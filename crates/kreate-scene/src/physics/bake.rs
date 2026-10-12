@@ -110,13 +110,10 @@ fn moved(tris: &[[kreate_math::Vec3; 3]], by: DAffine3) -> Vec<[kreate_math::Vec
 
 /// The object's transform that puts it at `world`, given its parent.
 fn local_for(doc: &Document, id: ObjectId, world: DAffine3) -> DTransform {
-    let Some(o) = doc.object(id) else {
+    if doc.object(id).is_none() {
         return DTransform::from_affine(world);
-    };
-    let above = match o.parent {
-        Some(p) => doc.world_transform(p) * o.parent_inverse,
-        None => DAffine3::IDENTITY,
-    };
+    }
+    let above = doc.above(id);
     DTransform::from_affine(above.inverse() * world)
 }
 

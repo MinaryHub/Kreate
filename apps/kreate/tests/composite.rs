@@ -1807,7 +1807,7 @@ fn shot_menu_row() {
 #[test]
 fn shot_every_tab() {
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
     let lamp = doc
         .objects()
         .find(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Light(_)))
@@ -1846,7 +1846,7 @@ fn shot_every_tab() {
 #[test]
 fn shot_physics_tab() {
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
     let cube = doc
         .objects()
         .find(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
@@ -2845,4 +2845,182 @@ fn shot_solid_texture() {
         return;
     };
     shot.dump("solid-texture");
+}
+
+/// A STEP file, read the way Import reads it and fitted to the frame: for
+/// looking at what the reader makes of real CAD output.
+#[test]
+#[ignore]
+fn shot_step_file() {
+    let Ok(path) = std::env::var("KREATE_STEP_SHOT") else {
+        return;
+    };
+    let (mut doc, _) =
+        kreate_io::scene_file::read_scene_file(std::path::Path::new(&path)).expect("reads");
+    let b = doc.world_bounds();
+    let centre = ((b.min + b.max) * 0.5).as_dvec3();
+    let k = 3.0 / ((b.max - b.min).max_element() as f64).max(1e-9);
+    let roots: Vec<_> = doc
+        .objects()
+        .filter(|(_, o)| o.parent.is_none())
+        .map(|(id, _)| id)
+        .collect();
+    for id in roots {
+        let o = doc.object_mut(id).unwrap();
+        o.transform.translation = (o.transform.translation - centre) * k;
+        o.transform.scale *= k;
+    }
+    doc.selection.clear();
+    let label = std::env::var("KREATE_STEP_LABEL").unwrap_or_else(|_| "step".into());
+    composite(&doc, "en").expect("a GPU").dump(&label);
+}
+
+/// The card over the viewport while files are read: one that can say how
+/// far it is, one that cannot yet.
+#[test]
+fn shot_import_progress() {
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    let Some(shot) = composite_with(&doc, "en", false, |state| {
+        state.importing = vec![
+            kreate::shell::ImportStatus {
+                id: 1,
+                name: "f-687277_31-0010_p_asm.stp".into(),
+                opening: false,
+                stage: kreate_io::scene_file::ReadStage::Shaping,
+                fraction: Some(0.42),
+                seconds: 37,
+                cancelling: false,
+            },
+            kreate::shell::ImportStatus {
+                id: 2,
+                name: "chair.glb".into(),
+                opening: true,
+                stage: kreate_io::scene_file::ReadStage::Reading,
+                fraction: None,
+                seconds: 2,
+                cancelling: false,
+            },
+        ];
+    }) else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    shot.dump("import-progress");
+}
+
+/// A real robot read from its URDF and given an armature, then posed by IK:
+/// the arm's target moved somewhere the arm can reach, and the arm follows.
+/// Two pictures, before and after; and the numbers, to the console.
+#[test]
+#[ignore]
+fn shot_urdf_rig_ik() {
+    let Ok(path) = std::env::var("KREATE_URDF") else {
+        return;
+    };
+    use kreate_math::{DAffine3, DQuat, DVec3};
+    use kreate_scene::armature;
+    let (mut doc, _) =
+        kreate_io::scene_file::read_scene_file(std::path::Path::new(&path)).expect("reads");
+    let any = doc
+        .objects()
+        .find(|(_, o)| o.robot.is_some())
+        .map(|(id, _)| id)
+        .expect("a robot");
+    let rig = doc.rig_robot(any).expect("rigs");
+    let (_, a) = doc.armature_of(rig).unwrap();
+    let a = a.clone();
+    eprintln!(
+        "bones: {:?}",
+        a.bones.iter().map(|b| b.name.as_str()).collect::<Vec<_>>()
+    );
+    let ik = doc.object(rig).unwrap().pose.ik.clone();
+    eprintln!("ik: {ik:?}");
+    let tip = a.bone_index(&ik[0].bone).unwrap();
+    let target = a.bone_index(&ik[0].target).unwrap();
+    // Where the tip is in a pose the arm can take.
+    let mut trial = doc.object(rig).unwrap().pose.clone();
+    for (bone, angle) in std::env::var("KREATE_URDF_POSE")
+        .unwrap_or_default()
+        .split(';')
+        .filter_map(|p| p.split_once('='))
+    {
+        trial.entry(bone).transform.rotation = DQuat::from_rotation_z(angle.parse().unwrap());
+    }
+    let frames = armature::posed(&a, &trial);
+    let goal = frames[tip].transform_point3(DVec3::Y * a.bones[tip].length());
+    doc.object_mut(rig).unwrap().pose.active = Some(ik[0].target.clone());
+    doc.object_mut(rig)
+        .unwrap()
+        .pose
+        .entry(&ik[0].target)
+        .selected = true;
+    doc.selection.clear();
+    doc.selection.add(rig);
+    doc.selection.active = Some(rig);
+    doc.sync_robot_rigs();
+    let pose_mode = kreate_ops::operator::Mode::from_tag("pose").unwrap();
+    composite_in_mode(&doc, "en", pose_mode, |_| {})
+        .expect("a GPU")
+        .dump("urdf-rig-before");
+    // IK on, the target moved there.
+    doc.object_mut(rig).unwrap().pose.ik[0].enabled = true;
+    let frames = armature::posed(&a, &doc.object(rig).unwrap().pose);
+    let want = DAffine3::from_rotation_translation(
+        a.bones[target].rest().to_scale_rotation_translation().1,
+        goal,
+    );
+    let t = armature::pose_for_frame(&a, &frames, target, want);
+    doc.object_mut(rig)
+        .unwrap()
+        .pose
+        .entry(&ik[0].target)
+        .transform = t;
+    doc.sync_robot_rigs();
+    let frames = armature::posed(&a, &doc.object(rig).unwrap().pose);
+    let reached = frames[tip].transform_point3(DVec3::Y * a.bones[tip].length());
+    eprintln!(
+        "goal {goal:?} reached {reached:?} off by {}",
+        reached.distance(goal)
+    );
+    for (id, o) in doc.objects() {
+        if let Some(kreate_scene::robot::RobotPart::Joint(j)) = &o.robot {
+            if j.kind.moves() {
+                eprintln!(
+                    "{}: {:.3} in [{:.3}, {:.3}]",
+                    o.name,
+                    j.position_of(&doc.object(id).unwrap().transform),
+                    j.lower,
+                    j.upper
+                );
+            }
+        }
+    }
+    composite_in_mode(&doc, "en", pose_mode, |_| {})
+        .expect("a GPU")
+        .dump("urdf-rig-after");
+}
+
+/// A part deep in a robot, made active: the outliner opens its parents and
+/// brings its row into view.
+#[test]
+#[ignore]
+fn shot_outliner_reveals_the_active() {
+    let Ok(path) = std::env::var("KREATE_URDF") else {
+        return;
+    };
+    let (mut doc, _) =
+        kreate_io::scene_file::read_scene_file(std::path::Path::new(&path)).expect("reads");
+    let name = std::env::var("KREATE_REVEAL").unwrap_or_else(|_| "panda_hand".into());
+    let id = doc
+        .objects()
+        .find(|(_, o)| o.name == name)
+        .map(|(id, _)| id)
+        .expect("the part");
+    doc.selection.clear();
+    doc.selection.add(id);
+    doc.selection.active = Some(id);
+    composite(&doc, "en")
+        .expect("a GPU")
+        .dump("outliner-reveal");
 }

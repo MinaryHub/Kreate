@@ -47,6 +47,10 @@ pub struct ShellState {
     /// A physics bake running off the main thread: frames done, of how many.
     /// The Physics tab shows it with a Cancel button.
     pub bake_progress: Option<(usize, usize)>,
+    /// Files being read, shown as a card over the viewport.
+    pub importing: Vec<ImportStatus>,
+    /// The read whose Cancel was pressed, for the application to stop.
+    pub cancel_import: Option<u64>,
     pub catalog: Catalog,
     /// Every editor this build can show.
     ///
@@ -628,6 +632,8 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             bake_progress: None,
+            importing: Vec::new(),
+            cancel_import: None,
             editors: kreate_ui::EditorRegistry::with_builtins(),
             catalog: Catalog::new(),
             material_slot: 0,
@@ -1475,6 +1481,8 @@ struct Labels {
     boolean_ops: [String; 3],
     parent_object: String,
     parent_clear: String,
+    parent_bone: String,
+    robot_rig: String,
     rename: String,
     bind_automatic: String,
     bind_empty: String,
@@ -1819,6 +1827,8 @@ impl Labels {
             boolean_ops: [0, 1, 2].map(|n| t(&format!("op-object-boolean-operation-{n}"))),
             parent_object: t("parent-object"),
             parent_clear: t("parent-clear"),
+            parent_bone: t("parent-bone"),
+            robot_rig: t("robot-rig"),
             rename: t("outliner-rename"),
             bind_automatic: t("bind-automatic"),
             bind_empty: t("bind-empty"),
@@ -4400,6 +4410,14 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
                 MenuNode::Entry(
                     MenuEntry::new(
                         "object.parent",
+                        &l.parent_bone,
+                        op("object.parent", &[("bone", V::Bool(true))]),
+                    )
+                    .variant("bone", V::Bool(true)),
+                ),
+                MenuNode::Entry(
+                    MenuEntry::new(
+                        "object.parent",
                         &l.parent_clear,
                         op("object.parent", &[("clear", V::Bool(true))]),
                     )
@@ -4428,6 +4446,7 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
                     &l.add_humanoid_rig,
                     op("object.add_humanoid_rig", &[]),
                 ),
+                entry("robot.rig", &l.robot_rig, op("robot.rig", &[])),
                 entry(
                     "object.unbind_armature",
                     &l.unbind,
@@ -4589,6 +4608,101 @@ fn draw_viewport(
     draw_nav_gizmo(ui, state, gizmo_room);
     draw_context_menu(ui, state, rect);
     draw_rename(ui, state, rect);
+    draw_imports(ui, state, rect);
+}
+
+/// A file being read, as the progress card shows it.
+#[derive(Clone, Debug)]
+pub struct ImportStatus {
+    pub id: u64,
+    pub name: String,
+    /// File ▸ Open rather than Import.
+    pub opening: bool,
+    pub stage: kreate_io::scene_file::ReadStage,
+    /// How far through the stage, when it can say.
+    pub fraction: Option<f32>,
+    pub seconds: u64,
+    pub cancelling: bool,
+}
+
+/// The files being read, over the top of the viewport: what, how far, how
+/// long, and a way to stop. A large CAD file takes minutes, and without this
+/// nothing on the screen said whether it was coming at all.
+fn draw_imports(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
+    if state.importing.is_empty() {
+        return;
+    }
+    let width = 340.0f32.min(viewport.width() - 16.0).max(120.0);
+    let mut cancel = None;
+    egui::Area::new(egui::Id::new("imports"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(
+            viewport.center().x - width / 2.0,
+            viewport.min.y + 36.0,
+        ))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width);
+                for job in &state.importing {
+                    let title = if job.opening {
+                        "import-opening-title"
+                    } else {
+                        "import-progress-title"
+                    };
+                    ui.label(
+                        egui::RichText::new(state.catalog.get_args(title, &[("name", &job.name)]))
+                            .strong(),
+                    );
+                    use kreate_io::scene_file::ReadStage;
+                    let stage = state.catalog.get(match job.stage {
+                        ReadStage::Reading => "import-stage-reading",
+                        ReadStage::Parsing => "import-stage-parsing",
+                        ReadStage::Shaping => "import-stage-shaping",
+                        ReadStage::Building => "import-stage-building",
+                    });
+                    let bar = match job.fraction {
+                        Some(f) => {
+                            let percent = ((f * 100.0).round() as u32).to_string();
+                            egui::ProgressBar::new(f).text(state.catalog.get_args(
+                                "import-stage-percent",
+                                &[("stage", &stage), ("percent", &percent)],
+                            ))
+                        }
+                        None => egui::ProgressBar::new(0.0).animate(true).text(stage),
+                    };
+                    let accent = kreate_ui::theme::from_ui(ui).accent;
+                    ui.add(bar.desired_width(width).fill(accent.gamma_multiply(0.7)));
+                    ui.horizontal(|ui| {
+                        let seconds = job.seconds.to_string();
+                        ui.weak(
+                            state
+                                .catalog
+                                .get_args("import-elapsed", &[("seconds", &seconds)]),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let label = if job.cancelling {
+                                "import-cancelling"
+                            } else {
+                                "import-cancel"
+                            };
+                            if ui
+                                .add_enabled(
+                                    !job.cancelling,
+                                    egui::Button::new(state.catalog.get(label)),
+                                )
+                                .clicked()
+                            {
+                                cancel = Some(job.id);
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        });
+    if cancel.is_some() {
+        state.cancel_import = cancel;
+    }
 }
 
 /// F2, Blender's: the active object's name in a field under the pointer.
@@ -9507,11 +9621,30 @@ fn draw_robot_panel(ui: &mut Ui, state: &mut ShellState, doc: &Document, active:
     if joints.is_empty() {
         return;
     }
+    let rig = doc.robot_rig(active);
     let title = state.catalog.get("panel-robot");
     kreate_ui::panel::section(ui, &title, true, |ui| {
-        if ui.button(state.catalog.get("robot-reset")).clicked() {
-            state.queue.run("robot.reset_pose", PropertyMap::new());
-        }
+        ui.horizontal(|ui| {
+            if ui.button(state.catalog.get("robot-reset")).clicked() {
+                state.queue.run("robot.reset_pose", PropertyMap::new());
+            }
+            match rig.and_then(|r| doc.object(r)) {
+                // Posed by its bones now: the sliders and the bones agree,
+                // whichever moves.
+                Some(r) => {
+                    ui.weak(state.catalog.get_args("robot-rigged", &[("rig", &r.name)]));
+                }
+                None => {
+                    if ui
+                        .button(state.catalog.get("robot-rig"))
+                        .on_hover_text(state.catalog.get("op-robot-rig-desc"))
+                        .clicked()
+                    {
+                        state.queue.run("robot.rig", PropertyMap::new());
+                    }
+                }
+            }
+        });
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         egui::Grid::new("robot-joints")
             .num_columns(2)
@@ -10510,6 +10643,7 @@ fn draw_constraint_fields(
         "constraint-copy-scale",
         "constraint-damped-track",
         "constraint-limit-rotation",
+        "constraint-limit-location",
     ];
     ui.menu_button(state.catalog.get("op-pose-constraint-add"), |ui| {
         for (i, key) in kinds.iter().enumerate() {

@@ -6,19 +6,26 @@ use kreate_scene::Document;
 
 /// What a new document contains.
 ///
-/// A cube, a lamp, a camera and a world — which is to say, a scene that can be
-/// rendered. That is the whole reason for each of them.
-///
-/// A cube alone was the starting point for a long time, and it meant that
-/// pressing `Z` into the rendered mode on a new document gave a black screen.
-/// Correct, and useless: nothing was lighting anything. The fix is not to make
-/// the renderer invent light — §2.1 is emphatic that a scene's light comes from
-/// the scene — but to start the user with a scene that has some.
+/// Nothing to see: no geometry, no lamp, no camera — the viewport starts
+/// empty, ready for whatever is added or imported. Only the world, which is
+/// not an object and draws nothing: a dim grey sky, so that something added
+/// and looked at in the rendered mode is lit rather than black. §2.1 is
+/// emphatic that a scene's light comes from the scene, so the renderer does
+/// not invent any.
+pub fn starting_scene(doc: &mut Document) {
+    let world = doc.add_world(kreate_scene::World::new("World"));
+    doc.set_active_world(Some(world));
+}
+
+/// A scene that renders: a 2 m cube at the origin, selected, a lamp above and
+/// to one side, and a camera looking at it — what a new document held before
+/// it started empty, and what the tests that render a whole scene draw.
 ///
 /// Every piece goes through the same constructors the Add menu uses, so there
-/// is one definition of what a lamp is and this cannot drift from what the menu
-/// produces.
-pub fn starting_scene(doc: &mut Document) {
+/// is one definition of what a lamp is and this cannot drift from what the
+/// menu produces.
+pub fn sample_scene(doc: &mut Document) {
+    starting_scene(doc);
     let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
     let cube = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
 
@@ -36,24 +43,14 @@ pub fn starting_scene(doc: &mut Document) {
     lamp.transform.rotation = looking_at(lamp.transform.translation, DVec3::ZERO);
     doc.add_object(lamp);
 
-    // A dim grey sky. Not for the look of it: without a world the only thing
-    // lighting a face that the lamp does not reach is nothing, and an object
-    // with pure black on one side reads as broken rather than as unlit.
-    let world = doc.add_world(kreate_scene::World::new("World"));
-    doc.set_active_world(Some(world));
-
     // The camera is the scene's, not the viewport's — it is what the exposure
-    // is metered for and what a render will eventually be made through.
+    // is metered for and what a render is made through.
     let camera = doc.add_camera(kreate_scene::Camera::new("Camera"));
     let mut eye = Object::new("Camera", ObjectData::Camera(camera));
     eye.transform.translation = DVec3::new(7.0, -7.0, 5.0);
-    // Looking at the cube, so the view through it (Numpad 0) and a render
-    // show the scene rather than the floor beneath the camera.
     eye.transform.rotation = looking_at(eye.transform.translation, DVec3::ZERO);
     doc.add_object(eye);
 
-    // The cube, because that is what somebody opening the application is going
-    // to do something to.
     doc.selection.add(cube);
 }
 
@@ -75,11 +72,22 @@ pub fn looking_at(from: DVec3, target: DVec3) -> DQuat {
 mod tests {
     use super::*;
 
-    /// The camera and the lamp of a new document both point at the cube.
+    /// A new document has no objects at all, only the world that lights
+    /// what is added.
     #[test]
-    fn the_camera_and_the_lamp_look_at_the_cube() {
+    fn a_new_document_is_empty_but_lit() {
         let mut doc = Document::new();
         starting_scene(&mut doc);
+        assert_eq!(doc.objects().count(), 0, "a new document starts empty");
+        assert!(doc.selection.is_empty());
+        assert!(doc.active_world().is_some());
+    }
+
+    /// The sample scene's camera and lamp both point at its cube.
+    #[test]
+    fn the_sample_camera_and_lamp_look_at_the_cube() {
+        let mut doc = Document::new();
+        sample_scene(&mut doc);
         let mut aimed = 0;
         for (_, object) in doc.objects() {
             if !matches!(object.data, ObjectData::Camera(_) | ObjectData::Light(_)) {

@@ -3202,7 +3202,7 @@ impl Viewport {
                         // The wireframe's base alpha, scaled by the density
                         // fade. Folded in here rather than in the shader so the
                         // shader keeps one alpha and not two to multiply.
-                        0.55 * draw.detail.wire_alpha,
+                        0.55 * wire_alpha(self.shading, draw.wire_only, draw.detail),
                         1.0,
                         f32::from(u8::from(draw.selected)),
                         f32::from(u8::from(draw.preview)),
@@ -4419,7 +4419,10 @@ impl Viewport {
                 // A fully faded wireframe is skipped rather than drawn
                 // transparent: at that density the draw is millions of
                 // instances, and the point of the fade is not to pay for them.
-                if mesh.counts.edges == 0 || !draw.detail.draw || draw.detail.wire_alpha <= 0.0 {
+                if mesh.counts.edges == 0
+                    || !draw.detail.draw
+                    || wire_alpha(self.shading, draw.wire_only, draw.detail) <= 0.0
+                {
                     continue;
                 }
                 // With the wireframe overlay off, only the wire-only draws.
@@ -5409,9 +5412,36 @@ const EDGE_DEPTH_OFFSET: f32 = 3.0e-4;
 /// do not have to reach into `gpu`.
 pub const VIEWPORT_DEPTH_FORMAT: wgpu::TextureFormat = DEPTH_FORMAT;
 
+/// The wireframe's strength for one draw: the density fade, except where the
+/// wire is all there is of the object — the wireframe shading mode, a
+/// wire-only draw. There the fade made whole objects vanish as the view drew
+/// back, and come back as it closed in: a CAD part of a hundred thousand
+/// triangles faded away a few metres off.
+fn wire_alpha(shading: ShadingMode, wire_only: bool, detail: crate::lod::Detail) -> f32 {
+    if shading == ShadingMode::Wireframe || wire_only {
+        1.0
+    } else {
+        detail.wire_alpha
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Far off, a dense mesh's overlay fades — but in the wireframe mode the
+    /// wire is the object, and it stays.
+    #[test]
+    fn the_wireframe_mode_never_fades_its_wires() {
+        let far = crate::lod::Detail {
+            draw: true,
+            wire_alpha: 0.0,
+            point_alpha: 0.0,
+        };
+        assert_eq!(wire_alpha(ShadingMode::Studio, false, far), 0.0);
+        assert_eq!(wire_alpha(ShadingMode::Wireframe, false, far), 1.0);
+        assert_eq!(wire_alpha(ShadingMode::Studio, true, far), 1.0);
+    }
 
     #[test]
     fn uniform_structs_meet_std140_alignment() {

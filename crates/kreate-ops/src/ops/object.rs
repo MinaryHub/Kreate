@@ -2726,6 +2726,9 @@ impl Operator for Rename {
 pub struct ParentParams {
     /// Clear the parent instead of setting it to the active object.
     pub clear: bool,
+    /// Hang them from the active armature's active bone rather than from the
+    /// armature: Blender's Ctrl+P ▸ Bone.
+    pub bone: bool,
 }
 
 /// Parents the selected objects to the active one.
@@ -2755,6 +2758,25 @@ impl Operator for Parent {
             return Err(OpError::Failed("no active object to parent to".into()));
         }
 
+        // The bone, for a parent to a bone: the armature's active one.
+        let bone = match (params.bone && !params.clear, parent) {
+            (true, Some(p)) => {
+                let d = doc.document();
+                let name = d
+                    .object(p)
+                    .and_then(|o| o.pose.active.clone())
+                    .filter(|b| d.bone_frame(p, b).is_some());
+                match name {
+                    Some(b) => Some(b),
+                    None => {
+                        return Err(OpError::Failed(
+                            "make an armature active, with a bone active in it".into(),
+                        ))
+                    }
+                }
+            }
+            _ => None,
+        };
         let d = doc.document_mut();
         let mut changed = false;
         let mut refused = 0;
@@ -2762,7 +2784,11 @@ impl Operator for Parent {
             if Some(id) == parent {
                 continue;
             }
-            match d.set_parent(id, parent) {
+            let done = match (&bone, parent) {
+                (Some(b), Some(p)) => d.set_parent_bone(id, p, b),
+                _ => d.set_parent(id, parent),
+            };
+            match done {
                 Ok(()) => changed = true,
                 // A cycle is refused per object rather than failing the whole
                 // operation: parenting a mixed selection where one member is an
@@ -3155,13 +3181,7 @@ fn bounds_or_point(doc: &Document, id: ObjectId) -> Option<(DVec3, DVec3)> {
 
 /// Moves an object by a distance given in world space, whatever its parent.
 fn move_in_world(doc: &mut Document, id: ObjectId, delta: DVec3) {
-    let local = match doc.object(id).and_then(|o| o.parent) {
-        Some(parent) => doc
-            .world_transform(parent)
-            .inverse()
-            .transform_vector3(delta),
-        None => delta,
-    };
+    let local = doc.above(id).inverse().transform_vector3(delta);
     if let Some(object) = doc.object_mut(id) {
         object.transform.translation += local;
     }

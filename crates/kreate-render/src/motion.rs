@@ -97,6 +97,17 @@ impl CameraMotion {
         }
     }
 
+    /// Puts the camera where it is with nothing left to do: no timed move,
+    /// and the smoothing's target on it.
+    ///
+    /// For a view moved directly — Walk Navigation — rather than through the
+    /// target. Without it the smoothing pulls the drawn camera back to the
+    /// old target every frame, and the walk keeps returning to where it began.
+    pub fn settle(&mut self, current: &Camera) {
+        self.transition = None;
+        self.target = *current;
+    }
+
     pub fn is_animating(&self) -> bool {
         self.transition.is_some()
     }
@@ -190,6 +201,28 @@ pub fn framing_for(from: &Camera, centre: DVec3, radius: f64, aspect: f64) -> Ca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A camera moved directly and then settled stays where it was put: the
+    /// smoothing does not pull it back to the target it had.
+    #[test]
+    fn a_settled_camera_stays_where_it_was_moved() {
+        let mut camera = Camera::default();
+        let mut motion = CameraMotion::new(camera);
+        camera.pivot += DVec3::new(3.0, 0.0, 0.0);
+        let moved = camera;
+        motion.settle(&camera);
+        for _ in 0..10 {
+            motion.advance(&mut camera, 0.016);
+        }
+        assert_eq!(camera.pivot, moved.pivot);
+        // Unsettled, the same move is drawn back: the walk's bug.
+        let mut drifting = moved;
+        let mut motion = CameraMotion::new(Camera::default());
+        for _ in 0..60 {
+            motion.advance(&mut drifting, 0.016);
+        }
+        assert!(drifting.pivot.distance(Camera::default().pivot) < 1e-3);
+    }
 
     fn other() -> Camera {
         let mut c = Camera {

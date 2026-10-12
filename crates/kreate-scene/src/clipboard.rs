@@ -112,6 +112,7 @@ impl Document {
             // Parents are settled below, once every copy exists. Until then
             // the copy stands alone at its world placement.
             copy.parent = None;
+            copy.parent_bone = None;
             copy.parent_inverse = kreate_math::DAffine3::IDENTITY;
             copy.transform = DTransform::from_affine(self.world_transform(*id));
             let new_id = out.add_object(copy);
@@ -135,6 +136,7 @@ impl Document {
                 copy.transform = object.transform;
                 copy.parent_inverse = object.parent_inverse;
                 copy.parent = Some(*new_parent);
+                copy.parent_bone = object.parent_bone.clone();
             }
         }
         out.repoint_references(self, &new_ids);
@@ -230,6 +232,7 @@ impl Document {
                 })
                 .collect();
             copy.parent = None;
+            copy.parent_bone = None;
             let new_id = self.add_object(copy);
             new_ids.insert(*id, new_id);
             added.push(new_id);
@@ -244,6 +247,7 @@ impl Document {
             if let Some(new_parent) = new_ids.get(&parent) {
                 if let Some(copy) = self.object_mut(*new_id) {
                     copy.parent = Some(*new_parent);
+                    copy.parent_bone = object.parent_bone.clone();
                 }
             }
         }
@@ -268,6 +272,16 @@ impl Document {
                 continue;
             };
             copy.skin = copy.skin.and_then(|u| uids.get(&u).copied());
+            // A robot's rig keeps the joints that came with it.
+            if let Some(crate::robot::RobotPart::Rig { joints }) = &mut copy.robot {
+                joints.retain_mut(|j| match uids.get(&j.joint) {
+                    Some(u) => {
+                        j.joint = *u;
+                        true
+                    }
+                    None => false,
+                });
+            }
             for variable in copy.drivers.iter_mut().flat_map(|d| d.variables.iter_mut()) {
                 if variable.target != crate::Uid::NONE {
                     variable.target = uids

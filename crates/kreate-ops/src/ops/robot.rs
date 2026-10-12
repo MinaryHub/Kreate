@@ -17,6 +17,7 @@ use crate::OpParams;
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetJoint>();
     registry.register::<ResetPose>();
+    registry.register::<RigRobot>();
 }
 
 fn joint_of(doc: &Document, id: ObjectId) -> Option<Joint> {
@@ -66,6 +67,9 @@ fn set(doc: &mut Document, id: ObjectId, position: f64) -> bool {
             }
             None => continue,
         };
+        // The rig's bone with it: a rigged robot's joints follow its bones,
+        // and a joint set without its bone would spring back.
+        changed |= doc.hold_joint_in_rig(id, held);
         for (other, o) in doc.objects() {
             if let Some(RobotPart::Joint(j)) = &o.robot {
                 if let Some(m) = j.mimic.as_ref().filter(|m| m.joint == name) {
@@ -158,19 +162,59 @@ impl Operator for ResetPose {
             .collect();
         let mut changed = false;
         for (id, j) in joints {
-            if let Some(o) = doc.document_mut().object_mut(id) {
+            let d = doc.document_mut();
+            if let Some(o) = d.object_mut(id) {
                 let rest = j.place(j.clamp(0.0));
                 if o.transform != rest {
                     o.transform = rest;
                     changed = true;
                 }
             }
+            changed |= d.hold_joint_in_rig(id, j.clamp(0.0));
         }
         Ok(if changed {
             OpResult::Finished
         } else {
             OpResult::Cancelled
         })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RigRobotParams {}
+
+/// Makes an armature that poses the robot the active object belongs to: a
+/// bone for each joint that moves, its limits as the bone's, an IK target at
+/// the end of each arm. See `Document::rig_robot`.
+pub struct RigRobot;
+
+impl Operator for RigRobot {
+    type Params = RigRobotParams;
+    fn id() -> &'static str {
+        "robot.rig"
+    }
+    fn label() -> &'static str {
+        "Make Armature from Robot"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .active
+            .is_some_and(|a| doc.robot_root(a).is_some() && doc.robot_rig(a).is_none())
+    }
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(active) = doc.document().selection.active else {
+            return Err(OpError::Failed("select a part of the robot".into()));
+        };
+        let d = doc.document_mut();
+        let rig = d.rig_robot(active).map_err(OpError::Failed)?;
+        d.selection.clear();
+        d.selection.add(rig);
+        d.selection.active = Some(rig);
+        Ok(OpResult::Finished)
     }
 }
 

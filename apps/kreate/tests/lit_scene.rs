@@ -635,7 +635,7 @@ fn a_new_document_renders_a_picture_with_nothing_added() {
     // but for a new document to be a scene with some in it.
     let gpu = gpu_or_skip!(gpu());
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
 
     let pixels = shoot(&gpu, &doc);
     let brightest = pixels.iter().fold(0.0f32, |acc, p| acc.max(p[0]));
@@ -891,7 +891,7 @@ fn a_scene_with_a_sky() -> Document {
     // The starting scene, because that is what a user has when they open the
     // world tab: a cube, a lamp, a camera and a world to point at an image.
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
 
     // The application adds the datablock and the operator makes the link —
     // which is the split `pick_world_image` makes, for the reason an operator
@@ -1120,7 +1120,7 @@ fn a_texture_assigned_from_the_panel_reaches_the_picture() {
     kreate_ops::register_builtin(&mut registry);
     let mut history = History::new();
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
 
     // The cube the starter document comes with, and a material on it — the
     // panel needs one to point at, which is why the tab does not appear
@@ -1215,7 +1215,7 @@ fn one_object_can_wear_two_materials_at_once() {
         return;
     };
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
     for (id, _) in doc
         .objects()
         .filter(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
@@ -1281,7 +1281,7 @@ fn one_object_can_wear_two_materials_at_once() {
 fn the_new_documents_shadow_stays_while_the_view_moves() {
     let gpu = gpu_or_skip!(gpu());
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
     // A floor under the cube, as the user's scene has: something to fall on.
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
@@ -1341,7 +1341,7 @@ fn a_plane_shot(
 ) -> Vec<[f32; 4]> {
     let gpu = gpu().expect("checked by the caller");
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
     for id in doc
         .objects()
         .filter(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))
@@ -1501,7 +1501,7 @@ fn the_path_tracer_draws_the_documents_own_materials() {
         return;
     };
     let mut doc = Document::new();
-    kreate::startup::starting_scene(&mut doc);
+    kreate::startup::sample_scene(&mut doc);
     for id in doc
         .objects()
         .filter(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Mesh(_)))

@@ -723,6 +723,9 @@ struct App {
         std::sync::mpsc::Receiver<ImportReady>,
     ),
     import_wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// The reads under way, for the progress card and its Cancel.
+    importing: Vec<Importing>,
+    next_import: u64,
     /// The asset browser's lists, pictures and downloads.
     assets: Option<kreate::assets::Library>,
     window: Option<Arc<Window>>,
@@ -1043,6 +1046,8 @@ impl App {
             outbox: None,
             imports: std::sync::mpsc::channel(),
             import_wake: None,
+            importing: Vec::new(),
+            next_import: 0,
             assets: None,
             window: None,
             gfx: None,
@@ -4534,7 +4539,7 @@ impl App {
                 }
                 Command::OpenPath(path) => {
                     if self.confirm_discarding_changes("unsaved-what-open") {
-                        self.load_from(&path);
+                        self.open_from(&path);
                     }
                 }
                 Command::SetVisible { object, visible } => {
@@ -4909,7 +4914,7 @@ impl App {
         else {
             return;
         };
-        self.load_from(&path);
+        self.open_from(&path);
     }
 
     fn load_from(&mut self, path: &std::path::Path) {
@@ -5311,19 +5316,47 @@ impl App {
     /// model does not stop the interface: [`App::serve_imports`] runs
     /// `object.import` for it, one undo step whose script line names the file.
     fn import_into(&mut self, path: &std::path::Path) {
+        self.read_in_background(path, false);
+    }
+
+    /// File ▸ Open and the recent files: a document is read where it is, a
+    /// scene file on a thread with a progress card, like an import — a CAD
+    /// file can take minutes, and the window must not freeze meanwhile.
+    fn open_from(&mut self, path: &std::path::Path) {
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("kreate"))
+        {
+            self.load_from(path);
+        } else {
+            self.read_in_background(path, true);
+        }
+    }
+
+    fn read_in_background(&mut self, path: &std::path::Path, opening: bool) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        self.status(&format!("importing {name}…"));
+        self.status(&format!("reading {name}…"));
+        let progress = std::sync::Arc::new(kreate_io::scene_file::ReadProgress::default());
+        self.next_import += 1;
+        self.importing.push(Importing {
+            id: self.next_import,
+            path: path.to_path_buf(),
+            started: Instant::now(),
+            opening,
+            progress: progress.clone(),
+        });
+        self.redraw.set(RedrawReason::UI);
         let (tx, wake) = (self.imports.0.clone(), self.import_wake.clone());
         let path = path.to_path_buf();
         std::thread::spawn(move || {
-            let result = match kreate_io::scene_file::read_scene_file(&path) {
+            let result = match kreate_io::scene_file::read_scene_file_with(&path, &progress) {
                 Ok((document, _)) => {
                     let bounds = document.world_bounds();
                     kreate_io::scene_file::prepare(&path, document);
-                    Ok((path, bounds))
+                    Ok((path, bounds, opening))
                 }
                 Err(why) => Err((
                     path.clone(),
@@ -5351,8 +5384,23 @@ impl App {
             w.request_redraw();
         }
         for result in ready {
+            let path = match &result {
+                Ok((path, _, _)) | Err((path, _)) => path.clone(),
+            };
+            if let Some(at) = self.importing.iter().position(|i| i.path == path) {
+                self.importing.remove(at);
+            }
+            self.publish_imports();
             match result {
-                Ok((path, bounds)) => {
+                Ok((path, _, true)) => match kreate_io::scene_file::take(&path) {
+                    Ok(document) => {
+                        self.adopt((*document).clone());
+                        self.file = DocumentFile::new();
+                        self.status(&format!("opened {}", path.display()));
+                    }
+                    Err(why) => self.status(&format!("cannot open {}: {why}", path.display())),
+                },
+                Ok((path, bounds, false)) => {
                     let mut wish = self.import_wishes.remove(&path).unwrap_or_default();
                     let mut params = PropertyMap::new();
                     params.set("path", PropertyValue::Text(path.display().to_string()));
@@ -5386,6 +5434,12 @@ impl App {
                             Err(format!("{} could not be added", path.display()))
                         };
                         wish.answer(answer);
+                    } else if self.history.cursor() > before {
+                        // The view goes to what arrived: a CAD part is a few
+                        // centimetres across and lands as a dot on the grid,
+                        // a building out past the far edge of the view.
+                        self.evaluate_scene();
+                        self.frame_selected();
                     }
                     self.status(&format!("added {}", path.display()));
                 }
@@ -5393,7 +5447,11 @@ impl App {
                     if let Some(mut wish) = self.import_wishes.remove(&path) {
                         wish.answer(Err(why.clone()));
                     }
-                    self.status(&why);
+                    if why.ends_with(kreate_io::scene_file::CANCELLED) {
+                        self.status(&format!("stopped reading {}", path.display()));
+                    } else {
+                        self.status(&why);
+                    }
                 }
             }
         }
@@ -5476,6 +5534,10 @@ impl App {
             return;
         }
         if self.doc.drive() > 0 {
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+        }
+        // A rigged robot's joints, where its bones now stand.
+        if self.doc.sync_robot_rigs() > 0 {
             self.redraw.set(RedrawReason::SCENE_CHANGED);
         }
         if self.solve_active_sketch() {
@@ -6728,6 +6790,43 @@ impl App {
 
     /// Hands a finished bake in, or says it was stopped; and keeps the
     /// progress where the Physics tab reads it.
+    /// The reads under way, for the interface's progress card; its Cancel
+    /// passed on; and a frame asked for while any runs, so the card moves.
+    fn publish_imports(&mut self) {
+        if let Some(id) = self.ui.cancel_import.take() {
+            if let Some(job) = self.importing.iter().find(|i| i.id == id) {
+                job.progress.cancel();
+            }
+        }
+        let was = !self.ui.importing.is_empty();
+        self.ui.importing = self
+            .importing
+            .iter()
+            .map(|i| {
+                let (stage, fraction) = i.progress.get();
+                kreate::shell::ImportStatus {
+                    id: i.id,
+                    name: i
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    opening: i.opening,
+                    stage,
+                    fraction,
+                    seconds: i.started.elapsed().as_secs(),
+                    cancelling: i.progress.cancelled(),
+                }
+            })
+            .collect();
+        if !self.importing.is_empty() {
+            let soon = Instant::now() + std::time::Duration::from_millis(150);
+            self.ui_repaint_at = Some(self.ui_repaint_at.map_or(soon, |at| at.min(soon)));
+        } else if was {
+            self.redraw.set(RedrawReason::UI);
+        }
+    }
+
     fn poll_bake(&mut self) {
         let Some(job) = &self.bake_job else {
             self.ui.bake_progress = None;
@@ -10411,7 +10510,19 @@ struct ChatTurn {
 
 /// A file read by an import thread: where it is and how much room the
 /// model takes, or why it could not be read.
-type ImportReady = Result<(std::path::PathBuf, kreate_math::Aabb), (std::path::PathBuf, String)>;
+/// A read finished: the file, what it holds the room of, and whether it
+/// replaces the document (Open) rather than joining it (Import).
+type ImportReady =
+    Result<(std::path::PathBuf, kreate_math::Aabb, bool), (std::path::PathBuf, String)>;
+
+/// A scene file being read on a thread of its own.
+struct Importing {
+    id: u64,
+    path: std::path::PathBuf,
+    started: Instant,
+    opening: bool,
+    progress: std::sync::Arc<kreate_io::scene_file::ReadProgress>,
+}
 
 /// What became of one line of a script.
 struct ScriptLine {
@@ -11027,6 +11138,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.poll_bake();
+        self.publish_imports();
         let downloaded = self
             .update_ready
             .as_ref()
@@ -11049,6 +11161,10 @@ impl ApplicationHandler for App {
             || self.motion.is_animating()
             || !self.ui.queue.is_empty()
             || self.playing.is_some()
+            // A key held in a walk moves the view every frame, not only when
+            // the keyboard repeats: that came half a second late and then
+            // thirty times a second, a walk in stumbles.
+            || self.walk.as_ref().is_some_and(|w| w.moving())
         {
             if let Some(w) = &self.window {
                 w.request_redraw();

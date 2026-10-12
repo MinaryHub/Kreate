@@ -62,6 +62,10 @@ pub const IMPORT: &[Format] = &[
         name: "URDF (robot)",
         extensions: &["urdf"],
     },
+    Format {
+        name: "STEP (CAD)",
+        extensions: &["step", "stp"],
+    },
 ];
 
 /// What Export writes, in the order the menu offers it.

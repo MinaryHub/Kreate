@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -24,7 +25,7 @@ use crate::build::BuildNote;
 /// The extensions read as scenes, beside Kreate's own `.kreate`.
 pub const SCENE_FORMATS: &[&str] = &[
     "gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off", "usd", "usda", "usdc", "usdz", "dae",
-    "urdf",
+    "urdf", "step", "stp",
 ];
 
 /// Whether `path` names a file this module reads.
@@ -41,6 +42,76 @@ pub fn is_scene_file(path: &Path) -> bool {
 /// document holds is one conversion in one place, and §5.7's fidelity contract
 /// is written against it.
 pub fn read_scene_file(path: &Path) -> Result<(Document, Vec<BuildNote>), String> {
+    read_scene_file_with(path, &ReadProgress::default())
+}
+
+/// What a read is doing, for a progress bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadStage {
+    /// The file's bytes coming off the disk.
+    Reading,
+    /// The file's records being read: a CAD file's entities.
+    Parsing,
+    /// Exact surfaces being cut into triangles, face by face.
+    Shaping,
+    /// What was read becoming objects.
+    Building,
+}
+
+/// How far a read has got, shared between the thread reading and the window
+/// showing it — and the window's way to ask it to stop.
+///
+/// A large CAD file takes minutes, and a read that says nothing for minutes
+/// is indistinguishable from one that has stopped.
+#[derive(Debug, Default)]
+pub struct ReadProgress {
+    stage: AtomicU8,
+    done: AtomicU64,
+    total: AtomicU64,
+    cancel: AtomicBool,
+}
+
+impl ReadProgress {
+    /// Starts a stage, `total` steps long (zero for one that cannot say).
+    pub fn start(&self, stage: ReadStage, total: u64) {
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+        self.stage.store(stage as u8, Ordering::Relaxed);
+    }
+    pub fn advance(&self, done: u64) {
+        self.done.store(done, Ordering::Relaxed);
+    }
+    /// The stage, and how far through it: `None` when it cannot say.
+    pub fn get(&self) -> (ReadStage, Option<f32>) {
+        let stage = match self.stage.load(Ordering::Relaxed) {
+            0 => ReadStage::Reading,
+            1 => ReadStage::Parsing,
+            2 => ReadStage::Shaping,
+            _ => ReadStage::Building,
+        };
+        let total = self.total.load(Ordering::Relaxed);
+        let done = self.done.load(Ordering::Relaxed);
+        let fraction = (total > 0).then(|| (done as f64 / total as f64).clamp(0.0, 1.0) as f32);
+        (stage, fraction)
+    }
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// What a cancelled read answers.
+pub const CANCELLED: &str = "cancelled";
+
+/// [`read_scene_file`], saying how far it has got in `progress` and stopping
+/// when it is asked to.
+pub fn read_scene_file_with(
+    path: &Path,
+    progress: &ReadProgress,
+) -> Result<(Document, Vec<BuildNote>), String> {
+    progress.start(ReadStage::Reading, 0);
     let lower = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -86,6 +157,14 @@ pub fn read_scene_file(path: &Path) -> Result<(Document, Vec<BuildNote>), String
         "stl" => crate::stl::parse_stl(&bytes, &Default::default()).map_err(|e| e.to_string())?,
         "obj" => crate::parse_obj(&text(bytes)?, Default::default()).map_err(|e| e.to_string())?,
         "dae" => crate::dae::parse_dae_file(path).map_err(|e| e.to_string())?,
+        // Read lossily: a CAD program's names are often in its own code page.
+        "step" | "stp" => {
+            crate::step_read::parse_step_with(&String::from_utf8_lossy(&bytes), &name, progress)
+                .map_err(|e| match e {
+                    crate::step_read::StepError::Cancelled => CANCELLED.to_string(),
+                    e => e.to_string(),
+                })?
+        }
         // USD finds what a stage references from the stage's own folder, so
         // it reads by path.
         "usd" | "usda" | "usdc" | "usdz" => {
@@ -99,6 +178,10 @@ pub fn read_scene_file(path: &Path) -> Result<(Document, Vec<BuildNote>), String
         .map_err(|e| e.to_string())?,
         other => return Err(format!("`.{other}` is not a scene file Kreate reads")),
     };
+    if progress.cancelled() {
+        return Err(CANCELLED.to_string());
+    }
+    progress.start(ReadStage::Building, 0);
     let mut doc = Document::new();
     let (made, notes) = crate::build::build_into(&scene, &mut doc);
     if let Some(first) = made.first() {

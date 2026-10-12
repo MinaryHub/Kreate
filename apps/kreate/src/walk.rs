@@ -15,7 +15,8 @@ use kreate_render::{Camera, Projection};
 
 /// Radians the head turns for a point of mouse movement.
 pub const SENSITIVITY: f64 = 0.0025;
-/// Metres a second at the start: Blender's walking pace.
+/// Metres a second at the start, for a view looking at something ten
+/// metres off: Blender's walking pace. Closer, slower — see [`Walk::begin`].
 pub const PACE: f64 = 2.5;
 /// How much faster `Shift` is, and how much slower `Alt`.
 pub const RUN: f64 = 4.0;
@@ -78,9 +79,13 @@ impl Walk {
             camera.rotation = (level * DQuat::from_rotation_x(-0.35)).normalize();
             camera.pivot = eye - camera.rotation * (DVec3::Z * camera.distance);
         }
+        // The pace from how far off the view is looking: a part a few
+        // centimetres across, framed, is a few centimetres away, and a
+        // walk at a person's pace would be past it in a blink.
+        let pace = (PACE * camera.distance / 10.0).clamp(0.01, 100.0);
         Self {
             before,
-            pace: PACE,
+            pace,
             held: 0,
         }
     }
@@ -163,13 +168,13 @@ mod tests {
         assert!(walk.step(&mut camera, 2.0, false, false));
         let went = camera.eye() - eye;
         assert!(went.z.abs() < 1e-9, "dived: {went}");
-        assert!(close(went, facing * PACE * 2.0), "{went}");
+        assert!(close(went, facing * walk.pace * 2.0), "{went}");
         // Up is up, whatever the view.
         walk.set(Move::Forward, false);
         walk.set(Move::Up, true);
         let from = camera.eye();
         walk.step(&mut camera, 1.0, true, false);
-        assert!(close(camera.eye() - from, DVec3::Z * PACE * RUN));
+        assert!(close(camera.eye() - from, DVec3::Z * walk.pace * RUN));
         // And nothing held is nothing done.
         walk.set(Move::Up, false);
         assert!(!walk.step(&mut camera, 1.0, false, false));
@@ -208,11 +213,26 @@ mod tests {
     }
 
     #[test]
+    fn the_pace_follows_how_far_off_the_view_looks() {
+        let mut near = Camera {
+            distance: 0.1,
+            ..Camera::default()
+        };
+        let mut far = Camera {
+            distance: 10.0,
+            ..Camera::default()
+        };
+        assert!((Walk::begin(&mut far).pace - PACE).abs() < 1e-9);
+        assert!(Walk::begin(&mut near).pace < 0.1);
+    }
+
+    #[test]
     fn the_wheel_sets_the_pace_within_reason() {
         let mut camera = Camera::default();
         let mut walk = Walk::begin(&mut camera);
+        let start = walk.pace;
         walk.quicken(1.0);
-        assert!(walk.pace > PACE);
+        assert!(walk.pace > start);
         walk.quicken(-1000.0);
         assert!(walk.pace >= 0.01);
     }

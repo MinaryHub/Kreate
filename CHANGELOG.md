@@ -12,6 +12,31 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- A robot read from a URDF can be posed with an armature: Object ▸ Parent ▸
+  Make Armature from Robot (or Make Armature in the Robot panel) puts a bone
+  at every joint that moves, standing on the joint's axis and held to its
+  limits, with an effector and an IK target at the end of each arm. Turn the
+  bones in pose mode, or switch the IK on and drag the target, and the robot
+  follows; key the bones and it plays, and writes to glTF moving. The Robot
+  panel's sliders and the bones stay in step either way, mimic joints
+  included, and the URDF written out is the robot as before.
+- IK honours a bone's Limit Rotation: a bone held to turning about its own Z
+  turns only that way, within its range, while the chain reaches.
+- A Limit Location bone constraint, for a slider's travel.
+- Objects can hang from a bone (Ctrl+P ▸ Bone, Blender's Bone parent): they
+  move with it rigidly, as they are, and keep doing so through saving, undo,
+  copy and paste, and glTF export.
+- Reading a large file shows what it is doing: a card over the viewport with
+  the stage, how far through it, how long it has taken, and Cancel. Opening a
+  scene file no longer freezes the window while it reads.
+
+- STEP files (`.step`, `.stp`) open and import: solids and surfaces from any
+  CAD program — planes, cylinders, cones, spheres, tori and splines — cut
+  into triangles that follow the true shape, watertight where the part is.
+  An assembly comes in as its parts, each placed where the assembly puts it
+  and shared between its copies, with the file's colours as materials and
+  its own unit (millimetres, inches) honoured. STEP export was already there.
+
 - An Assets editor: models, materials and HDRIs from your own folders or
   from Poly Haven (CC0), searchable, with pictures. A model is added to the
   scene, a material is made of its maps and put on the active object, an
@@ -148,6 +173,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- A new document is empty: no cube, no lamp, no camera. The world is still
+  there, so what is added is lit in the rendered view.
+- An import frames what arrived, so a part a few centimetres across is not a
+  dot on the grid.
+
 - Animated glTF characters from Sketchfab (and so Objaverse) move as they
   should. Their skins hang under nodes scaled to a hundredth or a fifth,
   which glTF does not count and Kreate did — the body walked off from its
@@ -190,6 +220,13 @@ use; `scripts/release.sh` turns that section into the next release.
   and autosaves stay small.
 
 ### Fixed
+
+- Walk navigation went smoothly only while the keyboard repeated, and drifted
+  back to where it started: the camera's smoothing pulled it to its old
+  target every frame. It now walks every frame, at a pace set by how far off
+  the view is looking.
+- In the wireframe shading mode, dense meshes faded away as the view drew
+  back — their wires are all there is of them, and now they stay.
 
 - Cameras and lights from glTF files look and shine where the file says:
   each was tipped a quarter turn, a level camera looking at the floor and a

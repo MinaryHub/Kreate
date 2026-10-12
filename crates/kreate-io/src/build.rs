@@ -1889,6 +1889,22 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         }
         bone_nodes.insert(id, made);
     }
+    // An object hanging from a bone hangs from that bone's node: its
+    // transform is already relative to the bone's frame, and the bone's
+    // channels then carry it — a part riding a joint moves in the file as it
+    // does here.
+    for (index, (_, object)) in doc.objects().enumerate() {
+        let (Some(parent), Some(bone)) = (object.parent, object.parent_bone.as_deref()) else {
+            continue;
+        };
+        let node = doc
+            .armature_of(parent)
+            .and_then(|(_, a)| a.bone_index(bone))
+            .and_then(|b| bone_nodes.get(&parent)?.get(b).copied());
+        if let Some(node) = node {
+            nodes[index].parent = Some(node);
+        }
+    }
 
     // Skins: each bound mesh names its armature's bones as joints.
     let mut skins = Vec::new();
@@ -2235,6 +2251,52 @@ fn export_animations(
                 kreate_scene::armature::posed(armature, &pose)
             })
             .collect();
+        // A robot this armature poses: its joints move with the bones, and
+        // its links with them, so the joints' nodes play too.
+        if matches!(
+            object.robot,
+            Some(kreate_scene::robot::RobotPart::Rig { .. })
+        ) {
+            let readings: Vec<Vec<kreate_scene::robot::RigReading>> = frames
+                .iter()
+                .map(|frame| {
+                    let mut pose = object.pose.clone();
+                    kreate_scene::animation::apply_to_pose(action, *frame, &mut pose);
+                    doc.rig_readings(id, &pose)
+                })
+                .collect();
+            let order: Vec<ObjectId> = doc.objects().map(|(o, _)| o).collect();
+            for (k, reading) in readings.first().into_iter().flatten().enumerate() {
+                let Some(node) = order.iter().position(|o| *o == reading.joint) else {
+                    continue;
+                };
+                let Some(joint) = doc.object(reading.joint) else {
+                    continue;
+                };
+                tracks.push(crate::ir::ExportTrack {
+                    node,
+                    times: frames.iter().map(|f| ((f - origin) / fps) as f32).collect(),
+                    transforms: readings
+                        .iter()
+                        .map(|r| {
+                            let t = r.get(k).map_or(joint.transform, |r| r.placed);
+                            // Folded as the rest placement is.
+                            if joint.parent.is_some() {
+                                kreate_math::DTransform::from_affine(
+                                    joint.parent_inverse * t.to_affine(),
+                                )
+                            } else {
+                                t
+                            }
+                        })
+                        .collect(),
+                    step: false,
+                    translation: true,
+                    rotation: true,
+                    scale: false,
+                });
+            }
+        }
         for (i, bone) in armature.bones.iter().enumerate() {
             let Some(node) = joints.get(i) else { continue };
             tracks.push(crate::ir::ExportTrack {

@@ -3199,7 +3199,7 @@ impl Operator for Separate {
         let Some(source) = source else {
             return Err(OpError::Failed("no object to separate from".into()));
         };
-        let (name, transform, parent, parent_inverse) = {
+        let (name, transform, parent, parent_inverse, parent_bone) = {
             let Some(object) = doc.document().object(source) else {
                 return Err(OpError::Failed("the object is missing".into()));
             };
@@ -3208,6 +3208,7 @@ impl Operator for Separate {
                 object.transform,
                 object.parent,
                 object.parent_inverse,
+                object.parent_bone.clone(),
             )
         };
 
@@ -3227,6 +3228,7 @@ impl Operator for Separate {
         object.transform = transform;
         object.parent = parent;
         object.parent_inverse = parent_inverse;
+        object.parent_bone = parent_bone;
         let new_id = d.add_object(object);
 
         // Selected and active, because the next thing a user does is move it.

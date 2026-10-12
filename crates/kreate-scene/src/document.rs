@@ -148,6 +148,12 @@ pub struct Object {
     /// suddenly be interpreted relative to the parent. Storing the inverse keeps
     /// the object exactly where it was.
     pub parent_inverse: DAffine3,
+    /// The bone of the parent armature it follows, by name: Blender's Bone
+    /// parent. The object then hangs from the bone's posed frame rather than
+    /// from the armature's, and turns and moves with it rigidly — a part
+    /// carried by a joint, with nothing merged and no weights painted. `None`
+    /// for an ordinary parent, and when the bone is not there.
+    pub parent_bone: Option<String>,
     pub transform: DTransform,
     pub data: ObjectData,
     pub visible: bool,
@@ -220,6 +226,7 @@ impl Object {
             name: name.into(),
             parent: None,
             parent_inverse: DAffine3::IDENTITY,
+            parent_bone: None,
             transform: DTransform::IDENTITY,
             data,
             visible: true,
@@ -992,6 +999,7 @@ impl Document {
             let o = &mut self.objects[id];
             o.parent = parent;
             o.parent_inverse = parent_inverse;
+            o.parent_bone = None;
         }
         match (was_root, parent.is_none()) {
             (true, false) => self.roots.retain(|r| *r != id),
@@ -1000,6 +1008,57 @@ impl Document {
         }
         self.touch();
         Ok(())
+    }
+
+    /// Parents `id` to bone `bone` of the armature object `armature`, where it
+    /// stands: from now on it moves as the bone does. Blender's Ctrl+P ▸
+    /// Bone.
+    pub fn set_parent_bone(
+        &mut self,
+        id: ObjectId,
+        armature: ObjectId,
+        bone: &str,
+    ) -> Result<(), ReparentError> {
+        if self.bone_frame(armature, bone).is_none() {
+            return Err(ReparentError::NoSuchParent);
+        }
+        self.set_parent(id, Some(armature))?;
+        let frame =
+            self.world_transform(armature) * self.bone_frame(armature, bone).expect("checked");
+        let o = &mut self.objects[id];
+        o.parent_inverse = frame.inverse();
+        o.parent_bone = Some(bone.to_string());
+        self.touch();
+        Ok(())
+    }
+
+    /// Bone `bone` of the armature object `armature` as it is posed now, in
+    /// the armature's space — IK and constraints included.
+    pub fn bone_frame(&self, armature: ObjectId, bone: &str) -> Option<DAffine3> {
+        let (_, a) = self.armature_of(armature)?;
+        let index = a.bone_index(bone)?;
+        let pose = &self.object(armature)?.pose;
+        crate::armature::posed(a, pose).get(index).copied()
+    }
+
+    /// What `id`'s own transform is relative to: its parent's world frame —
+    /// the bone's, for one parented to a bone — times the inverse kept from
+    /// the moment of parenting. `world_transform(id)` is this times the
+    /// object's transform.
+    pub fn above(&self, id: ObjectId) -> DAffine3 {
+        let Some(o) = self.objects.get(id) else {
+            return DAffine3::IDENTITY;
+        };
+        match o.parent {
+            Some(p) => {
+                let mut frame = self.world_transform(p);
+                if let Some(bone) = o.parent_bone.as_deref().and_then(|b| self.bone_frame(p, b)) {
+                    frame *= bone;
+                }
+                frame * o.parent_inverse
+            }
+            None => DAffine3::IDENTITY,
+        }
     }
 
     /// Whether `ancestor` is somewhere above `id` in the hierarchy.
@@ -1049,10 +1108,17 @@ impl Document {
         for id in chain.iter().rev() {
             let object = &self.objects[*id];
             let local = object.transform.to_affine();
-            world = if object.parent.is_some() {
-                world * object.parent_inverse * local
-            } else {
-                local
+            world = match object.parent {
+                Some(parent) => {
+                    // `world` is the parent's here: the chain runs root down.
+                    let bone = object
+                        .parent_bone
+                        .as_deref()
+                        .and_then(|b| self.bone_frame(parent, b))
+                        .unwrap_or(DAffine3::IDENTITY);
+                    world * bone * object.parent_inverse * local
+                }
+                None => local,
             };
         }
         world
@@ -1348,8 +1414,19 @@ impl Document {
                         c.pole = new.to_string();
                     }
                 }
+                if let Some(crate::robot::RobotPart::Rig { joints }) = &mut o.robot {
+                    for j in joints.iter_mut().filter(|j| j.bone == old) {
+                        j.bone = new.to_string();
+                    }
+                }
                 o.action
             };
+            // Objects hanging from the bone keep hanging from it.
+            for (_, child) in self.objects.iter_mut() {
+                if child.parent == Some(id) && child.parent_bone.as_deref() == Some(old) {
+                    child.parent_bone = Some(new.to_string());
+                }
+            }
             if let Some(action) = action.and_then(|a| self.action_mut(a)) {
                 for curve in &mut action.curves {
                     if let Some(rest) = curve.path.property.strip_prefix(old_prefix.as_str()) {
@@ -1711,8 +1788,10 @@ impl Document {
             self.touch();
         }
         // After the keys, so a driver wins over a curve on the same property
-        // and reads the frame's values rather than the last frame's.
-        moved + self.drive()
+        // and reads the frame's values rather than the last frame's; then
+        // the robots' joints, from the bones the keys and drivers placed.
+        let driven = self.drive();
+        moved + driven + self.sync_robot_rigs()
     }
 
     // --- lights -------------------------------------------------------------

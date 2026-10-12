@@ -755,7 +755,8 @@ pub struct ConstraintParams {
         "copy_rotation",
         "copy_scale",
         "damped_track",
-        "limit_rotation"
+        "limit_rotation",
+        "limit_location"
     ))]
     pub kind: u32,
     /// The bone it reads; empty when adding takes the other selected bone.
@@ -763,9 +764,10 @@ pub struct ConstraintParams {
     #[param(min = 0.0, max = 1.0)]
     pub influence: f64,
     pub enabled: bool,
-    /// A limit's lowest XYZ angles, in degrees.
+    /// A limit's lowest XYZ: angles in degrees for Limit Rotation, metres
+    /// for Limit Location.
     pub min: [f64; 3],
-    /// A limit's highest XYZ angles, in degrees.
+    /// A limit's highest XYZ, in the same units.
     pub max: [f64; 3],
 }
 
@@ -788,9 +790,16 @@ impl ConstraintParams {
     /// The constraint these describe, on `bone`.
     fn constraint(&self, bone: String) -> Option<armature::BoneConstraint> {
         let mut kind = armature::ConstraintKind::from_index(self.kind)?;
-        if let armature::ConstraintKind::LimitRotation { min, max } = &mut kind {
-            *min = DVec3::from_array(self.min.map(f64::to_radians));
-            *max = DVec3::from_array(self.max.map(f64::to_radians));
+        match &mut kind {
+            armature::ConstraintKind::LimitRotation { min, max } => {
+                *min = DVec3::from_array(self.min.map(f64::to_radians));
+                *max = DVec3::from_array(self.max.map(f64::to_radians));
+            }
+            armature::ConstraintKind::LimitLocation { min, max } => {
+                *min = DVec3::from_array(self.min);
+                *max = DVec3::from_array(self.max);
+            }
+            _ => {}
         }
         Some(armature::BoneConstraint {
             bone,
@@ -809,6 +818,7 @@ pub fn constraint_params(index: usize, c: &armature::BoneConstraint) -> Constrai
             min.to_array().map(f64::to_degrees),
             max.to_array().map(f64::to_degrees),
         ),
+        armature::ConstraintKind::LimitLocation { min, max } => (min.to_array(), max.to_array()),
         _ => ([-180.0; 3], [180.0; 3]),
     };
     ConstraintParams {

@@ -16,10 +16,10 @@ impl App {
         // starting from what the scene camera showed.
         self.camera_view = None;
         self.camera_view_object = None;
-        self.motion.interrupt(&self.camera);
+        self.motion.settle(&self.camera);
         self.walk = Some(Walk::begin(&mut self.camera));
         self.walk_clock = None;
-        self.motion.interrupt(&self.camera);
+        self.motion.settle(&self.camera);
         if let Some(window) = &self.window {
             // Held where it is and hidden, so the mouse turns the head
             // however far it goes. Locked where the platform can, kept
@@ -44,7 +44,7 @@ impl App {
         if !keep {
             self.camera = walk.before;
         }
-        self.motion.interrupt(&self.camera);
+        self.motion.settle(&self.camera);
         if let Some(window) = &self.window {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
@@ -71,7 +71,7 @@ impl App {
             self.input.shift_down,
             self.input.alt_down,
         ) {
-            self.motion.interrupt(&self.camera);
+            self.motion.settle(&self.camera);
             self.redraw.set(RedrawReason::CAMERA_MOVED);
         }
     }
@@ -82,7 +82,7 @@ impl App {
             return;
         }
         walk::look(&mut self.camera, dx, dy);
-        self.motion.interrupt(&self.camera);
+        self.motion.settle(&self.camera);
         self.redraw.set(RedrawReason::CAMERA_MOVED);
     }
 

@@ -284,8 +284,31 @@ pub fn outliner(
 ) {
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
     let expanded_id = ui.id().with("expanded");
-    let expanded: std::collections::HashSet<u32> =
+    let mut expanded: std::collections::HashSet<u32> =
         ui.data(|d| d.get_temp(expanded_id)).unwrap_or_default();
+
+    // A newly active object — picked in the viewport, most often — is shown
+    // here: its parents opened, and the list scrolled to it when it is off
+    // the screen. Without it, a part clicked in a robot of a hundred links
+    // was somewhere in a tree of collapsed rows, and finding it was a hunt.
+    let revealed_id = ui.id().with("revealed");
+    let revealed: Option<u32> = ui.data(|d| d.get_temp(revealed_id)).flatten();
+    let mut reveal: Option<usize> = None;
+    if active != revealed {
+        ui.data_mut(|d| d.insert_temp(revealed_id, active));
+        if let Some(index) = active.and_then(|a| order.iter().position(|k| *k == a)) {
+            let mut opened = false;
+            for above in ancestors_of(depths, index) {
+                if let Some(key) = order.get(above) {
+                    opened |= expanded.insert(*key);
+                }
+            }
+            if opened {
+                ui.data_mut(|d| d.insert_temp(expanded_id, expanded.clone()));
+            }
+            reveal = Some(index);
+        }
+    }
 
     let starts: Vec<usize> = groups.iter().map(|g| g.start).collect();
     let rows = visible_rows_grouped(
@@ -294,6 +317,20 @@ pub fn outliner(
         |index| order.get(index).is_some_and(|key| expanded.contains(key)),
         &row,
     );
+    // As deep as the tree shown goes, so every name keeps its room.
+    let deepest = rows
+        .iter()
+        .map(|r| match r {
+            TreeRow::Object(i) => depths.get(*i).map_or(0.0, |d| *d as f32 + 1.0),
+            TreeRow::Data(i) => depths.get(*i).map_or(0.0, |d| *d as f32 + 2.0),
+            TreeRow::Material(i, _) | TreeRow::Bone(i, _) => {
+                depths.get(*i).map_or(0.0, |d| *d as f32 + 3.0)
+            }
+            _ => 1.0,
+        })
+        .fold(1.0f32, f32::max);
+    let fit = ((ui.available_width() - ROW_ROOM) / deepest).clamp(3.0, INDENT);
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("outliner-indent"), fit));
     let mut toggled: Option<u32> = None;
     // A name being typed, Blender's double-click: kept across frames until
     // Enter, a click away, or Escape.
@@ -303,12 +340,33 @@ pub fn outliner(
     // A scroll bar with room of its own, not one floating over the rows: the
     // eyes sit against the right edge, and a floating bar lay on top of them.
     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
+    // Scrolled to the revealed row only when it is not already in sight —
+    // a row clicked here stays where it is under the pointer.
+    let seen_id = ui.id().with("seen");
+    let seen: Option<(usize, usize)> = ui.data(|d| d.get_temp(seen_id));
+    let pitch = row_height + ui.spacing().item_spacing.y;
+    let target = reveal.and_then(|index| rows.iter().position(|r| *r == TreeRow::Object(index)));
+    // Near it first, by the rows' pitch, so it is laid out; then centred on
+    // its own rectangle once it is drawn — rows are not all exactly a pitch
+    // tall, and over hundreds of rows the estimate alone lands it at an edge.
+    let pending_id = ui.id().with("reveal-pending");
+    let mut pending: Option<u32> = ui.data(|d| d.get_temp(pending_id)).flatten();
+    let mut area = egui::ScrollArea::vertical();
+    if let Some(at) = target {
+        let in_sight = seen.is_some_and(|(first, last)| at > first && at + 1 < last);
+        if !in_sight {
+            let half = ui.available_height() / 2.0;
+            area = area.vertical_scroll_offset((at as f32 * pitch - half + pitch / 2.0).max(0.0));
+            pending = active;
+        }
+    }
+    let mut seen_now = None;
+    area.auto_shrink([false, false])
         // Only the visible rows are laid out — and, because `row` is a function
         // rather than a slice, only the visible rows are *built*. The whole
         // point: a hundred thousand objects must cost the same as twenty.
         .show_rows(ui, row_height, rows.len(), |ui, visible| {
+            seen_now = Some((visible.start, visible.end));
             for at in visible {
                 match rows[at] {
                     TreeRow::Root => draw_root(ui, catalog, queue),
@@ -320,8 +378,17 @@ pub fn outliner(
                     TreeRow::Object(index) => {
                         let Some(data) = row(index) else { continue };
                         let open = expanded.contains(&data.id);
+                        let top = ui.cursor().min.y;
                         if draw_object_row(ui, catalog, order, selected, active, index, &data, open, queue, &mut renaming) {
                             toggled = Some(data.id);
+                        }
+                        if pending == Some(data.id) {
+                            let rect = egui::Rect::from_x_y_ranges(
+                                ui.max_rect().x_range(),
+                                top..=ui.cursor().min.y,
+                            );
+                            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                            pending = None;
                         }
                     }
                     TreeRow::Data(index) => {
@@ -343,6 +410,10 @@ pub fn outliner(
             }
         });
 
+    if let Some(range) = seen_now {
+        ui.data_mut(|d| d.insert_temp(seen_id, range));
+    }
+    ui.data_mut(|d| d.insert_temp(pending_id, pending));
     ui.data_mut(|d| match renaming {
         Some(r) => {
             d.insert_temp(rename_id, r);
@@ -361,8 +432,40 @@ pub fn outliner(
     }
 }
 
+/// The objects above the one at `index`, nearest first: each earlier row
+/// shallower than the last found. Hierarchy order puts a parent before its
+/// children, so walking back is walking up.
+pub fn ancestors_of(depths: &[u16], index: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some(mut depth) = depths.get(index).copied() else {
+        return out;
+    };
+    for i in (0..index).rev() {
+        if depth == 0 {
+            break;
+        }
+        if depths[i] < depth {
+            out.push(i);
+            depth = depths[i];
+        }
+    }
+    out
+}
+
 /// Indentation per level of the tree, in points.
 const INDENT: f32 = 14.0;
+
+/// The indentation this frame: [`INDENT`], or less when the tree is deeper
+/// than the panel is wide. A robot's links hang under joints under links,
+/// twenty levels down to its hand, and at full indentation the names went
+/// off the right edge and left only the expanders to look at.
+fn indent(ui: &Ui) -> f32 {
+    ui.data(|d| d.get_temp(egui::Id::new("outliner-indent")))
+        .unwrap_or(INDENT)
+}
+
+/// Room kept for a row's name, eye and expander, in points.
+const ROW_ROOM: f32 = 170.0;
 
 /// An object row being dragged, by its key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,7 +537,7 @@ fn draw_collection_row(
     renaming: &mut Option<Renaming>,
 ) {
     ui.horizontal(|ui| {
-        ui.add_space(INDENT);
+        ui.add_space(indent(ui));
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         collection_icon(ui, rect);
         let typing = match renaming {
@@ -549,7 +652,7 @@ fn draw_object_row(
 ) -> bool {
     let mut toggled = false;
     ui.horizontal(|ui| {
-        ui.add_space(INDENT * (row.depth as f32 + 1.0));
+        ui.add_space(indent(ui) * (row.depth as f32 + 1.0));
 
         // The expander: a chevron when there is something to open, a gap the
         // same width when there is not, so the icons line up.
@@ -691,7 +794,7 @@ fn draw_object_row(
 fn draw_data_row(ui: &mut Ui, catalog: &Catalog, row: &OutlinerRow) {
     let Some(name) = &row.data_name else { return };
     ui.horizontal(|ui| {
-        ui.add_space(INDENT * (row.depth as f32 + 2.0) + 12.0);
+        ui.add_space(indent(ui) * (row.depth as f32 + 2.0) + 12.0);
         let (icon_rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         object_icon(ui, row.kind, icon_rect, true);
         // Dim: this is a fact about the object, not a thing to select. The
@@ -711,7 +814,7 @@ fn draw_material_row(ui: &mut Ui, row: &OutlinerRow, slot: usize) {
         return;
     };
     ui.horizontal(|ui| {
-        ui.add_space(INDENT * (row.depth as f32 + 3.0) + 12.0);
+        ui.add_space(indent(ui) * (row.depth as f32 + 3.0) + 12.0);
         let theme = crate::theme::from_ui(ui);
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         // The material's sphere, the same mark the properties tab wears.
@@ -728,7 +831,7 @@ fn draw_bone_row(ui: &mut Ui, row: &OutlinerRow, bone: usize, queue: &mut Comman
         return;
     };
     ui.horizontal(|ui| {
-        ui.add_space(INDENT * (row.depth as f32 + 3.0 + *depth as f32) + 12.0);
+        ui.add_space(indent(ui) * (row.depth as f32 + 3.0 + *depth as f32) + 12.0);
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         object_icon(ui, RowKind::Armature, rect, true);
         if ui.selectable_label(*selected, name).clicked() {
@@ -1056,6 +1159,22 @@ mod tests {
     fn the_tree_starts_with_the_scene_collection() {
         let rows = visible_rows(&[], |_| false, |_| None);
         assert_eq!(rows, vec![TreeRow::Root]);
+    }
+
+    #[test]
+    fn the_ancestors_of_a_row_are_the_shallower_rows_before_it() {
+        // 0
+        //   1
+        //     2
+        //   3
+        //     4
+        //       5
+        // 6
+        let depths = [0, 1, 2, 1, 2, 3, 0];
+        assert_eq!(ancestors_of(&depths, 5), vec![4, 3, 0]);
+        assert_eq!(ancestors_of(&depths, 2), vec![1, 0]);
+        assert!(ancestors_of(&depths, 6).is_empty());
+        assert!(ancestors_of(&depths, 0).is_empty());
     }
 
     #[test]

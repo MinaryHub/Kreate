@@ -349,16 +349,20 @@ pub enum ConstraintKind {
     /// Its own rotation, as XYZ Euler angles relative to where its parent
     /// carries its rest, held between `min` and `max` (radians).
     LimitRotation { min: DVec3, max: DVec3 },
+    /// Its own offset from where its parent carries its rest, in its rest's
+    /// axes, held between `min` and `max` (metres): a slider's travel.
+    LimitLocation { min: DVec3, max: DVec3 },
 }
 
 impl ConstraintKind {
     /// Every kind, in the order the menus and the operators number them.
-    pub const NAMES: [&'static str; 5] = [
+    pub const NAMES: [&'static str; 6] = [
         "copy_location",
         "copy_rotation",
         "copy_scale",
         "damped_track",
         "limit_rotation",
+        "limit_location",
     ];
 
     pub fn index(&self) -> u32 {
@@ -368,6 +372,7 @@ impl ConstraintKind {
             Self::CopyScale => 2,
             Self::DampedTrack => 3,
             Self::LimitRotation { .. } => 4,
+            Self::LimitLocation { .. } => 5,
         }
     }
 
@@ -383,13 +388,22 @@ impl ConstraintKind {
                 min: -full,
                 max: full,
             },
+            // A kilometre each way: no limit a model will meet, and a number
+            // a file can hold, which infinity is not.
+            5 => Self::LimitLocation {
+                min: DVec3::splat(-1000.0),
+                max: DVec3::splat(1000.0),
+            },
             _ => return None,
         })
     }
 
     /// Whether it reads another bone.
     pub fn has_target(&self) -> bool {
-        !matches!(self, Self::LimitRotation { .. })
+        !matches!(
+            self,
+            Self::LimitRotation { .. } | Self::LimitLocation { .. }
+        )
     }
 }
 
@@ -512,17 +526,15 @@ fn apply_constraint(armature: &Armature, frames: &mut [DAffine3], c: &BoneConstr
                 * DAffine3::from_translation(-translation)
                 * before
         }
+        ConstraintKind::LimitLocation { min, max } => {
+            let base = pose_base(armature, frames, i);
+            let local = base.inverse() * before;
+            let (s, r, tr) = local.to_scale_rotation_translation();
+            let held = tr.clamp(*min, max.max(*min));
+            base * DAffine3::from_scale_rotation_translation(s, r, tr.lerp(held, t))
+        }
         ConstraintKind::LimitRotation { min, max } => {
-            let bone = &armature.bones[i];
-            let base = match bone
-                .parent
-                .and_then(|p| Some((frames.get(p)?, armature.bones.get(p)?)))
-            {
-                Some((parent_posed, parent)) => {
-                    *parent_posed * parent.rest().inverse() * bone.rest()
-                }
-                None => bone.rest(),
-            };
+            let base = pose_base(armature, frames, i);
             let local = base.inverse() * before;
             let (s, r, tr) = local.to_scale_rotation_translation();
             let euler = crate::animation::to_euler(r);
@@ -596,10 +608,17 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
         .map(|b| armature.bones[*b].length())
         .sum::<f64>()
         .max(1e-9);
+    let freedoms: Vec<Freedom> = chain
+        .iter()
+        .map(|b| freedom(pose, &armature.bones[*b].name))
+        .collect();
+    let all_free = freedoms.iter().all(|f| *f == Freedom::Free);
     // A straight chain with the goal on its own line gives the solver no
     // side to bend to: every bone already points at it. Bend the first
-    // joint a little first — towards the pole when there is one.
-    if chain.len() >= 2 {
+    // joint a little first — towards the pole when there is one. Not for a
+    // chain of hinges: tipping it off the line would turn them about axes
+    // they do not have, and a hinge bends to its own side anyway.
+    if chain.len() >= 2 && all_free {
         let root = frames[*chain.last().expect("not empty")].translation;
         let line = (tip(frames) - root).normalize_or_zero();
         let off_line = |p: DVec3| (p - root).cross(line).length();
@@ -634,7 +653,29 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
             if from.length_squared() < 1e-18 || to.length_squared() < 1e-18 {
                 continue;
             }
-            let turn = DQuat::from_rotation_arc(from.normalize(), to.normalize());
+            let turn = match freedoms[k] {
+                Freedom::Locked => continue,
+                Freedom::Free => DQuat::from_rotation_arc(from.normalize(), to.normalize()),
+                // About the hinge alone, and only as far as its limits: the
+                // tip's and the goal's directions seen along the axis, the
+                // turn between them added to where the hinge stands, held.
+                Freedom::Hinge { min, max } => {
+                    let axis = frames[j].matrix3.mul_vec3(DVec3::Z).normalize_or_zero();
+                    let (f, g) = (from - axis * from.dot(axis), to - axis * to.dot(axis));
+                    if axis == DVec3::ZERO
+                        || f.length_squared() < 1e-18
+                        || g.length_squared() < 1e-18
+                    {
+                        continue;
+                    }
+                    let delta = f.cross(g).dot(axis).atan2(f.dot(g));
+                    let base = pose_base(armature, frames, j);
+                    let (_, r, _) = (base.inverse() * frames[j]).to_scale_rotation_translation();
+                    let now = twist_about_z(r);
+                    let next = (now + delta).clamp(min, max);
+                    DQuat::from_axis_angle(axis, next - now)
+                }
+            };
             let about = DAffine3::from_translation(pivot)
                 * DAffine3::from_quat(turn)
                 * DAffine3::from_translation(-pivot);
@@ -684,6 +725,61 @@ fn solve_ik(armature: &Armature, pose: &Pose, frames: &mut [DAffine3], ik: &IkCo
         frames[i] = frames[p] * armature.bones[p].rest().inverse() * bone.rest() * local;
         moved[i] = true;
     }
+}
+
+/// Where bone `index` would stand with its own pose at rest: its parent's
+/// posed frame carrying its rest, in armature space. What a bone's pose is
+/// relative to — and so what a limit holds it against.
+pub fn pose_base(armature: &Armature, frames: &[DAffine3], index: usize) -> DAffine3 {
+    let bone = &armature.bones[index];
+    match bone
+        .parent
+        .and_then(|p| Some((frames.get(p)?, armature.bones.get(p)?)))
+    {
+        Some((parent_posed, parent)) => *parent_posed * parent.rest().inverse() * bone.rest(),
+        None => bone.rest(),
+    }
+}
+
+/// How far `q` turns about Z: its twist, as an angle in (-π, π]. What a
+/// hinge's position is when the hinge turns about its own Z.
+pub fn twist_about_z(q: DQuat) -> f64 {
+    let pi = std::f64::consts::PI;
+    (2.0 * q.z.atan2(q.w) + pi).rem_euclid(2.0 * pi) - pi
+}
+
+/// How a pose's limits let a bone turn, as the IK solver honours them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Freedom {
+    /// Any way at all.
+    Free,
+    /// About its own Z only, between these angles: a Limit Rotation that
+    /// holds X and Y at nothing — a robot's revolute joint.
+    Hinge { min: f64, max: f64 },
+    /// Not at all: every axis held at nothing.
+    Locked,
+}
+
+fn freedom(pose: &Pose, bone: &str) -> Freedom {
+    let held = |min: f64, max: f64| min >= -1e-9 && max <= 1e-9;
+    for c in &pose.constraints {
+        if !c.enabled || c.bone != bone || c.influence < 1.0 - 1e-9 {
+            continue;
+        }
+        if let ConstraintKind::LimitRotation { min, max } = c.kind {
+            let (x, y, z) = (held(min.x, max.x), held(min.y, max.y), held(min.z, max.z));
+            if x && y && z {
+                return Freedom::Locked;
+            }
+            if x && y {
+                return Freedom::Hinge {
+                    min: min.z,
+                    max: max.z.max(min.z),
+                };
+            }
+        }
+    }
+    Freedom::Free
 }
 
 /// The pose transform that puts bone `index` at `frame` (armature space),

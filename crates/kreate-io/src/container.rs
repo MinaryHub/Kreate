@@ -186,6 +186,11 @@ pub enum RobotRecord {
         mimic: Option<(String, f64, f64)>,
     },
     Collision,
+    /// An armature posing the robot: each bone and the identity of the
+    /// joint's object it moves.
+    Rig {
+        joints: Vec<(String, u64)>,
+    },
 }
 
 impl RobotRecord {
@@ -215,6 +220,12 @@ impl RobotRecord {
                     .map(|m| (m.joint.clone(), m.multiplier, m.offset)),
             },
             RobotPart::Collision => RobotRecord::Collision,
+            RobotPart::Rig { joints } => RobotRecord::Rig {
+                joints: joints
+                    .iter()
+                    .map(|j| (j.bone.clone(), j.joint.raw()))
+                    .collect(),
+            },
         }
     }
 
@@ -260,6 +271,15 @@ impl RobotRecord {
                 }),
             }),
             RobotRecord::Collision => RobotPart::Collision,
+            RobotRecord::Rig { joints } => RobotPart::Rig {
+                joints: joints
+                    .iter()
+                    .map(|(bone, joint)| kreate_scene::robot::RigJoint {
+                        bone: bone.clone(),
+                        joint: kreate_scene::Uid::from_raw(*joint),
+                    })
+                    .collect(),
+            },
         }
     }
 }
@@ -291,6 +311,9 @@ pub struct ObjectRecord {
     /// Row-major 4x3 affine, the inverse of the parent's world matrix when
     /// parenting happened. Stored because recomputing it would move the object.
     pub parent_inverse: [f64; 12],
+    /// The parent armature's bone it hangs from, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_bone: Option<String>,
     /// The mesh entry's key, for an object that has geometry.
     pub mesh: Option<String>,
     /// Index into [`SceneFile::cameras`], for an object that is one.
@@ -686,7 +709,7 @@ pub struct ConstraintRecord {
     pub influence: f64,
     #[serde(default = "enabled_default")]
     pub enabled: bool,
-    /// A limit's range, radians.
+    /// A limit's range: radians for a rotation, metres for a location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1825,36 +1848,43 @@ pub fn write(
                 rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
                 scale: t.scale.to_array(),
                 parent_inverse: affine_to_array(&m),
+                parent_bone: object.parent_bone.clone(),
                 mesh,
                 camera,
                 light,
                 armature,
                 pose,
                 active_bone: object.pose.active.clone(),
-                constraints: object
-                    .pose
-                    .constraints
-                    .iter()
-                    .map(|c| {
-                        let (min, max) = match &c.kind {
-                            kreate_scene::armature::ConstraintKind::LimitRotation { min, max } => {
-                                (Some(min.to_array()), Some(max.to_array()))
+                constraints:
+                    object
+                        .pose
+                        .constraints
+                        .iter()
+                        .map(|c| {
+                            let (min, max) = match &c.kind {
+                                kreate_scene::armature::ConstraintKind::LimitRotation {
+                                    min,
+                                    max,
+                                }
+                                | kreate_scene::armature::ConstraintKind::LimitLocation {
+                                    min,
+                                    max,
+                                } => (Some(min.to_array()), Some(max.to_array())),
+                                _ => (None, None),
+                            };
+                            ConstraintRecord {
+                                bone: c.bone.clone(),
+                                kind: kreate_scene::armature::ConstraintKind::NAMES
+                                    [c.kind.index() as usize]
+                                    .to_string(),
+                                target: c.target.clone(),
+                                influence: c.influence,
+                                enabled: c.enabled,
+                                min,
+                                max,
                             }
-                            _ => (None, None),
-                        };
-                        ConstraintRecord {
-                            bone: c.bone.clone(),
-                            kind: kreate_scene::armature::ConstraintKind::NAMES
-                                [c.kind.index() as usize]
-                                .to_string(),
-                            target: c.target.clone(),
-                            influence: c.influence,
-                            enabled: c.enabled,
-                            min,
-                            max,
-                        }
-                    })
-                    .collect(),
+                        })
+                        .collect(),
                 ik: object
                     .pose
                     .ik
@@ -2474,7 +2504,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     use kreate_scene::armature::ConstraintKind;
                     let index = ConstraintKind::NAMES.iter().position(|n| *n == r.kind)?;
                     let mut kind = ConstraintKind::from_index(index as u32)?;
-                    if let ConstraintKind::LimitRotation { min, max } = &mut kind {
+                    if let ConstraintKind::LimitRotation { min, max }
+                    | ConstraintKind::LimitLocation { min, max } = &mut kind
+                    {
                         if let Some(m) = r.min {
                             *min = glam::DVec3::from_array(m);
                         }
@@ -2630,6 +2662,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     for (record, id) in scene.objects.iter().zip(&object_ids) {
         if let Some(object) = document.object_mut(*id) {
             object.parent_inverse = affine_from_array(&record.parent_inverse);
+            object.parent_bone = record.parent_bone.clone();
         }
     }
 
