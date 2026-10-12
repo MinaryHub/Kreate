@@ -34,6 +34,53 @@ const MAX_ROUNDS: usize = 16;
 /// again.
 const CONTEXT: u32 = 32_768;
 
+/// The tools a model on this computer is given: the ones a conversation
+/// about the scene uses. Every tool, with every description, is thousands
+/// of words a small model reads before each answer — on a laptop, most of
+/// the wait.
+const LOCAL_TOOLS: [&str; 10] = [
+    "get_scene",
+    "get_context",
+    "list_operators",
+    "run_script",
+    "get_mesh",
+    "capture_viewport",
+    "undo",
+    "timeline",
+    "search_assets",
+    "add_asset",
+];
+
+/// The most of a tool's answer a model is handed. A scene's description can
+/// run to pages; the start of it says what a small model can use.
+const MAX_RESULT: usize = 12_000;
+
+/// How long Ollama keeps the model loaded between messages, so the next one
+/// does not wait for it to load again.
+const KEEP_ALIVE: &str = "30m";
+
+/// A description cut to its first sentences: what the tool is for.
+fn brief(text: &str, most: usize) -> String {
+    if text.len() <= most {
+        return text.to_string();
+    }
+    let mut end = 0;
+    for (i, _) in text.match_indices(". ") {
+        if i + 1 > most {
+            break;
+        }
+        end = i + 1;
+    }
+    if end == 0 {
+        end = text
+            .char_indices()
+            .take_while(|(i, _)| *i < most)
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+    }
+    text[..end].to_string()
+}
+
 /// A model Ollama has, and what it can do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Model {
@@ -248,20 +295,26 @@ impl Drop for Connector {
     }
 }
 
-/// The connector's tools as Ollama takes them.
-pub fn ollama_tools(listed: &Value) -> Vec<Value> {
+/// The connector's tools as Ollama takes them: the ones a local model is
+/// given (and `capture_viewport` only to one that can see), each described
+/// in its first sentences.
+pub fn ollama_tools(listed: &Value, sees: bool) -> Vec<Value> {
     listed
         .get("tools")
         .and_then(Value::as_array)
         .map(|tools| {
             tools
                 .iter()
+                .filter(|t| {
+                    let name = t.get("name").and_then(Value::as_str).unwrap_or("");
+                    LOCAL_TOOLS.contains(&name) && (sees || name != "capture_viewport")
+                })
                 .filter_map(|t| {
                     Some(json!({
                         "type": "function",
                         "function": {
                             "name": t.get("name")?.as_str()?,
-                            "description": t.get("description").and_then(Value::as_str).unwrap_or(""),
+                            "description": brief(t.get("description").and_then(Value::as_str).unwrap_or(""), 320),
                             "parameters": t.get("inputSchema").cloned()
                                 .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
                         }
@@ -387,17 +440,23 @@ fn run(
     )?;
     mcp.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
     let tools = if model.tools {
-        ollama_tools(&mcp.call("tools/list", json!({}))?)
+        ollama_tools(&mcp.call("tools/list", json!({}))?, model.vision)
     } else {
         Vec::new()
     };
     {
         let mut history = history.lock().map_err(|_| "the conversation was lost")?;
         if history.is_empty() {
-            let instructions = hello
+            // The connector's first two paragraphs: what Kreate is, how a
+            // script runs. The rest is for models that read faster.
+            let instructions: String = hello
                 .get("instructions")
                 .and_then(Value::as_str)
-                .unwrap_or("");
+                .unwrap_or("")
+                .lines()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("\n");
             history.push(
                 json!({ "role": "system", "content": format!("{system}\n\n{instructions}") }),
             );
@@ -424,6 +483,7 @@ fn run(
             "model": model.name,
             "messages": messages,
             "stream": true,
+            "keep_alive": KEEP_ALIVE,
             "options": { "num_ctx": CONTEXT },
         });
         // No tools once it has had enough: then it can only answer.
@@ -483,6 +543,20 @@ fn run(
             ) {
                 Ok(result) => tool_result(&result),
                 Err(why) => (why, Vec::new(), true),
+            };
+            let content = if content.len() > MAX_RESULT {
+                let cut = content
+                    .char_indices()
+                    .take_while(|(i, _)| *i < MAX_RESULT)
+                    .last()
+                    .map_or(0, |(i, c)| i + c.len_utf8());
+                format!(
+                    "{}\n[… cut: the answer was {} characters]",
+                    &content[..cut],
+                    content.len()
+                )
+            } else {
+                content
             };
             if failed {
                 say(Event::ToolError(content.clone()));
@@ -619,7 +693,7 @@ mod tests {
             "description": "Runs lines",
             "inputSchema": { "type": "object", "properties": { "script": { "type": "string" } } }
         }]});
-        let tools = ollama_tools(&listed);
+        let tools = ollama_tools(&listed, false);
         assert_eq!(tools[0]["function"]["name"], "run_script");
         assert_eq!(
             tools[0]["function"]["parameters"]["properties"]["script"]["type"],
@@ -632,5 +706,29 @@ mod tests {
             ]
         }));
         assert_eq!((words.as_str(), pictures.len(), failed), ("done", 1, false));
+    }
+
+    #[test]
+    fn a_local_model_is_given_the_tools_it_uses_described_briefly() {
+        let long = format!("Looks at the scene. {}", "More words. ".repeat(100));
+        let listed = json!({ "tools": [
+            { "name": "get_scene", "description": long, "inputSchema": {} },
+            { "name": "capture_viewport", "description": "A picture.", "inputSchema": {} },
+            { "name": "check_rig", "description": "Rigs.", "inputSchema": {} },
+        ]});
+        let blind = ollama_tools(&listed, false);
+        let names: Vec<&str> = blind
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["get_scene"],
+            "no picture for a model that cannot see, no rigging"
+        );
+        let described = blind[0]["function"]["description"].as_str().unwrap();
+        assert!(described.len() <= 320 && described.starts_with("Looks at the scene."));
+        assert_eq!(ollama_tools(&listed, true).len(), 2);
+        assert_eq!(brief("Short.", 320), "Short.");
     }
 }
