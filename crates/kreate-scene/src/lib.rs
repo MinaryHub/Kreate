@@ -28,9 +28,9 @@ pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};
 pub use document::{
-    ActionId, ArmatureId, Collection, CollectionId, Document, LightId, Linkage, Material,
-    MaterialId, MaterialMap, MaterialOverrides, MeshId, Object, ObjectData, ObjectId,
-    ReparentError, Selection, WorldId,
+    ActionId, ArmatureId, BlockKey, Changes, Collection, CollectionId, Document, LightId, Linkage,
+    Material, MaterialId, MaterialMap, MaterialOverrides, MeshId, Object, ObjectData, ObjectId,
+    ReparentError, Selection, WorldId, SITE_SHIFT,
 };
 pub use edit_session::{EditSession, EditSessions};
 pub use image::{ColorSpace, Image, PixelFormat, Source, Tile, TILE};

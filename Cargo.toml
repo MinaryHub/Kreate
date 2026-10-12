@@ -14,9 +14,11 @@ members = [
     "crates/kreate-testkit",
     "crates/kreate-i18n",
     "crates/kreate-reflect",
+    "crates/kreate-collab",
     "apps/kreate",
     "apps/kreatec",
     "apps/kreate-mcp",
+    "apps/kreate-relay",
 ]
 
 [workspace.package]
@@ -41,6 +43,7 @@ kreate-input      = { path = "crates/kreate-input" }
 kreate-render     = { path = "crates/kreate-render" }
 kreate-shader     = { path = "crates/kreate-shader" }
 kreate-io         = { path = "crates/kreate-io" }
+kreate-collab     = { path = "crates/kreate-collab" }
 kreate-ui         = { path = "crates/kreate-ui" }
 kreate-testkit    = { path = "crates/kreate-testkit" }
 kreate-i18n       = { path = "crates/kreate-i18n" }

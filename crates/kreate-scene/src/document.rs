@@ -645,7 +645,15 @@ pub struct Document {
     /// pointing at it. A counter living outside the snapshot would give the
     /// redone object a new identity and orphan its animation.
     uids: UidCounters,
+    /// Which participant of a shared session this copy is; 0 outside one.
+    /// See [`Document::set_uid_site`].
+    site: u16,
+    /// The last identity this participant handed out, in its own range.
+    site_uids: UidCounters,
 }
+
+mod sync;
+pub use sync::{BlockKey, Changes, SITE_SHIFT};
 
 /// A mesh datablock: its geometry and its identity.
 ///
@@ -690,6 +698,22 @@ struct UidCounters {
     material: Uid,
     action: Uid,
     armature: Uid,
+}
+
+impl UidCounters {
+    fn of(&mut self, kind: DatablockKind) -> &mut Uid {
+        match kind {
+            DatablockKind::Object => &mut self.object,
+            DatablockKind::Mesh => &mut self.mesh,
+            DatablockKind::Camera => &mut self.camera,
+            DatablockKind::Image => &mut self.image,
+            DatablockKind::Material => &mut self.material,
+            DatablockKind::Light => &mut self.light,
+            DatablockKind::World => &mut self.world,
+            DatablockKind::Action => &mut self.action,
+            DatablockKind::Armature => &mut self.armature,
+        }
+    }
 }
 
 impl Document {
@@ -810,17 +834,15 @@ impl Document {
 
     /// The next identity for a kind of datablock.
     fn issue(&mut self, kind: DatablockKind) -> Uid {
-        let counter = match kind {
-            DatablockKind::Object => &mut self.uids.object,
-            DatablockKind::Mesh => &mut self.uids.mesh,
-            DatablockKind::Camera => &mut self.uids.camera,
-            DatablockKind::Image => &mut self.uids.image,
-            DatablockKind::Material => &mut self.uids.material,
-            DatablockKind::Light => &mut self.uids.light,
-            DatablockKind::World => &mut self.uids.world,
-            DatablockKind::Action => &mut self.uids.action,
-            DatablockKind::Armature => &mut self.uids.armature,
-        };
+        if self.site != 0 {
+            // In a shared session each participant numbers in its own range,
+            // so two people adding a cube at once make two cubes.
+            let base = Uid::from_raw(u64::from(self.site) << SITE_SHIFT);
+            let counter = self.site_uids.of(kind);
+            *counter = (*counter).max(base).next();
+            return *counter;
+        }
+        let counter = self.uids.of(kind);
         *counter = counter.next();
         *counter
     }

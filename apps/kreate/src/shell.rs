@@ -163,6 +163,9 @@ pub struct ShellState {
     /// Help ▸ Contact's form, kept while closed so a half-written message
     /// survives, and whether Help ▸ About is showing.
     pub contact: kreate_ui::contact::ContactForm,
+    /// File ▸ Shared Session: what was typed, and how the session stands.
+    pub collab: kreate_ui::collab::CollabForm,
+    pub collab_view: Option<kreate_ui::collab::CollabView>,
     pub about_open: bool,
     /// The last render, shown in its own window until closed.
     pub render_result: Option<RenderResultView>,
@@ -668,6 +671,8 @@ impl Default for ShellState {
             chat_account: kreate_ui::chat::ChatAccount::Checking,
             chat_code: String::new(),
             contact: kreate_ui::contact::ContactForm::new(),
+            collab: Default::default(),
+            collab_view: None,
             about_open: false,
             render_result: None,
             queue: CommandQueue::new(),
@@ -1510,6 +1515,7 @@ struct Labels {
     menu_edit: String,
     menu_help: String,
     help_contact: String,
+    file_collab: String,
     help_about: String,
     contact_title: String,
     contact_intro: String,
@@ -1864,6 +1870,7 @@ impl Labels {
             menu_edit: t("menu-edit"),
             menu_help: t("menu-help"),
             help_contact: t("help-contact"),
+            file_collab: t("menu-file-collab"),
             help_about: t("help-about"),
             contact_title: t("contact-title"),
             contact_intro: t("contact-intro"),
@@ -3697,6 +3704,12 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                     "file.run_script",
                     &l.file_run_script,
                     dispatch("file.run_script"),
+                ),
+                Separator,
+                entry(
+                    "file.collab",
+                    &l.file_collab,
+                    Run::Command(Command::OpenCollab),
                 ),
                 Separator,
                 // Beside what is there, as one undo step: where Open replaces.
@@ -5887,6 +5900,36 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         crate::version::platform()
     );
     kreate_ui::contact::contact_window(ctx, &text, &mut state.contact, &details, &mut state.queue);
+    let t = |key: &str| state.catalog.get(key);
+    let collab = kreate_ui::collab::CollabText {
+        title: t("collab-title"),
+        intro: t("collab-intro"),
+        name: t("collab-name"),
+        address: t("collab-address"),
+        address_hint: t("collab-address-hint"),
+        key: t("collab-key"),
+        key_hint: t("collab-key-hint"),
+        port: t("collab-port"),
+        host: t("collab-host"),
+        join: t("collab-join"),
+        join_warning: t("collab-join-warning"),
+        leave: t("collab-leave"),
+        connecting: t("collab-connecting"),
+        hosting_at: t("collab-hosting-at"),
+        joined_at: t("collab-joined-at"),
+        people: t("collab-people"),
+        alone: t("collab-alone"),
+        you: t("collab-you"),
+        editing: t("collab-editing"),
+        sending: t("collab-sending"),
+    };
+    kreate_ui::collab::collab_window(
+        ctx,
+        &collab,
+        &mut state.collab,
+        state.collab_view.as_ref(),
+        &mut state.queue,
+    );
     let about = kreate_ui::contact::AboutText {
         title: l.about_title.clone(),
         version: l.about_version.clone(),
@@ -12077,6 +12120,7 @@ mod tests {
             "sculpt-coarse",
             "menu-help",
             "help-contact",
+            "menu-file-collab",
             "help-about",
             "contact-title",
             "contact-intro",

@@ -207,6 +207,22 @@ pub enum Command {
     },
     /// From the Claude panel: give up on signing in.
     ChatSignInCancel,
+    /// File ▸ Shared Session.
+    OpenCollab,
+    /// From the session window: host a session on this machine.
+    CollabHost {
+        name: String,
+        port: u16,
+        key: String,
+    },
+    /// From the session window: join one at `address`.
+    CollabJoin {
+        name: String,
+        address: String,
+        key: String,
+    },
+    /// Leave the session; the scene stays as it was.
+    CollabLeave,
     /// Help ▸ Contact.
     OpenContact,
     /// Help ▸ About Kreate.

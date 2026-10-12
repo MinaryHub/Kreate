@@ -21,6 +21,7 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 kreate-io.workspace = true
+kreate-collab.workspace = true
 kreate-shader.workspace = true
 rfd.workspace = true
 crash-handler.workspace = true

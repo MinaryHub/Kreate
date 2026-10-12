@@ -473,6 +473,7 @@ impl App {
                     break;
                 }
             }
+            self.collab_after_undo();
             self.edit.clear();
             self.redraw.set(RedrawReason::SCENE_CHANGED);
             // Done once: the button goes, and the line says what happened.

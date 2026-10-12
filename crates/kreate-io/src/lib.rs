@@ -31,6 +31,7 @@ pub mod scene_file;
 pub mod step;
 pub mod step_read;
 pub mod stl;
+pub mod sync;
 pub mod threemf;
 pub mod urdf;
 pub mod usd;

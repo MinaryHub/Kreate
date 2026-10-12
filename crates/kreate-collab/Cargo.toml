@@ -1,0 +1,17 @@
+[package]
+name = "kreate-collab"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kreate-scene.workspace = true
+kreate-io.workspace = true
+kreate-mesh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+kreate-math.workspace = true

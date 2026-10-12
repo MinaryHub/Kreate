@@ -9,6 +9,7 @@
 pub mod area;
 pub mod assets;
 pub mod chat;
+pub mod collab;
 pub mod command;
 pub mod command_info;
 pub mod command_palette;

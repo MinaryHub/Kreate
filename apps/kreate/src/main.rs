@@ -44,6 +44,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+mod collab;
 mod connector;
 mod panels;
 mod render_jobs;
@@ -985,6 +986,10 @@ struct App {
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
     driven_at: u64,
+    /// File ▸ Shared Session, while in one.
+    session: Option<kreate_collab::Session>,
+    /// The objects whose inside this participant holds the session's lock on.
+    collab_locks: Vec<u64>,
     /// Blender's record button: while on, every object transform keys what it
     /// changed at the current frame.
     autokey: bool,
@@ -1109,6 +1114,8 @@ impl App {
             playing: None,
             ui_repaint_at: None,
             driven_at: u64::MAX,
+            session: None,
+            collab_locks: Vec::new(),
             paint_stroke: None,
             sculpt_stroke: None,
             sculpt_display: Default::default(),
@@ -1352,6 +1359,9 @@ impl App {
         let Some(change) = kreate::mode::plan(self.op_ctx.mode, mode, has) else {
             return;
         };
+        if !self.collab_may_enter(change.to) {
+            return;
+        }
         // Only a change into or out of a mode with element selections sweeps
         // them. Entering pose mode is not an edit of any mesh, and a history
         // step for a selection nobody can see would be one more thing to undo.
@@ -4461,6 +4471,10 @@ impl App {
                     }
                 }
                 Command::OpenContact => self.ui.contact.open(),
+                Command::OpenCollab => self.open_collab(),
+                Command::CollabHost { name, port, key } => self.collab_host(name, port, key),
+                Command::CollabJoin { name, address, key } => self.collab_join(name, address, key),
+                Command::CollabLeave => self.collab_leave(),
                 Command::OpenAbout => self.ui.about_open = true,
                 Command::ContactSend {
                     kind,
@@ -4639,6 +4653,7 @@ impl App {
                             _ => break,
                         }
                     }
+                    self.collab_after_undo();
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                 }
                 Command::SetSelection { objects, active } => {
@@ -5793,6 +5808,12 @@ impl App {
     /// open having silently failed.
     fn adopt(&mut self, document: Document) {
         self.doc = document;
+        // In a shared session the new scene is shared too, and what is added
+        // to it is numbered in this participant's own range.
+        if let Some(site) = self.session.as_ref().and_then(|s| s.site()) {
+            self.doc.set_uid_site(site);
+        }
+        self.collab_may_enter(OpMode::RESTING);
         self.history = History::new();
         self.edit.clear();
         self.op_ctx.mode = OpMode::RESTING;
@@ -5901,6 +5922,7 @@ impl App {
 
     fn undo(&mut self) {
         if self.history.undo(&mut self.doc) {
+            self.collab_after_undo();
             println!("  undo");
             self.redraw.set(RedrawReason::SCENE_CHANGED);
         } else {
@@ -5914,6 +5936,7 @@ impl App {
             .redo(&self.registry, &mut self.doc, &self.op_ctx)
         {
             Ok(true) => {
+                self.collab_after_undo();
                 println!("  redo");
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
@@ -9193,7 +9216,7 @@ impl App {
             }
             _ => None,
         };
-        let (marker_lines, marker_points) = if self.rendering_still {
+        let (mut marker_lines, marker_points) = if self.rendering_still {
             Default::default()
         } else {
             kreate::glyphs::markers_only(
@@ -9202,6 +9225,9 @@ impl App {
                 self.local_view.as_ref().map(|(ids, _)| ids.as_slice()),
             )
         };
+        if !self.rendering_still {
+            marker_lines.extend(collab::peer_lines(self.session.as_ref(), &self.doc));
+        }
         gfx.viewport.set_markers(
             &gfx.gpu.device,
             &gfx.gpu.queue,
@@ -11156,6 +11182,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.collab_tick();
         self.poll_bake();
         self.publish_imports();
         let downloaded = self
@@ -11190,7 +11217,17 @@ impl ApplicationHandler for App {
             }
             event_loop.set_control_flow(ControlFlow::Poll);
         } else if let Some(at) = self.ui_repaint_at {
+            let at = if self.session.is_some() {
+                at.min(Instant::now() + std::time::Duration::from_millis(30))
+            } else {
+                at
+            };
             event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+        } else if self.session.is_some() {
+            // Others' edits arrive without an event here to wake for.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + std::time::Duration::from_millis(30),
+            ));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
