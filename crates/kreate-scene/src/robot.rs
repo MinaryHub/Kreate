@@ -736,8 +736,62 @@ impl Document {
                 }
             }
         }
+        moved += self.hold_free_joints();
         if moved > 0 {
             self.touch_version();
+        }
+        moved
+    }
+
+    /// Every joint no rig poses, held to what a joint can do however it was
+    /// moved — the move and turn tools included: a turning joint turns only
+    /// about its own Z and a sliding one slides only along it, within its
+    /// limits; a fixed joint stays where it rests; a mimicking joint follows
+    /// the joint it mimics. Floating and planar joints are left as placed.
+    /// Returns how many moved.
+    fn hold_free_joints(&mut self) -> usize {
+        let free: Vec<(ObjectId, String, Joint, DTransform)> = self
+            .objects()
+            .filter_map(|(id, o)| match &o.robot {
+                Some(RobotPart::Joint(j)) => Some((id, o.name.clone(), j.clone(), o.transform)),
+                _ => None,
+            })
+            .filter(|(id, ..)| self.robot_rig(*id).is_none())
+            .collect();
+        if free.is_empty() {
+            return 0;
+        }
+        // Where each stands, held; then the mimics, from their leaders.
+        let mut position: std::collections::HashMap<String, f64> = free
+            .iter()
+            .filter(|(_, _, j, _)| j.kind.moves())
+            .map(|(_, name, j, t)| (name.clone(), j.clamp(j.position_of(t))))
+            .collect();
+        for (_, name, j, _) in &free {
+            if let Some(m) = &j.mimic {
+                if let Some(lead) = position.get(&m.joint).copied() {
+                    position.insert(name.clone(), j.clamp(m.multiplier * lead + m.offset));
+                }
+            }
+        }
+        let mut moved = 0;
+        for (id, name, j, t) in free {
+            let held = match j.kind {
+                JointKind::Fixed => j.rest,
+                k if k.moves() => {
+                    let mut at = j.place(position.get(&name).copied().unwrap_or(0.0));
+                    // A size the user gave it is theirs to keep.
+                    at.scale = t.scale;
+                    at
+                }
+                _ => continue,
+            };
+            if !close(&t, &held) {
+                if let Some(o) = self.object_untouched_mut(id) {
+                    o.transform = held;
+                    moved += 1;
+                }
+            }
         }
         moved
     }
@@ -783,6 +837,70 @@ fn close(a: &DTransform, b: &DTransform) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_joint_turned_by_hand_is_held_to_its_axis_and_limits() {
+        use crate::document::{Object, ObjectData};
+        let mut doc = Document::new();
+        let joint = |name: &str, kind: JointKind, mimic: Option<Mimic>| {
+            let mut o = Object::new(name, ObjectData::Empty);
+            let j = Joint {
+                kind,
+                rest: DTransform {
+                    translation: DVec3::new(0.0, 0.0, 1.0),
+                    ..DTransform::IDENTITY
+                },
+                lower: -0.5,
+                upper: 0.5,
+                mimic,
+                ..Joint::default()
+            };
+            o.transform = j.rest;
+            o.robot = Some(RobotPart::Joint(j));
+            o
+        };
+        let elbow = doc.add_object(joint("elbow", JointKind::Revolute, None));
+        let thumb = doc.add_object(joint(
+            "thumb",
+            JointKind::Revolute,
+            Some(Mimic {
+                joint: "elbow".into(),
+                multiplier: -1.0,
+                offset: 0.0,
+            }),
+        ));
+        let bolt = doc.add_object(joint("bolt", JointKind::Fixed, None));
+        // Turned past its limit, tipped off its axis and dragged aside.
+        if let Some(o) = doc.object_mut(elbow) {
+            o.transform.rotation = DQuat::from_rotation_z(2.0) * DQuat::from_rotation_x(0.3);
+            o.transform.translation.x += 1.0;
+        }
+        if let Some(o) = doc.object_mut(bolt) {
+            o.transform.rotation = DQuat::from_rotation_y(1.0);
+        }
+        doc.sync_robot_rigs();
+        let read = |id| match &doc.object(id).unwrap().robot {
+            Some(RobotPart::Joint(j)) => j.position_of(&doc.object(id).unwrap().transform),
+            _ => unreachable!(),
+        };
+        assert!((read(elbow) - 0.5).abs() < 1e-9, "held at its upper limit");
+        let t = doc.object(elbow).unwrap().transform;
+        assert_eq!(
+            t.translation,
+            DVec3::new(0.0, 0.0, 1.0),
+            "where its joint is"
+        );
+        assert!(
+            (t.rotation * DVec3::Z - DVec3::Z).length() < 1e-9,
+            "only about its Z"
+        );
+        assert!((read(thumb) + 0.5).abs() < 1e-9, "the mimic follows");
+        assert_eq!(
+            doc.object(bolt).unwrap().transform.rotation,
+            DQuat::IDENTITY
+        );
+    }
+
     use super::*;
 
     fn arm() -> Joint {
