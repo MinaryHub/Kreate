@@ -508,3 +508,30 @@ fn a_skinned_mesh_comes_back_through_usd_as_a_rig() {
         assert!(d < 1e-3, "frame {frame}: the surface moved by {d}");
     }
 }
+
+/// And through binary USD: the same rig, read back from a `.usdc`.
+#[test]
+fn a_skinned_mesh_comes_back_through_binary_usd() {
+    let (mut doc, body) = rigged();
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let bytes = kreate_io::usd::write_usd_binary(&scene).text;
+    assert!(bytes.starts_with(b"PXR-USDC"));
+    let path = std::env::temp_dir().join(format!("kreate-rig-{}.usdc", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+    let read = kreate_io::usd_read::parse_usd_file(&path);
+    let _ = std::fs::remove_file(&path);
+    let read = read.expect("what we wrote reads");
+    let mut back = Document::new();
+    build_into(&read, &mut back);
+    let mesh_back = back
+        .objects()
+        .find(|(_, o)| o.skin.is_some())
+        .map(|(id, _)| id)
+        .expect("a bound mesh");
+    for frame in [1.0, 5.5, 10.0] {
+        let want = surface(&mut doc, body, frame);
+        let got = surface(&mut back, mesh_back, frame);
+        let d = apart(&want, &got);
+        assert!(d < 1e-3, "frame {frame}: the surface moved by {d}");
+    }
+}

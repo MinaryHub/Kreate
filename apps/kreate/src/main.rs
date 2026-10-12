@@ -5140,6 +5140,14 @@ impl App {
                     Err(e) => Err(e),
                 }
             }
+            "usdc" | "usd" => {
+                let package = kreate_io::usd::write_usd_binary(&scene);
+                notes.extend(package.notes);
+                match write_beside(path, &package.files) {
+                    Ok(()) => Ok(package.text),
+                    Err(e) => Err(e),
+                }
+            }
             "usdz" => {
                 let (bytes, more) = kreate_io::usd::write_usdz(&scene);
                 notes.extend(more);

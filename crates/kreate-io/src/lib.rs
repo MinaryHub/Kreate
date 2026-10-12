@@ -37,6 +37,7 @@ pub mod usd;
 pub mod usd_read;
 pub mod usda;
 pub mod usdc;
+pub mod usdc_write;
 pub mod xml;
 
 pub use build::{build_into, scene_from_document, BuildNote};

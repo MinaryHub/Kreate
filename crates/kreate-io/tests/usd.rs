@@ -292,7 +292,7 @@ fn a_usdz_carries_its_pictures_and_reads_back_with_them() {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("a zip");
     assert_eq!(
         archive.by_index(0).unwrap().name(),
-        "scene.usda",
+        "scene.usdc",
         "the stage first"
     );
     for i in 0..archive.len() {

@@ -40,25 +40,53 @@ pub fn write_usda(scene: &ExportScene<'_>) -> (String, Vec<LossyNote>) {
     (package.text, package.notes)
 }
 
-/// A stage and the pictures it names, by the path it names them by.
-pub struct UsdPackage {
-    pub text: String,
+/// A stage and the pictures it names, by the path it names them by. The
+/// stage is text, or a binary layer's bytes.
+pub struct UsdPackage<T = String> {
+    pub text: T,
     pub files: Vec<(String, Vec<u8>)>,
     pub notes: Vec<LossyNote>,
 }
 
-/// The stage as one `.usdz`: the stage first, then its pictures, each
-/// stored as it is and on a 64-byte boundary, as the format asks.
+/// The stage as a binary layer (`.usdc`), and the pictures it names: the
+/// text stage, read and written again in the binary form — one writer, two
+/// encodings, so the two cannot say different things.
+pub fn write_usd_binary(scene: &ExportScene<'_>) -> UsdPackage<Vec<u8>> {
+    let package = write_usd(scene);
+    match crate::usda::parse_usda(&package.text) {
+        Ok(layer) => UsdPackage {
+            text: crate::usdc_write::write_usdc(&layer),
+            files: package.files,
+            notes: package.notes,
+        },
+        // Not expected: it is our own text. Said, and the text kept.
+        Err(e) => {
+            let mut notes = package.notes;
+            notes.push(LossyNote::Unsupported {
+                what: format!("the binary form could not be made ({e}); the text was written"),
+            });
+            UsdPackage {
+                text: package.text.into_bytes(),
+                files: package.files,
+                notes,
+            }
+        }
+    }
+}
+
+/// The stage as one `.usdz`: the stage (binary, as Apple's viewers expect)
+/// first, then its pictures, each stored as it is and on a 64-byte
+/// boundary, as the format asks.
 pub fn write_usdz(scene: &ExportScene<'_>) -> (Vec<u8>, Vec<LossyNote>) {
     use std::io::Write;
-    let package = write_usd(scene);
+    let package = write_usd_binary(scene);
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .with_alignment(64);
     let mut notes = package.notes;
     let mut failed = None;
-    let mut entries = vec![("scene.usda".to_string(), package.text.into_bytes())];
+    let mut entries = vec![("scene.usdc".to_string(), package.text)];
     entries.extend(package.files);
     for (name, bytes) in &entries {
         let result = zip

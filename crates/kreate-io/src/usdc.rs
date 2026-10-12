@@ -439,6 +439,8 @@ impl<'a> Crate<'a> {
                 STRING => V::Texts(vec![self.string(p)?]),
                 TOKEN | ASSET => V::Texts(vec![self.token(p)?]),
                 SPECIFIER => V::Specifier(p as u8),
+                // Varying (0) or uniform (1).
+                44 => V::Nums(vec![p as f64]),
                 MATRIX2D | MATRIX3D | MATRIX4D => {
                     // The diagonal, as bytes: everything else is zero.
                     let n = match kind {
@@ -722,6 +724,12 @@ fn plain(path: &str) -> String {
     }
 }
 
+/// Integers as a section stores them, for the writer's tests.
+#[cfg(test)]
+pub(crate) fn decode_for_test(file: &[u8], count: usize) -> Result<Vec<i64>, UsdcError> {
+    Cursor { b: file, at: 0 }.ints(count, false)
+}
+
 /// A `.usdc` layer.
 pub fn parse_usdc(b: &[u8]) -> Result<Layer, UsdcError> {
     if !b.starts_with(b"PXR-USDC") || b.len() < 88 {
@@ -936,6 +944,12 @@ pub fn parse_usdc(b: &[u8]) -> Result<Layer, UsdcError> {
                 {
                     layer.time_codes_per_second = n.first().copied();
                 }
+                if let Some(V::Nums(n)) = val("startTimeCode") {
+                    layer.start_time_code = n.first().copied();
+                }
+                if let Some(V::Nums(n)) = val("endTimeCode") {
+                    layer.end_time_code = n.first().copied();
+                }
                 if let Some(V::Nums(n)) = val("metersPerUnit") {
                     layer.meters_per_unit = n.first().copied();
                 }
@@ -1029,6 +1043,9 @@ pub fn parse_usdc(b: &[u8]) -> Result<Layer, UsdcError> {
                         .or_else(|| property.samples.first().map(|(_, v)| v.clone()));
                     if let Some(V::Texts(t)) = val("interpolation") {
                         property.interpolation = t.into_iter().next();
+                    }
+                    if let Some(V::Nums(v)) = val("variability") {
+                        property.uniform = v.first() == Some(&1.0);
                     }
                     if let Some(V::Nums(n)) = val("elementSize") {
                         property.element_size = n.first().map(|e| *e as i64);

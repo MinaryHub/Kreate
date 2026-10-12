@@ -103,6 +103,10 @@ pub const EXPORT: &[Format] = &[
         extensions: &["usda"],
     },
     Format {
+        name: "USD (binary)",
+        extensions: &["usdc", "usd"],
+    },
+    Format {
         name: "USDZ (one file, for AR)",
         extensions: &["usdz"],
     },

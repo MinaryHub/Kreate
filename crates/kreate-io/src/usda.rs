@@ -481,7 +481,9 @@ impl Parser {
         ) {
             first = self.word()?;
         }
+        let mut uniform = false;
         while matches!(first.as_str(), "custom" | "uniform" | "varying" | "config") {
+            uniform |= first == "uniform";
             first = self.word()?;
         }
         if first == "rel" {
@@ -538,6 +540,7 @@ impl Parser {
                 prim.properties.push(Property {
                     name,
                     type_name,
+                    uniform,
                     ..Property::default()
                 });
                 prim.properties.last_mut().expect("pushed")
@@ -656,6 +659,8 @@ pub fn parse_usda(text: &str) -> Result<Layer, UsdaError> {
             ("metersPerUnit", Raw::Num(m)) => layer.meters_per_unit = Some(m),
             ("defaultPrim", Raw::Text(d)) => layer.default_prim = Some(d),
             ("timeCodesPerSecond", Raw::Num(n)) => layer.time_codes_per_second = Some(n),
+            ("startTimeCode", Raw::Num(n)) => layer.start_time_code = Some(n),
+            ("endTimeCode", Raw::Num(n)) => layer.end_time_code = Some(n),
             ("framesPerSecond", Raw::Num(n)) if layer.time_codes_per_second.is_none() => {
                 layer.time_codes_per_second = Some(n)
             }

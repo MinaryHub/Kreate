@@ -92,6 +92,8 @@ pub struct Property {
     /// move. [`Property::value`] is its value at rest: the default, or else
     /// the first of these.
     pub samples: Vec<(f64, Val)>,
+    /// `uniform`: one value for all time.
+    pub uniform: bool,
 }
 
 impl Property {
@@ -160,6 +162,9 @@ pub struct Layer {
     pub default_prim: Option<String>,
     /// Time codes a second; 24 when the layer does not say.
     pub time_codes_per_second: Option<f64>,
+    /// The time codes the stage plays between, when it says.
+    pub start_time_code: Option<f64>,
+    pub end_time_code: Option<f64>,
     pub sublayers: Vec<String>,
     pub prims: Vec<Prim>,
 }
@@ -2270,7 +2275,7 @@ fn trs(m: kreate_math::glam::DMat4) -> ImportTransform {
 }
 
 /// A target path made absolute: `../Looks/M` from where it was written.
-fn absolute(target: &str, from: &str) -> String {
+pub(crate) fn absolute(target: &str, from: &str) -> String {
     if target.starts_with('/') {
         return target.to_string();
     }
