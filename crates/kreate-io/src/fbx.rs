@@ -757,22 +757,6 @@ pub fn parse_fbx(
     let children_of = |id: i64| links.iter().filter(move |l| l.1 == id);
 
     let mut scene = ImportScene::new(source);
-    let mut unsupported: Vec<&str> = Vec::new();
-    for o in &objects.children {
-        let what = match (o.name.as_str(), o.value(2).and_then(Value::as_str)) {
-            ("Deformer", Some("BlendShape")) => "blend shapes",
-            _ => continue,
-        };
-        if !unsupported.contains(&what) {
-            unsupported.push(what);
-        }
-    }
-    for what in unsupported {
-        scene
-            .source
-            .notes
-            .push(LossyNote::Unsupported { what: what.into() });
-    }
 
     // Textures: each `Texture` record's image, by the texture's id.
     let mut image_of_texture: Vec<(i64, usize)> = Vec::new();
@@ -1099,6 +1083,7 @@ pub fn parse_fbx(
     }
     read_skins(objects, &links, &node_of, &mesh_of, &mut scene);
     read_takes(objects, &links, &models, &node_of, &mut scene);
+    read_blend_shapes(objects, &links, &node_of, &mesh_of, &mut scene);
     if lights_assumed {
         scene.source.notes.push(LossyNote::Unsupported {
             what: "FBX lights have no physical unit: an intensity of 100 was taken as \
@@ -1374,6 +1359,224 @@ impl Curve {
                 self.values[i - 1] + (self.values[i] - self.values[i - 1]) * f
             }
         })
+    }
+}
+
+/// One blend-shape channel as read: the weight range each of its targets
+/// covers, its percent, its keys, and the curve node keying it.
+type ShapeChannel = (Vec<(f32, f32)>, f32, Option<Curve>, Option<i64>);
+
+/// Every `BlendShape` deformer as its mesh's morph targets: each channel a
+/// target — or, with in-between shapes (`FullWeights`), a run of them, one
+/// from each shape to the next, turned up over its stretch of the channel's
+/// percent — its `DeformPercent` the models' weight, and its keys a morph
+/// channel in the take they are keyed in.
+fn read_blend_shapes(
+    objects: &Node,
+    links: &[(i64, i64, Option<String>)],
+    node_of: &[(i64, usize)],
+    mesh_of: &[(i64, usize)],
+    scene: &mut ImportScene,
+) {
+    let id_of = |n: &Node| n.value(0).and_then(Value::as_i64);
+    let find = |id: i64| objects.children.iter().find(|o| id_of(o) == Some(id));
+    let children = |id: i64, kind: &'static str| -> Vec<&Node> {
+        links
+            .iter()
+            .filter(|l| l.1 == id)
+            .filter_map(|l| find(l.0))
+            .filter(|n| n.value(2).and_then(Value::as_str) == Some(kind))
+            .collect()
+    };
+    for deformer in objects
+        .children_named("Deformer")
+        .filter(|d| d.value(2).and_then(Value::as_str) == Some("BlendShape"))
+    {
+        let Some(deformer_id) = id_of(deformer) else {
+            continue;
+        };
+        let Some((geometry, mesh)) = links
+            .iter()
+            .filter(|l| l.0 == deformer_id)
+            .find_map(|l| mesh_of.iter().find(|(g, _)| *g == l.1).copied())
+        else {
+            continue;
+        };
+        let count = scene.meshes[mesh].positions.len();
+        let wearers: Vec<usize> = links
+            .iter()
+            .filter(|l| l.0 == geometry)
+            .filter_map(|l| node_of.iter().find(|(m, _)| *m == l.1).map(|(_, n)| *n))
+            .collect();
+        let mut targets: Vec<(String, Vec<Vec3>)> = Vec::new();
+        // Per channel: its weight ranges, its percent and its keys.
+        let mut channels: Vec<ShapeChannel> = Vec::new();
+        for channel in children(deformer_id, "BlendShapeChannel") {
+            let Some(channel_id) = id_of(channel) else {
+                continue;
+            };
+            let name = clean_name(channel.value(1).and_then(Value::as_str).unwrap_or("Shape"));
+            let shapes = children(channel_id, "Shape");
+            if shapes.is_empty() {
+                continue;
+            }
+            let full_weights: Vec<f64> = channel
+                .child("FullWeights")
+                .and_then(|v| v.value(0))
+                .map(Value::floats)
+                .unwrap_or_default();
+            // Each shape, its offsets spread to every point, at its weight.
+            let mut stops: Vec<(f32, Vec<Vec3>)> = shapes
+                .iter()
+                .enumerate()
+                .map(|(k, shape)| {
+                    let indexes = shape
+                        .child("Indexes")
+                        .and_then(|v| v.value(0))
+                        .map(Value::ints)
+                        .unwrap_or_default();
+                    let offsets = shape
+                        .child("Vertices")
+                        .and_then(|v| v.value(0))
+                        .map(Value::floats)
+                        .unwrap_or_default();
+                    let mut full = vec![Vec3::ZERO; count];
+                    for (i, o) in indexes.iter().zip(offsets.as_chunks::<3>().0) {
+                        if let Some(slot) = full.get_mut(*i as usize) {
+                            *slot = Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32);
+                        }
+                    }
+                    let weight = full_weights.get(k).map_or(1.0, |w| (*w / 100.0) as f32);
+                    (weight, full)
+                })
+                .collect();
+            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut ranges = Vec::new();
+            let (mut low, mut before) = (0.0f32, vec![Vec3::ZERO; count]);
+            for (k, (w, at)) in stops.iter().enumerate() {
+                let step: Vec<Vec3> = at.iter().zip(&before).map(|(a, b)| *a - *b).collect();
+                let key = if k + 1 == stops.len() {
+                    name.clone()
+                } else {
+                    format!("{name}_inbetween{}", k + 1)
+                };
+                targets.push((key, step));
+                ranges.push((low, *w));
+                low = *w;
+                before = at.clone();
+            }
+            let percent = channel.property_f64("DeformPercent").unwrap_or(0.0) as f32;
+            // Its keys: a curve node on its DeformPercent, and the curve
+            // under it — and the take that node's layer is in.
+            let keyed = links
+                .iter()
+                .filter(|l| l.1 == channel_id && l.2.as_deref() == Some("DeformPercent"))
+                .filter_map(|l| {
+                    find(l.0)
+                        .filter(|n| n.name == "AnimationCurveNode")
+                        .map(|n| (l.0, n))
+                })
+                .next();
+            let curve = keyed.and_then(|(node_id, _)| {
+                links
+                    .iter()
+                    .filter(|l| l.1 == node_id)
+                    .filter_map(|l| find(l.0))
+                    .find(|n| n.name == "AnimationCurve")
+                    .and_then(|c| {
+                        let times: Vec<f64> = c
+                            .child("KeyTime")
+                            .and_then(|v| v.value(0))
+                            .map(Value::ints)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|t| *t as f64 / TICKS)
+                            .collect();
+                        let values = c
+                            .child("KeyValueFloat")
+                            .and_then(|v| v.value(0))
+                            .map(Value::floats)
+                            .unwrap_or_default();
+                        (!times.is_empty() && !values.is_empty()).then_some(Curve { times, values })
+                    })
+            });
+            channels.push((ranges, percent, curve, keyed.map(|(id, _)| id)));
+        }
+        if targets.is_empty() {
+            continue;
+        }
+        // A channel's percent as its targets' weights.
+        let spread = |ranges: &[(f32, f32)], percent: f32, out: &mut Vec<f32>| {
+            let w = percent / 100.0;
+            if ranges.len() == 1 {
+                out.push(w);
+            } else {
+                for (low, high) in ranges {
+                    out.push(((w - low) / (high - low).max(1e-6)).clamp(0.0, 1.0));
+                }
+            }
+        };
+        let mut rest = Vec::new();
+        for (ranges, percent, _, _) in &channels {
+            spread(ranges, *percent, &mut rest);
+        }
+        if scene.vertex_morphs.len() < scene.meshes.len() {
+            scene.vertex_morphs.resize(scene.meshes.len(), Vec::new());
+        }
+        scene.vertex_morphs[mesh] = targets;
+        for node in &wearers {
+            if scene.node_weights.len() <= *node {
+                scene.node_weights.resize(node + 1, Vec::new());
+            }
+            scene.node_weights[*node] = rest.clone();
+        }
+        // The keys, from the take's start: what any channel is keyed at.
+        if channels.iter().all(|c| c.2.is_none()) {
+            continue;
+        }
+        let mut times: Vec<f64> = channels
+            .iter()
+            .filter_map(|c| c.2.as_ref())
+            .flat_map(|c| c.times.iter().copied())
+            .collect();
+        times.sort_by(f64::total_cmp);
+        times.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+        // The take: the stack above the keyed node's layer, and its start.
+        let stack = channels
+            .iter()
+            .find_map(|c| c.3)
+            .and_then(|node| links.iter().find(|l| l.0 == node).map(|l| l.1))
+            .and_then(|layer| links.iter().find(|l| l.0 == layer).map(|l| l.1))
+            .and_then(find);
+        let first = times.first().copied().unwrap_or(0.0);
+        let start = stack
+            .and_then(|s| s.property_f64("LocalStart"))
+            .map(|t| t / TICKS)
+            .filter(|t| *t <= first)
+            .unwrap_or(first);
+        let name = stack
+            .and_then(|s| s.value(1).and_then(Value::as_str))
+            .map(clean_name)
+            .unwrap_or_else(|| "Take".into());
+        let mut values = Vec::with_capacity(times.len() * rest.len());
+        for t in &times {
+            for (ranges, percent, curve, _) in &channels {
+                let p = curve
+                    .as_ref()
+                    .and_then(|c| c.at(*t))
+                    .map_or(*percent, |v| v as f32);
+                spread(ranges, p, &mut values);
+            }
+        }
+        for node in wearers {
+            scene.morph_channels.push(crate::ir::ImportMorphChannel {
+                animation: name.clone(),
+                node,
+                interpolation: crate::ir::ChannelInterpolation::Linear,
+                times: times.iter().map(|t| (t - start) as f32).collect(),
+                values: values.clone(),
+            });
+        }
     }
 }
 
@@ -1978,6 +2181,101 @@ Connections:  {
 	C: "OP",903,902,"d|Z"
 }
 "#;
+
+    const SHAPED: &str = r#"; FBX 7.4.0 project file
+GlobalSettings:  {
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",2
+		P: "UnitScaleFactor", "double", "Number", "",100
+	}
+}
+Objects:  {
+	Geometry: 100, "Geometry::Face", "Mesh" {
+		Vertices: *9 {
+			a: 0,0,0,1,0,0,0,1,0
+		}
+		PolygonVertexIndex: *3 {
+			a: 0,1,-3
+		}
+	}
+	Model: 110, "Model::Face", "Mesh" {
+	}
+	Deformer: 120, "Deformer::Morphs", "BlendShape" {
+	}
+	Deformer: 130, "SubDeformer::Smile", "BlendShapeChannel" {
+		DeformPercent: 25
+		FullWeights: *2 {
+			a: 50,100
+		}
+		Properties70:  {
+			P: "DeformPercent", "Number", "", "A",25
+		}
+	}
+	Geometry: 140, "Geometry::Smile_half", "Shape" {
+		Indexes: *1 {
+			a: 2
+		}
+		Vertices: *3 {
+			a: 0,0,0.4
+		}
+	}
+	Geometry: 150, "Geometry::Smile", "Shape" {
+		Indexes: *1 {
+			a: 2
+		}
+		Vertices: *3 {
+			a: 0,0,0.5
+		}
+	}
+	AnimationStack: 900, "AnimStack::Grin", "" {
+	}
+	AnimationLayer: 901, "AnimLayer::Base", "" {
+	}
+	AnimationCurveNode: 902, "AnimCurveNode::DeformPercent", "" {
+	}
+	AnimationCurve: 903, "AnimCurve::", "" {
+		KeyTime: *2 {
+			a: 0,46186158000
+		}
+		KeyValueFloat: *2 {
+			a: 0,75
+		}
+	}
+}
+Connections:  {
+	C: "OO",100,110
+	C: "OO",110,0
+	C: "OO",120,100
+	C: "OO",130,120
+	C: "OO",140,130
+	C: "OO",150,130
+	C: "OO",901,900
+	C: "OO",902,901
+	C: "OP",902,130,"DeformPercent"
+	C: "OP",903,902,"d|DeformPercent"
+}
+"#;
+
+    #[test]
+    fn blend_shapes_come_in_with_their_in_betweens_and_keys() {
+        let scene = parse_fbx(SHAPED.as_bytes(), &none).expect("reads");
+        let targets = &scene.vertex_morphs[0];
+        let names: Vec<&str> = targets.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["Smile_inbetween1", "Smile"]);
+        assert_eq!(targets[0].1[2], Vec3::new(0.0, 0.0, 0.4));
+        assert!((targets[1].1[2].z - 0.1).abs() < 1e-6);
+        // 25% is halfway to the in-between at 50%.
+        let face = scene.nodes.iter().position(|n| n.name == "Face").unwrap();
+        assert_eq!(scene.node_weights[face], vec![0.5, 0.0]);
+        // Keyed from 0% to 75%: at the end, the in-between whole and half
+        // the rest.
+        let keyed = &scene.morph_channels[0];
+        assert_eq!(keyed.times.len(), 2);
+        assert_eq!(&keyed.values[2..], &[1.0, 0.5]);
+        let mut doc = kreate_scene::Document::new();
+        crate::build_into(&scene, &mut doc);
+        assert!(doc.objects().any(|(_, o)| o.shape_keys.len() == 2));
+    }
 
     #[test]
     fn a_skinned_take_plays_its_bones_and_moves_the_mesh_with_them() {
