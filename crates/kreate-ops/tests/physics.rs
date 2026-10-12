@@ -436,3 +436,65 @@ fn smoke_and_fire_are_set_up_and_baked_by_operators() {
     assert_eq!(doc.physics_cache.gas.len(), 1);
     assert_eq!(doc.physics_cache.gas[0].frames.len(), 8);
 }
+
+#[test]
+fn one_simulation_bakes_and_frees_on_its_own() {
+    let (registry, mut history, mut doc) = wired();
+    let cube = falling_cube(&registry, &mut history, &mut doc);
+    let emitter = add(
+        &mut doc,
+        "Emitter",
+        kreate_mesh::primitives::plane(1.0),
+        6.0,
+    );
+    select(&mut doc, emitter);
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.particles_add",
+        &[]
+    ));
+    // Everything, then the particles freed: the falling cube's bake stays.
+    assert!(run(&registry, &mut history, &mut doc, "physics.bake", &[]));
+    let rigid = doc.physics_cache.rigid.clone();
+    assert!(!rigid.is_empty() && !doc.physics_cache.particles.is_empty());
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.free_bake",
+        &[("only", PropertyValue::Enum(3))]
+    ));
+    assert!(doc.physics_cache.particles.is_empty());
+    assert_eq!(
+        doc.physics_cache.rigid, rigid,
+        "the rigid bodies' bake is kept"
+    );
+    doc.animate(48.0);
+    let z = doc.object(cube).unwrap().transform.translation.z;
+    assert!((z - 0.5).abs() < 0.05, "still landed: {z}");
+    // The particles alone, baked again: the rigid bake untouched.
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.bake",
+        &[("only", PropertyValue::Enum(3))]
+    ));
+    assert!(!doc.physics_cache.particles.is_empty());
+    assert_eq!(doc.physics_cache.rigid, rigid);
+    // Rigid bodies alone, from nothing baked: the particles' bake is kept.
+    let particles = doc.physics_cache.particles.len();
+    let first = doc.physics_cache.particles[0].frames.len();
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        "physics.bake",
+        &[("only", PropertyValue::Enum(1))]
+    ));
+    assert_eq!(doc.physics_cache.particles.len(), particles);
+    assert_eq!(doc.physics_cache.particles[0].frames.len(), first);
+    assert!(!doc.physics_cache.rigid.is_empty());
+}

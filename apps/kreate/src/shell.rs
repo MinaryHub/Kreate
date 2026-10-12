@@ -6120,8 +6120,10 @@ fn set_sim(state: &mut ShellState, p: &kreate_scene::physics::ObjectPhysics, sim
 /// The bake buttons, inside a simulation's own section: the bake runs every
 /// simulation in the scene, as it always has, and says so. Bake to
 /// Keyframes is the rigid body's alone.
-fn bake_row(ui: &mut Ui, state: &mut ShellState, doc: &Document, with_keys: bool) {
+fn bake_row(ui: &mut Ui, state: &mut ShellState, doc: &Document, only: u32, with_keys: bool) {
     let cache = &doc.physics_cache;
+    let mut which = PropertyMap::new();
+    which.set("only", kreate_reflect::PropertyValue::Enum(only));
     ui.horizontal(|ui| {
         if let Some((done, total)) = state.bake_progress {
             // A bake is running: how far, and a way to stop it.
@@ -6140,14 +6142,17 @@ fn bake_row(ui: &mut Ui, state: &mut ShellState, doc: &Document, with_keys: bool
             }
             return;
         }
+        let (bake, hint) = if only == 0 {
+            ("physics-bake-all", "physics-bake-all-hint")
+        } else {
+            ("physics-bake", "physics-bake-one-hint")
+        };
         if ui
-            .button(state.catalog.get("physics-bake"))
-            .on_hover_text(state.catalog.get("physics-bake-all-hint"))
+            .button(state.catalog.get(bake))
+            .on_hover_text(state.catalog.get(hint))
             .clicked()
         {
-            state
-                .queue
-                .dispatch("physics.bake_start", PropertyMap::new());
+            state.queue.dispatch("physics.bake_start", which.clone());
         }
         if ui
             .add_enabled(
@@ -6156,7 +6161,7 @@ fn bake_row(ui: &mut Ui, state: &mut ShellState, doc: &Document, with_keys: bool
             )
             .clicked()
         {
-            state.queue.run("physics.free_bake", PropertyMap::new());
+            state.queue.run("physics.free_bake", which.clone());
         }
         // Said before the click: the rigid bodies stop being rigid bodies,
         // which otherwise looks like the settings going missing.
@@ -6366,7 +6371,13 @@ fn draw_physics_tab(
                             }
                             if sim.bakes() {
                                 ui.separator();
-                                bake_row(ui, state, doc, sim == Sim::RigidBody);
+                                let only = match sim {
+                                    Sim::RigidBody => 1,
+                                    Sim::Cloth | Sim::SoftBody => 2,
+                                    Sim::Particles | Sim::Hair => 3,
+                                    _ => 4,
+                                };
+                                bake_row(ui, state, doc, only, sim == Sim::RigidBody);
                             }
                         })
                     })
@@ -6390,6 +6401,9 @@ fn draw_physics_tab(
                 ph::world_params(&doc.physics).to_map(),
                 |_| true,
             );
+            // Every simulation at once.
+            ui.separator();
+            bake_row(ui, state, doc, 0, false);
         });
     });
 }

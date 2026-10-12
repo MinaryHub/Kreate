@@ -408,6 +408,8 @@ struct SculptStroke {
 /// A physics bake on its own thread.
 struct BakeJob {
     token: u32,
+    /// Which simulations it bakes: `physics.bake`'s `only`.
+    only: u32,
     /// Frames done in the high half, of how many in the low.
     progress: Arc<std::sync::atomic::AtomicU64>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -6758,7 +6760,7 @@ impl App {
     /// and the bake can be stopped. Its result goes in through
     /// `physics.bake` like any bake — one undo step, a script line — handed
     /// over by a token.
-    fn start_bake(&mut self) {
+    fn start_bake(&mut self, only: u32) {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         if self.bake_job.is_some() {
             return;
@@ -6772,6 +6774,7 @@ impl App {
         self.bake_tokens = self.bake_tokens.wrapping_add(1).max(1);
         let job = BakeJob {
             token: self.bake_tokens,
+            only,
             progress: Arc::new(AtomicU64::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
             result: Arc::new(std::sync::Mutex::new(None)),
@@ -6782,7 +6785,8 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("bake".into())
             .spawn(move || {
-                let out = kreate_scene::physics::bake::bake_with(&doc, |done, total| {
+                let kind = kreate_scene::physics::bake::BakeOnly::from_index(only);
+                let out = kreate_scene::physics::bake::bake_only_with(&doc, kind, |done, total| {
                     progress.store(((done as u64) << 32) | total as u64, Ordering::Relaxed);
                     !cancel.load(Ordering::Relaxed)
                 });
@@ -6848,7 +6852,7 @@ impl App {
             self.redraw.set(RedrawReason::UI);
             return;
         };
-        let token = job.token;
+        let (token, only) = (job.token, job.only);
         self.bake_job = None;
         self.ui.bake_progress = None;
         match outcome {
@@ -6856,6 +6860,7 @@ impl App {
                 kreate_ops::ops::physics::stage_bake(token, cache, summary);
                 let mut p = PropertyMap::new();
                 p.set("staged", PropertyValue::Int(token as i64));
+                p.set("only", PropertyValue::Enum(only));
                 self.run_op("physics.bake", p);
             }
             None => self.status("Bake cancelled"),
@@ -9982,7 +9987,13 @@ impl App {
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
-            "physics.bake_start" => self.start_bake(),
+            "physics.bake_start" => {
+                let only = match action.params.get("only") {
+                    Some(PropertyValue::Enum(i)) => *i,
+                    _ => 0,
+                };
+                self.start_bake(only)
+            }
             "physics.bake_cancel" => {
                 if let Some(job) = &self.bake_job {
                     job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -12804,7 +12815,7 @@ kreate.ops.object.add_primitive()",
             panic!("the bake never finished");
         };
         let steps = app.history.entries().len();
-        app.start_bake();
+        app.start_bake(0);
         assert!(app.bake_job.is_some());
         wait(&mut app);
         assert!(!app.doc.physics_cache.is_empty());
@@ -12816,7 +12827,7 @@ kreate.ops.object.add_primitive()",
             .to_script_call()
             .contains("physics.bake"));
 
-        app.start_bake();
+        app.start_bake(0);
         app.bake_job
             .as_ref()
             .unwrap()

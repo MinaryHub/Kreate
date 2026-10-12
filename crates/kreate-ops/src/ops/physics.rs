@@ -1054,6 +1054,9 @@ pub struct BakeParams {
     /// what a script replaying this line does.
     #[param(hidden)]
     pub staged: u32,
+    /// Which simulations: all, or one kind, the rest of the bake kept.
+    #[param(variants("all", "rigid_body", "cloth_soft_body", "particles", "fluid"))]
+    pub only: u32,
 }
 
 /// Bakes made elsewhere, waiting for the operator that puts them in.
@@ -1099,18 +1102,28 @@ impl Operator for Bake {
                 .position(|(t, _, _)| *t == params.staged && params.staged != 0)
                 .map(|i| held.remove(i))
         };
+        let only = kreate_scene::physics::bake::BakeOnly::from_index(params.only);
         let (cache, summary) = match staged {
             Some((_, cache, summary)) => (cache, summary),
-            None => kreate_scene::physics::bake::bake(doc.document()),
+            None => kreate_scene::physics::bake::bake_only_with(doc.document(), only, |_, _| true)
+                .expect("a bake that is never stopped finishes"),
         };
-        if summary.rigid + summary.soft + summary.particles + summary.fluid == 0 {
+        if !only.made_any(&summary) {
             return Err(OpError::Failed(
                 "nothing to bake: no active rigid body, cloth, soft body, emitter or liquid domain"
                     .into(),
             ));
         }
         let d = doc.document_mut();
-        restore_rigid(d);
+        // Rigid bodies the old bake moved go back first, when it is theirs
+        // that is replaced.
+        if matches!(
+            only,
+            kreate_scene::physics::bake::BakeOnly::All
+                | kreate_scene::physics::bake::BakeOnly::Rigid
+        ) {
+            restore_rigid(d);
+        }
         d.physics_cache = Arc::new(cache);
         let frame = d.playback.frame;
         d.animate(frame);
@@ -1131,7 +1144,11 @@ fn restore_rigid(d: &mut Document) {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
-pub struct FreeBakeParams {}
+pub struct FreeBakeParams {
+    /// Which simulations' bake: all, or one kind, the rest kept.
+    #[param(variants("all", "rigid_body", "cloth_soft_body", "particles", "fluid"))]
+    pub only: u32,
+}
 
 /// Throws the bake away; rigid bodies go back to where they started.
 pub struct FreeBake;
@@ -1148,16 +1165,23 @@ impl Operator for FreeBake {
         !doc.physics_cache.is_empty()
     }
     fn execute(
-        _params: &Self::Params,
+        params: &Self::Params,
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
+        use kreate_scene::physics::bake::BakeOnly;
         if doc.document().physics_cache.is_empty() {
             return Ok(OpResult::Cancelled);
         }
+        let only = BakeOnly::from_index(params.only);
         let d = doc.document_mut();
-        restore_rigid(d);
-        d.physics_cache = Arc::new(PhysicsCache::default());
+        if matches!(only, BakeOnly::All | BakeOnly::Rigid) {
+            restore_rigid(d);
+        }
+        d.physics_cache = Arc::new(match only {
+            BakeOnly::All => PhysicsCache::default(),
+            kind => kind.freed(&d.physics_cache),
+        });
         Ok(OpResult::Finished)
     }
 }

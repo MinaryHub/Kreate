@@ -117,6 +117,124 @@ fn local_for(doc: &Document, id: ObjectId, world: DAffine3) -> DTransform {
     DTransform::from_affine(above.inverse() * world)
 }
 
+/// Which simulations a bake runs: all of them, or one kind — the rest of
+/// the cache kept as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BakeOnly {
+    #[default]
+    All,
+    Rigid,
+    /// Cloth and soft bodies.
+    Soft,
+    /// Emitters and hair.
+    Particles,
+    /// Liquid and gas domains.
+    Fluid,
+}
+
+impl BakeOnly {
+    /// By the operators' number: all, rigid, soft, particles, fluid.
+    pub fn from_index(i: u32) -> Self {
+        match i {
+            1 => Self::Rigid,
+            2 => Self::Soft,
+            3 => Self::Particles,
+            4 => Self::Fluid,
+            _ => Self::All,
+        }
+    }
+
+    /// Whether a bake of this kind made anything, by what it says it made.
+    pub fn made_any(self, s: &BakeSummary) -> bool {
+        match self {
+            Self::All => s.rigid + s.soft + s.particles + s.fluid > 0,
+            Self::Rigid => s.rigid > 0,
+            Self::Soft => s.soft > 0,
+            Self::Particles => s.particles > 0,
+            Self::Fluid => s.fluid > 0,
+        }
+    }
+
+    /// `old` with this kind's tracks taken from `fresh` — all of it, for
+    /// all, or when the two do not start on the same frame.
+    pub fn merged(self, old: &PhysicsCache, fresh: PhysicsCache) -> PhysicsCache {
+        if self == Self::All || old.is_empty() || old.start != fresh.start {
+            if self == Self::All {
+                return fresh;
+            }
+            let mut out = PhysicsCache {
+                start: fresh.start,
+                ..PhysicsCache::default()
+            };
+            self.take(&mut out, fresh);
+            return out;
+        }
+        let mut out = old.clone();
+        self.take(&mut out, fresh);
+        out
+    }
+
+    fn take(self, out: &mut PhysicsCache, fresh: PhysicsCache) {
+        match self {
+            Self::All => *out = fresh,
+            Self::Rigid => out.rigid = fresh.rigid,
+            Self::Soft => out.soft = fresh.soft,
+            Self::Particles => out.particles = fresh.particles,
+            Self::Fluid => {
+                out.fluid = fresh.fluid;
+                out.gas = fresh.gas;
+            }
+        }
+    }
+
+    /// `cache` with this kind's tracks gone.
+    pub fn freed(self, cache: &PhysicsCache) -> PhysicsCache {
+        let mut out = cache.clone();
+        self.take(
+            &mut out,
+            PhysicsCache {
+                start: cache.start,
+                ..PhysicsCache::default()
+            },
+        );
+        out
+    }
+}
+
+/// One kind of simulation baked, every object's other kinds set aside —
+/// colliders kept, so what it falls on is still there — and merged into
+/// `doc`'s cache. `None` when `progress` said to stop.
+pub fn bake_only_with(
+    doc: &Document,
+    only: BakeOnly,
+    progress: impl FnMut(usize, usize) -> bool,
+) -> Option<(PhysicsCache, BakeSummary)> {
+    if only == BakeOnly::All {
+        return bake_with(doc, progress);
+    }
+    let mut kept = doc.clone();
+    let ids: Vec<ObjectId> = kept.objects().map(|(id, _)| id).collect();
+    for id in ids {
+        if let Some(o) = kept.object_untouched_mut(id) {
+            let p = &mut o.physics;
+            if only != BakeOnly::Rigid {
+                p.rigid = None;
+            }
+            if only != BakeOnly::Soft {
+                p.soft = None;
+            }
+            if only != BakeOnly::Particles {
+                p.particles.clear();
+            }
+            if only != BakeOnly::Fluid {
+                p.fluid = None;
+            }
+        }
+    }
+    let (fresh, summary) = bake_with(&kept, progress)?;
+    Some((only.merged(&doc.physics_cache, fresh), summary))
+}
+
 /// Runs every simulation in `doc` over its physics frame range.
 pub fn bake(doc: &Document) -> (PhysicsCache, BakeSummary) {
     bake_with(doc, |_, _| true).expect("a bake that is never stopped finishes")
