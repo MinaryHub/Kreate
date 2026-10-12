@@ -1044,6 +1044,9 @@ pub fn parse_usdc(b: &[u8]) -> Result<Layer, UsdcError> {
                     if let Some(V::Texts(t)) = val("interpolation") {
                         property.interpolation = t.into_iter().next();
                     }
+                    if let Some(V::Nums(v)) = val("weight") {
+                        property.weight = v.first().copied();
+                    }
                     if let Some(V::Nums(v)) = val("variability") {
                         property.uniform = v.first() == Some(&1.0);
                     }

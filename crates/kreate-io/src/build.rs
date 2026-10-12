@@ -2434,19 +2434,27 @@ fn export_light(light: &kreate_scene::Light, notes: &mut Vec<LossyNote>) -> Impo
                 outer,
             }
         }
-        kreate_scene::LightKind::Area { .. } => {
-            // glTF has no area light, and the nearest thing that is not a lie
-            // is the point light §7.3 already reduces it to for the raster
-            // pass: the same axial candela from the same place. What is lost is
-            // the shape, and with it the soft shadow that was the reason to
-            // reach for an area light.
+        kreate_scene::LightKind::Area { shape, .. } => {
+            // Its shape, in nits, for a format that has area lights (USD).
+            // glTF has none, and writes the nearest thing that is not a lie:
+            // a point of the same axial candela from the same place — losing
+            // the shape, and with it the soft shadow.
             notes.push(LossyNote::Unsupported {
                 what: format!(
-                    "{}: an area light was written as a point light of the same axial intensity",
+                    "{}: an area light — glTF writes it as a point light of the same axial intensity",
                     light.name
                 ),
             });
-            ImportLightKind::Point
+            let (width, height, round) = match shape {
+                kreate_scene::AreaShape::Rect { width, height } => (width, height, false),
+                kreate_scene::AreaShape::Disc { radius } => (2.0 * radius, 2.0 * radius, true),
+                kreate_scene::AreaShape::Ellipse { width, height } => (width, height, true),
+            };
+            ImportLightKind::Area {
+                width: width as f32,
+                height: height as f32,
+                round,
+            }
         }
     };
     if light.exposure != 0.0 {
@@ -2475,7 +2483,10 @@ fn export_light(light: &kreate_scene::Light, notes: &mut Vec<LossyNote>) -> Impo
         // An area light's nits become candela here, which is the one kind whose
         // unit changes on the way out — because the kind it is being written as
         // is a different kind.
-        intensity: light.axial_candela().unwrap_or(light.effective_intensity()) as f32,
+        intensity: match light.kind {
+            kreate_scene::LightKind::Area { .. } => light.effective_intensity(),
+            _ => light.axial_candela().unwrap_or(light.effective_intensity()),
+        } as f32,
         // No cutoff. The datablock has no artist-set distance yet (§7.8), and
         // the one the application derives from the display's black point is a
         // property of how the picture is being shown, not of the lamp.

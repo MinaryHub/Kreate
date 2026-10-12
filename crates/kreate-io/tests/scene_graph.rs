@@ -835,10 +835,33 @@ fn an_area_light_leaves_as_a_point_light_of_the_same_axial_intensity() {
         ObjectData::Light(id),
     ));
     let (scene, _) = kreate_io::scene_from_document(&doc);
+    // Its shape and nits, for USD; glTF's point, the candela along its axis.
+    assert_eq!(
+        scene.lights[0].kind,
+        ImportLightKind::Area {
+            width: 2.0,
+            height: 2.0,
+            round: false
+        }
+    );
+    let (bytes, _) = kreate_io::write_gltf_scene(
+        &scene,
+        &kreate_io::GltfExportOptions {
+            binary: false,
+            ..Default::default()
+        },
+    );
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("text glTF");
+    let written = json["extensions"]["KHR_lights_punctual"]["lights"][0]["intensity"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(
+        json["extensions"]["KHR_lights_punctual"]["lights"][0]["type"],
+        "point"
+    );
     assert!(
-        (scene.lights[0].intensity - 2000.0).abs() < 1e-2,
-        "four square metres at 500 nits came out as {}",
-        scene.lights[0].intensity
+        (written - 2000.0).abs() < 1e-2,
+        "four square metres at 500 nits came out as {written}"
     );
 }
 

@@ -94,6 +94,8 @@ pub struct Property {
     pub samples: Vec<(f64, Val)>,
     /// `uniform`: one value for all time.
     pub uniform: bool,
+    /// A blend shape's in-between: the weight at which it is reached.
+    pub weight: Option<f64>,
 }
 
 impl Property {
@@ -629,6 +631,9 @@ fn read_stage(assets: &Assets, base: &str, name: &str) -> Result<ImportScene, Us
 }
 
 /// A skeleton as read: its skin, its node, its joints' names and nodes.
+/// A blend shape and the weight range each of its targets covers.
+type ShapeRun = (String, Vec<(f32, f32)>);
+
 /// A skeleton as read: its skin, its node, its joints' names and nodes, and
 /// the path of the animation it plays.
 type SkeletonRead = (usize, usize, Vec<String>, Vec<usize>, Option<String>);
@@ -1122,9 +1127,12 @@ impl<'a> Reader<'a> {
     }
 
     /// A mesh's blend shapes as its morph targets: each target's offsets,
-    /// for the points it names or for all of them. Their names, in the
-    /// mesh's order, when it has any.
-    fn blend_shapes(&mut self, prim: &Prim, mesh: usize) -> Option<Vec<String>> {
+    /// for the points it names or for all of them. A shape with in-between
+    /// shapes becomes a run of targets, one from each in-between to the
+    /// next, each turned up over its stretch of the weight — together the
+    /// piecewise line USD draws. Each shape's name, in the mesh's order, with
+    /// the weight range each of its targets covers.
+    fn blend_shapes(&mut self, prim: &Prim, mesh: usize) -> Option<Vec<ShapeRun>> {
         let names = prim
             .property("skel:blendShapes")
             .and_then(Property::texts)?
@@ -1132,42 +1140,64 @@ impl<'a> Reader<'a> {
         let targets = prim.property("skel:blendShapeTargets")?.targets.clone();
         let count = self.scene.meshes[mesh].positions.len();
         let mut morphs = Vec::new();
+        let mut runs = Vec::new();
         for (name, target) in names.iter().zip(&targets) {
             let Some(shape) = self.all.get(&absolute(target, "/")).copied() else {
                 continue;
             };
-            let Some(offsets) = shape.nums("offsets") else {
-                continue;
-            };
-            let offsets: Vec<Vec3> = offsets
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|o| Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32))
-                .collect();
-            let mut full = vec![Vec3::ZERO; count];
-            match shape.nums("pointIndices") {
-                Some(at) => {
-                    for (i, d) in at.iter().zip(&offsets) {
-                        if let Some(slot) = full.get_mut(*i as usize) {
+            let spread = |offsets: &[f64]| -> Vec<Vec3> {
+                let offsets: Vec<Vec3> = offsets
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|o| Vec3::new(o[0] as f32, o[1] as f32, o[2] as f32))
+                    .collect();
+                let mut full = vec![Vec3::ZERO; count];
+                match shape.nums("pointIndices") {
+                    Some(at) => {
+                        for (i, d) in at.iter().zip(&offsets) {
+                            if let Some(slot) = full.get_mut(*i as usize) {
+                                *slot = *d;
+                            }
+                        }
+                    }
+                    None => {
+                        for (slot, d) in full.iter_mut().zip(&offsets) {
                             *slot = *d;
                         }
                     }
                 }
-                None => {
-                    for (slot, d) in full.iter_mut().zip(&offsets) {
-                        *slot = *d;
-                    }
-                }
-            }
-            if shape
+                full
+            };
+            let Some(offsets) = shape.nums("offsets") else {
+                continue;
+            };
+            // The shape at each weight it is given at, in order, ending at
+            // one.
+            let mut stops: Vec<(f32, Vec<Vec3>)> = shape
                 .properties
                 .iter()
-                .any(|p| p.name.starts_with("inbetweens:"))
-            {
-                self.say("blend shapes' in-between shapes are not read".into());
+                .filter(|p| p.name.starts_with("inbetweens:"))
+                .filter_map(|p| Some((p.weight? as f32, spread(p.nums()?))))
+                .filter(|(w, _)| *w > 0.0 && *w < 1.0)
+                .collect();
+            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+            stops.push((1.0, spread(offsets)));
+            let mut ranges = Vec::with_capacity(stops.len());
+            let (mut low, mut before) = (0.0f32, vec![Vec3::ZERO; count]);
+            for (k, (w, at)) in stops.iter().enumerate() {
+                let step: Vec<Vec3> = at.iter().zip(&before).map(|(a, b)| *a - *b).collect();
+                let key = if k + 1 == stops.len() {
+                    name.clone()
+                } else {
+                    format!("{name}_inbetween{}", k + 1)
+                };
+                morphs.push((key, step));
+                ranges.push((low, *w));
+                low = *w;
+                before = at.clone();
             }
-            morphs.push((name.clone(), full));
+            runs.push((name.clone(), ranges));
         }
         if morphs.is_empty() {
             return None;
@@ -1178,12 +1208,12 @@ impl<'a> Reader<'a> {
                 .resize(self.scene.meshes.len(), Vec::new());
         }
         self.scene.vertex_morphs[mesh] = morphs;
-        Some(names)
+        Some(runs)
     }
 
-    /// The animation's blend-shape weights for one mesh's shapes, in their
-    /// order: a morph channel on its node.
-    fn shape_weights(&mut self, anim: &Prim, shapes: &[String], node: usize) {
+    /// The animation's blend-shape weights for one mesh's shapes: a morph
+    /// channel on its node, each target turned up over its stretch.
+    fn shape_weights(&mut self, anim: &Prim, shapes: &[ShapeRun], node: usize) {
         let Some(keyed) = anim.property("blendShapes").and_then(Property::texts) else {
             return;
         };
@@ -1192,26 +1222,36 @@ impl<'a> Reader<'a> {
         };
         let column: Vec<Option<usize>> = shapes
             .iter()
-            .map(|s| keyed.iter().position(|k| k == s))
+            .map(|(s, _)| keyed.iter().position(|k| k == s))
             .collect();
         let times: Vec<f64> = if weights.samples.is_empty() {
             vec![0.0]
         } else {
             weights.samples.iter().map(|(t, _)| *t).collect()
         };
-        let mut values = Vec::with_capacity(times.len() * shapes.len());
+        let width: usize = shapes.iter().map(|(_, r)| r.len()).sum();
+        let mut values = Vec::with_capacity(times.len() * width);
         for t in &times {
             let Some(row) = value_at(weights, (!weights.samples.is_empty()).then_some(*t)) else {
                 return;
             };
-            for c in &column {
-                values.push(c.and_then(|c| row.get(c)).copied().unwrap_or(0.0) as f32);
+            for ((_, ranges), c) in shapes.iter().zip(&column) {
+                let w = c.and_then(|c| row.get(c)).copied().unwrap_or(0.0) as f32;
+                if ranges.len() == 1 {
+                    // No in-betweens: the weight as it is, past one or below
+                    // nothing included.
+                    values.push(w);
+                } else {
+                    for (low, high) in ranges {
+                        values.push(((w - low) / (high - low).max(1e-6)).clamp(0.0, 1.0));
+                    }
+                }
             }
         }
         if self.scene.node_weights.len() <= node {
             self.scene.node_weights.resize(node + 1, Vec::new());
         }
-        self.scene.node_weights[node] = values[..shapes.len()].to_vec();
+        self.scene.node_weights[node] = values[..width].to_vec();
         let name = self.take().name.clone();
         let rate = self.rate;
         self.scene
@@ -2010,9 +2050,16 @@ impl<'a> Reader<'a> {
             .nums("curveVertexCounts")
             .map(|c| c.iter().map(|n| *n as usize).collect())
             .unwrap_or_else(|| vec![points.len()]);
-        if prim.text("type").is_some_and(|t| t != "linear") || prim.type_name != "BasisCurves" {
-            self.say("curves are followed through their control points, straight".into());
+        let kind = prim.text("type").unwrap_or("cubic").to_string();
+        let basis = prim.text("basis").unwrap_or("bezier").to_string();
+        let periodic = prim.text("wrap") == Some("periodic");
+        if prim.type_name != "BasisCurves" {
+            self.say(
+                "NURBS and Hermite curves are followed through their control points, straight"
+                    .into(),
+            );
         }
+        let shaped = prim.type_name == "BasisCurves" && kind == "cubic";
         let widths = prim.nums("widths").unwrap_or(&[]);
         // A width per point, or one for all; or, not given, a hundredth of
         // the curves' size.
@@ -2039,13 +2086,27 @@ impl<'a> Reader<'a> {
             if run.len() < 2 || segments > MAX_SEGMENTS {
                 continue;
             }
-            segments += run.len() - 1;
+            // The curve itself: its cubic evaluated, or its points joined.
+            let control: Vec<(Vec3, f32)> = run.clone().map(|k| (points[k], width(k))).collect();
+            let line = if shaped {
+                sample_cubic(&control, &basis, periodic)
+            } else {
+                let mut l = control.clone();
+                if periodic {
+                    l.push(control[0]);
+                }
+                l
+            };
+            if line.len() < 2 {
+                continue;
+            }
+            segments += line.len() - 1;
             // A frame carried along the curve, so the tube does not twist.
             let mut normal = Vec3::ZERO;
             let first = positions.len() as u32;
-            for k in run.clone() {
-                let prev = points[k.max(run.start + 1) - 1];
-                let next = points[(k + 1).min(run.end - 1)];
+            for k in 0..line.len() {
+                let prev = line[k.max(1) - 1].0;
+                let next = line[(k + 1).min(line.len() - 1)].0;
                 let along = (next - prev).normalize_or_zero();
                 if normal == Vec3::ZERO {
                     normal = along.any_orthonormal_vector();
@@ -2053,13 +2114,13 @@ impl<'a> Reader<'a> {
                 normal = (normal - along * normal.dot(along))
                     .normalize_or(along.any_orthonormal_vector());
                 let side = along.cross(normal);
-                let r = width(k) * 0.5;
+                let r = line[k].1 * 0.5;
                 for s in 0..SIDES {
                     let a = std::f32::consts::TAU * s as f32 / SIDES as f32;
-                    positions.push(points[k] + (normal * a.cos() + side * a.sin()) * r);
+                    positions.push(line[k].0 + (normal * a.cos() + side * a.sin()) * r);
                 }
             }
-            for k in 0..run.len() as u32 - 1 {
+            for k in 0..line.len() as u32 - 1 {
                 for s in 0..SIDES as u32 {
                     let a = first + k * SIDES as u32 + s;
                     let b = first + k * SIDES as u32 + (s + 1) % SIDES as u32;
@@ -2174,6 +2235,71 @@ impl<'a> Reader<'a> {
         });
         self.scene.lights.len() - 1
     }
+}
+
+/// Points along a cubic curve, eight a segment, each with its width: a
+/// Bézier's segments share their ends (a step of three), a B-spline's and a
+/// Catmull-Rom's overlap (a step of one); a periodic curve wraps round.
+fn sample_cubic(control: &[(Vec3, f32)], basis: &str, periodic: bool) -> Vec<(Vec3, f32)> {
+    const STEPS: usize = 8;
+    let n = control.len();
+    let at = |i: usize| control[i % n];
+    // The four weights for `t` in a segment, by basis.
+    let weights = |t: f32| -> [f32; 4] {
+        let (t2, t3) = (t * t, t * t * t);
+        let u = 1.0 - t;
+        match basis {
+            "bspline" => [
+                u * u * u / 6.0,
+                (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0,
+                (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0,
+                t3 / 6.0,
+            ],
+            "catmullRom" => [
+                0.5 * (-t3 + 2.0 * t2 - t),
+                0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
+                0.5 * (-3.0 * t3 + 4.0 * t2 + t),
+                0.5 * (t3 - t2),
+            ],
+            // Bézier, and anything unknown read as one.
+            _ => [u * u * u, 3.0 * u * u * t, 3.0 * u * t2, t3],
+        }
+    };
+    let step = if basis == "bspline" || basis == "catmullRom" {
+        1
+    } else {
+        3
+    };
+    let segments = if periodic {
+        n / step
+    } else if n >= 4 {
+        (n - 4) / step + 1
+    } else {
+        0
+    };
+    if segments == 0 {
+        return control.to_vec();
+    }
+    let mut out = Vec::with_capacity(segments * STEPS + 1);
+    for s in 0..segments {
+        let base = s * step;
+        let last = s + 1 == segments;
+        for k in 0..=STEPS {
+            if k == STEPS && !last {
+                break;
+            }
+            let w = weights(k as f32 / STEPS as f32);
+            let mut p = Vec3::ZERO;
+            let mut width = 0.0;
+            for (j, wj) in w.iter().enumerate() {
+                let (q, r) = at(base + j);
+                p += q * *wj;
+                width += r * *wj;
+            }
+            out.push((p, width.max(0.0)));
+        }
+    }
+    out
 }
 
 /// A property's value at `time` — between its samples, a straight line;
@@ -2852,6 +2978,126 @@ def Xform "World"
             assert_eq!(from_text.lights.len(), from_binary.lights.len());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cubic_curve_bends_as_its_basis_says() {
+        let scene = parse_usda_text(
+            r#"#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+def BasisCurves "Arc"
+{
+    uniform token type = "cubic"
+    uniform token basis = "bezier"
+    int[] curveVertexCounts = [4]
+    point3f[] points = [(0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0)]
+    float[] widths = [0.02]
+}
+"#,
+        )
+        .unwrap();
+        let arc = &scene.meshes[0];
+        // Eight steps, nine rings of six: the fifth ring is the middle.
+        assert_eq!(arc.positions.len(), 9 * 6);
+        let middle: Vec3 = arc.positions[4 * 6..5 * 6].iter().copied().sum::<Vec3>() / 6.0;
+        // B(½) = (P0 + 3·P1 + 3·P2 + P3) / 8.
+        assert!(
+            (middle - Vec3::new(0.5, 0.75, 0.0)).length() < 1e-5,
+            "{middle}"
+        );
+        let samples = sample_cubic(
+            &[
+                (Vec3::ZERO, 1.0),
+                (Vec3::X, 1.0),
+                (Vec3::new(2.0, 0.0, 0.0), 1.0),
+                (Vec3::new(3.0, 0.0, 0.0), 1.0),
+            ],
+            "catmullRom",
+            false,
+        );
+        // A Catmull-Rom passes through its inner points.
+        assert!((samples[0].0 - Vec3::X).length() < 1e-6);
+        assert!((samples.last().unwrap().0 - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn an_in_between_shape_is_reached_at_its_weight() {
+        let text = r#"#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    timeCodesPerSecond = 1
+)
+def SkelRoot "Root"
+{
+    def Skeleton "Skel"
+    {
+        uniform token[] joints = []
+        rel skel:animationSource = <Anim>
+        def SkelAnimation "Anim"
+        {
+            uniform token[] joints = []
+            uniform token[] blendShapes = ["Push"]
+            float[] blendShapeWeights.timeSamples = {
+                0: [0],
+                1: [0.5],
+                2: [0.75],
+                3: [1],
+            }
+        }
+    }
+    def Mesh "Plate"
+    {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        rel skel:skeleton = </Root/Skel>
+        uniform token[] skel:blendShapes = ["Push"]
+        rel skel:blendShapeTargets = </Root/Plate/Push>
+        def BlendShape "Push"
+        {
+            uniform vector3f[] offsets = [(0, 0, 0.5)]
+            uniform int[] pointIndices = [2]
+            uniform vector3f[] inbetweens:half = [(0, 0, 0.4)] (
+                weight = 0.5
+            )
+        }
+    }
+}
+"#;
+        for binary in [false, true] {
+            let scene = if binary {
+                let layer = crate::usda::parse_usda(text).unwrap();
+                let dir = std::env::temp_dir().join(format!("kreate-ib-{}", std::process::id()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join("ib.usdc");
+                std::fs::write(&path, crate::usdc_write::write_usdc(&layer)).unwrap();
+                let s = parse_usd_file(&path).unwrap();
+                let _ = std::fs::remove_dir_all(&dir);
+                s
+            } else {
+                parse_usda_text(text).unwrap()
+            };
+            let targets = &scene.vertex_morphs[0];
+            let names: Vec<&str> = targets.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, vec!["Push_inbetween1", "Push"], "binary: {binary}");
+            let keyed = &scene.morph_channels[0];
+            // Where the third point is at each time: what USD draws.
+            let height = |k: usize| -> f32 {
+                let w = &keyed.values[k * 2..k * 2 + 2];
+                targets[0].1[2].z * w[0] + targets[1].1[2].z * w[1]
+            };
+            for (k, want) in [(0, 0.0), (1, 0.4), (2, 0.45), (3, 0.5)] {
+                assert!(
+                    (height(k) - want).abs() < 1e-6,
+                    "time {k}: {} (binary {binary})",
+                    height(k)
+                );
+            }
+        }
     }
 
     #[test]

@@ -289,11 +289,28 @@ fn write_lights(lights: &[crate::ir::ImportLight], root: &mut json::Root) {
                     }),
                 ),
             };
+            // An area light's nits, as the candela of a point that bright
+            // along its axis.
+            let intensity = match light.kind {
+                ImportLightKind::Area {
+                    width,
+                    height,
+                    round,
+                } => {
+                    let area = if round {
+                        std::f32::consts::PI * width * height * 0.25
+                    } else {
+                        width * height
+                    };
+                    light.intensity * area
+                }
+                _ => light.intensity,
+            };
             khr::Light {
                 color: light.color,
                 extensions: None,
                 extras: Default::default(),
-                intensity: light.intensity,
+                intensity,
                 name: Some(light.name.clone()),
                 range: light.range,
                 spot,

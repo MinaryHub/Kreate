@@ -563,6 +563,12 @@ pub fn write_usdc(layer: &Layer) -> Vec<u8> {
             let v = w.token_value(i);
             fields.push(w.field("interpolation", v));
         }
+        if let Some(weight) = p.weight {
+            fields.push(w.field(
+                "weight",
+                rep(FLOAT, false, true, (weight as f32).to_bits() as u64),
+            ));
+        }
         if let Some(e) = p.element_size {
             fields.push(w.field("elementSize", rep(INT, false, true, e as u32 as u64)));
         }

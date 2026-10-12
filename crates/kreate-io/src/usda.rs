@@ -557,6 +557,7 @@ impl Parser {
             match (key.as_str(), v) {
                 ("interpolation", Raw::Text(t)) => property.interpolation = Some(t),
                 ("elementSize", Raw::Num(n)) => property.element_size = Some(n as i64),
+                ("weight", Raw::Num(n)) => property.weight = Some(n),
                 _ => {}
             }
         }
