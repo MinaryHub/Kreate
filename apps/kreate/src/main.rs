@@ -4924,6 +4924,20 @@ impl App {
             // pointer picks a point of what moves, and from then on that
             // point is what lands on the target. Pressed again while picking,
             // it takes the point under the pointer.
+            // B in a loop cut: the cut snaps to the nearer end of its edge,
+            // and a number typed after is a distance from that end.
+            KeyCode::KeyB
+                if self
+                    .gesture
+                    .as_ref()
+                    .is_some_and(|(g, _)| g.kind == kreate::modal::Kind::LoopCut) =>
+            {
+                if let Some((gesture, _)) = &mut self.gesture {
+                    gesture.anchor_slide();
+                }
+                self.drive_gesture();
+                true
+            }
             KeyCode::KeyB if self.gesture.as_ref().is_some_and(|(g, _)| g.takes_base()) => {
                 if self.gesture.as_ref().is_some_and(|(g, _)| g.picking_base()) {
                     self.finish_base_pick();

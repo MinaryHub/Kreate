@@ -344,6 +344,11 @@ pub struct Gesture {
     /// A loop cut's edge on screen, first end to second — what the pointer
     /// slides the cut along. `None` for every other kind.
     slide: Option<((f32, f32), (f32, f32))>,
+    /// The same edge's two ends in the world, for a distance along it.
+    slide_world: Option<(DVec3, DVec3)>,
+    /// The end a loop cut is measured from after `B`: `false` the first,
+    /// `true` the second. While set, a typed number is a distance from it.
+    pub anchor: Option<bool>,
     /// How many loops a loop cut makes, before anything is typed. The wheel
     /// changes it.
     pub cuts: u32,
@@ -425,6 +430,8 @@ impl Gesture {
             swept: 0.0,
             bearing: None,
             slide: None,
+            slide_world: None,
+            anchor: None,
             cuts: 1,
             edge: None,
             depth_hold: None,
@@ -589,6 +596,72 @@ impl Gesture {
     pub fn set_slide_edge(&mut self, a: DVec3, b: DVec3) {
         self.slide =
             project(a, &self.camera, self.viewport).zip(project(b, &self.camera, self.viewport));
+        self.slide_world = Some((a, b));
+    }
+
+    /// `B` in a loop cut: the cut snaps to the end of its edge nearer the
+    /// pointer, and from there it is measured — a number typed now is how
+    /// far from that end it cuts. Again, the other end.
+    pub fn anchor_slide(&mut self) {
+        let Some(((ax, ay), (bx, by))) = self.slide else {
+            return;
+        };
+        self.anchor = Some(match self.anchor {
+            Some(end) => !end,
+            None => {
+                let (cx, cy) = self.cursor;
+                (cx - bx).hypot(cy - by) < (cx - ax).hypot(cy - ay)
+            }
+        });
+        // The slide goes on from the end, from where the pointer is now.
+        self.start = self.cursor;
+        self.precise_from = None;
+        self.coarse = (0.0, 0.0);
+    }
+
+    /// The loop cut's edge length in the world.
+    fn slide_length(&self) -> Option<f64> {
+        self.slide_world
+            .map(|(a, b)| a.distance(b))
+            .filter(|l| *l > 1e-12)
+    }
+
+    /// How far from the anchored end the cut is: typed, or the pointer's
+    /// slide as a length — rounded to the increment when snapping.
+    fn anchored_distance(&self, dx: f32, dy: f32) -> Option<f64> {
+        let end = self.anchor?;
+        let length = self.slide_length()?;
+        if let Some(typed) = self.typed() {
+            return Some(typed.clamp(0.0, length));
+        }
+        let along = self.slide_position_from(if end { 1.0 } else { 0.0 }, dx, dy);
+        let from_end = if end { 1.0 - along } else { along } * length;
+        let d = if self.snapping() {
+            Snap::round(from_end, self.snap.length)
+        } else {
+            from_end
+        };
+        Some(d.clamp(0.0, length))
+    }
+
+    /// Where the loop cut sits along its edge, 0 at the first end: the
+    /// anchored distance when there is one, otherwise the slide.
+    fn cut_position(&self, dx: f32, dy: f32) -> f64 {
+        match (
+            self.anchor,
+            self.anchored_distance(dx, dy),
+            self.slide_length(),
+        ) {
+            (Some(end), Some(d), Some(length)) => {
+                let f = d / length;
+                if end {
+                    1.0 - f
+                } else {
+                    f
+                }
+            }
+            _ => self.slide_position(dx, dy),
+        }
     }
 
     /// Adds `step` loops to a loop cut, one at the least — the wheel.
@@ -866,6 +939,8 @@ impl Gesture {
                 crate::expr::Unit::Length
             }
             Kind::Rotate => crate::expr::Unit::Angle,
+            // Anchored, a loop cut's number is a distance from the end.
+            Kind::LoopCut if self.anchor.is_some() => crate::expr::Unit::Length,
             Kind::Scale | Kind::LoopCut => crate::expr::Unit::Factor,
         }
     }
@@ -915,10 +990,7 @@ impl Gesture {
                 if let Some(edge) = self.edge {
                     params.set("edge", PropertyValue::Int(edge as i64));
                 }
-                params.set(
-                    "position",
-                    PropertyValue::Float(self.slide_position(dx, dy)),
-                );
+                params.set("position", PropertyValue::Float(self.cut_position(dx, dy)));
             }
             Kind::Rotate => {
                 let axis = self.axis.unwrap_or_else(|| self.view_axis());
@@ -1110,6 +1182,9 @@ impl Gesture {
 
     /// How many loops: a typed whole number, otherwise what the wheel set.
     fn loop_cuts(&self) -> u32 {
+        if self.anchor.is_some() {
+            return self.cuts;
+        }
         match self.typed() {
             Some(n) if n.is_finite() => (n.round() as i64).clamp(1, MAX_CUTS as i64) as u32,
             _ => self.cuts,
@@ -1120,16 +1195,22 @@ impl Gesture {
     /// wherever the pointer has slid it — the motion along the edge on screen,
     /// as a fraction of the edge's length there.
     fn slide_position(&self, dx: f32, dy: f32) -> f64 {
+        // Off the very ends: a cut slid onto a corner is a sliver of a face.
+        self.slide_position_from(0.5, dx, dy).clamp(0.02, 0.98)
+    }
+
+    /// The same, from `from` along the edge rather than its middle.
+    fn slide_position_from(&self, from: f64, dx: f32, dy: f32) -> f64 {
         let Some(((ax, ay), (bx, by))) = self.slide else {
-            return 0.5;
+            return from;
         };
         let (ex, ey) = (bx - ax, by - ay);
         let length2 = ex * ex + ey * ey;
         // An edge seen end on has no length to slide along.
         if length2 < 1.0 {
-            return 0.5;
+            return from;
         }
-        (0.5 + ((dx * ex + dy * ey) / length2) as f64).clamp(0.0, 1.0)
+        (from + ((dx * ex + dy * ey) / length2) as f64).clamp(0.0, 1.0)
     }
 
     /// A screen displacement as a world vector across the view plane.
@@ -1243,11 +1324,19 @@ impl Gesture {
             Kind::Bevel => format!("width {}", len(self.bevel_width())),
             Kind::LoopCut => {
                 let (dx, dy) = self.effective_delta(self.cursor);
-                format!(
-                    "cuts {}  position {:.3}  (wheel: cuts)",
-                    self.loop_cuts(),
-                    self.slide_position(dx, dy)
-                )
+                match (self.anchor, self.anchored_distance(dx, dy)) {
+                    (Some(end), Some(d)) => format!(
+                        "cuts {}  {} from {} end  (type a distance; B: other end)",
+                        self.loop_cuts(),
+                        len(d),
+                        if end { "second" } else { "first" },
+                    ),
+                    _ => format!(
+                        "cuts {}  position {:.3}  (wheel: cuts; B: measure from an end)",
+                        self.loop_cuts(),
+                        self.slide_position(dx, dy)
+                    ),
+                }
             }
             Kind::Move | Kind::ExtrudeFree => {
                 let (dx, dy) = self.effective_delta(self.cursor);

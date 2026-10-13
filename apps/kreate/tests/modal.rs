@@ -1550,9 +1550,10 @@ fn a_loop_cut_slides_along_its_edge_and_the_wheel_or_a_number_sets_how_many() {
         (left - (1.0 - right)).abs() < 1e-6,
         "not symmetric: {left} {right}"
     );
-    // Across the edge does not slide it; far past an end stops at the end.
+    // Across the edge does not slide it; far past an end stops short of the
+    // end, where the cut would be a sliver.
     assert_eq!(float(&at(&mut g, (600.0, 200.0)), "position"), 0.5);
-    assert_eq!(float(&at(&mut g, (2000.0, 300.0)), "position"), 1.0);
+    assert_eq!(float(&at(&mut g, (2000.0, 300.0)), "position"), 0.98);
     // The wheel adds loops, never below one.
     g.add_cuts(2);
     assert_eq!(cuts(&at(&mut g, (600.0, 300.0))), 3);
@@ -1561,6 +1562,50 @@ fn a_loop_cut_slides_along_its_edge_and_the_wheel_or_a_number_sets_how_many() {
     // A typed number is how many.
     g.type_character('4');
     assert_eq!(cuts(&at(&mut g, (600.0, 300.0))), 4);
+}
+
+#[test]
+fn b_snaps_a_loop_cut_to_an_end_and_a_number_is_a_distance_from_it() {
+    let mut g = pulled(Kind::LoopCut);
+    // An edge along world X, 2 units long: its second end on screen right.
+    g.set_slide_edge(DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+    // The pointer right of the edge's middle (the view's, x = 400): B takes
+    // the second end, and the cut snaps there.
+    g.track((640.0, 300.0));
+    g.anchor_slide();
+    assert_eq!(g.anchor, Some(true));
+    assert_eq!(float(&at(&mut g, (640.0, 300.0)), "position"), 1.0);
+    // 0.5 typed: half a unit in from the second end, a quarter of the edge.
+    for c in "0.5".chars() {
+        g.type_character(c);
+    }
+    let p = at(&mut g, (700.0, 300.0));
+    assert!((float(&p, "position") - 0.75).abs() < 1e-9, "{p:?}");
+    assert_eq!(p.get("cuts"), Some(&PropertyValue::Int(1)), "not a count");
+    // B again: the same distance from the first end.
+    g.anchor_slide();
+    assert_eq!(g.anchor, Some(false));
+    assert!((float(&at(&mut g, (700.0, 300.0)), "position") - 0.25).abs() < 1e-9);
+    // Longer than the edge stops at the far end.
+    g.backspace();
+    g.backspace();
+    g.backspace();
+    g.type_character('5');
+    assert_eq!(float(&at(&mut g, (700.0, 300.0)), "position"), 1.0);
+}
+
+#[test]
+fn an_anchored_loop_cut_slides_from_its_end_with_the_pointer() {
+    let mut g = pulled(Kind::LoopCut);
+    g.set_slide_edge(DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+    // The edge's middle is the view's, x = 400: left of it is the first end.
+    g.track((340.0, 300.0));
+    g.anchor_slide();
+    assert_eq!(g.anchor, Some(false), "the pointer was left of the middle");
+    assert_eq!(float(&at(&mut g, (340.0, 300.0)), "position"), 0.0);
+    // Right, towards the second end: in from the first.
+    let moved = float(&at(&mut g, (370.0, 300.0)), "position");
+    assert!(moved > 0.0 && moved < 0.5, "{moved}");
 }
 
 #[test]

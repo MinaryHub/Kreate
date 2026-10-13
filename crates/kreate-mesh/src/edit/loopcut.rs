@@ -183,7 +183,10 @@ pub fn loop_cut(
     };
     let shift = position - 0.5;
     let ts: Vec<f32> = (0..cuts)
-        .map(|i| ((i + 1) as f32 / (cuts + 1) as f32 + shift).clamp(0.02, 0.98))
+        // Kept off the ends by a hair, not more: a cut typed at a distance
+        // from an end lands there, however short the distance is beside the
+        // edge. The slide keeps itself further in.
+        .map(|i| ((i + 1) as f32 / (cuts + 1) as f32 + shift).clamp(0.001, 0.999))
         .collect();
 
     // --- write --------------------------------------------------------------
