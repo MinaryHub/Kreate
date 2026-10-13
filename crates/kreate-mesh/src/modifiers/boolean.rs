@@ -233,7 +233,22 @@ impl Tree {
             }
             let plane = *self.nodes[at].plane.get_or_insert(polygons[0].plane);
             let (mut cf, mut cb, mut f, mut b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for p in &polygons {
+            // The polygon the plane was taken from stays here, whatever its
+            // corners say. A face not quite flat has corners off its own
+            // plane; sorted like the rest it went to a child as "in front",
+            // became that child's plane, went in front of itself again — a
+            // new node a turn, until the memory ran out.
+            let mut rest = polygons.iter();
+            if self.nodes[at].polygons.is_empty() && cf.is_empty() {
+                if let Some(first) = rest.next() {
+                    if first.plane.normal == plane.normal && first.plane.w == plane.w {
+                        cf.push(first.clone());
+                    } else {
+                        split(&plane, first, &mut cf, &mut cb, &mut f, &mut b);
+                    }
+                }
+            }
+            for p in rest {
                 split(&plane, p, &mut cf, &mut cb, &mut f, &mut b);
             }
             self.nodes[at].polygons.extend(cf);
@@ -327,18 +342,53 @@ impl Tree {
 }
 
 /// A mesh's faces as polygons, their sources numbered from `first`.
+///
+/// A face that is not flat, or not convex, goes in as triangles of the same
+/// source: the tree's splitting is only right for flat convex polygons — a
+/// plane cuts a concave one into pieces that are not each one piece — and
+/// edit mode makes faces of both kinds as soon as a vertex is moved.
 fn polygons_of(mesh: &MeshData, first: u32) -> Vec<Polygon> {
     let positions = mesh.positions();
-    (0..mesh.num_faces())
-        .filter_map(|f| {
-            let verts: Vec<DVec3> = mesh
-                .face_verts(f)
-                .iter()
-                .map(|v| positions[*v as usize].as_dvec3())
-                .collect();
-            Polygon::new(verts, first + f)
+    let mut out = Vec::new();
+    let mut tris = Vec::new();
+    for f in 0..mesh.num_faces() {
+        let corners = mesh.face_verts(f);
+        let verts: Vec<DVec3> = corners
+            .iter()
+            .map(|v| positions[*v as usize].as_dvec3())
+            .collect();
+        let source = first + f;
+        let Some(polygon) = Polygon::new(verts.clone(), source) else {
+            continue;
+        };
+        if verts.len() == 3 || flat_and_convex(&polygon) {
+            out.push(polygon);
+            continue;
+        }
+        let points: Vec<kreate_math::Vec3> =
+            corners.iter().map(|v| positions[*v as usize]).collect();
+        tris.clear();
+        crate::tessellate::triangulate_polygon(&points, &mut tris);
+        for t in &tris {
+            let tri = t.iter().map(|i| verts[*i as usize]).collect();
+            out.extend(Polygon::new(tri, source));
+        }
+    }
+    out
+}
+
+/// Whether every corner is on the polygon's plane and turns the same way.
+fn flat_and_convex(p: &Polygon) -> bool {
+    let n = p.verts.len();
+    let on_plane = p
+        .verts
+        .iter()
+        .all(|v| (p.plane.normal.dot(*v) - p.plane.w).abs() <= EPSILON * 0.5);
+    on_plane
+        && (0..n).all(|i| {
+            let (a, b, c) = (p.verts[i], p.verts[(i + 1) % n], p.verts[(i + 2) % n]);
+            (b - a).cross(c - b).dot(p.plane.normal) >= -1e-12
         })
-        .collect()
 }
 
 /// `a` combined with `b`, both in the same space.
@@ -902,6 +952,72 @@ mod tests {
         }
         let out = boolean(&a, &rod, BooleanOp::Difference);
         assert!((volume(&out) - 7.5).abs() < 1e-3, "{}", volume(&out));
+    }
+
+    /// A box whose top is warped: one corner raised, as moving a vertex in
+    /// edit mode leaves it. The tree used to split such a face against its
+    /// own plane without end, until the memory ran out.
+    #[test]
+    fn a_warped_face_is_cut_and_the_cut_ends() {
+        let mut a = primitives::cube(2.0);
+        let top = a
+            .positions()
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.x > 0.0 && p.y > 0.0 && p.z > 0.0)
+            .unwrap()
+            .0;
+        a.positions_mut()[top].z += 0.3;
+        let cutter = moved(
+            primitives::cylinder(0.4, 4.0, 32),
+            Vec3::new(0.3, 0.2, -1.0),
+        );
+        let start = std::time::Instant::now();
+        let out = boolean(&a, &cutter, BooleanOp::Difference);
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+        assert!(out.num_faces() > 0);
+        assert_eq!(open_edges(&out), 0, "closed");
+        assert!(volume(&out) < volume(&a), "something was taken out");
+    }
+
+    /// A concave prism, an L, cut through its corner: the cut takes what
+    /// a cylinder there holds and leaves the rest closed.
+    #[test]
+    fn a_concave_face_is_cut_as_a_whole() {
+        let outline = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let mut positions = Vec::new();
+        for z in [0.0f32, 1.0] {
+            for (x, y) in outline {
+                positions.push(Vec3::new(x, y, z));
+            }
+        }
+        let n = outline.len() as u32;
+        let mut faces: Vec<Vec<u32>> = vec![(0..n).rev().collect(), (n..2 * n).collect()];
+        for i in 0..n {
+            let j = (i + 1) % n;
+            faces.push(vec![i, j, n + j, n + i]);
+        }
+        let l = MeshData::from_faces(positions, &faces);
+        assert!((volume(&l) - 3.0).abs() < 1e-6);
+        let cutter = moved(
+            primitives::cylinder(0.3, 4.0, 48),
+            Vec3::new(0.5, 0.5, -1.0),
+        );
+        let out = boolean(&l, &cutter, BooleanOp::Difference);
+        assert_eq!(open_edges(&out), 0, "closed");
+        let hole = std::f64::consts::PI * 0.09;
+        assert!(
+            (volume(&out) - (3.0 - hole)).abs() < 0.01,
+            "{}",
+            volume(&out)
+        );
     }
 
     #[test]
