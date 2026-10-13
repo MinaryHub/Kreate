@@ -1002,6 +1002,8 @@ struct App {
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
     driven_at: u64,
+    /// The object Auto dynamic topology last said it would not cut.
+    dyntopo_told: Option<ObjectId>,
     /// File ▸ Shared Session, while in one.
     session: Option<kreate_collab::Session>,
     /// The objects whose inside this participant holds the session's lock on.
@@ -1133,6 +1135,7 @@ impl App {
             playing: None,
             ui_repaint_at: None,
             driven_at: u64::MAX,
+            dyntopo_told: None,
             session: None,
             collab_locks: Vec::new(),
             paint_stroke: None,
@@ -1486,7 +1489,12 @@ impl App {
                 .and_then(|m| self.doc.mesh(m))
                 .map(|m| m.num_verts())
                 .unwrap_or(0);
-            if verts < SCULPT_DENSE_ENOUGH {
+            let cuts = self.doc.selection.active.is_some_and(|id| {
+                self.dyntopo_loses(id).is_empty()
+                    && self.ui.sculpt.dyntopo != kreate::shell::DYNTOPO_OFF
+            }) || self.ui.sculpt.dyntopo == kreate::shell::DYNTOPO_ON;
+            // With dynamic topology the brush adds what it needs as it goes.
+            if verts < SCULPT_DENSE_ENOUGH && !cuts {
                 let message = self
                     .ui
                     .catalog
@@ -7716,7 +7724,7 @@ impl App {
             dabs: Vec::new(),
             pressures: Vec::new(),
             face_set,
-            pick_scene: settings.dyntopo.then(|| {
+            pick_scene: self.sculpt_dyntopo(object, settings.dyntopo).then(|| {
                 self.evaluated
                     .iter()
                     .filter(|(id, _)| *id == object)
@@ -7846,7 +7854,7 @@ impl App {
         if stroke.pressures.iter().any(|p| *p != 1.0) {
             params.set("pressures", PropertyValue::Floats(stroke.pressures.clone()));
         }
-        if settings.dyntopo {
+        if stroke.pick_scene.is_some() {
             params.set("dyntopo", PropertyValue::Bool(true));
             params.set("detail", PropertyValue::Float(settings.detail as f64));
         }
@@ -7877,6 +7885,58 @@ impl App {
             }
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// What dynamic topology would throw away from an object's mesh: its
+    /// layers that matter. UVs count only when a texture of its materials
+    /// reads them — a primitive comes with UVs nothing uses.
+    fn dyntopo_loses(&self, object: ObjectId) -> Vec<String> {
+        let Some(o) = self.doc.object(object) else {
+            return Vec::new();
+        };
+        let Some(mesh_id) = o.mesh() else {
+            return Vec::new();
+        };
+        let Some(mesh) = self.doc.mesh(mesh_id) else {
+            return Vec::new();
+        };
+        let textured = self
+            .doc
+            .mesh_slots(mesh_id)
+            .iter()
+            .chain(o.material_overrides.iter())
+            .flatten()
+            .filter_map(|m| self.doc.material(*m))
+            .any(|m| !m.images().is_empty());
+        let mut lost = kreate_mesh::dyntopo::loses(mesh);
+        if !textured {
+            lost.retain(|name| !name.starts_with("uv"));
+        }
+        lost
+    }
+
+    /// Whether this stroke cuts the surface finer as it goes. Said once per
+    /// object when Auto holds back for what it would throw away.
+    fn sculpt_dyntopo(&mut self, object: ObjectId, mode: u32) -> bool {
+        match mode {
+            kreate::shell::DYNTOPO_ON => true,
+            kreate::shell::DYNTOPO_OFF => false,
+            _ => {
+                let lost = self.dyntopo_loses(object);
+                if lost.is_empty() {
+                    return true;
+                }
+                if self.dyntopo_told != Some(object) {
+                    self.dyntopo_told = Some(object);
+                    let message = self
+                        .ui
+                        .catalog
+                        .get_args("sculpt-dyntopo-kept", &[("what", &lost.join(", "))]);
+                    self.status(&message);
+                }
+                false
+            }
+        }
     }
 
     /// The image texture paint paints on: the active object's first

@@ -27,6 +27,43 @@ const COLLAPSE: f32 = 0.4;
 /// absurdly small slows the stroke rather than eating the memory.
 const MAX_NEW: usize = 20_000;
 
+/// What a stroke with dynamic topology would throw away from `mesh`, by
+/// layer name: its UVs, colours and materials, a mask or face sets in use.
+/// Empty when it has nothing but its shape — when cutting it is free.
+pub fn loses(mesh: &MeshData) -> Vec<String> {
+    use crate::attribute::names;
+    let attributes = mesh.attributes();
+    let mut out = Vec::new();
+    for layer in attributes.iter() {
+        let name: &str = &layer.name;
+        if name == names::POSITION || names::is_internal(name) {
+            continue;
+        }
+        // Every face on the first material is no material to lose.
+        if name == names::MATERIAL_INDEX
+            && attributes
+                .get_i32(name)
+                .is_some_and(|v| v.iter().all(|m| *m == 0))
+        {
+            continue;
+        }
+        out.push(name.to_string());
+    }
+    if attributes
+        .get_f32(crate::sculpt::MASK)
+        .is_some_and(|m| m.iter().any(|v| *v != 0.0))
+    {
+        out.push("mask".into());
+    }
+    if attributes
+        .get_i32(crate::sculpt::FACE_SET)
+        .is_some_and(|f| f.windows(2).any(|w| w[0] != w[1]))
+    {
+        out.push("face sets".into());
+    }
+    out
+}
+
 /// A stroke with dynamic topology, part-way through.
 pub struct DynCache {
     original: Vec<Vec3>,
@@ -244,6 +281,24 @@ impl DynCache {
         out
     }
 
+    /// The corners of every triangle that comes within `radius` of
+    /// `centre`.
+    fn touched(&self, centre: Vec3, radius: f32) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::new();
+        for (t, tri) in self.tris.iter().enumerate() {
+            if !self.alive[t] {
+                continue;
+            }
+            let [a, b, c] = tri.map(|v| self.pos[v as usize]);
+            if triangle_distance(a, b, c, centre) < radius {
+                out.extend_from_slice(tri);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     fn within(&self, centre: Vec3, radius: f32) -> Vec<u32> {
         (0..self.pos.len() as u32)
             .filter(|v| {
@@ -258,15 +313,19 @@ impl DynCache {
         // rounds over; then short ones collapsed.
         let reach = dab.radius * 1.1;
         let made = self.pos.len();
-        for _ in 0..4 {
-            let near = self.within(dab.centre, reach);
+        for _ in 0..6 {
+            // The triangles the brush touches, not only those with a corner
+            // inside it: on a coarse mesh — a cube, a few big faces — the
+            // brush lands in the middle of a face with no corner near, and
+            // went on without cutting anything.
+            let near = self.touched(dab.centre, reach);
             let mut long: Vec<(f32, u32, u32)> = self
                 .edges_near(&near)
                 .into_iter()
                 .filter_map(|(a, b)| {
                     let (pa, pb) = (self.pos[a as usize], self.pos[b as usize]);
                     let len = pa.distance(pb);
-                    (len > detail && ((pa + pb) * 0.5).distance(dab.centre) < reach)
+                    (len > detail && segment_distance(pa, pb, dab.centre) < reach)
                         .then_some((len, a, b))
                 })
                 .collect();
@@ -385,6 +444,48 @@ fn stroke_copies(stroke: &Stroke) -> Vec<(Vec3, kreate_math::Quat)> {
     crate::sculpt::copies_of(stroke)
 }
 
+/// How far `p` is from the segment `a b`.
+fn segment_distance(a: Vec3, b: Vec3, p: Vec3) -> f32 {
+    let d = b - a;
+    let t = ((p - a).dot(d) / d.length_squared().max(1e-20)).clamp(0.0, 1.0);
+    (a + d * t).distance(p)
+}
+
+/// How far `p` is from the triangle `a b c`: the nearest point of it, inside
+/// or on an edge or a corner (Ericson's closest point on a triangle).
+fn triangle_distance(a: Vec3, b: Vec3, c: Vec3, p: Vec3) -> f32 {
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return p.distance(a);
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return p.distance(b);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return segment_distance(a, b, p);
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return p.distance(c);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return segment_distance(a, c, p);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return segment_distance(b, c, p);
+    }
+    let denom = 1.0 / (va + vb + vc).max(1e-30);
+    let (v, w) = (vb * denom, vc * denom);
+    (a + ab * v + ac * w).distance(p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +542,45 @@ mod tests {
             m.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max) > 0.02,
             "and drawn"
         );
+    }
+
+    /// The default cube: eight corners, the brush in the middle of a face
+    /// with none of them near. The face is cut there and drawn out.
+    #[test]
+    fn a_brush_in_the_middle_of_a_big_face_cuts_and_draws() {
+        let base = primitives::cube(2.0);
+        let mut m = base.clone();
+        let centre = Vec3::new(0.0, 0.0, 1.0);
+        let mut cache = DynCache::new(&m, &stroke(Brush::Draw), 0.06);
+        let mut dabs = Vec::new();
+        for _ in 0..4 {
+            dabs.push(Dab::new(centre, 0.3));
+            cache.run(&mut m, &dabs, &stroke(Brush::Draw), 0.06);
+        }
+        assert!(m.num_verts() > 50, "{} vertices", m.num_verts());
+        let top = m.positions().iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        assert!(top > 1.01, "drawn out of the face: {top}");
+    }
+
+    #[test]
+    fn a_bare_shape_loses_nothing_and_a_textured_one_its_uvs() {
+        // Whatever the primitive is made with — UVs, say — taken off.
+        let mut bare = primitives::cube(2.0);
+        for name in loses(&primitives::cube(2.0)) {
+            bare.attributes_mut().remove(&name);
+        }
+        assert!(loses(&bare).is_empty());
+        let mut textured = bare.clone();
+        let corners = textured.corner_verts().len();
+        textured.attributes_mut().insert(
+            crate::attribute::names::UV,
+            crate::attribute::Domain::Corner,
+            crate::attribute::AttrData::F32x2(std::sync::Arc::new(vec![
+                kreate_math::Vec2::ZERO;
+                corners
+            ])),
+        );
+        assert_eq!(loses(&textured), vec!["uv".to_string()]);
     }
 
     #[test]

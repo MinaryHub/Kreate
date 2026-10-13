@@ -1318,6 +1318,13 @@ pub struct BrushAdjust {
     pub was: f32,
 }
 
+/// Dynamic topology whenever cutting the surface throws nothing away: a
+/// mesh with nothing but its shape, or UVs no texture uses.
+pub const DYNTOPO_AUTO: u32 = 0;
+/// Always, whatever it throws away.
+pub const DYNTOPO_ON: u32 = 1;
+pub const DYNTOPO_OFF: u32 = 2;
+
 /// The sculpt brush's settings, the application's as the paint brush's are.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SculptSettings {
@@ -1347,8 +1354,9 @@ pub struct SculptSettings {
     pub pressure_strength: bool,
     /// The pen's pressure scales the size.
     pub pressure_size: bool,
-    /// Dynamic topology: the surface is cut finer where the brush goes.
-    pub dyntopo: bool,
+    /// Dynamic topology — the surface cut finer where the brush goes — as
+    /// [`DYNTOPO_AUTO`], [`DYNTOPO_ON`] or [`DYNTOPO_OFF`].
+    pub dyntopo: u32,
     /// Dynamic topology's edge length, as a fraction of the brush's radius.
     pub detail: f32,
     /// The voxel remesh's voxel size, in the mesh's units.
@@ -1377,7 +1385,7 @@ impl Default for SculptSettings {
             alpha: String::new(),
             pressure_strength: true,
             pressure_size: false,
-            dyntopo: false,
+            dyntopo: DYNTOPO_AUTO,
             detail: 0.2,
             voxel_size: 0.05,
             quad_faces: 2000,
@@ -5345,6 +5353,10 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
     .iter()
     .map(|k| c(k))
     .collect();
+    let dyntopo_modes: Vec<String> = ["auto", "on", "off", "hint"]
+        .iter()
+        .map(|k| c(&format!("sculpt-dyntopo-{k}")))
+        .collect();
     let falloffs: Vec<String> = ["smooth", "sphere", "root", "sharp", "linear", "constant"]
         .iter()
         .map(|k| c(&format!("sculpt-falloff-{k}")))
@@ -5443,7 +5455,18 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
         ui.checkbox(&mut s.show_overlay, &labels[17]);
     });
     ui.menu_button(topology, |ui| {
-        ui.checkbox(&mut s.dyntopo, &labels[18]);
+        ui.horizontal(|ui| {
+            ui.label(&labels[18]);
+            for (value, label) in [
+                (DYNTOPO_AUTO, &dyntopo_modes[0]),
+                (DYNTOPO_ON, &dyntopo_modes[1]),
+                (DYNTOPO_OFF, &dyntopo_modes[2]),
+            ] {
+                ui.selectable_value(&mut s.dyntopo, value, label.as_str());
+            }
+        })
+        .response
+        .on_hover_text(&dyntopo_modes[3]);
         ui.horizontal(|ui| {
             ui.label(&labels[19]);
             ui.add(
