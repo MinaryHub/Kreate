@@ -158,10 +158,10 @@ impl Theme {
     }
 
     /// The tokens for what is drawn straight on the viewport — a label over
-    /// the picture, a readout. The viewport is dark in either appearance, so
-    /// that text is graphite's whatever the panels are.
+    /// the picture, a readout. The canvas follows the appearance (light under
+    /// the light chrome), so these are the chrome's own.
     pub fn over_viewport(&self) -> Self {
-        Self::studio(self.density)
+        *self
     }
 
     /// Whether the surfaces are dark.

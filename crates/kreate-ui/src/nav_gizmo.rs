@@ -148,13 +148,32 @@ pub fn draw(
                 Align2::CENTER_CENTER,
                 ball.axis.label(),
                 FontId::proportional(r * 1.05),
-                // The letter sits *on* the axis colour, so it takes the
-                // darkest surface rather than the text colour.
-                theme.sunken,
+                // The letter sits *on* the axis colour, so it is dark in
+                // either appearance: the light theme's darkest surface is a
+                // pale grey, which vanished on the green ball.
+                Color32::from_rgb(0x12, 0x13, 0x16),
             );
         } else {
             painter.circle_filled(ball.centre, size, theme.raised);
-            painter.circle_stroke(ball.centre, size, Stroke::new(1.5, colour));
+            painter.circle_stroke(
+                ball.centre,
+                size,
+                Stroke::new(1.5, axis_colour(&theme, ball.axis, true)),
+            );
+            // The far end named too, in its axis's colour, so a pale ball on
+            // a pale canvas still says which way it looks from.
+            painter.text(
+                ball.centre,
+                Align2::CENTER_CENTER,
+                format!("-{}", ball.axis.label()),
+                FontId::proportional(r * 0.95),
+                {
+                    // Darkened, to read as text on the white ball.
+                    let c = axis_colour(&theme, ball.axis, true);
+                    let d = |v: u8| (f32::from(v) * 0.7) as u8;
+                    Color32::from_rgb(d(c.r()), d(c.g()), d(c.b()))
+                },
+            );
         }
         if is_hovered {
             painter.circle_stroke(ball.centre, size + 2.0, Stroke::new(1.5, theme.text));

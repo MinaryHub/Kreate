@@ -40,6 +40,12 @@ pub struct Denoise {
     blend: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     filtered_layout: wgpu::BindGroupLayout,
+    sums_layout: wgpu::BindGroupLayout,
+    sums_bind: Option<wgpu::BindGroup>,
+    /// Nothing, in group 1 of the step passes: they write the image the
+    /// blend reads there, and a texture may not be bound and drawn into at
+    /// once.
+    empty: wgpu::BindGroup,
     params: Vec<wgpu::Buffer>,
     /// The raw mean, copied out of the picture; then two to pass between.
     raw: (wgpu::Texture, wgpu::TextureView),
@@ -91,6 +97,28 @@ impl Denoise {
             label: Some("denoise filtered"),
             entries: &[texture(0, false)],
         });
+        let sums_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("denoise sums"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("denoise nothing"),
+            entries: &[],
+        });
+        let empty = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("denoise nothing"),
+            layout: &empty_layout,
+            entries: &[],
+        });
         let pipeline = |label: &str, layouts: &[Option<&wgpu::BindGroupLayout>], entry: &str| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
@@ -123,10 +151,14 @@ impl Denoise {
                 cache: None,
             })
         };
-        let step = pipeline("denoise step", &[Some(&layout)], "denoise_step");
+        let step = pipeline(
+            "denoise step",
+            &[Some(&layout), Some(&empty_layout), Some(&sums_layout)],
+            "denoise_step",
+        );
         let blend = pipeline(
             "denoise blend",
-            &[Some(&layout), Some(&filtered_layout)],
+            &[Some(&layout), Some(&filtered_layout), Some(&sums_layout)],
             "denoise_blend",
         );
         let params = (0..=PASSES)
@@ -146,6 +178,9 @@ impl Denoise {
             blend,
             layout,
             filtered_layout,
+            sums_layout,
+            sums_bind: None,
+            empty,
             params,
             raw,
             ping,
@@ -201,6 +236,7 @@ impl Denoise {
     }
 
     /// This frame's guides and how strong the filter is.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -209,7 +245,16 @@ impl Denoise {
         depth: &wgpu::TextureView,
         region: (u32, u32),
         samples: u32,
+        sums: &wgpu::Buffer,
     ) {
+        self.sums_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("denoise sums"),
+            layout: &self.sums_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sums.as_entire_binding(),
+            }],
+        }));
         let bind = |source: &wgpu::TextureView, params: &wgpu::Buffer| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("denoise"),
@@ -281,7 +326,7 @@ impl Denoise {
         picture_view: &wgpu::TextureView,
         region: (u32, u32),
     ) {
-        let Some(filtered_bind) = &self.filtered_bind else {
+        let (Some(filtered_bind), Some(sums_bind)) = (&self.filtered_bind, &self.sums_bind) else {
             return;
         };
         if self.binds.len() != PASSES + 1 {
@@ -320,9 +365,8 @@ impl Denoise {
             pass.set_viewport(0.0, 0.0, region.0 as f32, region.1 as f32, 0.0, 1.0);
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
-            if let Some(extra) = extra {
-                pass.set_bind_group(1, extra, &[]);
-            }
+            pass.set_bind_group(1, extra.unwrap_or(&self.empty), &[]);
+            pass.set_bind_group(2, sums_bind, &[]);
             pass.draw(0..3, 0..1);
         };
         for i in 0..PASSES {

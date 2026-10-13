@@ -5890,6 +5890,7 @@ impl App {
         self.file.maybe_autosave(&self.doc);
         let title = self.file.title(&self.doc);
         if title != self.shown_title {
+            self.ui.document_title = title.trim_end_matches(" — Kreate").to_string();
             if let Some(window) = &self.window {
                 window.set_title(&title);
             }
@@ -8566,6 +8567,15 @@ impl App {
             (viewport_rect.width().max(0.0) * pixels_per_point * scale) as u32,
             (viewport_rect.height().max(0.0) * pixels_per_point * scale) as u32,
         );
+        // The canvas follows the chrome: light under the light theme, as
+        // Fusion draws it.
+        if let Some(gfx) = self.gfx.as_mut() {
+            let light = self.ui.appearance == kreate_ui::Appearance::Light;
+            if gfx.viewport.is_light() != light {
+                gfx.viewport.set_light(light);
+                self.redraw.set(RedrawReason::SETTINGS);
+            }
+        }
         // Not while a render runs: the picture is the render's size, not the
         // panel's, and following the panel restarted its samples every frame.
         if self.render_job.is_none()
@@ -10725,6 +10735,8 @@ impl ApplicationHandler for App {
             target.size.0,
             target.size.1,
         );
+        // A moving view smoothed as a still one is: see `Viewport::temporal_aa`.
+        viewport.temporal_aa = true;
         // Pay for shader compilation now, while the window is still coming up,
         // rather than on the frame where the user first presses Tab or moves the
         // mouse over the scene. Creating a pipeline and compiling it are not the

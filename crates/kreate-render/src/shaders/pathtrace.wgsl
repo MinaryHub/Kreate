@@ -33,7 +33,9 @@ struct PtParams {
     // The glowing triangles, and their summed area times luminance.
     emitter_count: u32,
     emitter_total: f32,
-    _pad0: u32,
+    // How quiet a pixel's mean has to be — its standard error over its
+    // value — before it stops taking samples; zero takes them all.
+    noise_threshold: f32,
     // The environment's importance map: columns, rows, nonzero when there is
     // one.
     env: vec4<u32>,
@@ -61,6 +63,10 @@ struct PtNode {
 // transmission; emission and index of refraction; one-sidedness.
 const PT_SURFACE: u32 = 4u;
 @group(0) @binding(6) var<storage, read> pt_surfaces: array<vec4<f32>>;
+// Two per pixel: the radiance's sum and how many samples; the first
+// surface's colour summed and the radiance's luminance squared summed. The
+// first is the picture; the second is what the denoiser guides by and what
+// it and the adaptive sampling read the noise from.
 @group(0) @binding(7) var<storage, read_write> pt_sum: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read> pt_uvs: array<vec2<f32>>;
 // The images, one per layer at one size: colour (sRGB, decoded by the
@@ -693,6 +699,26 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = id.y * pt.size.x + id.x;
     pt_state = pt_hash(pixel * 9781u + pt.sample * 6271u + 1u);
 
+    // What this pixel has so far, read before it is added to.
+    var before = vec4<f32>(0.0);
+    var before_stats = vec4<f32>(0.0);
+    if (pt.sample > 1u) {
+        before = pt_sum[pixel * 2u];
+        before_stats = pt_sum[pixel * 2u + 1u];
+    }
+    // Adaptive sampling: a pixel whose mean is already quiet takes no more.
+    // Never before 32 of its own, and every sixteenth sample goes to every
+    // pixel anyway — a pixel that has not yet met a rare bright path looks
+    // quiet and is not.
+    if (pt.noise_threshold > 0.0 && before.w >= 32.0 && pt.sample % 16u != 0u) {
+        let n = before.w;
+        let mean = pt_luminance(before.rgb) / n;
+        let spread = max(before_stats.w / n - mean * mean, 0.0) / n;
+        if (sqrt(spread) < pt.noise_threshold * max(mean, 1e-4)) {
+            return;
+        }
+    }
+
     // The ray through a random point in the pixel: the antialiasing.
     let jitter = vec2<f32>(pt_random(), pt_random());
     let ndc = vec2<f32>(
@@ -725,6 +751,15 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var radiance = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
+    // The light that reached the first surface straight from a source,
+    // set when the path bounces past it: what is left after is the light
+    // that came the long way, which is where fireflies come from. Negative
+    // until then.
+    var direct = vec3<f32>(-1.0);
+    // The first surface's colour, for the denoiser to keep a texture's
+    // squares apart by: white where the path met nothing, or glass first.
+    var first_albedo = vec3<f32>(1.0);
+    var met_surface = false;
     // Glass is not counted against the bounces: a path through a block of it
     // crosses two faces and, at the steep angles total internal reflection
     // traps, several more — counted, it would run out inside and come back
@@ -973,6 +1008,15 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             + unpack4x8unorm(pt_colors[tri.z]) * hit.v;
         s.base_color *= tint.rgb;
         s.roughness = max(s.roughness, 0.02);
+        if (!met_surface && bounce == 0u && crossings == 0u) {
+            met_surface = true;
+            // What the surface returns of white light, its sheen
+            // included.
+            if (extra.w <= 0.0) {
+                let sheen = mix(vec3<f32>(0.04), s.base_color, s.metallic);
+                first_albedo = s.base_color * (1.0 - s.metallic) * 0.96 + sheen;
+            }
+        }
         let v = -dir;
         let start = p + geometric * 1e-3 * max(1.0, length(p - pt.eye.xyz) * 0.01);
         let transmission = extra.w;
@@ -1024,6 +1068,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             crossings += 1u;
             last_pdf = -1.0;
             continue;
+        }
+        if (bounce == 1u && direct.x < 0.0) {
+            direct = radiance;
         }
         bounce += 1u;
 
@@ -1201,9 +1248,31 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (l > cap) {
         radiance *= cap / l;
     }
+    // Fireflies: the light that came by bounces, held to a multiple of what
+    // this pixel averages so far. A rare path into a small bright light is
+    // real light, but one sample of it is hundreds of times the mean and
+    // stands as a white speck for hundreds of samples more; held here it
+    // adds its share without the speck. Not before eight samples, when the
+    // mean is not yet a measure, and never the direct light.
+    if (direct.x < 0.0) {
+        direct = radiance;
+    }
+    let came_by_bounces = max(radiance - direct, vec3<f32>(0.0));
+    if (before.w >= 8.0) {
+        let most = 16.0 * max(pt_luminance(before.rgb) / before.w, 1e-6);
+        let li = pt_luminance(came_by_bounces);
+        if (li > most) {
+            radiance = direct + came_by_bounces * (most / li);
+        }
+    }
+    let rl = pt_luminance(radiance);
+    let sample = vec4<f32>(radiance, 1.0);
+    let stats = vec4<f32>(first_albedo, rl * rl);
     if (pt.sample <= 1u) {
-        pt_sum[pixel] = vec4<f32>(radiance, 1.0);
+        pt_sum[pixel * 2u] = sample;
+        pt_sum[pixel * 2u + 1u] = stats;
     } else {
-        pt_sum[pixel] += vec4<f32>(radiance, 1.0);
+        pt_sum[pixel * 2u] = before + sample;
+        pt_sum[pixel * 2u + 1u] = before_stats + stats;
     }
 }

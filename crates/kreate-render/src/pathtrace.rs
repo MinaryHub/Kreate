@@ -211,7 +211,8 @@ struct Params {
     /// weight (area times luminance). See `emitters_of`.
     emitter_count: u32,
     emitter_total: f32,
-    _pad: u32,
+    /// See [`PathTracer::noise_threshold`].
+    noise_threshold: f32,
     /// The environment's importance map: columns, rows, whether there is
     /// one, and nothing.
     env: [u32; 4],
@@ -315,6 +316,10 @@ pub struct PathTracer {
     resolve_bind: Option<wgpu::BindGroup>,
     size: (u32, u32),
     sample: u32,
+    /// Adaptive sampling: a pixel stops taking samples once the standard
+    /// error of its mean is under this fraction of the mean. Zero traces
+    /// every pixel every sample.
+    pub noise_threshold: f32,
     /// A baked gas the paths travel through: group 1.
     volume: PtVolumeGpu,
 }
@@ -697,7 +702,7 @@ impl PathTracer {
             16,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let sum = buffer("path trace sum", 16, wgpu::BufferUsages::STORAGE);
+        let sum = buffer("path trace sum", 32, wgpu::BufferUsages::STORAGE);
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("path trace images"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -733,6 +738,7 @@ impl PathTracer {
             resolve_bind: None,
             size: (0, 0),
             sample: 0,
+            noise_threshold: 0.01,
             volume,
         }
     }
@@ -1153,6 +1159,12 @@ impl PathTracer {
         self.sample = 0;
     }
 
+    /// The per-pixel sums, for the denoiser to read the surface colour and
+    /// the noise from; see `pt_sum` in the shader.
+    pub fn sums(&self) -> &wgpu::Buffer {
+        &self.sum
+    }
+
     /// Samples in the sum so far.
     pub fn samples(&self) -> u32 {
         self.sample
@@ -1178,7 +1190,8 @@ impl PathTracer {
             if pixels > self.sum_pixels {
                 self.sum = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("path trace sum"),
-                    size: pixels as u64 * 16,
+                    // Two vec4s a pixel: see `pt_sum` in the shader.
+                    size: pixels as u64 * 32,
                     usage: wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 });
@@ -1279,7 +1292,7 @@ impl PathTracer {
             max_bounces: 4,
             emitter_count: self.scene.as_ref().map_or(0, |s| s.emitter_count),
             emitter_total: self.scene.as_ref().map_or(0.0, |s| s.emitter_total),
-            _pad: 0,
+            noise_threshold: self.noise_threshold.max(0.0),
             env: match self.env_size {
                 Some((c, r)) => [c, r, 1, 0],
                 None => [0, 0, 0, 0],

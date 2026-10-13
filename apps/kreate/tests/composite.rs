@@ -183,6 +183,7 @@ fn composite_with(
 
     let mut viewport = kreate_render::Viewport::new(&gpu.device, FORMAT, W, H);
     viewport.show_grid = true;
+    viewport.set_light(std::env::var("KREATE_THEME").is_ok_and(|t| t == "light"));
     // The element overlays, the way the application switches them on in
     // edit mode; without this the harness draws edit mode with no vertices.
     viewport.show_elements = edit_mode;

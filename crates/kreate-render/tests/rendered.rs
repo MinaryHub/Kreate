@@ -2100,6 +2100,54 @@ fn traced_shot_with(
     traced_scene(gpu, traced, frames, lens, denoise, grey, &[])
 }
 
+thread_local! {
+    /// The adaptive sampling's threshold the traced scenes use.
+    static NOISE_THRESHOLD: std::cell::Cell<f32> = const { std::cell::Cell::new(0.01) };
+}
+
+/// Adaptive sampling stops quiet pixels early and changes nothing else: a
+/// long mean taken with it is, near enough, the mean taken without.
+///
+/// Near enough is measured against what stopping costs: a threshold so loose
+/// that every pixel stops at its first thirty-two moves the picture about
+/// four times as far (0.011 against 0.0027 when this was written), which is
+/// also what shows the stopping happens at all.
+#[test]
+fn adaptive_sampling_leaves_the_converged_picture_as_it_was() {
+    let gpu = gpu_or_skip!(gpu());
+    let shot = |threshold: f32| {
+        NOISE_THRESHOLD.with(|t| t.set(threshold));
+        let p = traced_shot_with(&gpu, true, 256, None, false);
+        NOISE_THRESHOLD.with(|t| t.set(0.01));
+        p
+    };
+    let every = shot(0.0);
+    let adaptive = shot(0.01);
+    let loose = shot(100.0);
+    let n = every.len() as f32;
+    let apart = |p: &[[f32; 4]]| {
+        every
+            .iter()
+            .zip(p)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>())
+            .sum::<f32>()
+            / n
+    };
+    let mean = |p: &[[f32; 4]]| p.iter().map(|c| c[0] + c[1] + c[2]).sum::<f32>() / n;
+    assert!(
+        (mean(&every) - mean(&adaptive)).abs() < 0.01 * mean(&every),
+        "the brightness moved: {} against {}",
+        mean(&adaptive),
+        mean(&every)
+    );
+    let (near, far) = (apart(&adaptive), apart(&loose));
+    assert!(
+        far > near * 2.0,
+        "stopping changed little or nothing: {near} and {far}"
+    );
+    assert!(near < 0.01, "pixels differ by {near} on average");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn traced_scene(
     gpu: &Gpu,
@@ -2115,6 +2163,7 @@ fn traced_scene(
     viewport.path_trace = traced;
     viewport.path_trace_denoise = denoise;
     viewport.path_trace_lens = lens;
+    viewport.path_trace_noise_threshold = NOISE_THRESHOLD.with(|t| t.get());
     viewport.contact_shadows = CONTACT.with(|c| c.get());
     viewport.show_bloom = false;
     viewport.show_reflections = false;
@@ -2330,6 +2379,66 @@ fn a_young_mean_denoised_is_nearer_the_converged_picture() {
     }
     let (r, f) = (error(&raw), error(&filtered));
     assert!(f < r * 0.7, "filtered error {f} against raw {r}");
+}
+
+/// The denoiser keeps a texture: a fine checkerboard, eight samples in, comes
+/// out of it nearer the converged picture than the raw mean. Guided by the
+/// picture's colour alone it smeared the squares into one another and came
+/// out nearly twice as far (27 against the raw 14.5); guided by the surface's
+/// own colour it comes out nearer. What is left between them and the
+/// converged picture is the cube's squares, smaller than a pixel, which no
+/// filter brings back.
+#[test]
+fn a_texture_comes_through_the_denoiser_sharp() {
+    let gpu = gpu_or_skip!(gpu());
+    // 8×8 texels, red and blue alternating, sRGB-encoded.
+    let pixels: Vec<u8> = (0..64)
+        .flat_map(|i| {
+            if (i % 8 + i / 8) % 2 == 0 {
+                [230u8, 30, 30, 255]
+            } else {
+                [30u8, 30, 230, 255]
+            }
+        })
+        .collect();
+    let image = || kreate_render::pathtrace::PtImage {
+        width: 8,
+        height: 8,
+        pixels: &pixels,
+        color: true,
+    };
+    let white = kreate_render::pathtrace::PtSurface {
+        base_color: [1.0, 1.0, 1.0],
+        metallic: 0.0,
+        roughness: 0.5,
+        base_color_image: Some(0),
+        ..Default::default()
+    };
+    let converged = traced_scene(&gpu, true, 256, None, false, white, &[image()]);
+    let raw = traced_scene(&gpu, true, 8, None, false, white, &[image()]);
+    let filtered = traced_scene(&gpu, true, 8, None, true, white, &[image()]);
+    let error = |p: &Vec<[f32; 4]>| -> f32 {
+        p.iter()
+            .zip(&converged)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>())
+            .sum()
+    };
+    if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
+        for (name, img) in [
+            ("tx-converged", &converged),
+            ("tx-raw", &raw),
+            ("tx-filtered", &filtered),
+        ] {
+            let bytes: Vec<u8> = img
+                .iter()
+                .flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0).sqrt() * 255.0) as u8))
+                .collect();
+            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
+                .map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
+        }
+    }
+    let (r, f) = (error(&raw), error(&filtered));
+    assert!(f < r, "filtered error {f} against raw {r}");
 }
 
 /// Textures: a floor whose base colour image is red on one half and blue on
@@ -2570,6 +2679,116 @@ fn a_pan_starts_the_mean_over() {
     assert!(
         viewport.accumulating(),
         "the pan was averaged into the old picture"
+    );
+}
+
+/// The cube on the floor in the studio view, drawn through each camera in
+/// turn as the application draws frame by frame, temporal antialiasing on or
+/// off; the last frame comes back.
+fn studio_frames(gpu: &Gpu, cameras: &[Camera], temporal: bool) -> Vec<[f32; 4]> {
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Studio;
+    viewport.temporal_aa = temporal;
+    viewport.ambient_occlusion = false;
+    viewport.show_grid = false;
+    viewport.show_wireframe = false;
+    viewport.show_outline = false;
+    let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
+    let floor_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::grid(12.0, 2, 2));
+    let cube =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &cube_cpu, glam::Vec4::ONE);
+    let floor =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
+    one_material(gpu, &mut viewport, grey());
+    let lift = glam::DAffine3::from_translation(glam::DVec3::new(0.0, 0.0, 0.5));
+    let mut draws = vec![
+        Draw::new(&cube, lift),
+        Draw::new(&floor, glam::DAffine3::IDENTITY),
+    ];
+    let mut out = Vec::new();
+    for camera in cameras {
+        viewport.prepare(&gpu.device, &gpu.queue, camera, &mut draws);
+        out = read_frame(gpu, &mut viewport, &draws);
+    }
+    out
+}
+
+/// Temporal antialiasing: a view in motion, its edges smoothed the way a
+/// still view's are. A slow orbit's last frame is nearer the settled,
+/// sixteen-sample picture from the same place with it than without — about
+/// four times nearer when this was written (0.72 against 3.0); a fast turn's
+/// still a little nearer (11 against 14), which is the check that it trails
+/// nothing.
+#[test]
+fn a_moving_view_is_smoothed_toward_the_settled_picture() {
+    let gpu = gpu_or_skip!(gpu());
+    let base = Camera {
+        distance: 5.0,
+        ..Camera::default()
+    };
+    // Twenty frames of a slow turn, a few hundredths of a degree each.
+    let cameras: Vec<Camera> = (0..20)
+        .map(|i| {
+            let mut c = base;
+            c.orbit(0.0006 * i as f64, 0.0);
+            c
+        })
+        .collect();
+    let last = *cameras.last().unwrap();
+    let settled = studio_frames(&gpu, &[last; 24], false);
+    let plain = studio_frames(&gpu, &cameras, false);
+    let smoothed = studio_frames(&gpu, &cameras, true);
+    let error = |p: &[[f32; 4]]| -> f32 {
+        p.iter()
+            .zip(&settled)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>())
+            .sum()
+    };
+    if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
+        for (name, img) in [
+            ("taa-settled", &settled),
+            ("taa-plain", &plain),
+            ("taa-smoothed", &smoothed),
+        ] {
+            let bytes: Vec<u8> = img
+                .iter()
+                .flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8))
+                .collect();
+            let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
+                .map(|i| i.save(std::path::Path::new(&dir).join(format!("{name}.png"))));
+        }
+    }
+    let (e_plain, e_smooth) = (error(&plain), error(&smoothed));
+    assert!(
+        e_smooth < e_plain * 0.8,
+        "temporal {e_smooth} against plain {e_plain}"
+    );
+
+    // And a fast turn leaves no trail: what the history carries that this
+    // frame has nowhere near is cut off, so a quick move is no further from
+    // its settled picture than the frame alone is.
+    let fast: Vec<Camera> = (0..12)
+        .map(|i| {
+            let mut c = base;
+            c.orbit(0.05 * i as f64, 0.0);
+            c
+        })
+        .collect();
+    let last = *fast.last().unwrap();
+    let settled = studio_frames(&gpu, &[last; 24], false);
+    let error = |p: &[[f32; 4]]| -> f32 {
+        p.iter()
+            .zip(&settled)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>())
+            .sum()
+    };
+    let (e_plain, e_smooth) = (
+        error(&studio_frames(&gpu, &fast, false)),
+        error(&studio_frames(&gpu, &fast, true)),
+    );
+    assert!(
+        e_smooth < e_plain * 1.1,
+        "a fast turn trails: temporal {e_smooth} against plain {e_plain}"
     );
 }
 

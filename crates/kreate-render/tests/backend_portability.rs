@@ -81,6 +81,7 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
         ("outline", kreate_render::outline::source().into()),
         ("volume", kreate_render::volume::source().into()),
         ("accum", kreate_render::accum::source().into()),
+        ("temporal", kreate_render::accum::temporal_source().into()),
         ("bloom", kreate_render::bloom::source().into()),
         ("ssr", kreate_render::ssr::source().into()),
         (

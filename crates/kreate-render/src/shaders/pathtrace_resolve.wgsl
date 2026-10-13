@@ -23,6 +23,6 @@ fn resolve_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4
     if (p.x >= resolve.size.x || p.y >= resolve.size.y) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    let s = sum[p.y * resolve.size.x + p.x];
+    let s = sum[(p.y * resolve.size.x + p.x) * 2u];
     return vec4<f32>(s.rgb / max(s.w, 1.0), 1.0);
 }

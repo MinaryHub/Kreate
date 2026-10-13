@@ -289,6 +289,11 @@ pub struct ShellState {
     /// The viewport drawn at this fraction of its pixels on each side, and
     /// stretched to fit: Blender's Resolution Scale, for a slow machine.
     pub resolution_scale: f32,
+    /// The open document's name, `*` in front while it has unsaved changes:
+    /// what the application bar's document chip shows.
+    pub document_title: String,
+    /// Whether the last operation's dialog shows its fields.
+    pub adjust_open: bool,
     /// The chrome's appearance, as the preferences set it.
     pub appearance: kreate_ui::Appearance,
     /// Whether the remapping panel is open.
@@ -708,6 +713,8 @@ impl Default for ShellState {
             recent_files: Vec::new(),
             node_clipboard: None,
             resolution_scale: 1.0,
+            document_title: "untitled".into(),
+            adjust_open: false,
             appearance: kreate_ui::Appearance::Dark,
             capturing: None,
             palette: Default::default(),
@@ -2146,12 +2153,11 @@ pub fn draw(
             }
 
             ui.separator();
-            // Workspaces right after the menus, where Blender puts them: they
-            // are the top bar's own tabs, and the eye finds them at the same
-            // place whatever the window width.
-            draw_workspace_tabs(ui, state);
+            draw_app_bar(ui, state, &l, history.can_undo(), history.can_redo());
         });
     });
+    // The toolbar under it: the workspace, the mode tabs, the mode's tools.
+    draw_ribbon(ui, state, doc, &l, mode);
 
     Panel::bottom("status").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -2263,6 +2269,8 @@ pub fn draw(
             });
         });
     });
+
+    draw_history_strip(ui, state, &l);
 
     // The screen. Boundaries are interacted with *before* the areas, so a drag
     // that starts on one is not stolen by whatever is under it — a handle is
@@ -2766,7 +2774,7 @@ fn draw_area(
             .id_salt(("area-header", area.id.0)),
         |ui| {
             ui.set_clip_rect(header);
-            draw_area_header(ui, state, area, l, doc, mode);
+            draw_area_header(ui, state, area, l, mode);
         },
     );
 
@@ -3208,7 +3216,6 @@ fn draw_area_header(
     state: &mut ShellState,
     area: &kreate_ui::AreaRect,
     l: &Labels,
-    doc: &Document,
     mode: kreate_ops::operator::Mode,
 ) {
     ui.horizontal(|ui| {
@@ -3267,10 +3274,9 @@ fn draw_area_header(
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if is_viewport {
-                        // Which mode, first, because it governs what every
-                        // other key does and what the menus after it contain.
-                        draw_mode_menu(ui, state, doc, mode);
-                        ui.separator();
+                        // The mode and its menus are the toolbar's now, as
+                        // Fusion has them; the brush stays with the picture
+                        // it paints.
                         draw_brush_settings(ui, state, area.id.0, mode);
                     }
 
@@ -3281,12 +3287,6 @@ fn draw_area_header(
                     draw_view_menu(ui, state, area, l, is_viewport);
 
                     if is_viewport {
-                        // Select, Add, and whatever the mode's card says acts on
-                        // what it acts on — from the tree F3 searches.
-                        for menu in viewport_menus(l, mode, state.select_mode) {
-                            ui.menu_button(&menu.label, |ui| draw_nodes(ui, state, l, &menu.nodes));
-                        }
-
                         // The element buttons stay buttons rather than becoming
                         // a menu. They are a *state* — which one is lit tells
                         // you what a click in the viewport will pick — and a
@@ -8496,117 +8496,38 @@ fn draw_view_sidebar(
 /// modeller does dozens of times an hour, and a tab is one click where a
 /// dropdown is two. It is also the only affordance that shows the *set* — a
 /// user who cannot see that other layouts exist does not go looking for them.
-fn draw_workspace_tabs(ui: &mut Ui, state: &mut ShellState) {
+fn draw_workspace_switcher(ui: &mut Ui, state: &mut ShellState) {
     let active = state.workspaces.active_index();
     // Collected first: the loop borrows the queue, and iterating the list while
     // pushing to it is the same mistake the layout edits are deferred to avoid.
     let names: Vec<String> = state
         .workspaces
         .iter()
-        .map(|space| space.name.clone())
-        .collect();
-    // One segmented group, the open one raised in it: the workspaces are
-    // one choice among several, and read as that rather than as menu titles.
-    let theme = kreate_ui::theme::from_ui(ui);
-    egui::Frame::new()
-        .fill(theme.sunken)
-        .stroke(egui::Stroke::new(1.0, theme.border))
-        .corner_radius(7)
-        .inner_margin(2)
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.horizontal(|ui| {
-                for (index, name) in names.iter().enumerate() {
-                    // The built-in layouts' names are the program's words and
-                    // are translated; a name the user gave one is theirs.
-                    let key = format!("workspace-{}", name.to_lowercase().replace(' ', "-"));
-                    let shown = if state.catalog.has(&key) {
-                        state.catalog.get(&key)
-                    } else {
-                        name.clone()
-                    };
-                    let open = index == active;
-                    let text = egui::RichText::new(shown).color(if open {
-                        theme.text
-                    } else {
-                        theme.text_dim
-                    });
-                    let button = egui::Button::new(text)
-                        .fill(if open {
-                            theme.border_strong
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(5);
-                    if ui.add(button).clicked() {
-                        state.switch_workspace(index);
-                    }
-                }
-            });
-        });
-}
-
-/// The mode dropdown in the top bar.
-///
-/// Every mode, with the ones that cannot be entered disabled rather than
-/// hidden: a menu whose entries come and go is a menu the user cannot learn,
-/// and "edit mode is greyed out because nothing is selected" is a useful thing
-/// to be told. Whether a mode can be entered comes from the mode itself — see
-/// `Mode::needs_mesh`.
-fn draw_mode_menu(
-    ui: &mut Ui,
-    state: &mut ShellState,
-    doc: &Document,
-    mode: kreate_ops::operator::Mode,
-) {
-    use kreate_ops::operator::Mode;
-
-    let current = state.catalog.format(mode.label_key(), TextKind::Ui, &[]);
-    let names: Vec<(Mode, String)> = Mode::ALL
-        .iter()
-        .map(|kind| {
-            (
-                *kind,
-                state.catalog.format(kind.label_key(), TextKind::Ui, &[]),
-            )
+        .map(|space| {
+            // The built-in layouts' names are the program's words and are
+            // translated; a name the user gave one is theirs.
+            let key = format!("workspace-{}", space.name.to_lowercase().replace(' ', "-"));
+            if state.catalog.has(&key) {
+                state.catalog.get(&key)
+            } else {
+                space.name.clone()
+            }
         })
         .collect();
-    // Asked once, outside the closure: the answer is the same for every entry
-    // and reading the document inside would hold a borrow across the queue.
-    let has = kreate_ops::mode::Has::of(doc);
-
-    // The mode named in its own tint, so Sculpt never looks like Edit at a
-    // glance; object mode, the resting state, stays plain.
-    let theme = kreate_ui::theme::from_ui(ui);
-    let tint = theme.mode_tint(mode.tag());
-    let shown = match tint {
-        Some((_, text)) => egui::RichText::new(current).color(text),
-        None => egui::RichText::new(current),
-    };
-    // In a scope: the tint is the mode button's alone, and set on the Ui it
-    // would carry on to every menu after it in the header.
-    ui.scope(|ui| {
-        if let Some((fill, _)) = tint {
-            let w = &mut ui.visuals_mut().widgets;
-            for v in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
-                v.weak_bg_fill = fill;
-                v.bg_fill = fill;
-            }
-        }
-        egui::ComboBox::from_id_salt("mode")
-            .selected_text(shown)
-            .show_ui(ui, |ui| {
-                // This object's modes; see `Mode::offered`.
-                for (kind, name) in names.iter().filter(|(k, _)| *k == mode || k.offered(has)) {
-                    ui.add_enabled_ui(kind.can_enter(has), |ui| {
-                        if ui.selectable_label(*kind == mode, name).clicked() {
-                            state.queue.push(Command::SetMode(kind.tag().to_string()));
-                        }
-                    });
+    // One dropdown at the toolbar's left, as Fusion keeps its workspaces: the
+    // layout is chosen far less often than a tool, and a row of tabs took the
+    // width the tools want.
+    let current = names.get(active).cloned().unwrap_or_default();
+    egui::ComboBox::from_id_salt("workspace")
+        .width(118.0)
+        .selected_text(egui::RichText::new(current).strong())
+        .show_ui(ui, |ui| {
+            for (index, name) in names.iter().enumerate() {
+                if ui.selectable_label(index == active, name).clicked() {
+                    state.switch_workspace(index);
                 }
-            });
-    });
+            }
+        });
 }
 
 /// The edit-mode menus: Mesh, Edge and Face.
@@ -9356,16 +9277,38 @@ fn draw_adjust_float(
         viewport.min.y as i32,
     )))
     .order(egui::Order::Middle)
-    .pivot(egui::Align2::LEFT_BOTTOM)
-    .fixed_pos(viewport.left_bottom() + egui::vec2(10.0, -10.0))
+    // Top right, under the navigation gizmo, where Fusion opens a command's
+    // dialog: beside the model rather than over the corner the eye starts in.
+    .pivot(egui::Align2::RIGHT_TOP)
+    .fixed_pos(viewport.right_top() + egui::vec2(-12.0, 132.0))
     .constrain_to(viewport)
     .show(ui.ctx(), |ui| {
+        let theme = kreate_ui::theme::from_ui(ui);
         egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.set_max_width(250.0);
-            egui::CollapsingHeader::new(label)
-                .id_salt("adjust-last")
-                .default_open(false)
-                .show(ui, |ui| draw_adjust_fields(ui, state, registry, history));
+            ui.set_width(260.0);
+            // The title strip: the operation's name in capitals, as a
+            // dialog's heading.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(label.to_uppercase())
+                        .strong()
+                        .small()
+                        .color(theme.text),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let open = state.adjust_open;
+                    let toggle = state
+                        .catalog
+                        .get(if open { "adjust-done" } else { "adjust-edit" });
+                    if ui.small_button(toggle).clicked() {
+                        state.adjust_open = !open;
+                    }
+                });
+            });
+            if state.adjust_open {
+                ui.separator();
+                draw_adjust_fields(ui, state, registry, history);
+            }
         });
     });
     // Over the picture: a click on the panel must not select what is behind.
@@ -11319,6 +11262,658 @@ pub fn load_catalog(locale: &str) -> Catalog {
         tracing::error!(?e, "the built-in English catalog failed to load");
     }
     catalog
+}
+
+// --- the Fusion-style frame: application bar, toolbar, history strip --------
+
+/// A picture for a toolbar button or an application-bar button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RibbonIcon {
+    Plane,
+    Cube,
+    Sphere,
+    Cylinder,
+    Light,
+    Camera,
+    Bone,
+    Move,
+    Rotate,
+    Scale,
+    Duplicate,
+    Delete,
+    Extrude,
+    Inset,
+    Bevel,
+    LoopCut,
+    Knife,
+    Subdivide,
+    Merge,
+    Unwrap,
+    Key,
+    Save,
+    Undo,
+    Redo,
+    Search,
+}
+
+impl RibbonIcon {
+    /// Which picture a menu entry gets on the toolbar, if any. An entry with
+    /// none stays in its group's menu only.
+    fn of(entry: &MenuEntry) -> Option<Self> {
+        use kreate_reflect::PropertyValue as V;
+        let variant = |name: &str| {
+            entry.variant.iter().find_map(|(n, v)| match v {
+                V::Enum(i) if *n == name => Some(*i),
+                _ => None,
+            })
+        };
+        let id = entry.id;
+        Some(match id {
+            "object.add_primitive" => match variant("shape")? {
+                0 => Self::Plane,
+                1 => Self::Cube,
+                3 => Self::Sphere,
+                5 => Self::Cylinder,
+                _ => return None,
+            },
+            "object.add_light" if variant("kind") == Some(0) => Self::Light,
+            "object.add_camera" => Self::Camera,
+            "object.add_armature" | "armature.bone_add" => Self::Bone,
+            "mesh.inset" => Self::Inset,
+            "mesh.bevel" => Self::Bevel,
+            "mesh.loop_cut" => Self::LoopCut,
+            "mesh.knife" => Self::Knife,
+            "mesh.subdivide" => Self::Subdivide,
+            "mesh.merge" => Self::Merge,
+            "uv.unwrap" => Self::Unwrap,
+            "anim.keyframe_insert" => Self::Key,
+            _ if id.starts_with("mesh.extrude") || id == "armature.extrude" => Self::Extrude,
+            _ if id.ends_with(".translate") => Self::Move,
+            _ if id.ends_with(".rotate") => Self::Rotate,
+            _ if id.ends_with(".scale") => Self::Scale,
+            _ if id.ends_with(".duplicate") => Self::Duplicate,
+            _ if id.ends_with(".delete") => Self::Delete,
+            _ => return None,
+        })
+    }
+
+    /// Making things is the accent's; changing a shape the informational
+    /// blue; the rest the text's own colour.
+    fn colour(self, theme: &kreate_ui::Theme) -> egui::Color32 {
+        match self {
+            Self::Plane
+            | Self::Cube
+            | Self::Sphere
+            | Self::Cylinder
+            | Self::Light
+            | Self::Camera
+            | Self::Bone => theme.accent,
+            Self::Extrude
+            | Self::Inset
+            | Self::Bevel
+            | Self::LoopCut
+            | Self::Knife
+            | Self::Subdivide
+            | Self::Merge
+            | Self::Unwrap => theme.info,
+            _ => theme.text,
+        }
+    }
+
+    /// Draws the picture in `rect`, in strokes.
+    fn paint(self, painter: &egui::Painter, rect: egui::Rect, colour: egui::Color32) {
+        use egui::{pos2, Shape, Stroke};
+        let s = rect.width().min(rect.height());
+        let o = rect.center() - egui::vec2(s, s) * 0.5;
+        let p = |x: f32, y: f32| pos2(o.x + x * s, o.y + y * s);
+        let stroke = Stroke::new(1.5, colour);
+        let line = |pts: Vec<egui::Pos2>| painter.add(Shape::line(pts, stroke));
+        let closed = |pts: Vec<egui::Pos2>| painter.add(Shape::closed_line(pts, stroke));
+        let ellipse = |cx: f32, cy: f32, rx: f32, ry: f32, from: f32, to: f32| {
+            (0..=24)
+                .map(|i| {
+                    let t = from + (to - from) * i as f32 / 24.0;
+                    p(cx + rx * t.cos(), cy + ry * t.sin())
+                })
+                .collect::<Vec<_>>()
+        };
+        let tau = std::f32::consts::TAU;
+        let pi = std::f32::consts::PI;
+        match self {
+            Self::Plane => {
+                closed(vec![p(0.1, 0.6), p(0.5, 0.4), p(0.9, 0.6), p(0.5, 0.8)]);
+            }
+            Self::Cube => {
+                closed(vec![
+                    p(0.5, 0.1),
+                    p(0.88, 0.3),
+                    p(0.88, 0.72),
+                    p(0.5, 0.92),
+                    p(0.12, 0.72),
+                    p(0.12, 0.3),
+                ]);
+                line(vec![p(0.12, 0.3), p(0.5, 0.5), p(0.88, 0.3)]);
+                line(vec![p(0.5, 0.5), p(0.5, 0.92)]);
+            }
+            Self::Sphere => {
+                painter.circle_stroke(p(0.5, 0.5), 0.38 * s, stroke);
+                line(ellipse(0.5, 0.5, 0.38, 0.13, 0.0, pi));
+            }
+            Self::Cylinder => {
+                closed(ellipse(0.5, 0.25, 0.3, 0.1, 0.0, tau));
+                line(vec![p(0.2, 0.25), p(0.2, 0.75)]);
+                line(vec![p(0.8, 0.25), p(0.8, 0.75)]);
+                line(ellipse(0.5, 0.75, 0.3, 0.1, 0.0, pi));
+            }
+            Self::Light => {
+                painter.circle_stroke(p(0.5, 0.45), 0.17 * s, stroke);
+                for k in 0..8 {
+                    let a = k as f32 / 8.0 * tau;
+                    let (c, n) = (a.cos(), a.sin());
+                    line(vec![
+                        p(0.5 + 0.26 * c, 0.45 + 0.26 * n),
+                        p(0.5 + 0.38 * c, 0.45 + 0.38 * n),
+                    ]);
+                }
+            }
+            Self::Camera => {
+                closed(vec![p(0.1, 0.3), p(0.62, 0.3), p(0.62, 0.74), p(0.1, 0.74)]);
+                closed(vec![
+                    p(0.62, 0.46),
+                    p(0.9, 0.32),
+                    p(0.9, 0.72),
+                    p(0.62, 0.58),
+                ]);
+            }
+            Self::Bone => {
+                line(vec![p(0.28, 0.72), p(0.72, 0.28)]);
+                painter.circle_stroke(p(0.22, 0.78), 0.09 * s, stroke);
+                painter.circle_stroke(p(0.78, 0.22), 0.09 * s, stroke);
+            }
+            Self::Move => {
+                line(vec![p(0.5, 0.1), p(0.5, 0.9)]);
+                line(vec![p(0.1, 0.5), p(0.9, 0.5)]);
+                line(vec![p(0.38, 0.22), p(0.5, 0.1), p(0.62, 0.22)]);
+                line(vec![p(0.78, 0.38), p(0.9, 0.5), p(0.78, 0.62)]);
+                line(vec![p(0.38, 0.78), p(0.5, 0.9), p(0.62, 0.78)]);
+                line(vec![p(0.22, 0.38), p(0.1, 0.5), p(0.22, 0.62)]);
+            }
+            Self::Rotate => {
+                line(ellipse(0.5, 0.5, 0.36, 0.36, -0.3 * pi, 1.4 * pi));
+                let tip = p(
+                    0.5 + 0.36 * (-0.3 * pi).cos(),
+                    0.5 + 0.36 * (-0.3 * pi).sin(),
+                );
+                line(vec![
+                    tip + egui::vec2(-0.2 * s, -0.02 * s),
+                    tip,
+                    tip + egui::vec2(0.0, 0.2 * s),
+                ]);
+            }
+            Self::Scale => {
+                closed(vec![
+                    p(0.12, 0.48),
+                    p(0.52, 0.48),
+                    p(0.52, 0.88),
+                    p(0.12, 0.88),
+                ]);
+                line(vec![p(0.52, 0.48), p(0.88, 0.12)]);
+                line(vec![p(0.62, 0.12), p(0.88, 0.12), p(0.88, 0.38)]);
+            }
+            Self::Duplicate => {
+                closed(vec![
+                    p(0.12, 0.32),
+                    p(0.62, 0.32),
+                    p(0.62, 0.88),
+                    p(0.12, 0.88),
+                ]);
+                line(vec![
+                    p(0.36, 0.32),
+                    p(0.36, 0.12),
+                    p(0.88, 0.12),
+                    p(0.88, 0.66),
+                    p(0.62, 0.66),
+                ]);
+            }
+            Self::Delete => {
+                line(vec![p(0.2, 0.2), p(0.8, 0.8)]);
+                line(vec![p(0.8, 0.2), p(0.2, 0.8)]);
+            }
+            Self::Extrude => {
+                closed(vec![
+                    p(0.12, 0.62),
+                    p(0.88, 0.62),
+                    p(0.88, 0.88),
+                    p(0.12, 0.88),
+                ]);
+                line(vec![p(0.5, 0.54), p(0.5, 0.1)]);
+                line(vec![p(0.34, 0.26), p(0.5, 0.1), p(0.66, 0.26)]);
+            }
+            Self::Inset => {
+                closed(vec![p(0.1, 0.1), p(0.9, 0.1), p(0.9, 0.9), p(0.1, 0.9)]);
+                closed(vec![
+                    p(0.32, 0.32),
+                    p(0.68, 0.32),
+                    p(0.68, 0.68),
+                    p(0.32, 0.68),
+                ]);
+            }
+            Self::Bevel => {
+                let mut pts = vec![p(0.14, 0.88)];
+                pts.extend(ellipse(0.6, 0.6, 0.46, 0.46, pi, 1.5 * pi));
+                pts.push(p(0.88, 0.14));
+                line(pts);
+            }
+            Self::LoopCut => {
+                closed(vec![p(0.1, 0.18), p(0.9, 0.18), p(0.9, 0.82), p(0.1, 0.82)]);
+                for k in 0..4 {
+                    let y = 0.22 + k as f32 * 0.16;
+                    line(vec![p(0.5, y), p(0.5, y + 0.09)]);
+                }
+            }
+            Self::Knife => {
+                line(vec![p(0.15, 0.85), p(0.7, 0.3)]);
+                closed(vec![p(0.62, 0.22), p(0.86, 0.1), p(0.78, 0.38)]);
+            }
+            Self::Subdivide => {
+                closed(vec![p(0.1, 0.1), p(0.9, 0.1), p(0.9, 0.9), p(0.1, 0.9)]);
+                line(vec![p(0.5, 0.1), p(0.5, 0.9)]);
+                line(vec![p(0.1, 0.5), p(0.9, 0.5)]);
+            }
+            Self::Merge => {
+                line(vec![p(0.15, 0.15), p(0.5, 0.5), p(0.85, 0.15)]);
+                line(vec![p(0.5, 0.5), p(0.5, 0.9)]);
+                painter.circle_filled(p(0.5, 0.5), 0.07 * s, colour);
+            }
+            Self::Unwrap => {
+                closed(vec![p(0.1, 0.1), p(0.9, 0.1), p(0.9, 0.9), p(0.1, 0.9)]);
+                line(vec![p(0.1, 0.5), p(0.9, 0.5)]);
+                line(vec![p(0.5, 0.1), p(0.5, 0.5)]);
+            }
+            Self::Key => {
+                closed(vec![p(0.5, 0.12), p(0.86, 0.5), p(0.5, 0.88), p(0.14, 0.5)]);
+            }
+            Self::Save => {
+                closed(vec![
+                    p(0.14, 0.12),
+                    p(0.72, 0.12),
+                    p(0.88, 0.28),
+                    p(0.88, 0.88),
+                    p(0.14, 0.88),
+                ]);
+                line(vec![
+                    p(0.3, 0.12),
+                    p(0.3, 0.36),
+                    p(0.66, 0.36),
+                    p(0.66, 0.12),
+                ]);
+                closed(vec![p(0.3, 0.6), p(0.72, 0.6), p(0.72, 0.88), p(0.3, 0.88)]);
+            }
+            Self::Undo | Self::Redo => {
+                let flip = |x: f32| if self == Self::Undo { x } else { 1.0 - x };
+                let arc: Vec<egui::Pos2> = (0..=16)
+                    .map(|i| {
+                        let t = -0.5 * pi + pi * i as f32 / 16.0;
+                        p(flip(0.52 + 0.3 * t.cos()), 0.56 + 0.26 * t.sin())
+                    })
+                    .collect();
+                let mut pts = vec![p(flip(0.16), 0.3)];
+                pts.extend(arc);
+                pts.push(p(flip(0.4), 0.82));
+                line(pts);
+                line(vec![
+                    p(flip(0.32), 0.14),
+                    p(flip(0.16), 0.3),
+                    p(flip(0.32), 0.46),
+                ]);
+            }
+            Self::Search => {
+                painter.circle_stroke(p(0.44, 0.44), 0.28 * s, stroke);
+                line(vec![p(0.64, 0.64), p(0.88, 0.88)]);
+            }
+        }
+    }
+}
+
+/// A small icon-only button on the application bar.
+fn bar_button(ui: &mut Ui, icon: RibbonIcon, enabled: bool, tip: &str) -> egui::Response {
+    let theme = kreate_ui::theme::from_ui(ui);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), sense);
+    if response.hovered() && enabled {
+        ui.painter().rect_filled(rect, 4.0, theme.border);
+    }
+    let colour = if enabled {
+        theme.text_dim
+    } else {
+        theme.border_strong
+    };
+    icon.paint(ui.painter(), rect.shrink2(egui::vec2(6.0, 5.0)), colour);
+    response.on_hover_text(tip)
+}
+
+/// What the application bar carries after the menus: save, undo and redo
+/// as buttons, the open document, and the command search.
+fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool, can_redo: bool) {
+    let theme = kreate_ui::theme::from_ui(ui);
+    ui.spacing_mut().item_spacing.x = 2.0;
+    if bar_button(ui, RibbonIcon::Save, true, &l.file_save).clicked() {
+        state.queue.push(Command::SaveDocument);
+    }
+    if bar_button(ui, RibbonIcon::Undo, can_undo, &l.undo).clicked() {
+        state.queue.push(Command::Undo);
+    }
+    if bar_button(ui, RibbonIcon::Redo, can_redo, &l.redo).clicked() {
+        state.queue.push(Command::Redo);
+    }
+    ui.add_space(10.0);
+    // The document, as a tab: its name, and a dot while it has changes no
+    // save has kept.
+    let (modified, name) = match state.document_title.strip_prefix('*') {
+        Some(name) => (true, name.to_string()),
+        None => (false, state.document_title.clone()),
+    };
+    egui::Frame::new()
+        .fill(theme.sunken)
+        .stroke(egui::Stroke::new(1.0, theme.border))
+        .corner_radius(egui::CornerRadius {
+            nw: 6,
+            ne: 6,
+            sw: 0,
+            se: 0,
+        })
+        .inner_margin(egui::Margin::symmetric(10, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // i18n-exempt: the user's own file name
+                ui.label(egui::RichText::new(name).color(theme.text));
+                if modified {
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.0, theme.accent);
+                }
+            });
+        });
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let tip = state
+            .command_info
+            .get("app.search")
+            .map(|i| i.name.clone())
+            .unwrap_or_else(|| state.catalog.get("search-commands"));
+        if bar_button(ui, RibbonIcon::Search, true, &tip).clicked() {
+            state.palette.open();
+        }
+    });
+}
+
+/// The toolbar under the application bar, as Fusion lays it out: the
+/// workspace on the left, then the mode tabs over the mode's tool groups.
+///
+/// The groups are the mode's own menus — the same tree the header menus and
+/// F3 read — with the entries that have a picture brought out as buttons, so
+/// a tool is one click and the rest of its group is one more.
+fn draw_ribbon(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    l: &Labels,
+    mode: kreate_ops::operator::Mode,
+) {
+    use kreate_ops::operator::Mode;
+    let theme = kreate_ui::theme::from_ui(ui);
+    Panel::top("ribbon")
+        .frame(
+            egui::Frame::new()
+                .fill(theme.base)
+                .inner_margin(egui::Margin::symmetric(8, 4)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                draw_workspace_switcher(ui, state);
+                ui.separator();
+                ui.vertical(|ui| {
+                    // The mode tabs: this object's modes, as `Mode::offered`
+                    // decides, underlined in the mode's tint when open.
+                    let has = kreate_ops::mode::Has::of(doc);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for kind in Mode::ALL
+                            .iter()
+                            .copied()
+                            .filter(|k| *k == mode || k.offered(has))
+                        {
+                            let name = state
+                                .catalog
+                                .format(kind.label_key(), TextKind::Ui, &[])
+                                .to_uppercase();
+                            let open = kind == mode;
+                            let colour = if open { theme.text } else { theme.text_dim };
+                            let response = ui.add_enabled(
+                                kind.can_enter(has),
+                                egui::Button::new(
+                                    egui::RichText::new(name).small().strong().color(colour),
+                                )
+                                .frame(false)
+                                .min_size(egui::vec2(0.0, 20.0)),
+                            );
+                            let r = response.rect;
+                            if open {
+                                let under = theme
+                                    .mode_tint(kind.tag())
+                                    .map_or(theme.accent, |(_, text)| text);
+                                ui.painter().line_segment(
+                                    [
+                                        egui::pos2(r.left() + 4.0, r.bottom()),
+                                        egui::pos2(r.right() - 4.0, r.bottom()),
+                                    ],
+                                    egui::Stroke::new(2.0, under),
+                                );
+                            }
+                            if response.clicked() && !open {
+                                state.queue.push(Command::SetMode(kind.tag().to_string()));
+                            }
+                            ui.add_space(10.0);
+                        }
+                    });
+                    // The groups.
+                    ui.horizontal(|ui| {
+                        let menus = viewport_menus(l, mode, state.select_mode);
+                        for (i, menu) in menus.iter().enumerate() {
+                            if i > 0 {
+                                ui.separator();
+                            }
+                            draw_tool_group(ui, state, l, menu, &theme);
+                        }
+                    });
+                });
+            });
+        });
+}
+
+/// One group of the toolbar: up to three of its entries as buttons, and its
+/// name, which opens the whole menu.
+fn draw_tool_group(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    l: &Labels,
+    menu: &TopMenu,
+    theme: &kreate_ui::Theme,
+) {
+    fn featured<'a>(nodes: &'a [MenuNode], out: &mut Vec<(&'a MenuEntry, RibbonIcon)>) {
+        for node in nodes {
+            match node {
+                MenuNode::Entry(e) => {
+                    if let Some(icon) = RibbonIcon::of(e) {
+                        if out.len() < 3 && !out.iter().any(|(_, i)| *i == icon) {
+                            out.push((e, icon));
+                        }
+                    }
+                }
+                MenuNode::Sub(_, children) => featured(children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut buttons = Vec::new();
+    featured(&menu.nodes, &mut buttons);
+    // As wide as its buttons, its name centred under them; a group with no
+    // buttons is its name alone, at the buttons' height.
+    let width = (buttons.len() as f32 * 52.0).max(56.0);
+    let layout = egui::Layout::top_down(egui::Align::Center);
+    ui.allocate_ui_with_layout(egui::vec2(width, 64.0), layout, |ui| {
+        if buttons.is_empty() {
+            ui.add_space(20.0);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (entry, icon) in &buttons {
+                let size = egui::vec2(52.0, 40.0);
+                let sense = if entry.enabled {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                };
+                let (rect, response) = ui.allocate_exact_size(size, sense);
+                if response.hovered() && entry.enabled {
+                    ui.painter().rect_filled(rect, 5.0, theme.border);
+                }
+                let picture = egui::Rect::from_center_size(
+                    egui::pos2(rect.center().x, rect.top() + 13.0),
+                    egui::vec2(20.0, 20.0),
+                );
+                let colour = if entry.enabled {
+                    icon.colour(theme)
+                } else {
+                    theme.border_strong
+                };
+                icon.paint(ui.painter(), picture, colour);
+                // The name under it, cut to the button's width.
+                let font = egui::FontId::proportional(10.0);
+                let mut text = entry.label.clone();
+                let fits = |t: &str| {
+                    ui.painter()
+                        .layout_no_wrap(t.to_string(), font.clone(), theme.text)
+                        .size()
+                        .x
+                        <= size.x - 4.0
+                };
+                while !fits(&text) && text.chars().count() > 1 {
+                    text.pop();
+                }
+                ui.painter().text(
+                    egui::pos2(rect.center().x, rect.bottom() - 2.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    text,
+                    font,
+                    if entry.enabled {
+                        theme.text
+                    } else {
+                        theme.text_faint
+                    },
+                );
+                let tip = match state.command_info.get(entry.id) {
+                    Some(info) if !info.shortcut.is_empty() => {
+                        format!("{}  {}", entry.label, info.shortcut)
+                    }
+                    _ => entry.label.clone(),
+                };
+                if response.on_hover_text(tip).clicked() {
+                    run_entry(state, entry);
+                }
+            }
+        });
+        ui.menu_button(
+            egui::RichText::new(menu.label.to_uppercase())
+                .small()
+                .strong()
+                .color(theme.text_dim),
+            |ui| draw_nodes(ui, state, l, &menu.nodes),
+        );
+    });
+}
+
+/// The history as a strip of steps along the bottom, as Fusion's timeline
+/// shows a design's: the steps that are applied, a marker, the ones undone
+/// after it. A click on a step goes back, or forward, to just after it.
+fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    let theme = kreate_ui::theme::from_ui(ui);
+    Panel::bottom("history")
+        .frame(
+            egui::Frame::new()
+                .fill(theme.base)
+                .inner_margin(egui::Margin::symmetric(8, 3)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let at = state.history_at;
+                let total = state.history_steps.len();
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if bar_button(ui, RibbonIcon::Undo, at > 0, &l.undo).clicked() {
+                    state.queue.push(Command::Undo);
+                }
+                if bar_button(ui, RibbonIcon::Redo, at < total, &l.redo).clicked() {
+                    state.queue.push(Command::Redo);
+                }
+                ui.add_space(8.0);
+                egui::ScrollArea::horizontal()
+                    .id_salt("history-strip")
+                    .stick_to_right(true)
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            // The last few dozen: a history of thousands is
+                            // not a strip.
+                            const SHOWN: usize = 60;
+                            let first = total.saturating_sub(SHOWN);
+                            if at == first && first == 0 {
+                                marker(ui, &theme);
+                            }
+                            for (i, label) in state.history_steps.iter().enumerate().skip(first) {
+                                let applied = i + 1;
+                                let undone = applied > at;
+                                let short: String = label.chars().take(14).collect();
+                                let short = if short.chars().count() < label.chars().count() {
+                                    format!("{short}…")
+                                } else {
+                                    short
+                                };
+                                let text = egui::RichText::new(short).small().color(if undone {
+                                    theme.text_faint
+                                } else {
+                                    theme.text
+                                });
+                                let chip = egui::Button::new(text)
+                                    .fill(if undone {
+                                        egui::Color32::TRANSPARENT
+                                    } else {
+                                        theme.raised
+                                    })
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        if undone { theme.border } else { theme.raised },
+                                    ))
+                                    .corner_radius(4);
+                                if ui.add(chip).on_hover_text(label.as_str()).clicked() {
+                                    state.queue.push(Command::UndoTo(applied));
+                                }
+                                if applied == at {
+                                    marker(ui, &theme);
+                                }
+                            }
+                        });
+                    });
+            });
+        });
+
+    fn marker(ui: &mut Ui, theme: &kreate_ui::Theme) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(4.0, 20.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 2.0, theme.accent);
+    }
 }
 
 #[cfg(test)]

@@ -47,6 +47,11 @@ pub const AXIS_Z: u32 = 0x4A_80_D6;
 /// it is asked to show is lying, so the warmth stops at the viewport edge.
 pub const VIEWPORT: u32 = 0x1C_1C_1E;
 
+/// The viewport background under the light chrome: a cool mid-light grey,
+/// as Fusion 360 draws its canvas. Darker than white so a white model's
+/// faces still stand off it.
+pub const VIEWPORT_LIGHT: u32 = 0xC4_C9_D0;
+
 /// The ordinary wireframe, on an unselected object.
 ///
 /// Darker than the shaded surface on purpose: the wireframe is structure the
@@ -66,6 +71,10 @@ pub const HANDLE: u32 = 0xCF_D2_D7;
 /// dense lattice fading toward the horizon without becoming the brightest
 /// thing on screen.
 pub const GRID_LINE: u32 = 0x45_45_48;
+
+/// The grid's lines on [`VIEWPORT_LIGHT`]: a step darker than it, as the dark
+/// grid is a step lighter than its own.
+pub const GRID_LINE_LIGHT: u32 = 0xA2_A8_B1;
 
 /// Edge diagnostics. Loud on purpose — each one marks something the user
 /// almost certainly wants to know about and cannot otherwise see.

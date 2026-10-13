@@ -1508,6 +1508,10 @@ pub struct Viewport {
     denoise: crate::denoise::Denoise,
     /// Whether the path tracer's picture is denoised.
     pub path_trace_denoise: bool,
+    /// Adaptive sampling: a pixel stops taking samples once the standard
+    /// error of its mean is under this fraction of it. Zero traces every
+    /// pixel every sample.
+    pub path_trace_noise_threshold: f32,
     /// The path tracer's lens, when the view is through a camera with an
     /// aperture: depth of field.
     pub path_trace_lens: Option<crate::pathtrace::Lens>,
@@ -1545,6 +1549,22 @@ pub struct Viewport {
     accum: crate::accum::Accum,
     /// Whether a still view refines itself over the next frames.
     pub accumulate: bool,
+    /// Temporal antialiasing: a moving view is drawn nudged differently each
+    /// frame and folded into the last picture, carried to the new camera.
+    /// Off, a moving view's every frame is drawn unnudged and alone.
+    pub temporal_aa: bool,
+    /// The last frame's camera, unnudged, and its eye: where the temporal
+    /// pass carries the last picture from.
+    temporal_previous: Option<(glam::Mat4, glam::DVec3)>,
+    /// What the last picture was of — its size and how it was shaded —
+    /// for knowing when it is no history for this one.
+    temporal_key: Option<((u32, u32), u8)>,
+    /// Frames drawn while moving, for each one's nudge.
+    temporal_frame: u32,
+    /// Whether this frame folds into the last picture.
+    temporal_now: bool,
+    /// This frame's nudge, in pixels.
+    frame_jitter: (f32, f32),
     /// Frames already in the mean.
     accum_samples: u32,
     /// What the mean is a picture of; a different one starts it again.
@@ -1586,6 +1606,8 @@ pub struct Viewport {
     render_size: (u32, u32),
     pub shading: ShadingMode,
     pub background: wgpu::Color,
+    /// The grid's line colour, as a palette hex; see [`Viewport::set_light`].
+    grid_line: u32,
     /// Whether the solid pass goes through cluster culling.
     ///
     /// Off by default, and that is a measurement rather than timidity: it is
@@ -2603,6 +2625,7 @@ impl Viewport {
             path_trace_lens: None,
             denoise: crate::denoise::Denoise::new(device, width.max(1), height.max(1)),
             path_trace_denoise: true,
+            path_trace_noise_threshold: 0.01,
             ssr: crate::ssr::Ssr::new(device, width.max(1), height.max(1)),
             show_reflections: true,
             bloom: crate::bloom::Bloom::new(device),
@@ -2619,6 +2642,12 @@ impl Viewport {
             accum_signature: 0,
             accum_applies: false,
             frame_sample: None,
+            temporal_aa: false,
+            temporal_previous: None,
+            temporal_key: None,
+            temporal_frame: 0,
+            temporal_now: false,
+            frame_jitter: (0.0, 0.0),
             lighting_signature: 0,
             show_outline: true,
             antialias: true,
@@ -2626,6 +2655,7 @@ impl Viewport {
             render_size: (width.max(1), height.max(1)),
             shading: ShadingMode::Studio,
             background: palette::clear(palette::VIEWPORT),
+            grid_line: palette::GRID_LINE,
             show_grid: true,
             sample_cap: None,
             face_orientation: false,
@@ -2741,6 +2771,27 @@ impl Viewport {
         );
     }
 
+    /// The light canvas — [`palette::VIEWPORT_LIGHT`] and its grid — or the
+    /// dark one. A change starts the picture's samples over, since the
+    /// background is in every one of them.
+    pub fn set_light(&mut self, light: bool) {
+        let (background, grid) = if light {
+            (palette::VIEWPORT_LIGHT, palette::GRID_LINE_LIGHT)
+        } else {
+            (palette::VIEWPORT, palette::GRID_LINE)
+        };
+        if self.grid_line != grid {
+            self.grid_line = grid;
+            self.background = palette::clear(background);
+            self.accum_samples = 0;
+        }
+    }
+
+    /// Whether the light canvas is on.
+    pub fn is_light(&self) -> bool {
+        self.grid_line == palette::GRID_LINE_LIGHT
+    }
+
     pub fn aspect(&self) -> f64 {
         self.render_size.0 as f64 / self.render_size.1 as f64
     }
@@ -2853,8 +2904,37 @@ impl Viewport {
                 self.cluster_generation = self.cull.generation();
             }
         }
-        let view_proj = camera.view_projection(aspect);
-        let view_proj = self.next_sample(view_proj, camera.eye(), draws);
+        let unnudged = camera.view_projection(aspect);
+        let view_proj = self.next_sample(unnudged, camera.eye(), draws);
+        // The temporal pass: on while moving — the mean's first frame — when
+        // the last picture is of the same size and shading to carry over.
+        let key = (self.render_size, self.shading as u8);
+        let previous = self.temporal_previous.take();
+        self.temporal_now = false;
+        if self.temporal_aa && self.accum_applies && self.frame_sample == Some(1) {
+            if let (Some((before, eye)), true) = (previous, self.temporal_key == Some(key)) {
+                let (jx, jy) = self.frame_jitter;
+                let moved = (camera.eye() - eye).as_vec3();
+                let params = crate::accum::TemporalParams {
+                    inv_current: unnudged.inverse().to_cols_array_2d(),
+                    previous: before.to_cols_array_2d(),
+                    moved: [moved.x, moved.y, moved.z, 0.0],
+                    region: [self.render_size.0 as f32, self.render_size.1 as f32],
+                    jitter: [jx, jy],
+                    weight: crate::accum::TEMPORAL_WEIGHT,
+                    _pad: [0.0; 3],
+                };
+                self.accum
+                    .prepare_temporal(device, queue, &self.depth, &params);
+                self.temporal_now = true;
+            }
+        }
+        if self.accum_applies && self.frame_sample.is_some() {
+            self.temporal_previous = Some((unnudged, camera.eye()));
+            self.temporal_key = Some(key);
+        } else {
+            self.temporal_previous = previous;
+        }
         // A frame that is drawn writes depth with this camera; one that only
         // presents the settled mean leaves the last one's.
         if self.frame_sample.is_some() || !self.accum_applies {
@@ -2870,6 +2950,7 @@ impl Viewport {
         }
         if self.path_tracing() {
             if let Some(n) = self.frame_sample {
+                self.pathtracer.noise_threshold = self.path_trace_noise_threshold;
                 self.pathtracer.prepare(
                     device,
                     queue,
@@ -2889,6 +2970,7 @@ impl Viewport {
                         &self.depth,
                         self.render_size,
                         n,
+                        self.pathtracer.sums(),
                     );
                 }
             }
@@ -2992,7 +3074,7 @@ impl Viewport {
                     0.0,
                     0.0,
                 ],
-                line_color: palette::display_rgba(palette::GRID_LINE),
+                line_color: palette::display_rgba(self.grid_line),
                 axis_x_color: palette::display_rgba(palette::AXIS_X),
                 axis_y_color: palette::display_rgba(palette::AXIS_Y),
             }),
@@ -4552,7 +4634,11 @@ impl Viewport {
                 Some(n) => {
                     self.aa
                         .resolve(encoder, self.accum.frame(), self.render_size);
-                    self.accum.add(encoder, self.render_size, n);
+                    if self.temporal_now {
+                        self.accum.temporal(encoder, self.render_size);
+                    } else {
+                        self.accum.add(encoder, self.render_size, n);
+                    }
                     self.accum.present(encoder, target, self.render_size);
                 }
                 None => self.aa.resolve(encoder, target, self.render_size),
@@ -4728,7 +4814,17 @@ impl Viewport {
             self.frame_sample = None;
             return view_proj;
         }
-        let (jx, jy) = crate::accum::jitter(self.accum_samples);
+        // The mean's own nudges once still; while moving — every frame a
+        // mean's first — a different one each frame for the temporal pass,
+        // which the first of a still mean never has.
+        let nudge = if self.temporal_aa && self.accum_samples == 0 {
+            self.temporal_frame = self.temporal_frame.wrapping_add(1);
+            self.temporal_frame % 8 + 1
+        } else {
+            self.accum_samples
+        };
+        let (jx, jy) = crate::accum::jitter(nudge);
+        self.frame_jitter = (jx, jy);
         self.accum_samples += 1;
         self.frame_sample = Some(self.accum_samples);
         let (w, h) = (
@@ -5124,7 +5220,11 @@ impl Viewport {
                 Some(n) => {
                     self.screen
                         .draw_with(encoder, &self.screen_bind, self.accum.frame());
-                    self.accum.add(encoder, self.render_size, n);
+                    if self.temporal_now {
+                        self.accum.temporal(encoder, self.render_size);
+                    } else {
+                        self.accum.add(encoder, self.render_size, n);
+                    }
                     self.accum.present(encoder, target, self.render_size);
                 }
                 None => self.screen.draw_with(encoder, &self.screen_bind, target),
