@@ -21,6 +21,9 @@ pub enum Tool {
     Circle,
     Arc,
     Point,
+    /// Click a line, circle or arc to take out the piece between the
+    /// crossings either side.
+    Trim,
     /// A constraint, by its tag in `kreate_scene::sketch::KINDS` — or
     /// `concentric`, which is a coincidence of two centres.
     Constrain(&'static str),
@@ -39,6 +42,7 @@ impl Tool {
             "circle" => Tool::Circle,
             "arc" => Tool::Arc,
             "point" => Tool::Point,
+            "trim" => Tool::Trim,
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
             "revolve" => Tool::Revolve,
@@ -63,6 +67,7 @@ impl Tool {
             Tool::Circle => "circle",
             Tool::Arc => "arc",
             Tool::Point => "point",
+            Tool::Trim => "trim",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
             Tool::Revolve => "revolve",
@@ -202,6 +207,24 @@ impl Geometry {
         best.map(|b| b.0)
     }
 
+    /// The line nearest `at` on screen within `radius`, points or no points:
+    /// what the trim tool acts on.
+    pub fn line_near(&self, at: DVec2, radius: f64) -> Option<u32> {
+        self.lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                let pa = (*self.screen.get(l[0] as usize)?)?;
+                let pb = (*self.screen.get(l[1] as usize)?)?;
+                let d = pb - pa;
+                let t = ((at - pa).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+                Some((i as u32, (pa + d * t).distance(at)))
+            })
+            .filter(|(_, d)| *d <= radius)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
     fn ends(&self, line: u32) -> Option<[u32; 2]> {
         self.lines.get(line as usize).copied()
     }
@@ -335,6 +358,8 @@ pub struct SketchUi {
     pub lines: Vec<u32>,
     /// A point being dragged: which, and where the drag began on the plane.
     pub drag: Option<(u32, DVec2)>,
+    /// The line the trim tool is over, and where on the plane.
+    pub trim: Option<(u32, DVec2)>,
 }
 
 impl SketchUi {
@@ -666,6 +691,11 @@ pub fn view(
             }
             _ => {}
         }
+        if let (Tool::Trim, Some((line, on))) = (ui.tool, ui.trim) {
+            for [a, b] in kreate_ops::ops::sketch_trim::preview(doc, id, line as usize, on) {
+                view.cut.push([to_world(a), to_world(b)]);
+            }
+        }
         if let Some((v, from)) = ui.drag {
             view.preview.push(polyline(vec![at(v), at(v) + (h - from)]));
         }
@@ -703,6 +733,7 @@ pub fn view(
         (Tool::Arc, 1) => "sketch-prompt-arc-end",
         (Tool::Arc, _) => "sketch-prompt-arc-through",
         (Tool::Point, _) => "sketch-prompt-point",
+        (Tool::Trim, _) => "sketch-prompt-trim",
         (Tool::Dimension, _) => "sketch-prompt-dimension",
         (Tool::Constrain(_), _) => "sketch-prompt-constrain",
         (Tool::Extrude, _) => "sketch-prompt-region",

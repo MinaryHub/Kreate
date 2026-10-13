@@ -664,6 +664,12 @@ fn common() -> Vec<Binding> {
             Action::new("app.sketch_tool").with("tool", PropertyValue::Text("point".into())),
         ),
         key(
+            "sketch.tool_trim",
+            "T",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("trim".into())),
+        ),
+        key(
             "sketch.tool_dimension",
             "D",
             Context::Sketch,

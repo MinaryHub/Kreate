@@ -4042,8 +4042,20 @@ impl App {
     fn sketch_hover(&mut self) {
         let Some(on_plane) = self.sketch_plane_point() else {
             self.sketching.hover = None;
+            self.sketching.trim = None;
             return;
         };
+        if self.sketching.tool == kreate::sketching::Tool::Trim {
+            let trim = self
+                .sketch_cursor()
+                .zip(self.sketch_geometry())
+                .and_then(|(at, g)| g.line_near(at, 8.0))
+                .map(|line| (line, on_plane));
+            if trim != self.sketching.trim {
+                self.sketching.trim = trim;
+                self.redraw.set(RedrawReason::UI);
+            }
+        }
         let caught = self
             .sketch_cursor()
             .zip(self.sketch_geometry())
@@ -4187,6 +4199,17 @@ impl App {
                     Tool::Point => {
                         self.run_op_with("sketch.point", &[("at", v3(p))]);
                         self.sketch_tool_done();
+                    }
+                    // Trim stays in hand: one click a piece, as many as there are.
+                    Tool::Trim => {
+                        if let Some((line, on)) = self.sketching.trim.take() {
+                            self.run_op_with(
+                                "sketch.trim",
+                                &[("line", PropertyValue::Int(line as i64)), ("at", v3(on))],
+                            );
+                            self.redraw.set(RedrawReason::SCENE_CHANGED);
+                            self.sketch_hover();
+                        }
                     }
                     Tool::Constrain(_) | Tool::Dimension => {
                         let kind = match tool {

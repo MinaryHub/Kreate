@@ -26,6 +26,7 @@ pub mod sculpt;
 pub mod shape;
 pub mod sketch;
 pub mod sketch_draw;
+pub mod sketch_trim;
 pub mod texture;
 pub mod uv;
 
@@ -44,6 +45,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     design::register(registry);
     sketch::register(registry);
     sketch_draw::register(registry);
+    registry.register::<sketch_trim::Trim>();
     feature::register(registry);
     render::register(registry);
     robot::register(registry);

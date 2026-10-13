@@ -4121,7 +4121,10 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
             }),
             kreate_ops::mode::Menu::Sketch => out.push(TopMenu {
                 label: l.menu_sketch.clone(),
-                nodes: sketch_tool_nodes(l, &["line", "rectangle", "circle", "arc", "point"]),
+                nodes: sketch_tool_nodes(
+                    l,
+                    &["line", "rectangle", "circle", "arc", "point", "trim"],
+                ),
             }),
             kreate_ops::mode::Menu::Constrain => out.push(TopMenu {
                 label: l.menu_constrain.clone(),
@@ -12138,12 +12141,13 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 17] = [
+const SKETCH_TOOLS: [&str; 18] = [
     "line",
     "rectangle",
     "circle",
     "arc",
     "point",
+    "trim",
     "dimension",
     "coincident",
     "perpendicular",
@@ -12201,6 +12205,8 @@ pub struct SketchView {
     pub dims: Vec<SketchDim>,
     /// What the tool in hand would draw, as polylines.
     pub preview: Vec<Vec<kreate_math::DVec3>>,
+    /// What the trim tool would take out.
+    pub cut: Vec<[kreate_math::DVec3; 2]>,
     /// The point the pointer has snapped to.
     pub snap: Option<kreate_math::DVec3>,
     /// The regions picked for an extrude or a revolve, and the one under
@@ -12461,6 +12467,13 @@ fn draw_sketches(
                 6.0,
                 4.0,
             ));
+        }
+    }
+    // The piece a trim would take out, struck through in red.
+    let red = egui::Color32::from_rgb(0xe8, 0x4a, 0x4a);
+    for [a, b] in &view.cut {
+        if let (Some(p), Some(q)) = (project(a), project(b)) {
+            painter.line_segment([p, q], egui::Stroke::new(3.0, red));
         }
     }
     if let Some(p) = view.snap.as_ref().and_then(project) {
