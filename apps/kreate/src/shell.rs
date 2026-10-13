@@ -12234,8 +12234,8 @@ pub struct SketchView {
     pub snap: Option<kreate_math::DVec3>,
     /// The regions picked for an extrude or a revolve, and the one under
     /// the pointer.
-    pub regions: Vec<Vec<kreate_math::DVec3>>,
-    pub hover_region: Option<Vec<kreate_math::DVec3>>,
+    pub regions: Vec<RegionShape>,
+    pub hover_region: Option<RegionShape>,
     /// The tool in hand, by name, and what it asks for next.
     pub tool: &'static str,
     pub prompt: String,
@@ -12246,6 +12246,14 @@ pub struct SketchView {
     pub axis: Option<[u32; 2]>,
     /// The scene's length unit: metres in one, and its symbol.
     pub unit: (f64, &'static str),
+}
+
+/// A closed area of a sketch, for drawing: its outline and holes, and the
+/// triangles that fill it.
+#[derive(Clone, Debug, Default)]
+pub struct RegionShape {
+    pub rings: Vec<Vec<kreate_math::DVec3>>,
+    pub tris: Vec<[kreate_math::DVec3; 3]>,
 }
 
 /// One dimension on the sketch.
@@ -12360,28 +12368,35 @@ fn draw_sketches(
     };
     let project = |p: &kreate_math::DVec3| projector.project(*p);
     // The regions picked, filled faintly; the one under the pointer brighter.
-    let fill = |outline: &[kreate_math::DVec3], alpha: u8| {
-        let pts: Vec<egui::Pos2> = outline.iter().filter_map(project).collect();
-        if pts.len() == outline.len() && pts.len() >= 3 {
-            painter.add(egui::Shape::closed_line(
-                pts.clone(),
-                egui::Stroke::new(1.5, theme.accent),
-            ));
-            // A fan from the first point: enough for a highlight.
-            let c = egui::Color32::from_rgba_unmultiplied(
-                theme.accent.r(),
-                theme.accent.g(),
-                theme.accent.b(),
-                alpha,
-            );
-            let mut mesh = egui::Mesh::default();
-            for p in &pts {
-                mesh.colored_vertex(*p, c);
+    let fill = |region: &RegionShape, alpha: u8| {
+        let c = egui::Color32::from_rgba_unmultiplied(
+            theme.accent.r(),
+            theme.accent.g(),
+            theme.accent.b(),
+            alpha,
+        );
+        // The triangles the region is cut into, holes left out.
+        let mut mesh = egui::Mesh::default();
+        for t in &region.tris {
+            let (Some(a), Some(b), Some(d)) = (project(&t[0]), project(&t[1]), project(&t[2]))
+            else {
+                continue;
+            };
+            let i = mesh.vertices.len() as u32;
+            for p in [a, b, d] {
+                mesh.colored_vertex(p, c);
             }
-            for i in 1..pts.len() as u32 - 1 {
-                mesh.add_triangle(0, i, i + 1);
+            mesh.add_triangle(i, i + 1, i + 2);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+        for ring in &region.rings {
+            let pts: Vec<egui::Pos2> = ring.iter().filter_map(project).collect();
+            if pts.len() == ring.len() && pts.len() >= 3 {
+                painter.add(egui::Shape::closed_line(
+                    pts,
+                    egui::Stroke::new(1.5, theme.accent),
+                ));
             }
-            painter.add(egui::Shape::mesh(mesh));
         }
     };
     for r in &view.regions {

@@ -804,11 +804,24 @@ pub fn view(
     // The regions picked, and the one under the pointer.
     if matches!(ui.tool, Tool::Extrude | Tool::Revolve) {
         let regions = kreate_scene::feature::sketch_regions(doc, id);
+        // Each region as its rings and its triangles, holes and all: a fan
+        // from one corner filled outside a concave outline and over a hole.
         let outline = |r: &kreate_mesh::regions::Region| {
-            r.outline
-                .iter()
-                .map(|p| to_world(p.as_dvec2()))
-                .collect::<Vec<_>>()
+            let rings: Vec<Vec<DVec2>> = std::iter::once(&r.outline)
+                .chain(r.holes.iter())
+                .map(|ring| ring.iter().map(|p| p.as_dvec2()).collect())
+                .collect();
+            let flat: Vec<DVec2> = rings.iter().flatten().copied().collect();
+            crate::shell::RegionShape {
+                rings: rings
+                    .iter()
+                    .map(|ring| ring.iter().map(|p| to_world(*p)).collect())
+                    .collect(),
+                tris: kreate_mesh::earcut::triangulate(&rings)
+                    .into_iter()
+                    .map(|t| t.map(|i| to_world(flat[i])))
+                    .collect(),
+            }
         };
         for s in &ui.seeds {
             if let Some(i) = kreate_mesh::regions::region_at(&regions, s.as_vec2()) {
