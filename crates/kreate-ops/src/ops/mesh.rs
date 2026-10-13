@@ -4471,6 +4471,40 @@ mod tests {
         assert_eq!(doc.mesh(mesh).unwrap().num_faces(), 6);
     }
 
+    /// What `Ctrl+R` slides by: the pointer measured along the edge from
+    /// its first end as `edge_in_world` gives it. The cut has to move that
+    /// way too, on every edge — it went against the pointer on half of them.
+    #[test]
+    fn a_loop_cut_slides_from_the_end_the_tool_measures_from() {
+        let r = registry();
+        let (base, mesh, ctx) = cube_doc();
+        let count = base.mesh(mesh).unwrap().num_edges();
+        for edge in 0..count {
+            let mut doc = base.clone();
+            let mut h = History::new();
+            let (a, b) = edge_in_world(&doc, edge).unwrap();
+            h.dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "mesh.loop_cut",
+                &params(&[
+                    ("cuts", PropertyValue::Int(1)),
+                    ("edge", PropertyValue::Int(edge as i64)),
+                    ("position", PropertyValue::Float(0.25)),
+                ]),
+            )
+            .unwrap();
+            let want = a.lerp(b, 0.25);
+            let after = doc.mesh(mesh).unwrap();
+            let landed = after
+                .positions()
+                .iter()
+                .any(|p| p.as_dvec3().distance(want) < 1e-5);
+            assert!(landed, "edge {edge}: no cut a quarter from its first end");
+        }
+    }
+
     #[test]
     fn sliding_re_runs_from_the_original_rather_than_compounding() {
         // The adjust-last path, which is what makes a slide exact. Two different

@@ -77,14 +77,6 @@ pub fn loop_cut(
         return Ok(out);
     }
 
-    // The cut positions along an edge. Evenly spread, then shifted by
-    // `position - 0.5` so that a single cut at 0.5 sits in the middle and the
-    // slider moves the whole group without reordering it.
-    let shift = position.clamp(0.0, 1.0) - 0.5;
-    let ts: Vec<f32> = (0..cuts)
-        .map(|i| ((i + 1) as f32 / (cuts + 1) as f32 + shift).clamp(0.02, 0.98))
-        .collect();
-
     // --- read ---------------------------------------------------------------
     // Consecutive ring edges, each pair naming one face of the strip. Derived
     // from the ring rather than from `face_loop` so that *which* of a face's two
@@ -163,6 +155,36 @@ pub fn loop_cut(
     if corners.len() != strips.len() || strip_edges.len() != strips.len() {
         return Ok(out);
     }
+
+    // The cut positions along an edge. Evenly spread, then shifted by
+    // `position - 0.5` so that a single cut at 0.5 sits in the middle and the
+    // slider moves the whole group without reordering it.
+    //
+    // `position` runs from the seed edge's first end. The strips lay each
+    // ring edge out from the end their face's winding reaches first, which
+    // for the seed is that end or the other one by chance — and the slide,
+    // which measures the pointer along the seed from its first end, went
+    // the wrong way half the time. Measured from the other end, the same
+    // place is `1 - position`: the evenly spread group is symmetric about
+    // the middle.
+    let seed_from = strip_edges.iter().zip(&corners).find_map(|([e0, e1], c)| {
+        if *e0 == seed {
+            Some(c[0])
+        } else if *e1 == seed {
+            Some(c[3])
+        } else {
+            None
+        }
+    });
+    let position = position.clamp(0.0, 1.0);
+    let position = match (seed_from, mesh.edge_verts(seed)) {
+        (Some(from), Some([first, _])) if from != first => 1.0 - position,
+        _ => position,
+    };
+    let shift = position - 0.5;
+    let ts: Vec<f32> = (0..cuts)
+        .map(|i| ((i + 1) as f32 / (cuts + 1) as f32 + shift).clamp(0.02, 0.98))
+        .collect();
 
     // --- write --------------------------------------------------------------
     let mut splits: Vec<Option<Splits>> =
@@ -565,14 +587,43 @@ mod tests {
         m.assert_valid();
         let x = m.position(out.verts[0]).unwrap().x;
 
-        // A quarter along the seed, measured from whichever end the walk chose:
-        // both are the same cut, and pinning the direction would be pinning an
-        // implementation detail rather than the behaviour.
+        // A quarter along the seed from its first end — the end the slide
+        // measures the pointer from. Either end used to do, and the cut then
+        // slid against the pointer on every edge the walk took backwards.
         let fraction = (x - pa.x) / (pb.x - pa.x);
         assert!(
-            (fraction - 0.25).abs() < 1e-4 || (fraction - 0.75).abs() < 1e-4,
+            (fraction - 0.25).abs() < 1e-4,
             "the cut sits at {fraction} of the way along the seed"
         );
+    }
+
+    /// Every edge of a cube, each way round the walk may take it: a quarter
+    /// from its first end, every time.
+    #[test]
+    fn the_position_runs_from_the_seeds_first_end_on_every_edge() {
+        let base = BMesh::from_mesh_data(&primitives::cube(2.0));
+        let edges: Vec<EdgeId> = base.edge_ids().collect();
+        for seed in edges {
+            let mut m = base.clone();
+            let [a, b] = m.edge_verts(seed).unwrap();
+            let (pa, pb) = (m.position(a).unwrap(), m.position(b).unwrap());
+            let out = loop_cut(&mut m, seed, 1, 0.25).unwrap();
+            let on_seed = out
+                .verts
+                .iter()
+                .filter_map(|v| m.position(*v))
+                .find(|p| {
+                    let d = pb - pa;
+                    let t = (*p - pa).dot(d) / d.length_squared();
+                    (pa + d * t).distance(*p) < 1e-5 && (0.0..=1.0).contains(&t)
+                })
+                .expect("a cut vertex on the seed");
+            let fraction = (on_seed - pa).length() / (pb - pa).length();
+            assert!(
+                (fraction - 0.25).abs() < 1e-4,
+                "{seed:?}: {fraction} of the way from its first end"
+            );
+        }
     }
 
     #[test]
