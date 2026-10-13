@@ -951,6 +951,17 @@ struct App {
     /// `K` drawing a cut: the points clicked so far, in the world, and where
     /// the next click would put one.
     knife: Option<(Vec<DVec3>, Option<DVec3>)>,
+    /// The sketch tools' state: see `kreate::sketching`.
+    sketching: kreate::sketching::SketchUi,
+    /// Sketch mode was asked for with no sketch to draw in: the plane menu
+    /// is open, and choosing a plane starts one and enters.
+    sketch_waiting: bool,
+    /// The sketch the camera was last turned to face, so entering turns it
+    /// once and leaves the user's own orbit alone after.
+    sketch_faced: Option<kreate_scene::Uid>,
+    /// Which points of the sketch are pinned, and what that was worked out
+    /// for: the analysis is a matrix reduction, not a per-frame cost.
+    sketch_pinned: (u64, Vec<bool>),
     /// The Measure tool, while it is out. See `begin_measure`.
     measure: Option<MeasureTool>,
     /// Walk Navigation, while it runs, and when it last moved the view.
@@ -1069,7 +1080,7 @@ impl App {
             egui_ctx: egui::Context::default(),
             egui_state: None,
             fonts_warmed: false,
-            camera: Camera::default(),
+            camera: kreate::startup::starting_camera(),
             input: Input::default(),
             redraw: RedrawReason(RedrawReason::SCENE_CHANGED),
             latency: LatencyStats::default(),
@@ -1091,7 +1102,7 @@ impl App {
             hover: None,
             xray: false,
             drag_select: None,
-            motion: kreate_render::CameraMotion::new(kreate_render::Camera::default()),
+            motion: kreate_render::CameraMotion::new(kreate::startup::starting_camera()),
             last_frame: None,
             keymap: Keymap::default(),
             preset: Preset::default(),
@@ -1139,6 +1150,10 @@ impl App {
             loop_cut_hover: None,
             loop_cut_seed: None,
             knife: None,
+            sketching: Default::default(),
+            sketch_waiting: false,
+            sketch_faced: None,
+            sketch_pinned: (0, Vec::new()),
             measure: None,
             walk: None,
             walk_clock: None,
@@ -1365,6 +1380,29 @@ impl App {
         // inside it can be. A sweep proved the point — the guard that used to
         // live here, and the selection sweep below, could both be removed
         // without a single test noticing.
+        if mode == OpMode::Sketch
+            && kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_none()
+        {
+            self.sketch_waiting = true;
+            self.open_popup_menu("sketch_plane");
+            return;
+        }
+        // A body made from sketches holds no mesh of its own — it is built
+        // again from its features — so editing its vertices means making it
+        // a plain mesh first, as Fusion does when design history is turned
+        // off. One undo step brings the features back.
+        if mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements
+            && self.op_ctx.mode.acts_on() != kreate_ops::mode::ActsOn::MeshElements
+            && self
+                .doc
+                .selection
+                .active
+                .and_then(|id| self.doc.object(id))
+                .is_some_and(|o| !o.features.is_empty())
+        {
+            self.run_op_with("feature.to_mesh", &[]);
+            self.status(&self.ui.catalog.get("feature-made-mesh"));
+        }
         let has = kreate_ops::mode::Has::of(&self.doc);
         let Some(change) = kreate::mode::plan(self.op_ctx.mode, mode, has) else {
             return;
@@ -1816,7 +1854,10 @@ impl App {
                             self,
                             t(key),
                             "object.add_primitive",
-                            &[("shape", PropertyValue::Enum(i as u32))],
+                            &[
+                                ("shape", PropertyValue::Enum(i as u32)),
+                                ("on_floor", PropertyValue::Bool(true)),
+                            ],
                         )
                     })
                     .collect();
@@ -1962,6 +2003,25 @@ impl App {
                     ),
                 ],
             }],
+            "sketch_plane" => {
+                let plane = |app: &App, key: &str, i: u32| {
+                    row(
+                        app,
+                        t(key),
+                        "sketch.new",
+                        &[("plane", PropertyValue::Enum(i))],
+                    )
+                };
+                vec![Group {
+                    title: t("sketch-plane"),
+                    entries: vec![
+                        plane(self, "sketch-plane-xy", 0),
+                        plane(self, "sketch-plane-xz", 1),
+                        plane(self, "sketch-plane-yz", 2),
+                        plane(self, "sketch-plane-cursor", 3),
+                    ],
+                }]
+            }
             "apply" => {
                 let apply = |app: &App, key: &str, l: bool, r: bool, s: bool| {
                     row(
@@ -1989,17 +2049,22 @@ impl App {
             _ => return,
         };
         self.ui.context_menu.groups = groups;
-        let Some((rx, ry, _, _)) = self.viewport_px else {
+        let Some((rx, ry, rw, rh)) = self.viewport_px else {
             return;
         };
-        let Some((x, y)) = self.input.cursor else {
-            return;
-        };
+        // At the pointer, but inside the viewport: the menu is drawn by the
+        // viewport and only there, and a menu opened from a button above it —
+        // the Sketch mode tab asking for a plane — would otherwise open off
+        // the viewport and never be seen.
+        let (x, y) = self
+            .input
+            .cursor
+            .map(|(x, y)| (x as f32, y as f32))
+            .unwrap_or((rx + rw * 0.5, ry + rh * 0.5));
+        let x = x.clamp(rx + 8.0, (rx + rw - 8.0).max(rx + 8.0));
+        let y = y.clamp(ry + 8.0, (ry + rh - 8.0).max(ry + 8.0));
         let scale = self.egui_ctx.pixels_per_point().max(0.01);
-        self.ui.context_menu.at = Some(egui::pos2(
-            (x as f32 - rx) / scale + rx / scale,
-            (y as f32 - ry) / scale + ry / scale,
-        ));
+        self.ui.context_menu.at = Some(egui::pos2(x / scale, y / scale));
         self.redraw.set(RedrawReason::UI);
     }
 
@@ -3906,6 +3971,501 @@ impl App {
         self.redraw.set(RedrawReason::HOVER_CHANGED);
     }
 
+    // --- sketching -----------------------------------------------------------
+
+    /// The active sketch and where it is in the world.
+    fn sketch_target(&self) -> Option<(kreate_scene::document::ObjectId, glam::DAffine3)> {
+        let id = kreate_ops::ops::sketch_draw::active_sketch(&self.doc)?;
+        Some((id, self.doc.world_transform(id)))
+    }
+
+    /// The ray under the pointer: from the eye in perspective, from the view's
+    /// plane straight on in orthographic.
+    fn cursor_ray(&self) -> Option<(DVec3, DVec3)> {
+        let ndc = self.cursor_ndc()?;
+        let aspect = self.viewport_aspect();
+        match self.camera.projection {
+            kreate_render::Projection::Perspective => {
+                let d = self.camera.ray_direction(ndc, aspect);
+                Some((self.camera.eye(), d.as_dvec3().normalize()))
+            }
+            kreate_render::Projection::Orthographic => {
+                let h = self.camera.ortho_height() * 0.5;
+                let origin = self.camera.eye()
+                    + self.camera.right() * (ndc.x as f64 * h * aspect)
+                    + self.camera.up() * (ndc.y as f64 * h);
+                Some((origin, self.camera.forward()))
+            }
+        }
+    }
+
+    /// The pointer on the active sketch's plane, in the sketch's own space.
+    fn sketch_plane_point(&self) -> Option<glam::DVec2> {
+        let (_, world) = self.sketch_target()?;
+        let (o, d) = self.cursor_ray()?;
+        let back = world.inverse();
+        let (o, d) = (back.transform_point3(o), back.transform_vector3(d));
+        if d.z.abs() < 1e-12 {
+            return None;
+        }
+        let t = -o.z / d.z;
+        let p = o + d * t;
+        Some(glam::DVec2::new(p.x, p.y))
+    }
+
+    /// The pointer in interface points, as the projector puts things.
+    fn sketch_cursor(&self) -> Option<glam::DVec2> {
+        let (x, y) = self.input.cursor?;
+        let ppp = self.egui_ctx.pixels_per_point() as f64;
+        Some(glam::DVec2::new(x / ppp, y / ppp))
+    }
+
+    /// The active sketch as the tools see it.
+    fn sketch_geometry(&self) -> Option<kreate::sketching::Geometry> {
+        let (id, world) = self.sketch_target()?;
+        let projector = self.ui.projector?;
+        let object = self.doc.object(id)?;
+        let points = kreate_ops::ops::sketch_draw::points(&self.doc, id);
+        Some(kreate::sketching::Geometry::new(
+            points,
+            object.sketch_lines.clone(),
+            &object.sketch,
+            |p| {
+                projector
+                    .project(world.transform_point3(DVec3::new(p.x, p.y, 0.0)))
+                    .map(|q| glam::DVec2::new(q.x as f64, q.y as f64))
+            },
+        ))
+    }
+
+    /// The pointer on the plane, caught by a point of the sketch near it.
+    fn sketch_hover(&mut self) {
+        let Some(on_plane) = self.sketch_plane_point() else {
+            self.sketching.hover = None;
+            return;
+        };
+        let caught = self
+            .sketch_cursor()
+            .zip(self.sketch_geometry())
+            .and_then(|(at, g)| Some((g.point_near(at, 10.0)?, g)));
+        self.sketching.hover = Some(match caught {
+            Some((v, g)) => (g.points[v as usize], v + 1),
+            None => (on_plane, 0),
+        });
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    fn sketch_tool_done(&mut self) {
+        self.sketching.reset();
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// A line tool's points so far, run as one stroke.
+    fn commit_sketch_line(&mut self, closed: bool) {
+        let clicks = std::mem::take(&mut self.sketching.clicks);
+        if clicks.len() >= 2 {
+            self.run_op_with(
+                "sketch.line",
+                &[
+                    (
+                        "points",
+                        PropertyValue::Floats(
+                            clicks.iter().flat_map(|(p, _)| [p.x, p.y]).collect(),
+                        ),
+                    ),
+                    (
+                        "joins",
+                        PropertyValue::Ints(clicks.iter().map(|(_, j)| *j).collect()),
+                    ),
+                    ("closed", PropertyValue::Bool(closed)),
+                ],
+            );
+        }
+        self.sketch_tool_done();
+    }
+
+    /// The sketch mouse: returns whether the press or release was the tools'.
+    fn sketch_mouse(&mut self, button: MouseButton, pressed: bool) -> bool {
+        use kreate::sketching::{Pick, Tool};
+        let tool = self.sketching.tool;
+        match (button, pressed) {
+            (MouseButton::Right, true) => {
+                if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
+                    self.commit_sketch_line(false);
+                } else if !self.sketching.clicks.is_empty() || !self.sketching.picks.is_empty() {
+                    self.sketch_tool_done();
+                } else {
+                    self.sketching.take(Tool::Select);
+                }
+                true
+            }
+            (MouseButton::Left, false) => {
+                // The end of a point's drag.
+                if let (Some((v, from)), Some(to)) =
+                    (self.sketching.drag.take(), self.sketch_plane_point())
+                {
+                    let offset = to - from;
+                    if offset.length() > 1e-9 {
+                        self.run_op_with(
+                            "sketch.move",
+                            &[
+                                ("points", PropertyValue::Ints(vec![v])),
+                                ("offset", PropertyValue::Vec3([offset.x, offset.y, 0.0])),
+                            ],
+                        );
+                    }
+                    return true;
+                }
+                false
+            }
+            (MouseButton::Left, true) if self.press_belongs_to_viewport() => {
+                self.sketch_hover();
+                let Some((p, join)) = self.sketching.hover else {
+                    return true;
+                };
+                let pick = self
+                    .sketch_cursor()
+                    .zip(self.sketch_geometry())
+                    .and_then(|(at, g)| g.pick(at));
+                let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
+                match tool {
+                    Tool::Line => {
+                        let first = self.sketching.clicks.first().map(|c| c.1);
+                        self.sketching.clicks.push((p, join));
+                        self.sketching.typed.clear();
+                        // Back on the first point: the outline is closed.
+                        if self.sketching.clicks.len() >= 3 && join > 0 && first == Some(join) {
+                            self.sketching.clicks.pop();
+                            self.commit_sketch_line(true);
+                        }
+                    }
+                    Tool::Rectangle | Tool::Circle | Tool::Arc => {
+                        self.sketching.clicks.push((p, join));
+                        let c = self.sketching.clicks.clone();
+                        match (tool, c.len()) {
+                            (Tool::Rectangle, 2) => {
+                                self.run_op_with(
+                                    "sketch.rectangle",
+                                    &[
+                                        ("a", v3(c[0].0)),
+                                        ("b", v3(c[1].0)),
+                                        ("join", PropertyValue::Int(c[0].1 as i64)),
+                                    ],
+                                );
+                                self.sketch_tool_done();
+                            }
+                            (Tool::Circle, 2) => {
+                                let r = c[0].0.distance(c[1].0);
+                                if r > 1e-9 {
+                                    self.run_op_with(
+                                        "sketch.circle",
+                                        &[
+                                            ("centre", v3(c[0].0)),
+                                            ("radius", PropertyValue::Float(r)),
+                                            ("join", PropertyValue::Int(c[0].1 as i64)),
+                                        ],
+                                    );
+                                }
+                                self.sketch_tool_done();
+                            }
+                            // Start, end, then a point on the way.
+                            (Tool::Arc, 3) => {
+                                self.run_op_with(
+                                    "sketch.arc",
+                                    &[
+                                        ("start", v3(c[0].0)),
+                                        ("end", v3(c[1].0)),
+                                        ("through", v3(c[2].0)),
+                                        ("joins", PropertyValue::Ints(vec![c[0].1, c[1].1])),
+                                    ],
+                                );
+                                self.sketch_tool_done();
+                            }
+                            _ => {}
+                        }
+                    }
+                    Tool::Point => {
+                        self.run_op_with("sketch.point", &[("at", v3(p))]);
+                        self.sketch_tool_done();
+                    }
+                    Tool::Constrain(_) | Tool::Dimension => {
+                        let kind = match tool {
+                            Tool::Constrain(k) => k,
+                            _ => "",
+                        };
+                        let Some(pick) = pick else {
+                            return true;
+                        };
+                        self.sketching.picks.push(pick);
+                        let g = self.sketch_geometry().unwrap_or_default();
+                        let result = if tool == Tool::Dimension {
+                            kreate::sketching::dimension_for(&self.sketching.picks, &g)
+                        } else {
+                            kreate::sketching::constraint_for(kind, &self.sketching.picks, &g)
+                        };
+                        match result {
+                            Ok(Some((tag, points))) => {
+                                let kind = kreate_scene::sketch::KINDS
+                                    .iter()
+                                    .position(|k| *k == tag)
+                                    .unwrap_or(0) as u32;
+                                self.run_op_with(
+                                    "sketch.constrain",
+                                    &[
+                                        ("kind", PropertyValue::Enum(kind)),
+                                        ("points", PropertyValue::Ints(points)),
+                                    ],
+                                );
+                                // A dimension placed is a number to type.
+                                if tool == Tool::Dimension {
+                                    if let Some((id, _)) = self.sketch_target() {
+                                        let n = self.doc.object(id).map_or(0, |o| o.sketch.len());
+                                        self.ui.sketch_dim_edit =
+                                            n.checked_sub(1).map(|i| (i, String::new()));
+                                    }
+                                }
+                                self.sketch_tool_done();
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                self.status(&self.ui.catalog.get("sketch-cannot-constrain"));
+                                self.sketch_tool_done();
+                            }
+                        }
+                    }
+                    Tool::Select => {
+                        let extend = self.input.shift_down;
+                        if !extend {
+                            self.sketching.points.clear();
+                            self.sketching.lines.clear();
+                        }
+                        match pick {
+                            Some(Pick::Point(v)) => {
+                                self.sketching.points.push(v);
+                                self.sketching.drag = Some((v, p));
+                            }
+                            Some(Pick::Line(l)) => self.sketching.lines.push(l),
+                            _ => {}
+                        }
+                    }
+                    Tool::Extrude | Tool::Revolve => {
+                        if let (Tool::Revolve, Some(Pick::Line(l))) = (tool, pick) {
+                            if let Some(ends) = self
+                                .sketch_target()
+                                .and_then(|(id, _)| self.doc.object(id))
+                                .and_then(|o| o.sketch_lines.get(l as usize).copied())
+                            {
+                                self.sketching.axis = Some(ends);
+                                return true;
+                            }
+                        }
+                        // A region: picked, or put back if it already was.
+                        if let Some((id, _)) = self.sketch_target() {
+                            let regions = kreate_scene::feature::sketch_regions(&self.doc, id);
+                            let at = |q: glam::DVec2| {
+                                kreate_mesh::regions::region_at(&regions, q.as_vec2())
+                            };
+                            if let Some(r) = at(p) {
+                                let before = self.sketching.seeds.len();
+                                self.sketching.seeds.retain(|s| at(*s) != Some(r));
+                                if self.sketching.seeds.len() == before {
+                                    self.sketching.seeds.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The sketch keys: typing a length, Enter, Backspace and Escape.
+    /// Returns whether the key was the tools'.
+    fn sketch_key(&mut self, code: KeyCode) -> bool {
+        use kreate::sketching::Tool;
+        let tool = self.sketching.tool;
+        let drawing = tool.draws() && !self.sketching.clicks.is_empty();
+        let typed = match code {
+            KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
+            KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
+            KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
+            KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
+            KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
+            KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
+            KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
+            KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
+            KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
+            KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
+            KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
+            KeyCode::Minus | KeyCode::NumpadSubtract => Some('-'),
+            KeyCode::Comma | KeyCode::Space => Some(','),
+            _ => None,
+        };
+        if let (true, Some(ch)) = (drawing, typed) {
+            self.sketching.typed.push(ch);
+            self.redraw.set(RedrawReason::UI);
+            return true;
+        }
+        let unit = self.doc.design.length_unit.metres();
+        match code {
+            KeyCode::Backspace if drawing => {
+                if self.sketching.typed.pop().is_none() {
+                    self.sketching.clicks.pop();
+                }
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter if drawing => {
+                let lengths = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
+                let (last, toward) = (
+                    self.sketching
+                        .clicks
+                        .last()
+                        .map(|c| c.0)
+                        .unwrap_or_default(),
+                    self.sketching.hover.map(|h| h.0).unwrap_or_default(),
+                );
+                let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
+                match (tool, lengths.as_slice()) {
+                    (Tool::Line, [length, ..]) => {
+                        let next = kreate::sketching::along(last, toward, *length);
+                        self.sketching.clicks.push((next, 0));
+                        self.sketching.typed.clear();
+                    }
+                    (Tool::Line, []) => self.commit_sketch_line(false),
+                    (Tool::Rectangle, [w, h, ..]) => {
+                        let first = self.sketching.clicks[0];
+                        let far = kreate::sketching::corner(first.0, toward, *w, *h);
+                        self.run_op_with(
+                            "sketch.rectangle",
+                            &[
+                                ("a", v3(first.0)),
+                                ("b", v3(far)),
+                                ("join", PropertyValue::Int(first.1 as i64)),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    // A circle's number is its diameter, as Fusion's is.
+                    (Tool::Circle, [d, ..]) => {
+                        let first = self.sketching.clicks[0];
+                        self.run_op_with(
+                            "sketch.circle",
+                            &[
+                                ("centre", v3(first.0)),
+                                ("radius", PropertyValue::Float(d.abs() * 0.5)),
+                                ("join", PropertyValue::Int(first.1 as i64)),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    _ => {}
+                }
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
+            KeyCode::Escape => {
+                if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
+                    self.commit_sketch_line(false);
+                } else if !self.sketching.clicks.is_empty()
+                    || !self.sketching.picks.is_empty()
+                    || !self.sketching.seeds.is_empty()
+                {
+                    self.sketch_tool_done();
+                } else if tool != Tool::Select {
+                    self.sketching.take(Tool::Select);
+                } else {
+                    self.sketching.points.clear();
+                    self.sketching.lines.clear();
+                }
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Turns the camera to look straight at the sketch's plane, once per
+    /// sketch entered; and keeps the overlay's picture of the sketch.
+    fn update_sketch_view(&mut self) {
+        use kreate::sketching::Tool;
+        // Every sketch's lines, thin, whatever the mode.
+        let active = (self.op_ctx.mode == OpMode::Sketch)
+            .then(|| self.sketch_target().map(|t| t.0))
+            .flatten();
+        self.ui.sketch_lines = kreate::sketching::other_lines(&self.doc, active);
+        self.ui.length_unit = self.doc.design.length_unit.metres();
+        self.ui.features = kreate::sketching::feature_rows(&self.doc, &self.ui.catalog);
+
+        // Waiting for a plane: entered once the new sketch is active, given
+        // up when the menu closed without one.
+        if self.sketch_waiting {
+            if kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_some() {
+                self.sketch_waiting = false;
+                self.set_mode(OpMode::Sketch);
+            } else if self.ui.context_menu.groups.is_empty() {
+                self.sketch_waiting = false;
+            }
+        }
+        if self.op_ctx.mode != OpMode::Sketch {
+            self.ui.sketch_view = None;
+            self.sketch_faced = None;
+            if self.sketching.tool != Tool::Select || !self.sketching.clicks.is_empty() {
+                self.sketching = Default::default();
+            }
+            return;
+        }
+        let Some((id, world)) = self.sketch_target() else {
+            self.ui.sketch_view = None;
+            return;
+        };
+        let uid = self.doc.object(id).map(|o| o.uid);
+        if self.sketch_faced != uid {
+            self.sketch_faced = uid;
+            self.sketching = Default::default();
+            // Face the plane: the camera turned as the sketch is, looking
+            // down its Z, orthographic, about its origin.
+            let (_, rotation, translation) = world.to_scale_rotation_translation();
+            let mut camera = self.camera;
+            camera.rotation = rotation;
+            camera.pivot = translation;
+            camera.projection = kreate_render::Projection::Orthographic;
+            self.camera = camera;
+            self.motion = kreate_render::CameraMotion::new(camera);
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+        }
+        // Pinned, worked out again only when the sketch changed.
+        let points = kreate_ops::ops::sketch_draw::points(&self.doc, id);
+        let constraints = self
+            .doc
+            .object(id)
+            .map(|o| o.sketch.clone())
+            .unwrap_or_default();
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{constraints:?}").hash(&mut h);
+            for p in &points {
+                p.x.to_bits().hash(&mut h);
+                p.y.to_bits().hash(&mut h);
+            }
+            h.finish()
+        };
+        if self.sketch_pinned.0 != key {
+            self.sketch_pinned = (key, kreate::sketching::pinned(&points, &constraints));
+        }
+        self.ui.sketch_view = Some(kreate::sketching::view(
+            &self.doc,
+            id,
+            &self.sketching,
+            &self.ui.catalog,
+            &self.sketch_pinned.1,
+        ));
+    }
+
     fn begin_knife(&mut self) {
         if self.gesture.is_some() || self.knife.is_some() {
             return;
@@ -4586,6 +5146,22 @@ impl App {
                         self.set_mode(mode);
                     }
                 }
+                Command::EditSketch(name) => {
+                    let found = self
+                        .doc
+                        .objects()
+                        .find(|(_, o)| o.name == name)
+                        .map(|(id, _)| id);
+                    if let Some(id) = found {
+                        if self.op_ctx.mode != OpMode::RESTING {
+                            self.set_mode(OpMode::RESTING);
+                        }
+                        self.doc.selection.clear();
+                        self.doc.selection.add(id);
+                        self.doc.selection.active = Some(id);
+                        self.set_mode(OpMode::Sketch);
+                    }
+                }
                 Command::SetSelectMode(mode) => self.set_select_mode(mode),
                 Command::SetSculptBrush(brush) => {
                     self.ui.sculpt.brush =
@@ -4929,8 +5505,8 @@ impl App {
         // scene camera and any glide in progress, and then framed as
         // `adopt` frames. Keeping the last document's angle, lens or
         // orthographic view made a new document look like an old one.
-        self.camera = Camera::default();
-        self.motion = kreate_render::CameraMotion::new(Camera::default());
+        self.camera = kreate::startup::starting_camera();
+        self.motion = kreate_render::CameraMotion::new(kreate::startup::starting_camera());
         self.camera_view = None;
         self.camera_view_object = None;
         // The grid too, which a fresh start always shows.
@@ -7792,6 +8368,8 @@ impl App {
         // Exhaustive on what the mode acts on, so a mode that acts on bones
         // has to say what a click does rather than landing in a default.
         match self.op_ctx.mode.acts_on() {
+            // The sketch tools take their clicks before selection sees them.
+            kreate_ops::mode::ActsOn::Sketch => {}
             kreate_ops::mode::ActsOn::MeshElements => {
                 let mode = match self.pick_domain() {
                     kreate_render::PickDomain::Vert => 0u32,
@@ -8347,6 +8925,8 @@ impl App {
         // Before the interface borrows anything: the panel reads this, and it
         // has to be settled while `self` is still free.
         self.publish_uv_view();
+        // The sketch overlay and the feature list, likewise.
+        self.update_sketch_view();
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -8940,6 +9520,7 @@ impl App {
         // user is modelling under the studio lights.
         // The overlays as they are, for the menu's check marks.
         let overlays = kreate::shell::Overlays {
+            flat: gfx.viewport.shading == kreate_render::ShadingMode::Flat,
             grid: gfx.viewport.show_grid,
             wireframe: gfx.viewport.show_wireframe,
             face_orientation: gfx.viewport.face_orientation,
@@ -8954,14 +9535,28 @@ impl App {
             path_trace: gfx.viewport.path_trace,
             textures: self.solid_textures,
         };
-        if gfx.viewport.shading == kreate_render::ShadingMode::Rendered {
-            gfx.viewport
-                .set_world(scenelights::world_radiance(&self.doc));
+        let preview = (gfx.viewport.shading == kreate_render::ShadingMode::Material)
+            .then(|| scenelights::material_preview(self.camera.rotation));
+        if gfx.viewport.shading.lit() {
+            // The material preview's own light: an even pale sky and one
+            // soft key from over the viewer's left shoulder, turning with the
+            // view as Blender's preview light does — the scene's lamps and
+            // sky are the rendered view's.
+            if let Some(preview) = &preview {
+                gfx.viewport.set_world(preview.world);
+                if self.environment.take().is_some() {
+                    gfx.viewport
+                        .clear_environment(&gfx.gpu.device, &gfx.gpu.queue);
+                }
+            } else {
+                gfx.viewport
+                    .set_world(scenelights::world_radiance(&self.doc));
+            }
             // The environment, rebuilt only when it is a different one. Six
             // faces and their mips is not a per-frame cost, and the key is what
             // tells "the same sky again" from "a sky that finished loading".
             let want = kreate::environment::key_of(&self.doc);
-            if want != self.environment {
+            if preview.is_none() && want != self.environment {
                 match kreate::environment::background_image(&self.doc) {
                     Some(image) => {
                         let pixels = kreate::environment::pixels_of(image);
@@ -9197,7 +9792,10 @@ impl App {
             }
             // With the distance each lamp is worth computing to, which is
             // what the tile pass culls against.
-            let lights = scenelights::culled_lights(&self.doc, self.camera.pivot);
+            let lights = match &preview {
+                Some(preview) => preview.lights.clone(),
+                None => scenelights::culled_lights(&self.doc, self.camera.pivot),
+            };
             gfx.viewport
                 .set_lights(&gfx.gpu.device, &gfx.gpu.queue, self.camera.eye(), &lights);
             // The bridge between §2.2's photometric lights and §2.1's display
@@ -9208,11 +9806,15 @@ impl App {
             // which is what a photographer takes and what keeps the walls from
             // changing brightness as the camera turns.
             let shot = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot);
+            // The preview's light is its own, so its exposure is too.
+            let exposure = preview
+                .as_ref()
+                .map_or(shot.exposure as f32, |p| p.exposure);
             gfx.viewport.set_display(
                 &gfx.gpu.queue,
                 kreate_render::display::Display {
                     view: kreate_math::ViewTransform::AgX,
-                    exposure: shot.exposure as f32,
+                    exposure,
                 },
             );
             // What the header reports, from the same answer the picture was
@@ -9220,8 +9822,8 @@ impl App {
             self.ui.view_status = kreate::shell::ViewStatus {
                 overlays,
                 shading: gfx.viewport.shading,
-                exposure: shot.exposure as f32,
-                metered: shot.metered,
+                exposure,
+                metered: shot.metered && preview.is_none(),
                 samples: gfx.viewport.path_trace_samples(),
                 orthographic: matches!(
                     self.camera.projection,
@@ -9751,6 +10353,9 @@ impl App {
                 _ => {}
             }
         }
+        if self.op_ctx.mode == OpMode::Sketch && self.sketch_key(code) {
+            return;
+        }
         if self.loop_cut_hover.is_some() && code == KeyCode::Escape {
             self.end_loop_cut_hover();
             self.status("Loop Cut cancelled");
@@ -9894,6 +10499,32 @@ impl App {
             }
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
             "mesh.knife" if self.op_ctx.mode.edits_elements() => self.begin_knife(),
+            "app.sketch_tool" => {
+                let name = match action.params.get("tool") {
+                    Some(PropertyValue::Text(t)) => t.clone(),
+                    _ => String::new(),
+                };
+                if let Some(tool) = kreate::sketching::Tool::from_name(&name) {
+                    if self.op_ctx.mode != OpMode::Sketch {
+                        self.set_mode(OpMode::Sketch);
+                    }
+                    self.sketching.take(tool);
+                    self.redraw.set(RedrawReason::UI);
+                }
+            }
+            "app.sketch_delete" if self.op_ctx.mode == OpMode::Sketch => {
+                let (points, lines) = (self.sketching.points.clone(), self.sketching.lines.clone());
+                if !points.is_empty() || !lines.is_empty() {
+                    self.run_op_with(
+                        "sketch.delete",
+                        &[
+                            ("points", PropertyValue::Ints(points)),
+                            ("lines", PropertyValue::Ints(lines)),
+                        ],
+                    );
+                    self.sketching.reset();
+                }
+            }
             "mesh.select_linked_pick" if self.op_ctx.mode.edits_elements() => {
                 let deselect = action
                     .params
@@ -10274,16 +10905,26 @@ impl App {
             }
             "view.cycle_shading" => {
                 if let Some(gfx) = self.gfx.as_mut() {
-                    // Studio, flat, rendered, round. Rendered last because
-                    // it is the one that needs a scene with lights in it —
-                    // cycling into it from flat on an unlit scene shows
-                    // black, which is correct and is not what somebody
-                    // pressing the key twice was after.
+                    // Blender's four, in its order: wireframe, solid, material
+                    // preview, rendered. Rendered last because it is the one
+                    // that needs a scene with lights in it. Flat is a way of
+                    // lighting the solid view, and goes on to the preview.
                     gfx.viewport.shading = match gfx.viewport.shading {
                         ShadingMode::Wireframe => ShadingMode::Studio,
-                        ShadingMode::Studio => ShadingMode::Flat,
-                        ShadingMode::Flat => ShadingMode::Rendered,
+                        ShadingMode::Studio | ShadingMode::Flat => ShadingMode::Material,
+                        ShadingMode::Material => ShadingMode::Rendered,
                         ShadingMode::Rendered => ShadingMode::Wireframe,
+                    };
+                    self.redraw.set(RedrawReason::SETTINGS);
+                }
+            }
+            "view.toggle_flat" => {
+                // The solid view's lighting, studio or none; from another
+                // view, into the solid view lit flat.
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.shading = match gfx.viewport.shading {
+                        ShadingMode::Flat => ShadingMode::Studio,
+                        _ => ShadingMode::Flat,
                     };
                     self.redraw.set(RedrawReason::SETTINGS);
                 }
@@ -10323,6 +10964,7 @@ impl App {
                     &[
                         ("shape", PropertyValue::Enum(shape)),
                         ("location", PropertyValue::Vec3([n * 3.0, 0.0, 0.0])),
+                        ("on_floor", PropertyValue::Bool(true)),
                     ],
                 );
             }
@@ -10704,58 +11346,85 @@ impl ApplicationHandler for App {
         // What follows — every pipeline compiled, the shaders warmed — is the
         // bulk of the start-up, and without this the window sits blank for it.
         let mut splash = Splash::new(&self.egui_ctx, &self.ui.catalog);
-        let show = |message: &str,
-                    splash: &mut Splash,
-                    egui_state: &mut egui_winit::State,
-                    renderer: &mut egui_wgpu::Renderer| {
-            splash.draw(
-                &self.egui_ctx,
-                egui_state,
-                &window,
-                &gpu,
-                &surface,
-                &config,
-                renderer,
-                message,
-            );
-        };
-        let egui_state = self.egui_state.as_mut().expect("made just above");
-        show(
-            &self.ui.catalog.get("splash-shaders"),
-            &mut splash,
-            egui_state,
+        // egui's input as the window has it now — its size, its scale — kept
+        // to draw every splash frame from, re-timed: the frames below are
+        // drawn off the main thread, where the window's event state is not.
+        let template = self
+            .egui_state
+            .as_mut()
+            .expect("made just above")
+            .take_egui_input(&window);
+        let progress = SplashProgress::new(self.ui.catalog.get("splash-shaders"), 0.5);
+        splash.draw(
+            &self.egui_ctx,
+            &template,
+            &window,
+            &gpu,
+            &surface,
+            &config,
             &mut egui_renderer,
+            &progress,
         );
         window.set_visible(true);
 
         let target = ViewportTarget::new(&gpu.device, &mut egui_renderer, size.width, size.height);
-        let mut viewport = Viewport::new(
-            &gpu.device,
-            ViewportTarget::FORMAT,
-            target.size.0,
-            target.size.1,
-        );
-        // A moving view smoothed as a still one is: see `Viewport::temporal_aa`.
-        viewport.temporal_aa = true;
-        // Pay for shader compilation now, while the window is still coming up,
-        // rather than on the frame where the user first presses Tab or moves the
-        // mouse over the scene. Creating a pipeline and compiling it are not the
-        // same thing: the driver defers the second until a draw arrives, and the
-        // overlay and picking pipelines are not touched by an ordinary first
-        // frame. Measured cold, that first touch costs around ten milliseconds —
-        // a dropped frame, landing exactly when the user starts interacting.
-        show(
-            &self.ui.catalog.get("splash-warming"),
-            &mut splash,
-            egui_state,
+        let warming = self.ui.catalog.get("splash-warming");
+        let opening = self.ui.catalog.get("splash-opening");
+        // The compiling holds this thread for seconds, so the splash is drawn
+        // from another meanwhile: about sixty frames a second, the bar easing
+        // toward each step's mark. The device is shared between threads by
+        // design, and nothing here touches the surface or the renderer while
+        // the painter has them.
+        let viewport = std::thread::scope(|scope| {
+            let painter = scope.spawn(|| {
+                while !progress.finished() {
+                    splash.draw(
+                        &self.egui_ctx,
+                        &template,
+                        &window,
+                        &gpu,
+                        &surface,
+                        &config,
+                        &mut egui_renderer,
+                        &progress,
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
+            });
+            let mut viewport = Viewport::new(
+                &gpu.device,
+                ViewportTarget::FORMAT,
+                target.size.0,
+                target.size.1,
+            );
+            // A moving view smoothed as a still one is: see
+            // `Viewport::temporal_aa`.
+            viewport.temporal_aa = true;
+            // Pay for shader compilation now, while the window is still coming
+            // up, rather than on the frame where the user first presses Tab or
+            // moves the mouse over the scene. Creating a pipeline and compiling
+            // it are not the same thing: the driver defers the second until a
+            // draw arrives, and the overlay and picking pipelines are not
+            // touched by an ordinary first frame. Measured cold, that first
+            // touch costs around ten milliseconds — a dropped frame, landing
+            // exactly when the user starts interacting.
+            progress.step(warming, 0.9);
+            viewport.warm_up(&gpu.device, &gpu.queue);
+            progress.step(opening, 1.0);
+            progress.finish();
+            let _ = painter.join();
+            viewport
+        });
+        // The last frame, full: the painter may have stopped short of it.
+        splash.draw(
+            &self.egui_ctx,
+            &template,
+            &window,
+            &gpu,
+            &surface,
+            &config,
             &mut egui_renderer,
-        );
-        viewport.warm_up(&gpu.device, &gpu.queue);
-        show(
-            &self.ui.catalog.get("splash-opening"),
-            &mut splash,
-            egui_state,
-            &mut egui_renderer,
+            &progress,
         );
         drop(splash);
 
@@ -10954,6 +11623,11 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // The sketch tools: left draws or picks, right finishes.
+                // The middle button falls through, so the view still turns.
+                if self.op_ctx.mode == OpMode::Sketch && self.sketch_mouse(button, pressed) {
+                    return;
+                }
                 // Ctrl+R looking for an edge: left cuts, right gives up.
                 if self.loop_cut_hover.is_some() && pressed {
                     match button {
@@ -11082,6 +11756,9 @@ impl ApplicationHandler for App {
                 }
                 if self.knife.is_some() {
                     self.update_knife();
+                }
+                if self.op_ctx.mode == OpMode::Sketch {
+                    self.sketch_hover();
                 }
                 if self.measure.is_some() {
                     self.update_measure();
@@ -11425,13 +12102,86 @@ struct SavedView {
     frame: f64,
 }
 
-/// The loading screen: the logo, the name, what is being done and the version,
-/// drawn while the window is being made ready.
+/// How far the start-up has come, shared between the thread doing it and the
+/// one drawing the splash.
 ///
-/// Drawn whole on each call rather than animated. Start-up holds the main
-/// thread — compiling pipelines is synchronous — so there is no frame loop to
-/// animate in; each step says what it is about to do instead, which is the
-/// honest progress there is.
+/// Each step names what it is doing and the mark the bar reaches when it is
+/// done. Between steps the bar eases toward that mark and never quite gets
+/// there — the work has no finer progress to report, and a bar that stops
+/// dead reads as a hang — and when the step ends it moves on from wherever it
+/// had got to.
+struct SplashProgress {
+    state: std::sync::Mutex<SplashStep>,
+    start: std::time::Instant,
+    done: std::sync::atomic::AtomicBool,
+}
+
+struct SplashStep {
+    message: String,
+    from: f32,
+    to: f32,
+    since: std::time::Instant,
+}
+
+impl SplashProgress {
+    fn new(message: String, to: f32) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            state: std::sync::Mutex::new(SplashStep {
+                message,
+                from: 0.0,
+                to,
+                since: now,
+            }),
+            start: now,
+            done: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Where the bar is now, nought to one, and what is being done.
+    fn now(&self) -> (f32, String) {
+        let step = self.state.lock().expect("splash progress");
+        let t = step.since.elapsed().as_secs_f32();
+        // Most of the way in a second and a half, the rest ever more slowly.
+        let shown = step.from + (step.to - step.from) * (1.0 - (-t / 1.5).exp());
+        (shown, step.message.clone())
+    }
+
+    /// On to the next step: from wherever the bar has got to.
+    fn step(&self, message: String, to: f32) {
+        let (shown, _) = self.now();
+        let mut step = self.state.lock().expect("splash progress");
+        *step = SplashStep {
+            message,
+            from: shown,
+            to,
+            since: std::time::Instant::now(),
+        };
+    }
+
+    /// The work is done: the bar full, and the painter to stop.
+    fn finish(&self) {
+        {
+            let mut step = self.state.lock().expect("splash progress");
+            step.from = 1.0;
+            step.to = 1.0;
+        }
+        self.done.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn finished(&self) -> bool {
+        self.done.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Seconds since the splash first showed, for its motion.
+    fn time(&self) -> f32 {
+        self.start.elapsed().as_secs_f32()
+    }
+}
+
+/// The loading screen: the logo, the name, what is being done, a progress bar
+/// and the version, drawn while the window is being made ready — from a
+/// thread of its own while the main one compiles, so it moves.
 struct Splash {
     logo: Option<egui::TextureHandle>,
     title: String,
@@ -11466,32 +12216,68 @@ impl Splash {
     fn draw(
         &mut self,
         ctx: &egui::Context,
-        state: &mut egui_winit::State,
+        template: &egui::RawInput,
         window: &Window,
         gpu: &kreate_render::Gpu,
         surface: &wgpu::Surface<'_>,
         config: &wgpu::SurfaceConfiguration,
         renderer: &mut egui_wgpu::Renderer,
-        message: &str,
+        progress: &SplashProgress,
     ) {
-        let input = state.take_egui_input(window);
+        let t = progress.time();
+        let (fraction, message) = progress.now();
+        let mut input = template.clone();
+        input.events.clear();
+        input.time = Some(t as f64);
         let output = ctx.run_ui(input, |ui| {
+            let theme = kreate_ui::theme::from_ui(ui);
             let background = ui.visuals().panel_fill;
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(background))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.add_space((ui.available_height() * 0.5 - 130.0).max(0.0));
+                        ui.add_space((ui.available_height() * 0.5 - 150.0).max(0.0));
+                        // The logo breathing: a few per cent larger and back
+                        // over two seconds, in a box that does not move.
+                        let (slot, _) =
+                            ui.allocate_exact_size(egui::vec2(140.0, 140.0), egui::Sense::hover());
                         if let Some(logo) = &self.logo {
-                            ui.add(
-                                egui::Image::new(logo).fit_to_exact_size(egui::vec2(128.0, 128.0)),
+                            let size = 128.0 * (1.0 + 0.03 * (t * std::f32::consts::PI).sin());
+                            egui::Image::new(logo).paint_at(
+                                ui,
+                                egui::Rect::from_center_size(slot.center(), egui::vec2(size, size)),
                             );
                         }
                         ui.add_space(12.0);
                         ui.heading(&self.title);
                         ui.add_space(6.0);
-                        ui.label(message);
-                        ui.add_space(18.0);
+                        // What is being done, and dots that keep counting
+                        // while it is.
+                        let dots = ".".repeat(1 + (t * 2.5) as usize % 3);
+                        // i18n-exempt: a translated message and its dots
+                        ui.label(format!("{message}{dots:<3}"));
+                        ui.add_space(14.0);
+                        // The bar: the track, how far, and a glint running
+                        // along the filled part so it is seen to be alive.
+                        let (bar, _) =
+                            ui.allocate_exact_size(egui::vec2(260.0, 4.0), egui::Sense::hover());
+                        let painter = ui.painter();
+                        painter.rect_filled(bar, 2.0, theme.border);
+                        let filled = egui::Rect::from_min_size(
+                            bar.min,
+                            egui::vec2(bar.width() * fraction.clamp(0.0, 1.0), bar.height()),
+                        );
+                        painter.rect_filled(filled, 2.0, theme.accent);
+                        let sweep = (t * 0.7).fract();
+                        let x = bar.left() + (sweep * 1.4 - 0.2) * bar.width();
+                        let glint = egui::Rect::from_min_max(
+                            egui::pos2((x - 24.0).max(filled.left()), bar.top()),
+                            egui::pos2((x + 24.0).min(filled.right()), bar.bottom()),
+                        );
+                        if glint.width() > 0.0 {
+                            painter.rect_filled(glint, 2.0, egui::Color32::from_white_alpha(70));
+                        }
+                        ui.add_space(16.0);
                         ui.weak(&self.version);
                     });
                 });
@@ -12463,10 +13249,11 @@ mod tests {
     #[test]
     fn a_new_document_is_seen_from_the_default_view() {
         let mut app = app();
-        let fresh = Camera::default();
+        let fresh = kreate::startup::starting_camera();
+        assert_eq!(fresh.projection, kreate_render::Projection::Orthographic);
         app.camera.rotation = glam::DQuat::from_rotation_z(1.2) * app.camera.rotation;
         app.camera.fov_y = 0.3;
-        app.camera.projection = kreate_render::Projection::Orthographic;
+        app.camera.projection = kreate_render::Projection::Perspective;
         app.camera_view = Some(app.camera);
         app.new_document();
         assert!(app.camera.rotation.abs_diff_eq(fresh.rotation, 1e-9));
@@ -13255,6 +14042,9 @@ kreate.ops.object.add_primitive()",
         // A settled camera is set to the easing's target every frame; a switch
         // that changed only the drawn camera was undone on the next one.
         let mut app = app();
+        // From perspective, which is not where a fresh start is.
+        app.camera.projection = kreate_render::Projection::Perspective;
+        app.motion = kreate_render::CameraMotion::new(app.camera);
         app.dispatch(&Action::new("view.toggle_projection"));
         assert_eq!(
             app.camera.projection,
@@ -13430,6 +14220,63 @@ kreate.ops.object.add_primitive()",
         with_viewport(&mut app);
         app.input.cursor = Some((10.0, 10.0));
         assert!(!app.press_belongs_to_viewport());
+    }
+
+    #[test]
+    fn sketch_mode_from_a_tab_above_the_viewport_asks_for_a_plane_inside_it() {
+        // The mode tabs sit above the viewport, and the plane menu is drawn by
+        // the viewport alone: opened at the pointer, it was off the view and
+        // never seen, and the Sketch tab looked as if it did nothing.
+        let mut app = app();
+        with_viewport(&mut app);
+        app.input.cursor = Some((300.0, 10.0));
+        app.set_mode(OpMode::Sketch);
+        assert!(!app.ui.context_menu.groups.is_empty(), "no plane menu");
+        let at = app.ui.context_menu.at.expect("the plane menu is not open");
+        let scale = app.egui_ctx.pixels_per_point();
+        let view = egui::Rect::from_min_size(
+            egui::pos2(100.0 / scale, 50.0 / scale),
+            egui::vec2(800.0 / scale, 600.0 / scale),
+        );
+        assert!(view.contains(at), "{at:?} is outside the viewport {view:?}");
+    }
+
+    #[test]
+    fn edit_mode_on_a_body_from_a_sketch_has_something_to_select() {
+        // A body is built from its features and holds no mesh; edit mode on
+        // it had nothing to pick. Entering makes it a plain mesh first.
+        let mut app = app();
+        app.run_op_with("sketch.new", &[]);
+        app.run_op_with(
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([0.04, 0.02, 0.0])),
+                ("join", PropertyValue::Int(1)),
+            ],
+        );
+        app.run_op_with(
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.002, 0.002])),
+                ("distance", PropertyValue::Float(0.01)),
+            ],
+        );
+        let body = app
+            .doc
+            .objects()
+            .find(|(_, o)| !o.features.is_empty())
+            .map(|(id, _)| id)
+            .expect("a body");
+        app.doc.selection.clear();
+        app.doc.selection.add(body);
+        app.doc.selection.active = Some(body);
+        app.set_mode(OpMode::EditMesh);
+        assert_eq!(app.op_ctx.mode, OpMode::EditMesh);
+        let object = app.doc.object(body).unwrap();
+        assert!(object.features.is_empty());
+        let mesh = app.doc.mesh(object.mesh().unwrap()).unwrap();
+        assert_eq!(mesh.num_faces(), 6);
     }
 
     #[test]

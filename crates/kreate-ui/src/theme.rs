@@ -247,6 +247,7 @@ impl Theme {
         let (fill, on_dark, on_light) = match tag {
             "edit_mesh" | "edit_armature" => (0x4F_B3_A9, 0x9F_DC_D5, 0x1D_6B_63),
             "sculpt" => (0xB4_8C_F0, 0xD3_BD_F7, 0x5B_3A_A6),
+            "sketch" => (0x4D_9B_F0, 0xA6_CC_F7, 0x1F_5C_A6),
             "pose" => (0x78_AA_E6, 0xB9_D3_F2, 0x23_5E_A8),
             "weight_paint" => (0xE6_78_AA, 0xF2_BC_D4, 0xA3_2A_62),
             "texture_paint" => (0xD6_C8_78, 0xE8_DC_A2, 0x6E_60_10),

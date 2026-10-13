@@ -12,9 +12,24 @@ use kreate_scene::Document;
 /// and looked at in the rendered mode is lit rather than black. §2.1 is
 /// emphatic that a scene's light comes from the scene, so the renderer does
 /// not invent any.
+/// The view a fresh start shows: the renderer's default angle, looked at
+/// orthographically, as a part is drawn — no foreshortening to judge a size
+/// through. `5` on the numpad switches to perspective.
+pub fn starting_camera() -> kreate_render::Camera {
+    kreate_render::Camera {
+        projection: kreate_render::Projection::Orthographic,
+        ..kreate_render::Camera::default()
+    }
+}
+
 pub fn starting_scene(doc: &mut Document) {
     let world = doc.add_world(kreate_scene::World::new("World"));
     doc.set_active_world(Some(world));
+    // Lengths shown and typed in millimetres, as a part is drawn. Only what is
+    // shown: lengths are stored in metres whatever this says, and a file that
+    // names no unit is still read as metres, so documents saved before this
+    // open as they were.
+    doc.design.length_unit = kreate_scene::design::LengthUnit::Millimetres;
 }
 
 /// A scene that renders: a 2 m cube at the origin, selected, a lamp above and

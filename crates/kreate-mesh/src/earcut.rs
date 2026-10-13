@@ -487,7 +487,7 @@ impl Earcut {
 /// Triangles over `rings[0]` less the other rings. Indices are into the
 /// rings laid end to end; every triangle runs anticlockwise, and every point
 /// of every ring is a corner of some triangle.
-pub(crate) fn triangulate(rings: &[Vec<DVec2>]) -> Vec<[usize; 3]> {
+pub fn triangulate(rings: &[Vec<DVec2>]) -> Vec<[usize; 3]> {
     let mut e = Earcut {
         nodes: Vec::new(),
         out: Vec::new(),

@@ -36,10 +36,31 @@ pub enum Constraint {
     Perpendicular { a: u32, b: u32, c: u32, d: u32 },
     /// Line ab as long as line cd.
     Equal { a: u32, b: u32, c: u32, d: u32 },
+    /// Two points one: an end on an end, a line's end on a circle's centre
+    /// (two circles' centres are concentric this way).
+    Coincident { a: u32, b: u32 },
+    /// Point `p` on the line through `a` and `b`.
+    OnLine { p: u32, a: u32, b: u32 },
+    /// A circle: `ring` evenly round `centre`, its radius however far the
+    /// first is. The radius is a [`Constraint::Distance`] from the centre to
+    /// the first, when it is dimensioned.
+    Circle { centre: u32, ring: Vec<u32> },
+    /// An arc: `ring` evenly round `centre`, anticlockwise from the first to
+    /// the last, all as far from it as the first is. Its ends are free; how
+    /// far round it goes is wherever they are.
+    Arc { centre: u32, ring: Vec<u32> },
+    /// Line ab touching the circle or arc about `centre` through `on`: the
+    /// line as far from the centre as the radius.
+    Tangent {
+        a: u32,
+        b: u32,
+        centre: u32,
+        on: u32,
+    },
 }
 
 /// The kinds, in the order the operators number them.
-pub const KINDS: [&str; 8] = [
+pub const KINDS: [&str; 13] = [
     "distance",
     "horizontal",
     "vertical",
@@ -48,6 +69,11 @@ pub const KINDS: [&str; 8] = [
     "parallel",
     "perpendicular",
     "equal",
+    "coincident",
+    "on_line",
+    "circle",
+    "arc",
+    "tangent",
 ];
 
 impl Constraint {
@@ -66,21 +92,77 @@ impl Constraint {
             Constraint::Parallel { .. } => 5,
             Constraint::Perpendicular { .. } => 6,
             Constraint::Equal { .. } => 7,
+            Constraint::Coincident { .. } => 8,
+            Constraint::OnLine { .. } => 9,
+            Constraint::Circle { .. } => 10,
+            Constraint::Arc { .. } => 11,
+            Constraint::Tangent { .. } => 12,
         }
     }
 
     /// The points it names.
     pub fn points(&self) -> Vec<u32> {
-        match *self {
+        match self {
             Constraint::Distance { a, b, .. }
             | Constraint::Horizontal { a, b }
-            | Constraint::Vertical { a, b } => vec![a, b],
-            Constraint::Fixed { a, .. } => vec![a],
+            | Constraint::Vertical { a, b }
+            | Constraint::Coincident { a, b } => vec![*a, *b],
+            Constraint::Fixed { a, .. } => vec![*a],
+            Constraint::OnLine { p, a, b } => vec![*p, *a, *b],
             Constraint::Angle { a, b, c, d, .. }
             | Constraint::Parallel { a, b, c, d }
             | Constraint::Perpendicular { a, b, c, d }
-            | Constraint::Equal { a, b, c, d } => vec![a, b, c, d],
+            | Constraint::Equal { a, b, c, d } => vec![*a, *b, *c, *d],
+            Constraint::Circle { centre, ring } | Constraint::Arc { centre, ring } => {
+                std::iter::once(*centre)
+                    .chain(ring.iter().copied())
+                    .collect()
+            }
+            Constraint::Tangent { a, b, centre, on } => vec![*a, *b, *centre, *on],
         }
+    }
+
+    /// The same constraint on other points: each index through `map`. What
+    /// deleting or merging a sketch's points does to what names them.
+    pub fn remapped(&self, map: &impl Fn(u32) -> u32) -> Self {
+        let mut out = self.clone();
+        match &mut out {
+            Constraint::Distance { a, b, .. }
+            | Constraint::Horizontal { a, b }
+            | Constraint::Vertical { a, b }
+            | Constraint::Coincident { a, b } => {
+                *a = map(*a);
+                *b = map(*b);
+            }
+            Constraint::Fixed { a, .. } => *a = map(*a),
+            Constraint::OnLine { p, a, b } => {
+                *p = map(*p);
+                *a = map(*a);
+                *b = map(*b);
+            }
+            Constraint::Angle { a, b, c, d, .. }
+            | Constraint::Parallel { a, b, c, d }
+            | Constraint::Perpendicular { a, b, c, d }
+            | Constraint::Equal { a, b, c, d } => {
+                *a = map(*a);
+                *b = map(*b);
+                *c = map(*c);
+                *d = map(*d);
+            }
+            Constraint::Circle { centre, ring } | Constraint::Arc { centre, ring } => {
+                *centre = map(*centre);
+                for r in ring.iter_mut() {
+                    *r = map(*r);
+                }
+            }
+            Constraint::Tangent { a, b, centre, on } => {
+                *a = map(*a);
+                *b = map(*b);
+                *centre = map(*centre);
+                *on = map(*on);
+            }
+        }
+        out
     }
 
     /// Its number, for the ones that have one: a length, or an angle in
@@ -146,6 +228,30 @@ impl Constraint {
                 c: get(2)?,
                 d: get(3)?,
             },
+            "coincident" => Constraint::Coincident {
+                a: get(0)?,
+                b: get(1)?,
+            },
+            "on_line" => Constraint::OnLine {
+                p: get(0)?,
+                a: get(1)?,
+                b: get(2)?,
+            },
+            "circle" | "arc" => {
+                let centre = get(0)?;
+                let ring = p.get(1..).filter(|r| r.len() >= 2)?.to_vec();
+                if tag == "circle" {
+                    Constraint::Circle { centre, ring }
+                } else {
+                    Constraint::Arc { centre, ring }
+                }
+            }
+            "tangent" => Constraint::Tangent {
+                a: get(0)?,
+                b: get(1)?,
+                centre: get(2)?,
+                on: get(3)?,
+            },
             _ => return None,
         })
     }
@@ -161,7 +267,48 @@ impl Constraint {
     /// How far from holding it is, as residuals (zero when it holds).
     fn residuals(&self, p: &impl Fn(u32) -> DVec2, out: &mut Vec<f64>) {
         let line = |a: u32, b: u32| p(b) - p(a);
+        let along = |angle: f64| DVec2::new(angle.cos(), angle.sin());
         match *self {
+            Constraint::Coincident { a, b } => {
+                let d = p(b) - p(a);
+                out.extend([d.x, d.y]);
+            }
+            Constraint::OnLine { p: q, a, b } => {
+                let u = line(a, b);
+                out.push(u.perp_dot(p(q) - p(a)) / u.length().max(1e-12));
+            }
+            Constraint::Circle { centre, ref ring } => {
+                let c = p(centre);
+                let first = p(ring[0]) - c;
+                let r = first.length();
+                let start = first.y.atan2(first.x);
+                let n = ring.len() as f64;
+                for (i, v) in ring.iter().enumerate().skip(1) {
+                    let want = c + along(start + std::f64::consts::TAU * i as f64 / n) * r;
+                    let d = p(*v) - want;
+                    out.extend([d.x, d.y]);
+                }
+            }
+            Constraint::Arc { centre, ref ring } => {
+                let c = p(centre);
+                let first = p(ring[0]) - c;
+                let last = p(*ring.last().expect("two or more")) - c;
+                let r = first.length();
+                let start = first.y.atan2(first.x);
+                let sweep = (last.y.atan2(last.x) - start).rem_euclid(std::f64::consts::TAU);
+                out.push(last.length() - r);
+                let n = (ring.len() - 1) as f64;
+                for (i, v) in ring.iter().enumerate().take(ring.len() - 1).skip(1) {
+                    let want = c + along(start + sweep * i as f64 / n) * r;
+                    let d = p(*v) - want;
+                    out.extend([d.x, d.y]);
+                }
+            }
+            Constraint::Tangent { a, b, centre, on } => {
+                let u = line(a, b);
+                let off = u.perp_dot(p(centre) - p(a)).abs() / u.length().max(1e-12);
+                out.push(off - (p(on) - p(centre)).length());
+            }
             Constraint::Distance { a, b, value } => out.push(line(a, b).length() - value),
             Constraint::Horizontal { a, b } => out.push(line(a, b).y),
             Constraint::Vertical { a, b } => out.push(line(a, b).x),
@@ -313,6 +460,96 @@ pub fn solve(points: &mut [DVec2], constraints: &[Constraint]) -> Solve {
     }
 }
 
+/// Which points the constraints pin down completely: Fusion's black (here
+/// the text colour) against its blue, for a point that can still move.
+///
+/// A point is pinned when no motion of the sketch that keeps every
+/// constraint as it is moves it: when its two coordinates are zero in every
+/// vector of the null space of the constraints' Jacobian, at the points as
+/// they are. A sketch with nothing fixed is never pinned — the whole of it
+/// can slide — which is what a fixed point, or a line drawn from the origin,
+/// is for. Points no constraint names are free.
+pub fn pinned(points: &[DVec2], constraints: &[Constraint]) -> Vec<bool> {
+    let n = points.len() * 2;
+    if n == 0 {
+        return Vec::new();
+    }
+    let live: Vec<&Constraint> = constraints
+        .iter()
+        .filter(|c| c.points().iter().all(|i| (*i as usize) < points.len()))
+        .collect();
+    let residuals = |x: &[f64]| {
+        let p = |i: u32| DVec2::new(x[2 * i as usize], x[2 * i as usize + 1]);
+        let mut r = Vec::new();
+        for c in &live {
+            c.residuals(&p, &mut r);
+        }
+        r
+    };
+    let x: Vec<f64> = points.iter().flat_map(|p| [p.x, p.y]).collect();
+    let scale = x.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-3);
+    let h = scale * 1e-7;
+    let m = residuals(&x).len();
+    // The Jacobian, a row per residual.
+    let mut jac = vec![vec![0.0; n]; m];
+    for j in 0..n {
+        let (mut xp, mut xm) = (x.clone(), x.clone());
+        xp[j] += h;
+        xm[j] -= h;
+        let (rp, rm) = (residuals(&xp), residuals(&xm));
+        for i in 0..m {
+            jac[i][j] = (rp[i] - rm[i]) / (2.0 * h);
+        }
+    }
+    // Reduced row echelon form; the columns without a pivot are the free
+    // directions, each the start of one null-space vector.
+    let mut pivots: Vec<(usize, usize)> = Vec::new();
+    let mut row = 0;
+    for col in 0..n {
+        let Some(best) = (row..m).max_by(|a, b| jac[*a][col].abs().total_cmp(&jac[*b][col].abs()))
+        else {
+            break;
+        };
+        if jac[best][col].abs() < 1e-9 {
+            continue;
+        }
+        jac.swap(row, best);
+        let lead = jac[row][col];
+        for v in jac[row].iter_mut() {
+            *v /= lead;
+        }
+        let pivot_row = jac[row].clone();
+        for (other, r) in jac.iter_mut().enumerate() {
+            if other != row {
+                let f = r[col];
+                if f != 0.0 {
+                    for (v, p) in r.iter_mut().zip(&pivot_row) {
+                        *v -= f * p;
+                    }
+                }
+            }
+        }
+        pivots.push((row, col));
+        row += 1;
+        if row == m {
+            break;
+        }
+    }
+    let pivot_cols: std::collections::HashSet<usize> = pivots.iter().map(|p| p.1).collect();
+    let mut moves = vec![false; n];
+    for free in (0..n).filter(|c| !pivot_cols.contains(c)) {
+        moves[free] = true;
+        for (r, c) in &pivots {
+            if jac[*r][free].abs() > 1e-7 {
+                moves[*c] = true;
+            }
+        }
+    }
+    (0..points.len())
+        .map(|i| !moves[2 * i] && !moves[2 * i + 1])
+        .collect()
+}
+
 /// Solves `a x = b` (n × n) by elimination with partial pivoting.
 fn gauss(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
     for col in 0..n {
@@ -456,6 +693,182 @@ mod tests {
         ];
         assert!(solve(&mut q, &c).converged);
         assert!((q[3] - q[2]).y.abs() < 1e-7);
+    }
+
+    /// A rectangle drawn roughly: corners level and upright, two sides
+    /// dimensioned, one corner on the origin.
+    fn rectangle() -> (Vec<DVec2>, Vec<Constraint>) {
+        let p = vec![
+            DVec2::new(0.01, 0.02),
+            DVec2::new(0.041, -0.003),
+            DVec2::new(0.039, 0.021),
+            DVec2::new(-0.002, 0.019),
+        ];
+        let c = vec![
+            Constraint::Horizontal { a: 0, b: 1 },
+            Constraint::Vertical { a: 1, b: 2 },
+            Constraint::Horizontal { a: 2, b: 3 },
+            Constraint::Vertical { a: 3, b: 0 },
+            Constraint::Distance {
+                a: 0,
+                b: 1,
+                value: 0.04,
+            },
+            Constraint::Distance {
+                a: 1,
+                b: 2,
+                value: 0.02,
+            },
+        ];
+        (p, c)
+    }
+
+    #[test]
+    fn a_dimensioned_rectangle_is_pinned_only_once_it_is_tied_down() {
+        let (mut p, mut c) = rectangle();
+        assert!(solve(&mut p, &c).converged);
+        // Its shape is set, but the whole of it can slide.
+        assert!(pinned(&p, &c).iter().all(|f| !f), "{:?}", pinned(&p, &c));
+        c.push(Constraint::Fixed {
+            a: 0,
+            at: [0.0, 0.0],
+        });
+        assert!(solve(&mut p, &c).converged);
+        assert!(pinned(&p, &c).iter().all(|f| *f), "{:?}", pinned(&p, &c));
+        assert!((p[2] - DVec2::new(0.04, 0.02)).length() < 1e-9, "{p:?}");
+        // One side's dimension gone: the far corners are free again, the
+        // tied one is not.
+        c.remove(5);
+        let f = pinned(&p, &c);
+        assert!(f[0] && f[1] && !f[2] && !f[3], "{f:?}");
+    }
+
+    #[test]
+    fn changing_a_dimension_moves_the_sketch_to_it() {
+        let (mut p, mut c) = rectangle();
+        c.push(Constraint::Fixed {
+            a: 0,
+            at: [0.0, 0.0],
+        });
+        assert!(solve(&mut p, &c).converged);
+        c[4] = c[4].with_value(0.06);
+        assert!(solve(&mut p, &c).converged);
+        assert!((p[2] - DVec2::new(0.06, 0.02)).length() < 1e-9, "{p:?}");
+    }
+
+    /// A circle of eight round a centre: round, its radius dimensioned, a
+    /// line made tangent to it and a second circle concentric.
+    #[test]
+    fn a_circle_is_round_takes_its_radius_and_a_tangent_touches_it() {
+        let mut p: Vec<DVec2> = (0..8)
+            .map(|i| {
+                let a = i as f64 * std::f64::consts::TAU / 8.0;
+                DVec2::new(a.cos(), a.sin()) * (1.0 + 0.05 * (i % 3) as f64)
+            })
+            .collect();
+        p.push(DVec2::new(0.05, -0.02)); // 8: the centre
+        p.push(DVec2::new(-2.0, 1.3)); // 9, 10: a line
+        p.push(DVec2::new(2.0, 1.2));
+        p.push(DVec2::new(0.01, 0.01)); // 11: another centre
+        let ring: Vec<u32> = (0..8).collect();
+        let c = vec![
+            Constraint::Fixed {
+                a: 8,
+                at: [0.0, 0.0],
+            },
+            Constraint::Circle {
+                centre: 8,
+                ring: ring.clone(),
+            },
+            Constraint::Distance {
+                a: 8,
+                b: 0,
+                value: 0.5,
+            },
+            Constraint::Horizontal { a: 9, b: 10 },
+            Constraint::Tangent {
+                a: 9,
+                b: 10,
+                centre: 8,
+                on: 0,
+            },
+            Constraint::Coincident { a: 8, b: 11 },
+        ];
+        let s = solve(&mut p, &c);
+        assert!(s.converged, "{s:?}");
+        for v in &ring {
+            assert!((p[*v as usize].length() - 0.5).abs() < 1e-8, "{p:?}");
+        }
+        assert!((p[9].y.abs() - 0.5).abs() < 1e-8, "the line touches: {p:?}");
+        assert!(p[11].length() < 1e-9, "concentric");
+        // The ring is pinned but for turning about its centre — which is a
+        // motion, so it is not pinned; the centre is.
+        let f = pinned(&p, &c);
+        assert!(f[8] && f[11]);
+    }
+
+    #[test]
+    fn an_arc_keeps_its_ends_on_its_circle() {
+        let mut p = vec![
+            DVec2::new(1.0, 0.0),
+            DVec2::new(0.75, 0.62),
+            DVec2::new(0.1, 1.05),
+            DVec2::new(-0.4, 0.95),
+            DVec2::ZERO,
+        ];
+        let c = vec![
+            Constraint::Fixed {
+                a: 4,
+                at: [0.0, 0.0],
+            },
+            Constraint::Fixed {
+                a: 0,
+                at: [1.0, 0.0],
+            },
+            Constraint::Arc {
+                centre: 4,
+                ring: vec![0, 1, 2, 3],
+            },
+        ];
+        assert!(solve(&mut p, &c).converged);
+        for v in 0..4 {
+            assert!((p[v].length() - 1.0).abs() < 1e-8, "{p:?}");
+        }
+        let ang = |v: DVec2| v.y.atan2(v.x);
+        let step = ang(p[1]) - ang(p[0]);
+        assert!((ang(p[2]) - ang(p[1]) - step).abs() < 1e-7, "evenly: {p:?}");
+    }
+
+    #[test]
+    fn a_new_constraint_survives_the_file_and_a_remap() {
+        let c = Constraint::Circle {
+            centre: 4,
+            ring: vec![0, 1, 2],
+        };
+        let back = Constraint::from_parts(c.tag(), &c.points(), 0.0, [0.0; 2]);
+        assert_eq!(back, Some(c.clone()));
+        assert_eq!(
+            c.remapped(&|i| i + 10),
+            Constraint::Circle {
+                centre: 14,
+                ring: vec![10, 11, 12]
+            }
+        );
+        for c in [
+            Constraint::Coincident { a: 1, b: 2 },
+            Constraint::OnLine { p: 1, a: 2, b: 3 },
+            Constraint::Tangent {
+                a: 0,
+                b: 1,
+                centre: 2,
+                on: 3,
+            },
+        ] {
+            assert_eq!(
+                Constraint::from_parts(c.tag(), &c.points(), 0.0, [0.0; 2]),
+                Some(c)
+            );
+        }
     }
 
     #[test]

@@ -59,6 +59,14 @@ pub fn shading_button(ui: &mut Ui, mode: ShadingMode, selected: bool) -> Respons
             p.circle_filled(centre, r, ink.gamma_multiply(0.8));
             p.circle_stroke(centre, r, Stroke::new(1.0, ink));
         }
+        // A glossy sphere: a soft body, a ring of sheen and a bright spot —
+        // a material under a light that shows it off.
+        ShadingMode::Material => {
+            p.circle_filled(centre, r, ink.gamma_multiply(0.45));
+            p.circle_stroke(centre, r * 0.62, Stroke::new(1.0, ink.gamma_multiply(0.8)));
+            p.circle_filled(centre + Vec2::new(-r * 0.35, -r * 0.35), r * 0.22, ink);
+            p.circle_stroke(centre, r, Stroke::new(1.0, ink));
+        }
         // A sphere with a horizon: the scene's own light and a background.
         ShadingMode::Rendered => {
             let sphere = Rect::from_center_size(centre, Vec2::splat(r * 2.0));

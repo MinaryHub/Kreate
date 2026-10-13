@@ -36,8 +36,10 @@ pub enum Mode {
     /// Round the *change* to an increment. Needs no geometry.
     #[default]
     Increment,
-    /// Whatever is under the cursor: a vertex if one is near, else an edge,
-    /// else the face — Blender's Vertex + Edge + Face, what `B` turns on.
+    /// Whatever is under the cursor: a vertex, an edge's middle or a face's
+    /// centre if one is near, else a point along an edge, else the face —
+    /// Blender's Vertex + Edge + Face with its midpoints and centres, what
+    /// `B` turns on.
     Element,
     Vertex,
     Edge,
@@ -111,6 +113,8 @@ pub struct SnapWorld {
     pub verts: Vec<DVec3>,
     pub edges: Vec<[DVec3; 2]>,
     pub tris: Vec<[DVec3; 3]>,
+    /// Each face's centre: the mean of its corners.
+    pub centres: Vec<DVec3>,
 }
 
 impl SnapWorld {
@@ -151,6 +155,7 @@ impl SnapWorld {
             if ring.len() < 3 || ring.iter().any(|v| is_moving(*v)) {
                 continue;
             }
+            self.centres.push(centre(ring.iter().map(|v| world(*v))));
             // A fan, which is enough for a ray test against a planar face and
             // close enough for one that is not. A face being snapped to is being
             // pointed at, so an exact triangulation would buy nothing a user
@@ -193,6 +198,7 @@ impl SnapWorld {
             if ring.len() < 3 || !ring.iter().all(|v| listed(*v)) {
                 continue;
             }
+            self.centres.push(centre(ring.iter().map(|v| world(*v))));
             for i in 1..ring.len() - 1 {
                 self.tris
                     .push([world(ring[0]), world(ring[i]), world(ring[i + 1])]);
@@ -201,12 +207,22 @@ impl SnapWorld {
     }
 }
 
+/// The mean of some points.
+fn centre(points: impl Iterator<Item = DVec3>) -> DVec3 {
+    let (sum, n) = points.fold((DVec3::ZERO, 0usize), |(s, n), p| (s + p, n + 1));
+    sum / n.max(1) as f64
+}
+
 /// What kind of thing a snap caught, for drawing it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Element {
     Vertex,
     Edge,
+    /// The middle of an edge.
+    Midpoint,
     Face,
+    /// The centre of a face.
+    Centre,
 }
 
 impl Element {
@@ -214,7 +230,9 @@ impl Element {
         match self {
             Element::Vertex => "vertex",
             Element::Edge => "edge",
+            Element::Midpoint => "midpoint",
             Element::Face => "face",
+            Element::Centre => "centre",
         }
     }
 }
@@ -238,10 +256,13 @@ pub fn resolve(
 ) -> Option<Hit> {
     match mode {
         Mode::Increment => None,
-        // A vertex beats the edges it ends and an edge beats the faces it
-        // borders: the smaller thing is the more deliberate aim, and a vertex
+        // The points first — corners, edges' middles, faces' centres — the
+        // nearest of them to the cursor: each is a place someone aims at, and
+        // a middle could never be caught if sliding along the edge, which is
+        // always nearer, came first. Then a point along an edge, then the
+        // face: the smaller thing is the more deliberate aim, and a corner
         // could never be caught if the face around it always won.
-        Mode::Element => nearest_point(world.verts.iter().copied(), cursor, camera, viewport)
+        Mode::Element => nearest_of_points(world, cursor, camera, viewport)
             .or_else(|| nearest_on_edges(world, cursor, camera, viewport))
             .or_else(|| under_cursor(world, cursor, camera, viewport)),
         Mode::Vertex => nearest_point(world.verts.iter().copied(), cursor, camera, viewport),
@@ -252,12 +273,44 @@ pub fn resolve(
             viewport,
         )
         .map(|hit| Hit {
-            element: Element::Edge,
+            element: Element::Midpoint,
             ..hit
         }),
         Mode::Edge => nearest_on_edges(world, cursor, camera, viewport),
         Mode::Face => under_cursor(world, cursor, camera, viewport),
     }
+}
+
+/// The nearest corner, edge middle or face centre to the cursor; on a tie a
+/// corner, then a middle, as the smaller aim.
+fn nearest_of_points(
+    world: &SnapWorld,
+    cursor: (f32, f32),
+    camera: &Camera,
+    viewport: (f32, f32),
+) -> Option<Hit> {
+    let tagged = |hit: Option<Hit>, element| hit.map(|h| Hit { element, ..h });
+    let corner = nearest_point(world.verts.iter().copied(), cursor, camera, viewport);
+    let middle = tagged(
+        nearest_point(
+            world.edges.iter().map(|e| (e[0] + e[1]) * 0.5),
+            cursor,
+            camera,
+            viewport,
+        ),
+        Element::Midpoint,
+    );
+    let centre = tagged(
+        nearest_point(world.centres.iter().copied(), cursor, camera, viewport),
+        Element::Centre,
+    );
+    [corner, middle, centre]
+        .into_iter()
+        .flatten()
+        .fold(None, |best: Option<Hit>, hit| match best {
+            Some(b) if b.distance_px <= hit.distance_px => Some(b),
+            _ => Some(hit),
+        })
 }
 
 /// The nearest of a set of world points to the cursor, in screen space.

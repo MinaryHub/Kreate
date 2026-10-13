@@ -82,7 +82,8 @@ fn ssr_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let p = here.xyz;
     let n = normalize((params.view * vec4<f32>(info.xyz, 0.0)).xyz);
-    let v = normalize(p);
+    // Away from the eye: -Z everywhere in an orthographic view.
+    let v = select(normalize(p), vec3<f32>(0.0, 0.0, -1.0), params.projection[2][3] == 0.0);
     let r = reflect(v, n);
 
     // March with a per-pixel offset into the first step: the accumulation

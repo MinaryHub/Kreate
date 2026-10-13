@@ -389,6 +389,12 @@ pub struct ObjectRecord {
     /// Its sketch constraints: kind, vertex indices, number, held place.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sketch: Vec<(String, Vec<u32>, f64, [f64; 2])>,
+    /// Its sketch's lines, between its mesh's vertices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sketch_lines: Vec<[u32; 2]>,
+    /// The features that make it a body, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<FeatureRecord>,
     pub visible: bool,
     pub selectable: bool,
     /// `None` for a local datablock; otherwise the library and name it came
@@ -1971,6 +1977,8 @@ pub fn write(
                         )
                     })
                     .collect(),
+                sketch_lines: object.sketch_lines.clone(),
+                features: object.features.iter().map(feature_record).collect(),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -2588,6 +2596,19 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .collect();
         object.modifiers = record.modifiers.iter().filter_map(modifier_from).collect();
         object.geometry_nodes = record.geometry_nodes.as_ref().and_then(geo_from_record);
+        // Lines naming points the mesh does not have are dropped: a line
+        // to nowhere would draw from the origin.
+        let points = object
+            .mesh()
+            .and_then(|m| document.mesh(m))
+            .map_or(0, |m| m.num_verts());
+        object.sketch_lines = record
+            .sketch_lines
+            .iter()
+            .filter(|[a, b]| *a < points && *b < points)
+            .copied()
+            .collect();
+        object.features = record.features.iter().filter_map(feature_from).collect();
         // A constraint of a kind this build does not know is dropped, not
         // guessed at: the rest of the sketch still holds.
         object.sketch = record
@@ -2743,4 +2764,77 @@ fn affine_from_array(a: &[f64; 12]) -> glam::DAffine3 {
 /// A datablock kind from its stable name.
 fn kreate_reflect_kind(id: &str) -> Option<kreate_scene::DatablockKind> {
     kreate_scene::DatablockKind::from_id(id)
+}
+
+/// One feature of a body: see `kreate_scene::feature`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeatureRecord {
+    /// `extrude` or `revolve`.
+    pub kind: String,
+    /// Its sketch, by identity.
+    pub sketch: u64,
+    pub seeds: Vec<[f64; 2]>,
+    /// `join` or `cut`.
+    pub operation: String,
+    #[serde(default)]
+    pub distance: f64,
+    #[serde(default)]
+    pub symmetric: bool,
+    #[serde(default)]
+    pub axis: [u32; 2],
+    #[serde(default)]
+    pub angle: f64,
+    #[serde(default)]
+    pub order: u64,
+}
+
+fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
+    use kreate_scene::feature::Shape;
+    let (distance, symmetric, axis, angle) = match f.shape {
+        Shape::Extrude {
+            distance,
+            symmetric,
+        } => (distance, symmetric, [0, 0], 0.0),
+        Shape::Revolve { axis, angle } => (0.0, false, axis, angle),
+    };
+    FeatureRecord {
+        kind: f.kind_tag().into(),
+        sketch: f.sketch.raw(),
+        seeds: f.seeds.clone(),
+        operation: f.operation.tag().into(),
+        distance,
+        symmetric,
+        axis,
+        angle,
+        order: f.order,
+    }
+}
+
+/// A feature of a kind this build does not know is dropped, as a constraint
+/// is: the body is the rest of its features.
+fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
+    use kreate_scene::feature::{Feature, Operation, Shape};
+    let shape = match r.kind.as_str() {
+        "extrude" if r.distance.is_finite() => Shape::Extrude {
+            distance: r.distance,
+            symmetric: r.symmetric,
+        },
+        "revolve" if r.angle.is_finite() => Shape::Revolve {
+            axis: r.axis,
+            angle: r.angle,
+        },
+        _ => return None,
+    };
+    Some(Feature {
+        shape,
+        sketch: kreate_scene::Uid::from_raw(r.sketch),
+        seeds: r
+            .seeds
+            .iter()
+            .filter(|s| s[0].is_finite() && s[1].is_finite())
+            .copied()
+            .collect(),
+        operation: Operation::from_tag(&r.operation)?,
+        order: r.order,
+    })
 }

@@ -100,7 +100,12 @@ fn ao_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
         dy = p - d.xyz;
     }
     var n = normalize(cross(dx, dy));
-    if (dot(n, -p) < 0.0) {
+    // Toward the eye: +Z for an orthographic view (no perspective divide —
+    // the projection's w row is constant), whose eye point can be inside the
+    // model when zoomed in; from the point otherwise.
+    let ortho = params.projection[2][3] == 0.0;
+    let to_eye = select(-p, vec3<f32>(0.0, 0.0, 1.0), ortho);
+    if (dot(n, to_eye) < 0.0) {
         n = -n;
     }
 

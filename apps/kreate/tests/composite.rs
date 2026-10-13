@@ -84,7 +84,15 @@ fn composite_in(doc: &Document, locale: &str, edit_mode: bool) -> Option<Composi
     composite_with(doc, locale, edit_mode, |_| {})
 }
 
+/// A camera's aim for one picture: the centre and radius it frames, the way
+/// it is turned, and whether it is orthographic.
+type Framing = (glam::DVec3, f64, Option<glam::DQuat>, bool);
+
 thread_local! {
+    /// Where the camera looks instead of a 2 m sphere at the origin: the
+    /// centre and radius it frames, the way it is turned, and whether it is
+    /// orthographic.
+    static FRAMING: std::cell::Cell<Option<Framing>> = const { std::cell::Cell::new(None) };
     /// A mode for `composite_with` to draw in instead of object or mesh edit
     /// mode — set by `composite_in_mode` for the one call it wraps.
     static FORCED_MODE: std::cell::Cell<Option<kreate_ops::operator::Mode>> = const { std::cell::Cell::new(None) };
@@ -271,7 +279,18 @@ fn composite_with(
     for pass in 0..4 {
         let mut raw_input = raw_input.clone();
         raw_input.time = Some(pass as f64 * 0.25);
-        camera.frame_sphere(glam::DVec3::ZERO, 2.0, viewport.aspect());
+        match FRAMING.with(|f| f.get()) {
+            Some((centre, radius, rotation, ortho)) => {
+                if let Some(q) = rotation {
+                    camera.rotation = q;
+                }
+                if ortho {
+                    camera.projection = kreate_render::Projection::Orthographic;
+                }
+                camera.frame_sphere(centre, radius, viewport.aspect());
+            }
+            None => camera.frame_sphere(glam::DVec3::ZERO, 2.0, viewport.aspect()),
+        }
         state.camera_rotation = camera.rotation;
         if viewport_rect.width() > 0.0 {
             state.projector = Some(kreate_ui::object_glyph::Projector {
@@ -3037,4 +3056,205 @@ fn shot_outliner_reveals_the_active() {
     composite(&doc, "en")
         .expect("a GPU")
         .dump("outliner-reveal");
+}
+
+/// The sketch-to-solid flow the user asked to see, as pictures, through the
+/// same operators the tools run: a sketch on the ground, a rectangle from the
+/// origin dimensioned 40 × 20 mm, a 10 mm hole, the plate pushed up 10 mm
+/// with the hole through it, then the width made 60 mm and the body
+/// following. Writes `target/composite-sketch-*.png`.
+#[test]
+fn a_sketch_becomes_a_plate_and_the_plate_follows_the_sketch() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue as V};
+    let mut r = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut r);
+    let mut h = History::new();
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    let ctx = kreate_ops::operator::Context::default();
+    let mut run = |doc: &mut Document, id: &str, pairs: Vec<(&'static str, V)>| {
+        let mut p = PropertyMap::new();
+        for (k, v) in pairs {
+            p.set(k, v);
+        }
+        h.dispatch(&r, doc, &ctx, id, &p).expect(id);
+    };
+    run(&mut doc, "sketch.new", vec![]);
+    let sketch = kreate_ops::ops::sketch_draw::active_sketch(&doc).unwrap();
+    run(
+        &mut doc,
+        "sketch.rectangle",
+        vec![
+            ("a", V::Vec3([0.0, 0.0, 0.0])),
+            ("b", V::Vec3([0.036, 0.017, 0.0])),
+            ("join", V::Int(1)),
+        ],
+    );
+    for (pts, value) in [(vec![0u32, 1], 0.04), (vec![1u32, 2], 0.02)] {
+        run(
+            &mut doc,
+            "sketch.constrain",
+            vec![
+                ("kind", V::Enum(0)),
+                ("points", V::Ints(pts)),
+                ("value", V::Float(value)),
+            ],
+        );
+    }
+    run(
+        &mut doc,
+        "sketch.circle",
+        vec![
+            ("centre", V::Vec3([0.02, 0.01, 0.0])),
+            ("radius", V::Float(0.0045)),
+        ],
+    );
+    // The hole's diameter, 10 mm, and its centre held where it is.
+    let centre = 4u32;
+    run(
+        &mut doc,
+        "sketch.constrain",
+        vec![
+            ("kind", V::Enum(0)),
+            ("points", V::Ints(vec![centre, 5])),
+            ("value", V::Float(0.005)),
+        ],
+    );
+    run(
+        &mut doc,
+        "sketch.constrain",
+        vec![("kind", V::Enum(3)), ("points", V::Ints(vec![centre]))],
+    );
+
+    let top = (
+        glam::DVec3::new(0.02, 0.01, 0.0),
+        0.03,
+        Some(glam::DQuat::IDENTITY),
+        true,
+    );
+    let picture = |doc: &Document, label: &str, tool: kreate::sketching::Tool, framing: Framing| {
+        FRAMING.with(|f| f.set(Some(framing)));
+        let mut ui = kreate::sketching::SketchUi {
+            tool,
+            ..Default::default()
+        };
+        if tool == kreate::sketching::Tool::Extrude {
+            ui.seeds = vec![glam::DVec2::new(0.003, 0.003)];
+        }
+        let points = kreate_ops::ops::sketch_draw::points(doc, sketch);
+        let pinned = kreate::sketching::pinned(&points, &doc.object(sketch).unwrap().sketch);
+        let in_sketch = tool != kreate::sketching::Tool::Select;
+        let shot = composite_in_mode(
+            doc,
+            "ko-KR",
+            if in_sketch {
+                kreate_ops::operator::Mode::Sketch
+            } else {
+                kreate_ops::operator::Mode::Object
+            },
+            |state| {
+                if in_sketch {
+                    state.sketch_view = Some(kreate::sketching::view(
+                        doc,
+                        sketch,
+                        &ui,
+                        &state.catalog,
+                        &pinned,
+                    ));
+                }
+                state.sketch_lines =
+                    kreate::sketching::other_lines(doc, in_sketch.then_some(sketch));
+                state.features = kreate::sketching::feature_rows(doc, &state.catalog);
+            },
+        );
+        FRAMING.with(|f| f.set(None));
+        if shot.is_some() {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+            let _ = std::fs::copy(
+                dir.join("composite-scene-ko-KR.png"),
+                dir.join(format!("composite-sketch-{label}.png")),
+            );
+        }
+    };
+    picture(&doc, "1-drawn", kreate::sketching::Tool::Extrude, top);
+
+    // Every point pinned: the corner on the origin, the sides dimensioned,
+    // the hole's centre held and its diameter set.
+    let points = kreate_ops::ops::sketch_draw::points(&doc, sketch);
+    let pinned = kreate::sketching::pinned(&points, &doc.object(sketch).unwrap().sketch);
+    assert!(pinned.iter().all(|p| *p), "{pinned:?}");
+
+    run(
+        &mut doc,
+        "feature.extrude",
+        vec![
+            ("seeds", V::Floats(vec![0.003, 0.003])),
+            ("distance", V::Float(0.01)),
+        ],
+    );
+    let body = doc
+        .objects()
+        .find(|(_, o)| !o.features.is_empty())
+        .map(|(id, _)| id)
+        .unwrap();
+    let volume = |doc: &Document| {
+        let mut cache = kreate_scene::modifier::ModifierCache::new();
+        let mesh = cache
+            .evaluated(doc, body, &kreate_scene::modifier::EvalCtx::still())
+            .unwrap();
+        kreate_mesh::measure::mass_properties(&mesh, |p| p).volume
+    };
+    let hole = std::f64::consts::PI * 0.005f64.powi(2) * 0.01;
+    let v = volume(&doc);
+    let want = 0.04 * 0.02 * 0.01 - hole;
+    assert!((v - want).abs() < want * 5e-3, "{v} against {want}");
+    let three_quarter = (
+        glam::DVec3::new(0.025, 0.01, 0.005),
+        0.04,
+        Some(glam::DQuat::from_rotation_z(-0.6) * glam::DQuat::from_rotation_x(1.0)),
+        false,
+    );
+    picture(
+        &doc,
+        "2-extruded",
+        kreate::sketching::Tool::Select,
+        three_quarter,
+    );
+
+    // 60 mm wide: the dimension changed, the plate follows.
+    doc.selection.clear();
+    doc.selection.add(sketch);
+    doc.selection.active = Some(sketch);
+    let index = doc
+        .object(sketch)
+        .unwrap()
+        .sketch
+        .iter()
+        .position(|c| c.value() == Some(0.04))
+        .unwrap();
+    run(
+        &mut doc,
+        "sketch.constraint_set",
+        vec![("index", V::Int(index as i64)), ("value", V::Float(0.06))],
+    );
+    let v = volume(&doc);
+    let want = 0.06 * 0.02 * 0.01 - hole;
+    assert!((v - want).abs() < want * 5e-3, "{v} against {want}");
+    picture(
+        &doc,
+        "3-widened",
+        kreate::sketching::Tool::Select,
+        three_quarter,
+    );
+    picture(
+        &doc,
+        "4-sketch-again",
+        kreate::sketching::Tool::Dimension,
+        (
+            glam::DVec3::new(0.03, 0.01, 0.0),
+            0.04,
+            Some(glam::DQuat::IDENTITY),
+            true,
+        ),
+    );
 }

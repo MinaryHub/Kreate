@@ -146,6 +146,8 @@ pub enum Context {
     TexturePaint,
     /// Sculpt mode: the pointer sculpts, and letters pick brushes.
     Sculpt,
+    /// Sketch mode: the pointer draws, and letters pick the sketch tools.
+    Sketch,
     /// The pointer is over the UV editor.
     ///
     /// Its own context, and deliberately *not* inside `Viewport`: `G` in the
@@ -177,6 +179,7 @@ impl Context {
             Context::WeightPaint => &[Context::WeightPaint, Context::Viewport, Context::Global],
             Context::TexturePaint => &[Context::TexturePaint, Context::Viewport, Context::Global],
             Context::Sculpt => &[Context::Sculpt, Context::Viewport, Context::Global],
+            Context::Sketch => &[Context::Sketch, Context::Viewport, Context::Global],
             Context::UvEditor => &[Context::UvEditor, Context::Global],
             // A modal tool owns the keyboard: nothing outside it may fire, or a
             // stray `S` would start a scale inside a running transform.
@@ -197,6 +200,7 @@ impl Context {
             Context::WeightPaint => "weight_paint",
             Context::TexturePaint => "texture_paint",
             Context::Sculpt => "sculpt",
+            Context::Sketch => "sketch",
             Context::UvEditor => "uv_editor",
             Context::Modal => "modal",
         }
@@ -217,6 +221,7 @@ impl Context {
         Context::WeightPaint,
         Context::TexturePaint,
         Context::Sculpt,
+        Context::Sketch,
         Context::UvEditor,
         Context::Modal,
     ];
@@ -873,6 +878,12 @@ mod tests {
             Binding::new(
                 "texture.nothing",
                 Context::TexturePaint,
+                Input::key("G"),
+                Action::new("object.translate"),
+            ),
+            Binding::new(
+                "sketch.nothing",
+                Context::Sketch,
                 Input::key("G"),
                 Action::new("object.translate"),
             ),

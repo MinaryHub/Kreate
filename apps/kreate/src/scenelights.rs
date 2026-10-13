@@ -24,6 +24,35 @@ use kreate_scene::{Document, LightKind};
 /// Order follows [`Document::lit_by`], which is arena slot order. Stable across
 /// frames for an unchanged scene, which is what stops a light's index — and so
 /// its shadow map — from moving under it.
+/// The material preview's own light: what Blender's Material Preview lights
+/// a material with, so it can be judged before the scene has a lamp.
+pub struct Preview {
+    /// An even pale sky, in nits.
+    pub world: [f32; 3],
+    /// One soft key from over the viewer's left shoulder.
+    pub lights: Vec<PlacedLight>,
+    /// Stops: the light is the application's, so its exposure is too.
+    pub exposure: f32,
+}
+
+/// The preview light for a view turned by `view`: the key turns with it, as
+/// Blender's preview light does, so the side being looked at is lit.
+pub fn material_preview(view: glam::DQuat) -> Preview {
+    let from = view.as_quat() * glam::Vec3::new(-0.6, 0.9, 0.8);
+    Preview {
+        world: [0.42, 0.42, 0.44],
+        lights: vec![PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: -from.normalize(),
+            amount: [7.0; 3],
+            angular_radius: 0.12,
+            cast_shadow: true,
+            ..Default::default()
+        }],
+        exposure: 0.0,
+    }
+}
+
 pub fn placed_lights(doc: &Document) -> Vec<PlacedLight> {
     doc.lit_by()
         .map(|(_, light, world)| place(light, &world))

@@ -10,6 +10,7 @@ pub mod armature;
 pub mod collection;
 pub mod design;
 pub mod driver;
+pub mod feature;
 pub mod geo;
 pub mod mesh;
 pub mod modifier;
@@ -24,6 +25,7 @@ pub mod robot;
 pub mod sculpt;
 pub mod shape;
 pub mod sketch;
+pub mod sketch_draw;
 pub mod texture;
 pub mod uv;
 
@@ -41,6 +43,8 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     origin::register(registry);
     design::register(registry);
     sketch::register(registry);
+    sketch_draw::register(registry);
+    feature::register(registry);
     render::register(registry);
     robot::register(registry);
     paint::register(registry);

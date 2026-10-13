@@ -31,8 +31,13 @@
 
 struct Globals {
     view_proj: mat4x4<f32>,
-    /// xyz: unused here. w: unused.
+    /// xyz: unused here. w: one when the view is orthographic.
     params: vec4<f32>,
+    camera_right: vec4<f32>,
+    camera_up: vec4<f32>,
+    /// The camera's back, which is the way to the eye from every point of an
+    /// orthographic view.
+    camera_back: vec4<f32>,
 }
 
 struct RenderedObject {
@@ -133,9 +138,12 @@ struct RenderedOut {
 @fragment
 fn fs_rendered(in: VertexOut) -> RenderedOut {
     // Toward the camera, which eye-relative space puts at the origin.
+    // Orthographic: the camera's back everywhere. The eye point there is only
+    // where positions are measured from, and zooming in can put it inside
+    // the model, where "toward it" turns round halfway across a face.
     let to_eye = -in.world;
-    var view = vec3<f32>(0.0, 0.0, 1.0);
-    if dot(to_eye, to_eye) > 1e-12 {
+    var view = globals.camera_back.xyz;
+    if globals.params.w < 0.5 && dot(to_eye, to_eye) > 1e-12 {
         view = normalize(to_eye);
     }
 

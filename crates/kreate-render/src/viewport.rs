@@ -46,6 +46,20 @@ pub enum ShadingMode {
     /// image — per fragment it would apply before blending, which is the bug
     /// §2.1 records as compositing seven times too dark.
     Rendered,
+    /// Blender's Material Preview: the materials as the rendered view shades
+    /// them — the same passes — under a light of the application's own
+    /// rather than the scene's, so a material can be judged before the scene
+    /// has any lamps. The caller hands over that light; the renderer treats
+    /// this as the rendered view in all but the path tracer.
+    Material,
+}
+
+impl ShadingMode {
+    /// Whether the picture goes through the lit, scene-linear passes: the
+    /// rendered view and the material preview.
+    pub fn lit(self) -> bool {
+        matches!(self, ShadingMode::Rendered | ShadingMode::Material)
+    }
 }
 
 #[repr(C)]
@@ -309,6 +323,18 @@ pub struct MeshLayouts {
     pub cluster_draw: wgpu::BindGroupLayout,
 }
 
+/// A buffer's contents, or sixteen zero bytes when there are none: a mesh
+/// with no vertices — a sketch, which is points and lines and no faces — still
+/// has its buffers bound, and a binding of no bytes cannot be made.
+fn padded(bytes: &[u8]) -> &[u8] {
+    const ZERO: [u8; 16] = [0; 16];
+    if bytes.is_empty() {
+        &ZERO
+    } else {
+        bytes
+    }
+}
+
 impl GpuMesh {
     pub fn upload(
         device: &wgpu::Device,
@@ -321,7 +347,7 @@ impl GpuMesh {
         // from it to expand a screen-space line quad.
         let positions = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh positions"),
-            contents: bytemuck::cast_slice(&cpu.positions),
+            contents: padded(bytemuck::cast_slice(&cpu.positions)),
             // COPY_SRC as well: a drag copies these to a rest buffer on the GPU
             // rather than having the CPU send them again, which is the whole
             // cost it exists to avoid.
@@ -332,7 +358,7 @@ impl GpuMesh {
         });
         let normals = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh normals"),
-            contents: bytemuck::cast_slice(&cpu.normals),
+            contents: padded(bytemuck::cast_slice(&cpu.normals)),
             // STORAGE as well as VERTEX: the direct solid pass fetches these as
             // a vertex attribute, and the cluster pass reads the same bytes as
             // an array because its vertex index comes from the cluster index
@@ -344,7 +370,7 @@ impl GpuMesh {
         });
         let uvs = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh uvs"),
-            contents: bytemuck::cast_slice(&cpu.uvs),
+            contents: padded(bytemuck::cast_slice(&cpu.uvs)),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         // White for every vertex when the mesh has no colours, so the passes
@@ -2758,7 +2784,7 @@ impl Viewport {
             return;
         }
         let aspect = self.aspect();
-        let hdr = self.shading == ShadingMode::Rendered;
+        let hdr = self.shading.lit();
         self.volumes.set(
             device,
             queue,
@@ -2940,7 +2966,7 @@ impl Viewport {
         if self.frame_sample.is_some() || !self.accum_applies {
             self.depth_view_proj = Some(view_proj);
         }
-        if self.shading == ShadingMode::Rendered {
+        if self.shading.lit() {
             self.shading_view_proj = view_proj.to_cols_array_2d();
             queue.write_buffer(
                 &self.shading_globals_buf,
@@ -2975,7 +3001,7 @@ impl Viewport {
                 }
             }
         }
-        if self.shading == ShadingMode::Rendered && self.show_reflections {
+        if self.shading.lit() && self.show_reflections {
             // As far as the view is from what it turns about, twice: a floor
             // reflects what stands on it, not the horizon.
             self.ssr.prepare(
@@ -2989,7 +3015,7 @@ impl Viewport {
                 (camera.distance * 2.0).max(1e-3) as f32,
             );
         }
-        if self.shading == ShadingMode::Rendered && self.show_bloom {
+        if self.shading.lit() && self.show_bloom {
             // Over white once exposed: the picture's own exposure, so what
             // glows is what the display cannot show.
             self.bloom.prepare(
@@ -3013,11 +3039,7 @@ impl Viewport {
             (camera.distance * 0.1).max(1e-4) as f32,
             // Gentler in the rendered view, where the lights already shade
             // the form and the occlusion is grounding rather than drawing it.
-            if self.shading == ShadingMode::Rendered {
-                0.6
-            } else {
-                1.0
-            },
+            if self.shading.lit() { 0.6 } else { 1.0 },
         );
 
         let right = camera.right().as_vec3();
@@ -3037,7 +3059,13 @@ impl Viewport {
                     if self.face_orientation { 1.0 } else { 0.0 },
                     // How opaque the surfaces are in X-ray; zero when off.
                     if self.xray { XRAY_ALPHA } else { 0.0 },
-                    0.0,
+                    // One when orthographic: the way to the eye is then the
+                    // camera's back everywhere, not toward the eye point.
+                    if camera.projection == Projection::Orthographic {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 ],
                 camera_right: right.extend(0.0).to_array(),
                 camera_up: up.extend(0.0).to_array(),
@@ -3320,7 +3348,7 @@ impl Viewport {
     /// themselves, and culling for them would be a compute pass whose output
     /// nothing reads.
     fn fit_tiles(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, camera: &Camera) {
-        if self.shading != ShadingMode::Rendered {
+        if !self.shading.lit() {
             return;
         }
         let (w, h) = self.render_size;
@@ -3382,7 +3410,7 @@ impl Viewport {
         // earlier frame shadowing this one.
         self.shadow_entries.clear();
         self.shadow_views.clear();
-        if self.shading != ShadingMode::Rendered {
+        if !self.shading.lit() {
             // The other modes light themselves. Fitting frames for lights
             // nothing reads would be a pass per lamp for no picture at all.
             return;
@@ -3557,7 +3585,7 @@ impl Viewport {
         ShadingGlobals {
             tiles_across: self.tiles.across(),
             tile_capacity: crate::tiles::MAX_LIGHTS_PER_TILE,
-            region: if self.shading == ShadingMode::Rendered {
+            region: if self.shading.lit() {
                 [self.render_size.0, self.render_size.1]
             } else {
                 [0, 0]
@@ -3628,7 +3656,7 @@ impl Viewport {
     /// Whether this frame's rendered view darkens where things touch: on, the
     /// rendered mode, and rasterised — the path tracer's shadows are exact.
     fn contact_applies(&self) -> bool {
-        self.contact_shadows && self.shading == ShadingMode::Rendered && !self.path_tracing()
+        self.contact_shadows && self.shading.lit() && !self.path_tracing()
     }
 
     /// Replaces the environment with one built from an equirectangular image.
@@ -4612,7 +4640,7 @@ impl Viewport {
         target: &wgpu::TextureView,
         draws: &[Draw],
     ) {
-        if self.shading == ShadingMode::Rendered {
+        if self.shading.lit() {
             self.render_lit(encoder, target, draws);
             return;
         }
@@ -4754,7 +4782,7 @@ impl Viewport {
     ) -> glam::Mat4 {
         use std::hash::{Hash, Hasher};
         self.accum_applies = self.accumulate
-            && (self.smoothing() || self.shading == ShadingMode::Rendered)
+            && (self.smoothing() || self.shading.lit())
             && !(self.cluster_path && self.occlusion_culling);
         if !self.accum_applies {
             self.accum_samples = 0;

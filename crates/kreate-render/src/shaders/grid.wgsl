@@ -16,7 +16,8 @@ struct GridGlobals {
     inv_view_row0: vec4<f32>,
     inv_view_row1: vec4<f32>,
     inv_view_row2: vec4<f32>,
-    // xyz: camera position in world space. w: tan(fov_y / 2).
+    // xyz: camera position in world space. w: tan(fov_y / 2) in perspective;
+    // half the view's height, in metres, in orthographic.
     eye_and_tan: vec4<f32>,
     // x: aspect ratio, y: 1 for perspective / 0 for orthographic, zw: unused.
     params: vec4<f32>,
@@ -81,11 +82,24 @@ fn fs_main(in: VsOut) -> FsOut {
     );
     let tan_half = g.eye_and_tan.w;
     let aspect = g.params.x;
-    let dir = normalize(inv_view * vec3<f32>(
-        in.ndc.x * tan_half * aspect,
-        in.ndc.y * tan_half,
-        -1.0,
-    ));
+    let perspective = g.params.y > 0.5;
+    // Perspective: every ray from the eye, spreading. Orthographic: every ray
+    // the same direction, each from its own place across the view — rays from
+    // one point here drew a perspective floor under an orthographic model, its
+    // lines converging where the model's do not, and the floor's depth wrong
+    // enough to show through the model.
+    var origin = vec3<f32>(0.0);
+    var dir: vec3<f32>;
+    if (perspective) {
+        dir = normalize(inv_view * vec3<f32>(
+            in.ndc.x * tan_half * aspect,
+            in.ndc.y * tan_half,
+            -1.0,
+        ));
+    } else {
+        dir = normalize(inv_view * vec3<f32>(0.0, 0.0, -1.0));
+        origin = inv_view * vec3<f32>(in.ndc.x * tan_half * aspect, in.ndc.y * tan_half, 0.0);
+    }
 
     // The camera is at the origin of camera-relative space, so the world Z = 0
     // plane sits at -eye.z.
@@ -94,13 +108,13 @@ fn fs_main(in: VsOut) -> FsOut {
     if (abs(dir.z) < 1e-7) {
         discard;
     }
-    let t = plane_z / dir.z;
-    if (t <= 0.0) {
+    let t = (plane_z - origin.z) / dir.z;
+    if (perspective && t <= 0.0) {
         // The plane is behind the camera along this ray: looking up at the sky.
         discard;
     }
 
-    let hit_rel = dir * t;
+    let hit_rel = origin + dir * t;
     let world_xy = hit_rel.xy + eye.xy;
 
     // Two decades of lines, cross-faded by how dense they would be on screen, so
@@ -143,7 +157,16 @@ fn fs_main(in: VsOut) -> FsOut {
     // Real depth from the hit point, so geometry occludes the grid correctly.
     // Reversed-Z, so this is near 1 close to the camera.
     let clip = g.view_proj * vec4<f32>(hit_rel, 1.0);
-    out.depth = clip.z / clip.w;
+    // A hair farther than it is — three ten-thousandths of the distance, a
+    // few millimetres at a modelling distance — so a face lying in the
+    // grid's own plane, the underside of a floor resting on it, wins the tie
+    // every frame instead of flickering through it. Reversed-Z: smaller is
+    // farther.
+    out.depth = clip.z / clip.w * 0.9997;
+    // Orthographic depth has ends: past them the floor is not in the view.
+    if (out.depth < 0.0 || out.depth > 1.0) {
+        discard;
+    }
     out.color = vec4<f32>(color, coverage);
     return out;
 }

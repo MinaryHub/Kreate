@@ -631,6 +631,63 @@ fn common() -> Vec<Binding> {
             enum_param(Action::new("pose.select_all"), "action", 1),
         )
         .with_modifiers(Modifiers::alt()),
+        // The sketch tools, on Fusion's letters: L line, R rectangle, C circle,
+        // D dimension, E extrude. A for an arc and P a point, Y revolve.
+        key(
+            "sketch.tool_line",
+            "L",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("line".into())),
+        ),
+        key(
+            "sketch.tool_rectangle",
+            "R",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("rectangle".into())),
+        ),
+        key(
+            "sketch.tool_circle",
+            "C",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("circle".into())),
+        ),
+        key(
+            "sketch.tool_arc",
+            "A",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("arc".into())),
+        ),
+        key(
+            "sketch.tool_point",
+            "P",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("point".into())),
+        ),
+        key(
+            "sketch.tool_dimension",
+            "D",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("dimension".into())),
+        ),
+        key(
+            "sketch.tool_extrude",
+            "E",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("extrude".into())),
+        ),
+        key(
+            "sketch.tool_revolve",
+            "Y",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("revolve".into())),
+        ),
+        // X takes what is selected out of the sketch.
+        key(
+            "sketch.delete_x",
+            "X",
+            Context::Sketch,
+            Action::new("app.sketch_delete"),
+        ),
         // Blender's F and Shift+F: the brush's size and strength, set by
         // moving the pointer, in every brush mode.
         key(

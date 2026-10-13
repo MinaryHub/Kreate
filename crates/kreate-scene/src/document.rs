@@ -186,6 +186,13 @@ pub struct Object {
     /// Its sketch's constraints, on its mesh's vertices: see
     /// [`crate::sketch`]. Empty for an object that is not a sketch.
     pub sketch: Vec<crate::sketch::Constraint>,
+    /// Its sketch's lines, between its mesh's vertices. Here and not as the
+    /// mesh's edges because a mesh's edges are its faces', and a line drawn
+    /// in a sketch bounds no face of its own until the regions are found.
+    pub sketch_lines: Vec<[u32; 2]>,
+    /// What makes it a body: its features, run in order, are what it shows
+    /// in place of its mesh. See [`crate::feature`]. Empty for anything else.
+    pub features: Vec<crate::feature::Feature>,
     /// The action this object plays, if it is animated.
     pub action: Option<ActionId>,
     /// Actions laid on the timeline under the active one: see [`crate::nla`].
@@ -238,6 +245,8 @@ impl Object {
             modifiers: Vec::new(),
             geometry_nodes: None,
             sketch: Vec::new(),
+            sketch_lines: Vec::new(),
+            features: Vec::new(),
             action: None,
             nla: Vec::new(),
             drivers: Vec::new(),

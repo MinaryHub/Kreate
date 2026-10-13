@@ -59,6 +59,7 @@ fn the_header_offers_what_the_mode_acts_on() {
             ActsOn::Weights => Menu::Weights,
             ActsOn::Sculpt => Menu::Sculpt,
             ActsOn::Texture => Menu::Texture,
+            ActsOn::Sketch => Menu::Sketch,
         };
         assert!(
             info.menus.contains(&want),

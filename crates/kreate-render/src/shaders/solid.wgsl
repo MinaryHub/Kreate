@@ -11,7 +11,8 @@
 struct Globals {
     view_proj: mat4x4<f32>,
     // x: shading mode (0 studio, 1 flat, 2 matcap-ish)
-    // y: one to colour by face orientation, z: unused, w: unused
+    // y: one to colour by face orientation, z: X-ray alpha,
+    // w: one when the view is orthographic
     params: vec4<f32>,
     // The camera's right, up and back in the world: the studio lights are
     // placed in these, so they turn with the view.
@@ -318,7 +319,16 @@ fn fs_main(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0)
     if (!front_facing) {
         n = -n;
     }
-    let to_eye = normalize(-in.view_pos);
+    // Toward the eye: from the point in perspective, but the camera's back
+    // everywhere in an orthographic view. There the eye point is only where
+    // positions are measured from, and zooming in can put it inside the
+    // model — measured from it, the way to the eye turns round halfway
+    // across a face and the face goes dark from the middle.
+    let to_eye = select(
+        normalize(-in.view_pos),
+        globals.camera_back.xyz,
+        globals.params.w > 0.5,
+    );
 
     // The ramp is light's reflectance like any colour: shaded, so the form
     // still reads under the weights, as Blender's weight paint does.

@@ -33,6 +33,8 @@ pub enum Mode {
     WeightPaint,
     Sculpt,
     TexturePaint,
+    /// Drawing a sketch in its plane: Fusion's sketch environment.
+    Sketch,
 }
 
 /// What a mode needs to be entered.
@@ -97,6 +99,9 @@ pub enum ActsOn {
     Sculpt,
     /// The active mesh's texture, painted with a brush through its UVs.
     Texture,
+    /// The active sketch's lines and points, drawn and constrained by the
+    /// sketch tools.
+    Sketch,
 }
 
 /// A header menu a mode offers after Add.
@@ -115,6 +120,12 @@ pub enum Menu {
     Sculpt,
     /// Texture paint: making something to paint on.
     Texture,
+    /// The sketch tools: lines, rectangles, circles, arcs, points.
+    Sketch,
+    /// Constraints and dimensions on what is drawn.
+    Constrain,
+    /// The sketch made solid: extrude, revolve, and finishing the sketch.
+    Solid,
 }
 
 /// Everything the application asks of a mode.
@@ -150,7 +161,7 @@ pub struct ModeInfo {
 }
 
 /// The cards, in the order the mode menu lists them.
-pub const MODES: [ModeInfo; 7] = [
+pub const MODES: [ModeInfo; 8] = [
     ModeInfo {
         mode: Mode::Object,
         tag: "object",
@@ -256,11 +267,29 @@ pub const MODES: [ModeInfo; 7] = [
         transform: ["object.translate", "object.rotate", "object.scale"],
         tab: Mode::Object,
     },
+    ModeInfo {
+        mode: Mode::Sketch,
+        tag: "sketch",
+        label_key: "mode-sketch",
+        // Entered from anything: with no sketch active, entering starts one
+        // on a plane the user picks.
+        needs: Needs::Nothing,
+        acts_on: ActsOn::Sketch,
+        keymap: "sketch",
+        menus: &[Menu::Sketch, Menu::Constrain, Menu::Solid],
+        element_buttons: false,
+        edit_tools: false,
+        shows_elements: false,
+        // A sketch's points are dragged by the pointer; no key in its
+        // context reaches these.
+        transform: ["object.translate", "object.rotate", "object.scale"],
+        tab: Mode::Object,
+    },
 ];
 
 impl Mode {
     /// Every mode, in the order the header should offer them.
-    pub const ALL: [Mode; 7] = [
+    pub const ALL: [Mode; 8] = [
         Mode::Object,
         Mode::EditMesh,
         Mode::EditArmature,
@@ -268,6 +297,7 @@ impl Mode {
         Mode::WeightPaint,
         Mode::Sculpt,
         Mode::TexturePaint,
+        Mode::Sketch,
     ];
 
     /// This mode's card.
@@ -283,6 +313,7 @@ impl Mode {
             Mode::WeightPaint => &MODES[4],
             Mode::Sculpt => &MODES[5],
             Mode::TexturePaint => &MODES[6],
+            Mode::Sketch => &MODES[7],
         }
     }
 
@@ -442,7 +473,7 @@ mod tests {
                 ActsOn::Bones => "pose.",
                 ActsOn::BoneJoints => "armature.",
                 // See the card: nothing reaches them.
-                ActsOn::Weights | ActsOn::Sculpt | ActsOn::Texture => "object.",
+                ActsOn::Weights | ActsOn::Sculpt | ActsOn::Texture | ActsOn::Sketch => "object.",
             };
             for op in mode.info().transform {
                 assert!(op.starts_with(prefix), "{mode:?}: {op}");

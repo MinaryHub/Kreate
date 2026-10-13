@@ -11,7 +11,6 @@ pub mod clipboard;
 pub mod container;
 pub mod dae;
 pub mod drawing;
-mod earcut;
 pub mod exr;
 pub mod fbx;
 pub mod gltf_export;

@@ -58,6 +58,11 @@ pub struct AddPrimitiveParams {
     /// Cursor orientation is chosen.
     #[param(unit = "angle")]
     pub rotation: [f64; 3],
+    /// Lifted so its lowest point is at `location` rather than its middle:
+    /// a cube added at the cursor on the floor stands on the floor instead of
+    /// half through it. Off by default, as Blender and a script expect; the
+    /// Add menu turns it on.
+    pub on_floor: bool,
 }
 
 impl Default for AddPrimitiveParams {
@@ -69,6 +74,7 @@ impl Default for AddPrimitiveParams {
             rings: 16,
             location: [0.0; 3],
             rotation: [0.0; 3],
+            on_floor: false,
         }
     }
 }
@@ -121,14 +127,26 @@ impl Operator for AddPrimitive {
             )));
         }
 
+        let angles = DVec3::from_array(params.rotation);
+        let turn = if angles.is_finite() {
+            kreate_scene::animation::from_euler(angles)
+        } else {
+            kreate_math::DQuat::IDENTITY
+        };
+        // How far below its middle the shape reaches, turned as it will be.
+        let below = if params.on_floor {
+            mesh.positions()
+                .iter()
+                .map(|p| (turn * p.as_dvec3()).z)
+                .fold(0.0f64, f64::min)
+        } else {
+            0.0
+        };
         let d = doc.document_mut();
         let id = d.add_mesh_object(capitalise(name), mesh);
         let o = d.object_mut(id).expect("just added");
-        o.transform.translation = DVec3::from_array(params.location);
-        let angles = DVec3::from_array(params.rotation);
-        if angles.is_finite() {
-            o.transform.rotation = kreate_scene::animation::from_euler(angles);
-        }
+        o.transform.translation = DVec3::from_array(params.location) - DVec3::Z * below;
+        o.transform.rotation = turn;
         // A newly added object becomes the selection, which is what every
         // subsequent operator acts on.
         d.selection.clear();
@@ -4102,6 +4120,44 @@ mod tests {
             d.object(id).unwrap().transform.translation,
             DVec3::new(1.0, 2.0, 3.0)
         );
+    }
+
+    /// On the floor: a 2 m cube's bottom at the location, not its middle;
+    /// turned on its edge, its lowest corner there.
+    #[test]
+    fn a_primitive_on_the_floor_stands_on_its_location() {
+        let (r, mut h, mut d, c) = setup();
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.add_primitive",
+            &[
+                ("location", PropertyValue::Vec3([1.0, 2.0, 0.5])),
+                ("on_floor", PropertyValue::Bool(true)),
+            ],
+        );
+        let id = d.selection.active.unwrap();
+        let t = d.object(id).unwrap().transform.translation;
+        assert!((t - DVec3::new(1.0, 2.0, 1.5)).length() < 1e-9, "{t:?}");
+        run(
+            &r,
+            &mut h,
+            &mut d,
+            &c,
+            "object.add_primitive",
+            &[
+                ("on_floor", PropertyValue::Bool(true)),
+                (
+                    "rotation",
+                    PropertyValue::Vec3([std::f64::consts::FRAC_PI_4, 0.0, 0.0]),
+                ),
+            ],
+        );
+        let id = d.selection.active.unwrap();
+        let t = d.object(id).unwrap().transform.translation;
+        assert!((t.z - 2f64.sqrt()).abs() < 1e-6, "on its edge: {t:?}");
     }
 
     #[test]

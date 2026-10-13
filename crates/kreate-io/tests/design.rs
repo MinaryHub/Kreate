@@ -113,3 +113,77 @@ fn sketch_constraints_are_saved_with_their_object() {
     let (_, o) = back.objects().find(|(_, o)| o.name == "Sketch").unwrap();
     assert_eq!(o.sketch, constraints);
 }
+
+/// A sketch's own lines, its circle and tangent, and a body's features —
+/// an extrude cut and a revolve joined, naming the sketch by identity — come
+/// back as they went, and the body is built from them again.
+#[test]
+fn sketch_lines_and_a_bodys_features_are_saved() {
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::feature::{Feature, Operation, Shape};
+    use kreate_scene::sketch::Constraint;
+    let mut doc = Document::new();
+    let square = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mesh = doc.add_mesh(kreate_mesh::MeshData::from_faces(
+        square
+            .iter()
+            .map(|p| kreate_math::Vec3::new(p[0], p[1], 0.0))
+            .collect(),
+        &[],
+    ));
+    let mut sketch = Object::new("Sketch", ObjectData::Mesh(mesh));
+    sketch.sketch_lines = vec![[0, 1], [1, 2], [2, 3], [3, 0]];
+    sketch.sketch = vec![
+        Constraint::Coincident { a: 0, b: 1 },
+        Constraint::Circle {
+            centre: 0,
+            ring: vec![1, 2, 3],
+        },
+        Constraint::Tangent {
+            a: 0,
+            b: 1,
+            centre: 2,
+            on: 3,
+        },
+    ];
+    let id = doc.add_object(sketch);
+    let uid = doc.object_uid(id).unwrap();
+    let body_mesh = doc.add_mesh(kreate_mesh::MeshData::empty());
+    let mut body = Object::new("Body", ObjectData::Mesh(body_mesh));
+    body.features = vec![
+        Feature {
+            shape: Shape::Extrude {
+                distance: 0.25,
+                symmetric: true,
+            },
+            sketch: uid,
+            seeds: vec![[0.5, 0.5]],
+            operation: Operation::Join,
+            order: 1,
+        },
+        Feature {
+            shape: Shape::Revolve {
+                axis: [0, 3],
+                angle: 1.5,
+            },
+            sketch: uid,
+            seeds: vec![[0.25, 0.75]],
+            operation: Operation::Cut,
+            order: 2,
+        },
+    ];
+    let original = body.features.clone();
+    doc.add_object(body);
+    let back = round_trip(&doc);
+    let (_, s) = back.objects().find(|(_, o)| o.name == "Sketch").unwrap();
+    assert_eq!(s.sketch_lines, vec![[0, 1], [1, 2], [2, 3], [3, 0]]);
+    assert_eq!(s.sketch.len(), 3);
+    let (b, o) = back.objects().find(|(_, o)| o.name == "Body").unwrap();
+    assert_eq!(o.features, original);
+    // And it still names the sketch: the body is built.
+    let mut cache = kreate_scene::modifier::ModifierCache::new();
+    let built = cache
+        .evaluated(&back, b, &kreate_scene::modifier::EvalCtx::still())
+        .unwrap();
+    assert!(built.num_faces() > 0);
+}

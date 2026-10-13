@@ -344,7 +344,9 @@ fn projection_is_camera_relative() {
     );
 }
 
-/// Vertex, then edge, then face: the smaller thing is the more deliberate aim.
+/// The points first — a corner, an edge's middle, a face's centre — then a
+/// point along an edge, then the face: the smaller thing is the more
+/// deliberate aim, and a middle or a centre is a place aimed at.
 #[test]
 fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
     let a = DVec3::new(-1.0, 0.0, -1.0);
@@ -354,6 +356,7 @@ fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
         verts: vec![a, b, c],
         edges: vec![[a, b], [b, c], [c, a]],
         tris: vec![[a, b, c]],
+        centres: vec![(a + b + c) / 3.0],
     };
     let hit =
         |p: DVec3| snap::resolve(&world, Mode::Element, at_point(p), &camera(), VIEWPORT).unwrap();
@@ -362,14 +365,34 @@ fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
     assert_eq!(vertex.element, snap::Element::Vertex);
     assert!((vertex.point - c).length() < 1e-9);
 
-    let edge = hit((a + b) * 0.5);
-    assert_eq!(edge.element, snap::Element::Edge);
-    assert!((edge.point - (a + b) * 0.5).length() < 1e-6);
+    // Near an edge's middle: the middle exactly, not the point beside the
+    // cursor.
+    let mid = (a + b) * 0.5;
+    let middle = hit(mid + DVec3::new(0.06, 0.0, 0.03));
+    assert_eq!(middle.element, snap::Element::Midpoint);
+    assert!((middle.point - mid).length() < 1e-9, "{:?}", middle.point);
 
-    let middle = DVec3::new(0.0, 0.0, -0.3);
-    let face = hit(middle);
+    // Along an edge away from its middle: the point beside the cursor.
+    let along = a + (b - a) * 0.2;
+    let edge = hit(along);
+    assert_eq!(edge.element, snap::Element::Edge);
+    assert!((edge.point - along).length() < 1e-6);
+
+    // Near a face's centre: the centre exactly.
+    let centre = (a + b + c) / 3.0;
+    let caught = hit(centre + DVec3::new(0.05, 0.0, -0.04));
+    assert_eq!(caught.element, snap::Element::Centre);
+    assert!(
+        (caught.point - centre).length() < 1e-9,
+        "{:?}",
+        caught.point
+    );
+
+    // Elsewhere on the face: the point under the cursor.
+    let inside = DVec3::new(0.0, 0.0, -0.65);
+    let face = hit(inside);
     assert_eq!(face.element, snap::Element::Face);
-    assert!((face.point - middle).length() < 1e-6, "{:?}", face.point);
+    assert!((face.point - inside).length() < 1e-6, "{:?}", face.point);
 
     let far = at_point(DVec3::new(4.0, 0.0, 3.0));
     assert!(snap::resolve(&world, Mode::Element, far, &camera(), VIEWPORT).is_none());

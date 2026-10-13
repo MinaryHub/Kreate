@@ -288,6 +288,11 @@ fn the_pick_cache_survives_an_edit_between_queries() {
 
 /// Ids the application handles itself rather than sending to the registry.
 const APP_ACTIONS: &[&str] = &[
+    // Sketch mode's tools and its delete: the tool is interface state, and
+    // what it draws goes through the sketch operators on the clicks after.
+    "app.sketch_tool",
+    "app.sketch_delete",
+    "app.finish_sketch",
     // F / Shift+F: the brush's size and strength, which live in the
     // interface, not the document.
     "brush.radius_adjust",

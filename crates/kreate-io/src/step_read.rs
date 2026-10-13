@@ -3111,7 +3111,7 @@ fn edge_key(a: usize, b: usize) -> (usize, usize) {
 // surface.
 
 fn triangulate(rings: &[Vec<DVec2>]) -> Vec<[usize; 3]> {
-    crate::earcut::triangulate(rings)
+    kreate_mesh::earcut::triangulate(rings)
 }
 
 fn orient(a: DVec2, b: DVec2, c: DVec2) -> f64 {

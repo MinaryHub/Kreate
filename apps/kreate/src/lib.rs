@@ -38,6 +38,7 @@ pub mod sculptview;
 pub mod shell;
 pub mod silhouette;
 pub mod sketchfab;
+pub mod sketching;
 pub mod snap;
 pub mod startup;
 pub mod update;

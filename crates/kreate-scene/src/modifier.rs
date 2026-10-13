@@ -405,6 +405,15 @@ struct GeoEntry {
     used: u64,
 }
 
+/// A body built from its features: what it depended on and what it is.
+#[derive(Clone, Debug)]
+struct BodyEntry {
+    object: kreate_reflect::Uid,
+    key: u64,
+    output: Arc<MeshData>,
+    used: u64,
+}
+
 /// A mesh with its simulation laid on: what it was made from and of.
 #[derive(Clone, Debug)]
 struct SimEntry {
@@ -470,6 +479,8 @@ pub struct ModifierCache {
     geo: Vec<GeoEntry>,
     /// Simulation results laid on, one per object.
     sims: Vec<SimEntry>,
+    /// Bodies built from their features, one per object.
+    bodies: Vec<BodyEntry>,
     generation: u64,
     /// Counters, so "did it re-evaluate more than it had to" is answerable. It
     /// is invisible at a glance and shows up only as a stutter on a scene big
@@ -507,6 +518,15 @@ impl ModifierCache {
     ) -> Option<Arc<MeshData>> {
         let object = doc.object(id)?;
         let stored = doc.mesh_arc(object.mesh()?)?;
+        // A body is what its features make, not the mesh it holds; the stack
+        // and the rest run on that as on any mesh.
+        let built;
+        let stored = if object.features.is_empty() {
+            stored
+        } else {
+            built = self.body(doc, id);
+            &built
+        };
         // Shape keys first, as Blender's are — under the armature and the
         // stack — and not while edit mode has a key traded into the mesh.
         let shaped =
@@ -885,6 +905,33 @@ impl ModifierCache {
             .collect()
     }
 
+    /// A body's shape, built from its features or found again.
+    fn body(&mut self, doc: &Document, id: ObjectId) -> Arc<MeshData> {
+        let object = doc.object(id).expect("asked for by id");
+        let world = doc.world_transform(id);
+        let key = crate::feature::key(doc, &object.features, world);
+        let uid = object.uid;
+        if let Some(e) = self
+            .bodies
+            .iter_mut()
+            .find(|e| e.object == uid && e.key == key)
+        {
+            e.used = self.generation;
+            self.hits += 1;
+            return e.output.clone();
+        }
+        self.misses += 1;
+        let output = Arc::new(crate::feature::body(doc, &object.features, world));
+        self.bodies.retain(|e| e.object != uid);
+        self.bodies.push(BodyEntry {
+            object: uid,
+            key,
+            output: output.clone(),
+            used: self.generation,
+        });
+        output
+    }
+
     /// Drops entries that were not asked for since the last sweep.
     ///
     /// Called once a frame, after evaluation. Without it the cache keeps one
@@ -897,6 +944,7 @@ impl ModifierCache {
         self.shapes.retain(|e| e.used == generation);
         self.geo.retain(|e| e.used == generation);
         self.sims.retain(|e| e.used == generation);
+        self.bodies.retain(|e| e.used == generation);
         self.generation += 1;
     }
 

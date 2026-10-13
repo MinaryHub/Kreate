@@ -101,24 +101,48 @@ fn shoot_traced(gpu: &Gpu, doc: &Document, camera: Camera) -> Vec<[f32; 4]> {
 }
 
 fn shoot_with(gpu: &Gpu, doc: &Document, camera: Camera, traced: bool) -> Vec<[f32; 4]> {
+    shoot_mode(gpu, doc, camera, traced, false)
+}
+
+fn shoot_mode(
+    gpu: &Gpu,
+    doc: &Document,
+    camera: Camera,
+    traced: bool,
+    preview: bool,
+) -> Vec<[f32; 4]> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
-    viewport.shading = ShadingMode::Rendered;
+    viewport.shading = if preview {
+        ShadingMode::Material
+    } else {
+        ShadingMode::Rendered
+    };
     viewport.path_trace = traced;
     viewport.show_grid = false;
     viewport.show_wireframe = false;
 
     // The same three calls `main` makes, in the same order, from the same
     // functions. A test that assembled the lights itself would be checking its
-    // own arithmetic.
-    viewport.set_world(scenelights::world_radiance(doc));
+    // own arithmetic. The material preview's are its own.
+    let light = preview.then(|| scenelights::material_preview(camera.rotation));
+    viewport.set_world(
+        light
+            .as_ref()
+            .map_or_else(|| scenelights::world_radiance(doc), |p| p.world),
+    );
     viewport.set_display(
         &gpu.queue,
         kreate_render::display::Display {
             view: kreate_math::ViewTransform::AgX,
-            exposure: scenelights::shot_exposure(doc, 24.0, camera.pivot) as f32,
+            exposure: light.as_ref().map_or_else(
+                || scenelights::shot_exposure(doc, 24.0, camera.pivot) as f32,
+                |p| p.exposure,
+            ),
         },
     );
-    let lights = scenelights::placed_lights(doc);
+    let lights = light
+        .as_ref()
+        .map_or_else(|| scenelights::placed_lights(doc), |p| p.lights.clone());
     viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
 
     // The materials, compiled the way the frame loop compiles them. Without
@@ -701,6 +725,55 @@ fn adding_a_lamp_from_the_menu_lights_the_scene() {
             "a {name} blew the picture out: {saturated} of {lit} lit pixels clipped"
         );
     }
+}
+
+/// The material preview lights a material with no lamp in the scene, and
+/// lights it as a picture should be lit: the cube seen, its faces told apart,
+/// nothing blown to white.
+#[test]
+fn the_material_preview_shows_a_material_without_a_lamp() {
+    let gpu = match gpu() {
+        Some(gpu) => gpu,
+        None => return,
+    };
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = History::new();
+    let mut doc = Document::new();
+    menu(
+        &registry,
+        &mut history,
+        &mut doc,
+        "object.add_primitive",
+        &[("shape", PropertyValue::Enum(1))],
+    );
+    let shot = shoot_mode(&gpu, &doc, Camera::default(), false, true);
+    if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
+        let bytes: Vec<u8> = shot
+            .iter()
+            .flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8))
+            .collect();
+        let _ = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
+            .map(|i| i.save(std::path::Path::new(&dir).join("material-preview.png")));
+    }
+    let corner = shot[0];
+    let cube: Vec<f32> = shot
+        .iter()
+        .filter(|p| (0..3).any(|i| (p[i] - corner[i]).abs() > 0.02))
+        .map(|p| (p[0] + p[1] + p[2]) / 3.0)
+        .collect();
+    assert!(
+        cube.len() > 200,
+        "the cube is hardly there: {} pixels",
+        cube.len()
+    );
+    let (lo, hi) = cube
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+    let mean = cube.iter().sum::<f32>() / cube.len() as f32;
+    assert!(hi < 0.97, "blown out: {hi}");
+    assert!(mean > 0.2 && mean < 0.85, "the cube's mean is {mean}");
+    assert!(hi - lo > 0.15, "its faces are not told apart: {lo}..{hi}");
 }
 
 #[test]

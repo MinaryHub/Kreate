@@ -1056,3 +1056,44 @@ fn the_grid_does_not_break_the_wireframe() {
         "{with} wireframe pixels over the grid against {without} without it"
     );
 }
+
+/// Zoomed in close in an orthographic view, the camera's eye point — where
+/// positions are measured from — ends up inside the model. Shading that took
+/// "toward the eye" as "toward that point" turned round there, and a face
+/// went dark from the middle with a bright band along its edges, which a user
+/// saw happen as the view was zoomed and turned. Orthographic light comes
+/// from one direction for the whole picture, so the face must look the same
+/// with the eye point inside the cube as outside it, occlusion on or off.
+#[test]
+fn an_orthographic_view_shades_the_same_with_its_eye_inside_the_model() {
+    use kreate_render::Projection;
+    let aim = |pivot: DVec3| {
+        move |c: &mut Camera| {
+            c.projection = Projection::Orthographic;
+            c.pivot = pivot;
+            c.distance = 0.3;
+            c.rotation =
+                kreate_math::DQuat::from_rotation_z(0.5) * kreate_math::DQuat::from_rotation_x(0.4);
+        }
+    };
+    // The top face fills the picture either way: the view is a quarter unit
+    // across. Outside, the eye is above the top; inside, it is under it.
+    let outside = DVec3::new(0.0, 0.0, 1.0);
+    let inside = DVec3::new(0.0, 0.0, 0.5);
+    for occlusion in [false, true] {
+        OCCLUSION.with(|a| a.set(occlusion));
+        let out = render_scene_opts(&cube_scene(), ShadingMode::Studio, false, aim(outside));
+        let inn = render_scene_opts(&cube_scene(), ShadingMode::Studio, false, aim(inside));
+        OCCLUSION.with(|a| a.set(false));
+        let (out, _) = gpu_or_skip!(out);
+        let (inn, _) = gpu_or_skip!(inn);
+        for (x, y) in [(SIZE / 2, SIZE / 2), (20, 20), (SIZE - 20, SIZE - 20)] {
+            let (a, b) = (lum(out.at(x, y)), lum(inn.at(x, y)));
+            assert!(
+                (a - b).abs() <= 4,
+                "occlusion {occlusion}: at ({x}, {y}) the face is {a} with the eye outside \
+                 and {b} with it inside"
+            );
+        }
+    }
+}

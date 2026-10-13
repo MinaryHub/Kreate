@@ -349,6 +349,22 @@ pub struct ShellState {
     /// The knife's path while `K` is drawing it: the points clicked, then
     /// where the next one would go. Empty otherwise.
     pub knife_preview: Vec<kreate_math::DVec3>,
+    /// The sketch being drawn, as the sketch tools see it, for the overlay:
+    /// see [`SketchView`]. `None` outside sketch mode.
+    pub sketch_view: Option<SketchView>,
+    /// Metres in one of the scene's length unit, for the dialogs.
+    pub length_unit: f64,
+    /// Every other sketch's lines, drawn thin wherever they are: a sketch
+    /// has no faces for the renderer to draw.
+    pub sketch_lines: Vec<[kreate_math::DVec3; 2]>,
+    /// A dimension being typed into: its constraint's index and the text.
+    pub sketch_dim_edit: Option<(usize, String)>,
+    /// The extrude and revolve dialog's settings, kept between uses.
+    pub solid_dialog: SolidDialog,
+    /// The feature list: every sketch and feature, in the order made.
+    pub features: Vec<FeatureRow>,
+    /// A feature being edited from the list.
+    pub feature_edit: Option<FeatureEdit>,
     /// The Measure tool's points so far and where the next would go.
     pub measure_preview: Vec<kreate_math::DVec3>,
     /// The active object's volume, surface and middle, in the world, as it
@@ -732,6 +748,13 @@ impl Default for ShellState {
             texture_paint: TexturePaintSettings::default(),
             loop_cut_preview: Vec::new(),
             knife_preview: Vec::new(),
+            sketch_view: None,
+            length_unit: 0.001,
+            sketch_lines: Vec::new(),
+            sketch_dim_edit: None,
+            solid_dialog: SolidDialog::default(),
+            features: Vec::new(),
+            feature_edit: None,
             measure_preview: Vec::new(),
             mass: None,
             check_thickness: 0.001,
@@ -1134,6 +1157,9 @@ pub struct ToolSettings {
 /// The viewport's on-off settings, as the Overlays menu shows them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Overlays {
+    /// The solid view lit flat — Blender's Flat lighting — rather than by
+    /// the studio's lights.
+    pub flat: bool,
     pub grid: bool,
     pub wireframe: bool,
     pub face_orientation: bool,
@@ -1499,6 +1525,12 @@ struct Labels {
     menu_pose: String,
     menu_sculpt: String,
     menu_texture: String,
+    menu_sketch: String,
+    menu_constrain: String,
+    menu_solid: String,
+    finish_sketch: String,
+    /// Each sketch tool's name, by the name the keys use.
+    sketch_tools: Vec<(&'static str, String)>,
     new_texture: String,
     /// Every sculpt brush's name, in `Tool::SCULPT`'s order.
     sculpt_brushes: Vec<String>,
@@ -1538,6 +1570,8 @@ struct Labels {
     shading_flat: String,
     shading_wireframe: String,
     shading_rendered: String,
+    shading_material: String,
+    overlay_flat: String,
     shading_hint: String,
     exposure: String,
     exposure_metered: String,
@@ -1844,6 +1878,14 @@ impl Labels {
             menu_pose: t("menu-pose"),
             menu_sculpt: t("menu-sculpt"),
             menu_texture: t("menu-texture"),
+            menu_sketch: t("menu-sketch"),
+            menu_constrain: t("menu-constrain"),
+            menu_solid: t("menu-solid"),
+            finish_sketch: t("sketch-finish"),
+            sketch_tools: SKETCH_TOOLS
+                .iter()
+                .map(|n| (*n, t(&format!("sketch-tool-{n}"))))
+                .collect(),
             new_texture: t("op-paint-new-texture"),
             sculpt_brushes: kreate_ui::toolbar::Tool::SCULPT
                 .iter()
@@ -1893,6 +1935,8 @@ impl Labels {
             shading_flat: t("shading-flat"),
             shading_wireframe: t("shading-wireframe"),
             shading_rendered: t("shading-rendered"),
+            shading_material: t("shading-material"),
+            overlay_flat: t("overlay-flat"),
             shading_hint: t("shading-hint"),
             exposure: t("exposure"),
             exposure_metered: t("exposure-metered"),
@@ -2181,6 +2225,8 @@ pub fn draw(
             // view: what the hand does next, without opening a menu to learn
             // it. Read from the keymap, so a rebinding shows here too.
             let hints: &[&str] = match mode.acts_on() {
+                // The sketch tools' keys are on the toolbar's buttons.
+                kreate_ops::mode::ActsOn::Sketch => &[],
                 kreate_ops::mode::ActsOn::Objects => &[
                     "object.translate",
                     "object.rotate",
@@ -2358,7 +2404,7 @@ fn pie_entries(
     };
     Some(match name {
         // Blender's Z: wireframe left, rendered right, solid below, the
-        // flat look above.
+        // material preview above.
         "shading" => (
             l.pie_shading.clone(),
             vec![
@@ -2377,7 +2423,11 @@ fn pie_entries(
                     &l.shading_studio,
                     ShadingMode::Studio,
                 ),
-                shade("view.shading_flat", &l.shading_flat, ShadingMode::Flat),
+                shade(
+                    "view.shading_material",
+                    &l.shading_material,
+                    ShadingMode::Material,
+                ),
             ],
         ),
         // Blender's `~`. Each view is named for where the eye goes: Front
@@ -2930,6 +2980,29 @@ fn draw_area(
                                         painter.circle_filled(p, 2.0, colour);
                                     }
                                 }
+                                // A triangle on an edge's middle, as Blender
+                                // marks it.
+                                crate::snap::Element::Midpoint => {
+                                    let corners = vec![
+                                        p + egui::vec2(0.0, -7.0),
+                                        p + egui::vec2(6.5, 4.5),
+                                        p + egui::vec2(-6.5, 4.5),
+                                    ];
+                                    painter.add(egui::Shape::closed_line(corners.clone(), outline));
+                                    painter.add(egui::Shape::closed_line(corners, stroke));
+                                }
+                                // A cross in a ring on a face's centre.
+                                crate::snap::Element::Centre => {
+                                    painter.circle_stroke(p, 7.0, outline);
+                                    painter.circle_stroke(p, 7.0, stroke);
+                                    for (a, b) in [
+                                        (egui::vec2(-4.0, 0.0), egui::vec2(4.0, 0.0)),
+                                        (egui::vec2(0.0, -4.0), egui::vec2(0.0, 4.0)),
+                                    ] {
+                                        painter.line_segment([p + a, p + b], outline);
+                                        painter.line_segment([p + a, p + b], stroke);
+                                    }
+                                }
                             }
                         }
                     }
@@ -2971,6 +3044,12 @@ fn draw_area(
                             }
                         }
                     }
+                    // The sketches: every other one thin, the one being drawn
+                    // with its points, constraints and dimensions.
+                    if let Some(projector) = state.projector {
+                        let painter = ui.painter().with_clip_rect(inner);
+                        draw_sketches(ui, &painter, &projector, state, inner);
+                    }
                     // The loops `Ctrl+R` would cut, in Blender's yellow.
                     if let Some(projector) = state
                         .projector
@@ -2992,6 +3071,7 @@ fn draw_area(
                     }
                 }
                 "outliner" => {
+                    draw_feature_list(ui, state);
                     let order = std::mem::take(&mut state.outliner);
                     // A box to find an object by name: what a scene of
                     // hundreds of parts needs before anything else.
@@ -3930,7 +4010,10 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
 fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32) -> Vec<TopMenu> {
     // Sculpt mode selects nothing — the brush is the whole interaction, and
     // Blender's has no Select menu there — and its header needs the room.
-    let mut out = if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+    let mut out = if matches!(
+        mode.acts_on(),
+        kreate_ops::mode::ActsOn::Sculpt | kreate_ops::mode::ActsOn::Sketch
+    ) {
         Vec::new()
     } else {
         vec![TopMenu {
@@ -3946,7 +4029,8 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
         kreate_ops::mode::ActsOn::Bones
         | kreate_ops::mode::ActsOn::Weights
         | kreate_ops::mode::ActsOn::Sculpt
-        | kreate_ops::mode::ActsOn::Texture => {}
+        | kreate_ops::mode::ActsOn::Texture
+        | kreate_ops::mode::ActsOn::Sketch => {}
         kreate_ops::mode::ActsOn::BoneJoints => out.push(TopMenu {
             label: l.add_menu.clone(),
             nodes: vec![entry(
@@ -4031,6 +4115,41 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "sculpt.quad",
                         &l.sculpt_quad_remesh,
                         dispatch("sculpt.quad"),
+                    ));
+                    nodes
+                },
+            }),
+            kreate_ops::mode::Menu::Sketch => out.push(TopMenu {
+                label: l.menu_sketch.clone(),
+                nodes: sketch_tool_nodes(l, &["line", "rectangle", "circle", "arc", "point"]),
+            }),
+            kreate_ops::mode::Menu::Constrain => out.push(TopMenu {
+                label: l.menu_constrain.clone(),
+                nodes: sketch_tool_nodes(
+                    l,
+                    &[
+                        "dimension",
+                        "coincident",
+                        "perpendicular",
+                        "horizontal",
+                        "vertical",
+                        "parallel",
+                        "equal",
+                        "tangent",
+                        "concentric",
+                        "fixed",
+                    ],
+                ),
+            }),
+            kreate_ops::mode::Menu::Solid => out.push(TopMenu {
+                label: l.menu_solid.clone(),
+                nodes: {
+                    let mut nodes = sketch_tool_nodes(l, &["extrude", "revolve"]);
+                    nodes.push(MenuNode::Separator);
+                    nodes.push(entry(
+                        "app.finish_sketch",
+                        &l.finish_sketch,
+                        Run::Command(Command::SetMode("object".into())),
                     ));
                     nodes
                 },
@@ -4346,7 +4465,11 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
                 MenuEntry::new(
                     "object.add_primitive",
                     &l.add_shapes[shape],
-                    op("object.add_primitive", &[("shape", value.clone())]),
+                    // Standing on the floor, as a part is put down.
+                    op(
+                        "object.add_primitive",
+                        &[("shape", value.clone()), ("on_floor", V::Bool(true))],
+                    ),
                 )
                 .variant("shape", value),
             )
@@ -4564,17 +4687,21 @@ fn draw_shading_pills(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     let current = state.view_status.shading;
     let spacing = ui.spacing().item_spacing.x;
     ui.spacing_mut().item_spacing.x = 2.0;
-    // Right-to-left layout, so the list is reversed to read Studio, Flat,
-    // Rendered from left to right on screen.
+    // Right-to-left layout, so the list is reversed to read as Blender's
+    // does from left to right: wireframe, solid, material preview, rendered.
+    // Flat lighting is the solid view's, so the solid button is lit for it.
     for mode in [
         kreate_render::ShadingMode::Rendered,
-        kreate_render::ShadingMode::Flat,
+        kreate_render::ShadingMode::Material,
         kreate_render::ShadingMode::Studio,
         kreate_render::ShadingMode::Wireframe,
     ] {
+        let on = mode == current
+            || (mode == kreate_render::ShadingMode::Studio
+                && current == kreate_render::ShadingMode::Flat);
         // i18n-exempt: a translated name and a translated hint
         let tip = format!("{}\n{}", shading_label(mode, l), l.shading_hint);
-        if kreate_ui::view_icons::shading_button(ui, mode, mode == current)
+        if kreate_ui::view_icons::shading_button(ui, mode, on)
             .on_hover_text(tip)
             .clicked()
         {
@@ -4610,6 +4737,7 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 &l.overlay_dimensions,
                 on.dimensions,
             ),
+            ("view.toggle_flat", &l.overlay_flat, on.flat),
             ("view.toggle_ao", &l.overlay_ao, on.ambient_occlusion),
             ("view.toggle_xray", &l.overlay_xray, on.xray),
             ("view.toggle_outline", &l.overlay_outline, on.outline),
@@ -5685,14 +5813,16 @@ fn draw_work_plane(
 }
 
 /// Each sketch's distance and angle constraints, drawn as dimensions on its
-/// points in the world.
+/// points in the world. Not for a sketch drawn with the sketch tools: those
+/// show their dimensions while they are being edited, in the sketch's own
+/// view, and keep out of the way of the solids made from them otherwise.
 fn draw_sketch_dimensions(
     painter: &egui::Painter,
     projector: &kreate_ui::object_glyph::Projector,
     doc: &Document,
 ) {
     for (id, object) in doc.objects() {
-        if object.sketch.is_empty() || !doc.is_shown(id) {
+        if object.sketch.is_empty() || !object.sketch_lines.is_empty() || !doc.is_shown(id) {
             continue;
         }
         let Some(mesh) = object.mesh().and_then(|m| doc.mesh(m)) else {
@@ -9383,6 +9513,7 @@ fn shading_label(mode: kreate_render::ShadingMode, l: &Labels) -> &str {
         kreate_render::ShadingMode::Flat => &l.shading_flat,
         kreate_render::ShadingMode::Wireframe => &l.shading_wireframe,
         kreate_render::ShadingMode::Rendered => &l.shading_rendered,
+        kreate_render::ShadingMode::Material => &l.shading_material,
     }
 }
 
@@ -11294,6 +11425,16 @@ enum RibbonIcon {
     Undo,
     Redo,
     Search,
+    SkLine,
+    SkRect,
+    SkCircle,
+    SkArc,
+    SkPoint,
+    SkDimension,
+    SkCoincident,
+    SkPerpendicular,
+    SkHorizontal,
+    SkFinish,
 }
 
 impl RibbonIcon {
@@ -11308,6 +11449,29 @@ impl RibbonIcon {
             })
         };
         let id = entry.id;
+        if id == "app.sketch_tool" {
+            let tool = entry.variant.iter().find_map(|(n, v)| match v {
+                V::Text(t) if *n == "tool" => Some(t.as_str()),
+                _ => None,
+            })?;
+            return Some(match tool {
+                "line" => Self::SkLine,
+                "rectangle" => Self::SkRect,
+                "circle" => Self::SkCircle,
+                "arc" => Self::SkArc,
+                "point" => Self::SkPoint,
+                "dimension" => Self::SkDimension,
+                "coincident" => Self::SkCoincident,
+                "perpendicular" => Self::SkPerpendicular,
+                "horizontal" => Self::SkHorizontal,
+                "extrude" => Self::Extrude,
+                "revolve" => Self::Rotate,
+                _ => return None,
+            });
+        }
+        if id == "app.finish_sketch" {
+            return Some(Self::SkFinish);
+        }
         Some(match id {
             "object.add_primitive" => match variant("shape")? {
                 0 => Self::Plane,
@@ -11347,7 +11511,15 @@ impl RibbonIcon {
             | Self::Cylinder
             | Self::Light
             | Self::Camera
-            | Self::Bone => theme.accent,
+            | Self::Bone
+            | Self::SkLine
+            | Self::SkRect
+            | Self::SkCircle
+            | Self::SkArc
+            | Self::SkPoint => theme.accent,
+            Self::SkDimension | Self::SkCoincident | Self::SkPerpendicular | Self::SkHorizontal => {
+                theme.info
+            }
             Self::Extrude
             | Self::Inset
             | Self::Bevel
@@ -11570,6 +11742,55 @@ impl RibbonIcon {
             Self::Search => {
                 painter.circle_stroke(p(0.44, 0.44), 0.28 * s, stroke);
                 line(vec![p(0.64, 0.64), p(0.88, 0.88)]);
+            }
+            Self::SkLine => {
+                line(vec![p(0.15, 0.85), p(0.85, 0.15)]);
+                painter.circle_filled(p(0.15, 0.85), 0.08 * s, colour);
+                painter.circle_filled(p(0.85, 0.15), 0.08 * s, colour);
+            }
+            Self::SkRect => {
+                closed(vec![
+                    p(0.12, 0.25),
+                    p(0.88, 0.25),
+                    p(0.88, 0.75),
+                    p(0.12, 0.75),
+                ]);
+            }
+            Self::SkCircle => {
+                painter.circle_stroke(p(0.5, 0.5), 0.36 * s, stroke);
+                painter.circle_filled(p(0.5, 0.5), 0.05 * s, colour);
+            }
+            Self::SkArc => {
+                line(ellipse(0.5, 0.65, 0.38, 0.38, pi, tau));
+            }
+            Self::SkPoint => {
+                painter.circle_filled(p(0.5, 0.5), 0.12 * s, colour);
+                line(vec![p(0.2, 0.5), p(0.35, 0.5)]);
+                line(vec![p(0.65, 0.5), p(0.8, 0.5)]);
+            }
+            Self::SkDimension => {
+                line(vec![p(0.12, 0.3), p(0.12, 0.8)]);
+                line(vec![p(0.88, 0.3), p(0.88, 0.8)]);
+                line(vec![p(0.12, 0.55), p(0.88, 0.55)]);
+                line(vec![p(0.25, 0.45), p(0.12, 0.55), p(0.25, 0.65)]);
+                line(vec![p(0.75, 0.45), p(0.88, 0.55), p(0.75, 0.65)]);
+            }
+            Self::SkCoincident => {
+                line(vec![p(0.1, 0.8), p(0.5, 0.5)]);
+                line(vec![p(0.5, 0.5), p(0.9, 0.75)]);
+                painter.circle_filled(p(0.5, 0.5), 0.1 * s, colour);
+            }
+            Self::SkPerpendicular => {
+                line(vec![p(0.15, 0.85), p(0.85, 0.85)]);
+                line(vec![p(0.5, 0.85), p(0.5, 0.15)]);
+            }
+            Self::SkHorizontal => {
+                line(vec![p(0.1, 0.5), p(0.9, 0.5)]);
+                line(vec![p(0.2, 0.3), p(0.2, 0.7)]);
+                line(vec![p(0.8, 0.3), p(0.8, 0.7)]);
+            }
+            Self::SkFinish => {
+                line(vec![p(0.15, 0.55), p(0.4, 0.8), p(0.88, 0.22)]);
             }
         }
     }
@@ -11913,6 +12134,634 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     fn marker(ui: &mut Ui, theme: &kreate_ui::Theme) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(4.0, 20.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 2.0, theme.accent);
+    }
+}
+
+/// The sketch tools, by the names the keys and menus use.
+const SKETCH_TOOLS: [&str; 17] = [
+    "line",
+    "rectangle",
+    "circle",
+    "arc",
+    "point",
+    "dimension",
+    "coincident",
+    "perpendicular",
+    "horizontal",
+    "vertical",
+    "parallel",
+    "equal",
+    "tangent",
+    "concentric",
+    "fixed",
+    "extrude",
+    "revolve",
+];
+
+/// Menu entries that take up sketch tools, by name.
+fn sketch_tool_nodes(l: &Labels, names: &[&'static str]) -> Vec<MenuNode> {
+    use kreate_reflect::PropertyValue as V;
+    names
+        .iter()
+        .map(|name| {
+            let label = l
+                .sketch_tools
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| name.to_string());
+            let mut params = PropertyMap::new();
+            params.set("tool", V::Text(name.to_string()));
+            MenuNode::Entry(
+                MenuEntry::new(
+                    "app.sketch_tool",
+                    &label,
+                    Run::Dispatch("app.sketch_tool", params),
+                )
+                .variant("tool", V::Text(name.to_string())),
+            )
+        })
+        .collect()
+}
+
+// --- sketching: the overlay, the dialogs, the feature list -------------------
+
+/// The sketch being drawn, as the overlay draws it. Filled by the
+/// application each frame from the sketch and the tools' state; every point
+/// is in the world.
+#[derive(Clone, Debug, Default)]
+pub struct SketchView {
+    /// Each line, and whether both its ends are pinned — Fusion's black
+    /// (here the text colour) against its blue.
+    pub lines: Vec<([kreate_math::DVec3; 2], bool, bool)>,
+    /// The points a tool can pick: pinned, selected.
+    pub points: Vec<(kreate_math::DVec3, bool, bool)>,
+    /// A constraint's mark, where it is drawn.
+    pub glyphs: Vec<(kreate_math::DVec3, String)>,
+    pub dims: Vec<SketchDim>,
+    /// What the tool in hand would draw, as polylines.
+    pub preview: Vec<Vec<kreate_math::DVec3>>,
+    /// The point the pointer has snapped to.
+    pub snap: Option<kreate_math::DVec3>,
+    /// The regions picked for an extrude or a revolve, and the one under
+    /// the pointer.
+    pub regions: Vec<Vec<kreate_math::DVec3>>,
+    pub hover_region: Option<Vec<kreate_math::DVec3>>,
+    /// The tool in hand, by name, and what it asks for next.
+    pub tool: &'static str,
+    pub prompt: String,
+    /// What has been typed.
+    pub typed: String,
+    /// The picked regions' seeds and the revolve's axis, for the dialog.
+    pub seeds: Vec<[f64; 2]>,
+    pub axis: Option<[u32; 2]>,
+    /// The scene's length unit: metres in one, and its symbol.
+    pub unit: (f64, &'static str),
+}
+
+/// One dimension on the sketch.
+#[derive(Clone, Debug)]
+pub struct SketchDim {
+    /// Its constraint's place in the sketch's list.
+    pub index: usize,
+    /// Where its number is written, and the two points it measures.
+    pub at: kreate_math::DVec3,
+    pub ends: [kreate_math::DVec3; 2],
+    pub text: String,
+    /// What typing into it sets: the number as shown, and how to turn it
+    /// back into the constraint's value (times the unit, halved for a
+    /// diameter; radians for an angle).
+    pub shown: f64,
+    pub kind: DimKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DimKind {
+    Length,
+    Diameter,
+    Angle,
+}
+
+impl SketchDim {
+    /// The constraint's value for a number typed into it.
+    pub fn value_of(&self, typed: f64, unit_metres: f64) -> f64 {
+        match self.kind {
+            DimKind::Length => typed * unit_metres,
+            DimKind::Diameter => typed * unit_metres * 0.5,
+            DimKind::Angle => typed.to_radians(),
+        }
+    }
+}
+
+/// The extrude and revolve dialog's settings.
+#[derive(Clone, Debug)]
+pub struct SolidDialog {
+    /// The distance as typed, in the scene's unit.
+    pub distance: f64,
+    pub symmetric: bool,
+    /// 0 a new body, 1 join, 2 cut.
+    pub operation: u32,
+    /// The revolve's angle, in degrees.
+    pub angle: f64,
+}
+
+impl Default for SolidDialog {
+    fn default() -> Self {
+        Self {
+            distance: 10.0,
+            symmetric: false,
+            operation: 0,
+            angle: 360.0,
+        }
+    }
+}
+
+/// A row of the feature list.
+#[derive(Clone, Debug)]
+pub struct FeatureRow {
+    pub order: u64,
+    /// A sketch's name, or a feature's ("Extrude 2").
+    pub label: String,
+    /// The body a feature is in, and its place there; empty for a sketch.
+    pub body: String,
+    pub index: u32,
+    pub is_sketch: bool,
+    pub revolve: bool,
+    /// The extrude's distance in metres, or the revolve's angle in radians.
+    pub amount: f64,
+    pub symmetric: bool,
+    pub cut: bool,
+}
+
+/// A feature open for editing from the list.
+#[derive(Clone, Debug)]
+pub struct FeatureEdit {
+    pub row: FeatureRow,
+    /// As shown: the distance in the scene's unit, or the angle in degrees.
+    pub amount: f64,
+}
+
+fn tool_label(state: &ShellState, name: &str) -> String {
+    let key = format!("sketch-tool-{name}");
+    if state.catalog.has(&key) {
+        state.catalog.get(&key)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Every sketch's lines, and the one being drawn with all it carries.
+fn draw_sketches(
+    ui: &Ui,
+    painter: &egui::Painter,
+    projector: &kreate_ui::object_glyph::Projector,
+    state: &mut ShellState,
+    inner: egui::Rect,
+) {
+    let theme = kreate_ui::theme::from_ui(ui).over_viewport();
+    let blue = egui::Color32::from_rgb(0x4d, 0x9b, 0xf0);
+    let pinned_ink = theme.text;
+    for [a, b] in &state.sketch_lines {
+        if let (Some(p), Some(q)) = (projector.project(*a), projector.project(*b)) {
+            painter.line_segment([p, q], egui::Stroke::new(1.0, theme.text_dim));
+        }
+    }
+    let Some(view) = state.sketch_view.clone() else {
+        return;
+    };
+    let project = |p: &kreate_math::DVec3| projector.project(*p);
+    // The regions picked, filled faintly; the one under the pointer brighter.
+    let fill = |outline: &[kreate_math::DVec3], alpha: u8| {
+        let pts: Vec<egui::Pos2> = outline.iter().filter_map(project).collect();
+        if pts.len() == outline.len() && pts.len() >= 3 {
+            painter.add(egui::Shape::closed_line(
+                pts.clone(),
+                egui::Stroke::new(1.5, theme.accent),
+            ));
+            // A fan from the first point: enough for a highlight.
+            let c = egui::Color32::from_rgba_unmultiplied(
+                theme.accent.r(),
+                theme.accent.g(),
+                theme.accent.b(),
+                alpha,
+            );
+            let mut mesh = egui::Mesh::default();
+            for p in &pts {
+                mesh.colored_vertex(*p, c);
+            }
+            for i in 1..pts.len() as u32 - 1 {
+                mesh.add_triangle(0, i, i + 1);
+            }
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    };
+    for r in &view.regions {
+        fill(r, 70);
+    }
+    if let Some(r) = &view.hover_region {
+        fill(r, 35);
+    }
+    let halo = egui::Color32::from_black_alpha(150);
+    for ([a, b], pinned, selected) in &view.lines {
+        if let (Some(p), Some(q)) = (project(a), project(b)) {
+            let ink = if *selected {
+                theme.accent
+            } else if *pinned {
+                pinned_ink
+            } else {
+                blue
+            };
+            // A dark edge under the line, so it reads on a light solid as on
+            // the dark ground: a sketch is drawn over the bodies made from
+            // it, and their faces are as pale as the line.
+            painter.line_segment([p, q], egui::Stroke::new(3.6, halo));
+            painter.line_segment([p, q], egui::Stroke::new(1.6, ink));
+        }
+    }
+    for (at, pinned, selected) in &view.points {
+        if let Some(p) = project(at) {
+            let ink = if *selected {
+                theme.accent
+            } else if *pinned {
+                pinned_ink
+            } else {
+                blue
+            };
+            painter.rect_filled(
+                egui::Rect::from_center_size(p, egui::vec2(7.0, 7.0)),
+                0.0,
+                halo,
+            );
+            painter.rect_filled(
+                egui::Rect::from_center_size(p, egui::vec2(5.0, 5.0)),
+                0.0,
+                ink,
+            );
+        }
+    }
+    let font = egui::FontId::proportional(11.0);
+    for (at, text) in &view.glyphs {
+        if let Some(p) = project(at) {
+            let galley = painter.layout_no_wrap(text.clone(), font.clone(), theme.text);
+            let r =
+                egui::Align2::CENTER_CENTER.anchor_size(p + egui::vec2(8.0, -8.0), galley.size());
+            painter.rect_filled(r.expand(2.0), 2.0, theme.sunken.gamma_multiply(0.85));
+            painter.rect_stroke(
+                r.expand(2.0),
+                2.0,
+                egui::Stroke::new(1.0, theme.border_strong),
+                egui::StrokeKind::Outside,
+            );
+            painter.galley(r.min, galley, theme.text);
+        }
+    }
+    // Dimensions: a thin line between what they measure and the number.
+    let pointer = ui.ctx().pointer_hover_pos();
+    let double = ui.ctx().input(|i| {
+        i.pointer
+            .button_double_clicked(egui::PointerButton::Primary)
+    });
+    for d in &view.dims {
+        let (Some(a), Some(b), Some(at)) =
+            (project(&d.ends[0]), project(&d.ends[1]), project(&d.at))
+        else {
+            continue;
+        };
+        let line = egui::Stroke::new(1.0, theme.text_dim);
+        if d.kind != DimKind::Angle {
+            painter.line_segment([a, b], line);
+        }
+        let r = painter.text(
+            at,
+            egui::Align2::CENTER_CENTER,
+            &d.text,
+            egui::FontId::monospace(11.0),
+            theme.text,
+        );
+        painter.rect_filled(r.expand(2.0), 3.0, theme.sunken.gamma_multiply(0.85));
+        painter.text(
+            at,
+            egui::Align2::CENTER_CENTER,
+            &d.text,
+            egui::FontId::monospace(11.0),
+            theme.text,
+        );
+        // A double click on the number opens it for typing.
+        if double && pointer.is_some_and(|p| r.expand(4.0).contains(p) && inner.contains(p)) {
+            state.sketch_dim_edit = Some((d.index, format!("{:.3}", d.shown)));
+        }
+    }
+    // What the tool would draw, and where the pointer has caught.
+    for line in &view.preview {
+        let pts: Vec<egui::Pos2> = line.iter().filter_map(project).collect();
+        if pts.len() >= 2 {
+            painter.add(egui::Shape::dashed_line(
+                &pts,
+                egui::Stroke::new(1.5, theme.accent),
+                6.0,
+                4.0,
+            ));
+        }
+    }
+    if let Some(p) = view.snap.as_ref().and_then(project) {
+        painter.circle_stroke(p, 6.0, egui::Stroke::new(1.5, theme.accent));
+    }
+    // What the tool asks for, by the pointer's corner of the view.
+    let prompt = if view.typed.is_empty() {
+        view.prompt.clone()
+    } else {
+        // i18n-exempt: a number being typed, and its unit
+        format!("{} {}", view.typed, view.unit.1)
+    };
+    if !prompt.is_empty() {
+        let at = inner.left_bottom() + egui::vec2(12.0, -14.0);
+        let r = painter.text(
+            at,
+            egui::Align2::LEFT_BOTTOM,
+            &prompt,
+            egui::FontId::proportional(12.0),
+            theme.text,
+        );
+        let _ = r;
+    }
+
+    // The dimension being typed into.
+    draw_dimension_edit(ui, state, &view, projector);
+    // The extrude or revolve dialog, once a region is picked.
+    if matches!(view.tool, "extrude" | "revolve") && !view.seeds.is_empty() {
+        draw_solid_dialog(ui, state, &view, inner);
+    }
+}
+
+fn draw_dimension_edit(
+    ui: &Ui,
+    state: &mut ShellState,
+    view: &SketchView,
+    projector: &kreate_ui::object_glyph::Projector,
+) {
+    let Some((index, mut text)) = state.sketch_dim_edit.take() else {
+        return;
+    };
+    let Some(dim) = view.dims.iter().find(|d| d.index == index) else {
+        return;
+    };
+    let Some(at) = projector.project(dim.at) else {
+        return;
+    };
+    let mut keep = true;
+    egui::Area::new(egui::Id::new("sketch-dim-edit"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(at + egui::vec2(-40.0, -12.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(80.0));
+                field.request_focus();
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if enter {
+                    if let Ok(v) = text.trim().parse::<f64>() {
+                        if v.is_finite() && v != 0.0 {
+                            let mut p = PropertyMap::new();
+                            p.set("index", kreate_reflect::PropertyValue::Int(index as i64));
+                            p.set(
+                                "value",
+                                kreate_reflect::PropertyValue::Float(dim.value_of(v, view.unit.0)),
+                            );
+                            state.queue.run("sketch.constraint_set", p);
+                        }
+                    }
+                    keep = false;
+                }
+                if escape {
+                    keep = false;
+                }
+            });
+        });
+    if keep {
+        state.sketch_dim_edit = Some((index, text));
+    }
+}
+
+fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: egui::Rect) {
+    let revolve = view.tool == "revolve";
+    let title = tool_label(state, view.tool).to_uppercase();
+    let (ok, cancel) = (
+        state.catalog.get("dialog-ok"),
+        state.catalog.get("dialog-cancel"),
+    );
+    let ops = [
+        state.catalog.get("feature-new-body"),
+        state.catalog.get("feature-join"),
+        state.catalog.get("feature-cut"),
+    ];
+    let mut d = state.solid_dialog.clone();
+    let mut done: Option<bool> = None;
+    let shown = egui::Area::new(egui::Id::new("solid-dialog"))
+        .order(egui::Order::Middle)
+        .pivot(egui::Align2::RIGHT_TOP)
+        .fixed_pos(inner.right_top() + egui::vec2(-12.0, 132.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(240.0);
+                ui.label(egui::RichText::new(title).strong().small());
+                ui.separator();
+                egui::Grid::new("solid-dialog-grid")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        if revolve {
+                            ui.label(state.catalog.get("feature-angle"));
+                            ui.add(egui::DragValue::new(&mut d.angle).speed(1.0).suffix("°"));
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-axis"));
+                            ui.label(if view.axis.is_some() {
+                                state.catalog.get("feature-axis-set")
+                            } else {
+                                state.catalog.get("feature-axis-pick")
+                            });
+                            ui.end_row();
+                        } else {
+                            ui.label(state.catalog.get("feature-distance"));
+                            ui.add(
+                                egui::DragValue::new(&mut d.distance)
+                                    .speed(0.1)
+                                    .suffix(format!(" {}", view.unit.1)),
+                            );
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-symmetric"));
+                            ui.checkbox(&mut d.symmetric, "");
+                            ui.end_row();
+                        }
+                        ui.label(state.catalog.get("feature-operation"));
+                        egui::ComboBox::from_id_salt("solid-op")
+                            .selected_text(ops[d.operation.min(2) as usize].clone())
+                            .show_ui(ui, |ui| {
+                                for (i, name) in ops.iter().enumerate() {
+                                    ui.selectable_value(&mut d.operation, i as u32, name.as_str());
+                                }
+                            });
+                        ui.end_row();
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(&cancel).clicked() {
+                        done = Some(false);
+                    }
+                    let ready = !revolve || view.axis.is_some();
+                    if ui.add_enabled(ready, egui::Button::new(&ok)).clicked() {
+                        done = Some(true);
+                    }
+                });
+            });
+        });
+    state.viewport_blockers.push(shown.response.rect);
+    state.solid_dialog = d.clone();
+    match done {
+        Some(true) => {
+            use kreate_reflect::PropertyValue as V;
+            let mut p = PropertyMap::new();
+            p.set(
+                "seeds",
+                V::Floats(view.seeds.iter().flat_map(|s| [s[0], s[1]]).collect()),
+            );
+            p.set("operation", V::Enum(d.operation));
+            if revolve {
+                let axis = view.axis.unwrap_or([0, 0]);
+                p.set("axis", V::Ints(axis.to_vec()));
+                p.set("angle", V::Float(d.angle.to_radians()));
+                state.queue.run("feature.revolve", p);
+            } else {
+                p.set("distance", V::Float(d.distance * view.unit.0));
+                p.set("symmetric", V::Bool(d.symmetric));
+                state.queue.run("feature.extrude", p);
+            }
+            // The sketch is finished with, as Fusion leaves it.
+            state.queue.push(Command::SetMode("object".into()));
+        }
+        Some(false) => {
+            let mut p = PropertyMap::new();
+            p.set("tool", kreate_reflect::PropertyValue::Text("select".into()));
+            state.queue.dispatch("app.sketch_tool", p);
+        }
+        None => {}
+    }
+}
+
+/// The sketches and features, in the order they were made: the timeline.
+/// Double-click a sketch to draw in it again, a feature to change it.
+fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
+    if state.features.is_empty() {
+        return;
+    }
+    let theme = kreate_ui::theme::from_ui(ui);
+    let rows = state.features.clone();
+    egui::CollapsingHeader::new(state.catalog.get("feature-list"))
+        .id_salt("feature-list")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("feature-list-scroll")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for row in &rows {
+                        let icon = if row.is_sketch {
+                            "✎"
+                        } else if row.revolve {
+                            "⟳"
+                        } else {
+                            "⬆"
+                        };
+                        let colour = if row.cut { theme.info } else { theme.text };
+                        // i18n-exempt: a symbol and the user's own names
+                        let text = if row.is_sketch {
+                            format!("{icon}  {}", row.label)
+                        } else {
+                            format!("{icon}  {}  · {}", row.label, row.body)
+                        };
+                        let r = ui.selectable_label(false, egui::RichText::new(text).color(colour));
+                        if r.double_clicked() {
+                            if row.is_sketch {
+                                state.queue.push(Command::EditSketch(row.label.clone()));
+                            } else {
+                                let unit = state.length_unit;
+                                state.feature_edit = Some(FeatureEdit {
+                                    amount: if row.revolve {
+                                        row.amount.to_degrees()
+                                    } else {
+                                        row.amount / unit.max(1e-12)
+                                    },
+                                    row: row.clone(),
+                                });
+                            }
+                        }
+                    }
+                });
+        });
+    ui.separator();
+    draw_feature_edit(ui, state);
+}
+
+fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
+    let Some(mut edit) = state.feature_edit.take() else {
+        return;
+    };
+    let mut keep = true;
+    let (ok, cancel) = (
+        state.catalog.get("dialog-ok"),
+        state.catalog.get("dialog-cancel"),
+    );
+    let title = edit.row.label.clone();
+    let unit = state.length_unit;
+    egui::Window::new(title)
+        .id(egui::Id::new("feature-edit"))
+        .collapsible(false)
+        .resizable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Grid::new("feature-edit-grid")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    if edit.row.revolve {
+                        ui.label(state.catalog.get("feature-angle"));
+                        ui.add(
+                            egui::DragValue::new(&mut edit.amount)
+                                .speed(1.0)
+                                .suffix("°"),
+                        );
+                    } else {
+                        ui.label(state.catalog.get("feature-distance"));
+                        ui.add(egui::DragValue::new(&mut edit.amount).speed(0.1));
+                        ui.end_row();
+                        ui.label(state.catalog.get("feature-symmetric"));
+                        ui.checkbox(&mut edit.row.symmetric, "");
+                    }
+                    ui.end_row();
+                    ui.label(state.catalog.get("feature-cut"));
+                    ui.checkbox(&mut edit.row.cut, "");
+                    ui.end_row();
+                });
+            ui.horizontal(|ui| {
+                if ui.button(&cancel).clicked() {
+                    keep = false;
+                }
+                if ui.button(&ok).clicked() {
+                    use kreate_reflect::PropertyValue as V;
+                    let mut p = PropertyMap::new();
+                    p.set("body", V::Text(edit.row.body.clone()));
+                    p.set("index", V::Int(edit.row.index as i64));
+                    let amount = if edit.row.revolve {
+                        edit.amount.to_radians()
+                    } else {
+                        edit.amount * unit
+                    };
+                    p.set("amount", V::Float(amount));
+                    p.set("symmetric", V::Bool(edit.row.symmetric));
+                    p.set("operation", V::Enum(u32::from(edit.row.cut)));
+                    state.queue.run("feature.set", p);
+                    keep = false;
+                }
+            });
+        });
+    if keep {
+        state.feature_edit = Some(edit);
     }
 }
 
@@ -13290,7 +14139,9 @@ mod tests {
                 "mode-edit",
                 "mode-weight-paint",
                 "mode-sculpt",
-                "mode-texture-paint"
+                "mode-texture-paint",
+                // Needs nothing: a sketch starts from a plane.
+                "mode-sketch"
             ]
         );
         assert!(entries[0].1, "the mode you are in is not lit");
@@ -13315,7 +14166,15 @@ mod tests {
         )
         .unwrap();
         let ids: Vec<&str> = entries.iter().map(|(e, _)| e.id).collect();
-        assert_eq!(ids, vec!["mode-object", "mode-edit-armature", "mode-pose"]);
+        assert_eq!(
+            ids,
+            vec![
+                "mode-object",
+                "mode-edit-armature",
+                "mode-pose",
+                "mode-sketch"
+            ]
+        );
         for (entry, current) in &entries {
             assert!(entry.enabled);
             assert_eq!(*current, entry.id == "mode-object");

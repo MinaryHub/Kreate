@@ -73,6 +73,9 @@ pub enum Command {
     /// is what the user means by that key, and it is not expressible as "set
     /// this mode".
     SetMode(String),
+    /// Draw in a sketch again, by its object's name: select it and enter
+    /// sketch mode — the feature list's double click.
+    EditSketch(String),
     /// Chooses which element type edit-mode selection acts on.
     SetSelectMode(u32),
     /// Picks the sculpt brush: draw, smooth, grab, inflate.

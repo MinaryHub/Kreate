@@ -1,0 +1,991 @@
+//! Drawing in a sketch: a new sketch on a plane, and the lines, rectangles,
+//! circles, arcs and points the sketch tools put in it, each one operator
+//! and one undo step — with the constraints a careful drawing implies added
+//! as it is drawn, as Fusion adds them.
+//!
+//! A sketch's points are its mesh's vertices, its lines the object's own
+//! (`Object::sketch_lines`), its constraints `Object::sketch`. Point 0 is
+//! the sketch's origin, fixed where the sketch's axes cross: what a line
+//! drawn from it is tied down by.
+//!
+//! Every position here is in the sketch's own plane, in metres.
+
+use kreate_math::{DMat3, DQuat, DVec2, DVec3, Vec3};
+use kreate_mesh::MeshData;
+use kreate_scene::document::{Object, ObjectData, ObjectId};
+use kreate_scene::sketch::{Constraint, KINDS};
+use kreate_scene::{DocMut, Document};
+
+use crate::operator::{Context, OpError, OpResult, Operator};
+use crate::OpParams;
+
+pub fn register(registry: &mut crate::operator::OperatorRegistry) {
+    registry.register::<NewSketch>();
+    registry.register::<Line>();
+    registry.register::<Rectangle>();
+    registry.register::<Circle>();
+    registry.register::<Arc>();
+    registry.register::<Point>();
+    registry.register::<Constrain>();
+    registry.register::<MovePoints>();
+    registry.register::<Delete>();
+}
+
+/// How near level or upright a line has to be drawn to be made so: about a
+/// degree and a half.
+const SQUARE: f64 = 0.026;
+
+/// The active object, when it is a sketch: one that has its origin.
+pub fn active_sketch(doc: &Document) -> Option<ObjectId> {
+    let id = doc.selection.active?;
+    let o = doc.object(id)?;
+    o.mesh()?;
+    (!o.sketch.is_empty() || !o.sketch_lines.is_empty()).then_some(id)
+}
+
+/// The sketch's points, in its plane.
+pub fn points(doc: &Document, id: ObjectId) -> Vec<DVec2> {
+    doc.object(id)
+        .and_then(|o| o.mesh())
+        .and_then(|m| doc.mesh(m))
+        .map(|m| {
+            m.positions()
+                .iter()
+                .map(|p| DVec2::new(p.x as f64, p.y as f64))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Writes a sketch's points: its mesh made again with them, its faces kept.
+fn set_points(doc: &mut DocMut<'_>, id: ObjectId, points: &[DVec2]) -> Option<()> {
+    let mesh_id = doc.document().object(id)?.mesh()?;
+    let old = doc.document().mesh(mesh_id)?;
+    let faces: Vec<Vec<u32>> = old.faces().map(|f| f.to_vec()).collect();
+    let positions: Vec<Vec3> = points
+        .iter()
+        .map(|p| Vec3::new(p.x as f32, p.y as f32, 0.0))
+        .collect();
+    *doc.document_mut().mesh_mut(mesh_id)? = MeshData::from_faces(positions, &faces);
+    Some(())
+}
+
+/// Solves the sketch and writes the points where the constraints put them.
+pub fn solve(doc: &mut DocMut<'_>, id: ObjectId) -> Option<kreate_scene::sketch::Solve> {
+    let mut p = points(doc.document(), id);
+    let c = doc.document().object(id)?.sketch.clone();
+    let result = kreate_scene::sketch::solve(&mut p, &c);
+    set_points(doc, id, &p)?;
+    Some(result)
+}
+
+/// What a tool hands over for one of its points: where, and an existing
+/// point it lands on (its index plus one; zero for none) — a drawing that
+/// ends where another begins is joined there, not two points on one spot.
+fn place(points: &mut Vec<DVec2>, at: DVec2, join: Option<&u32>) -> u32 {
+    match join
+        .copied()
+        .filter(|j| *j > 0 && (*j as usize) <= points.len())
+    {
+        Some(j) => j - 1,
+        None => {
+            points.push(at);
+            points.len() as u32 - 1
+        }
+    }
+}
+
+/// A point parameter's place in the sketch's plane: its Z is ignored.
+fn xy(v: [f64; 3]) -> DVec2 {
+    DVec2::new(v[0], v[1])
+}
+
+fn pair(v: &[f64], i: usize) -> Option<DVec2> {
+    Some(DVec2::new(*v.get(2 * i)?, *v.get(2 * i + 1)?)).filter(|p| p.is_finite())
+}
+
+/// The level or upright constraint a line drawn nearly so earns.
+fn squared(points: &[DVec2], a: u32, b: u32) -> Option<Constraint> {
+    let d = points[b as usize] - points[a as usize];
+    if d.length() < 1e-12 {
+        return None;
+    }
+    let angle = d.y.atan2(d.x).rem_euclid(std::f64::consts::PI);
+    if angle < SQUARE || angle > std::f64::consts::PI - SQUARE {
+        Some(Constraint::Horizontal { a, b })
+    } else if (angle - std::f64::consts::FRAC_PI_2).abs() < SQUARE {
+        Some(Constraint::Vertical { a, b })
+    } else {
+        None
+    }
+}
+
+/// Lines, points and constraints added to the active sketch, and the sketch
+/// solved: what every drawing operator ends with.
+fn commit(
+    doc: &mut DocMut<'_>,
+    id: ObjectId,
+    points: Vec<DVec2>,
+    lines: Vec<[u32; 2]>,
+    constraints: Vec<Constraint>,
+) -> Result<OpResult, OpError> {
+    set_points(doc, id, &points).ok_or_else(|| OpError::Failed("no sketch".into()))?;
+    let o = doc.document_mut().object_mut(id).expect("the sketch");
+    o.sketch_lines.extend(lines);
+    o.sketch.extend(constraints);
+    solve(doc, id);
+    Ok(OpResult::Finished)
+}
+
+fn need_sketch(doc: &Document) -> Result<ObjectId, OpError> {
+    active_sketch(doc).ok_or_else(|| OpError::Failed("no sketch is being drawn".into()))
+}
+
+// --- a new sketch ------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct NewSketchParams {
+    /// Which plane: the ground (XY), the front (XZ), the side (YZ), or the
+    /// work plane at the 3D cursor — a face, when the cursor was put on one.
+    #[param(variants("xy", "xz", "yz", "cursor"))]
+    pub plane: u32,
+}
+
+/// Starts a sketch on a plane: an object whose point 0 is its origin, held.
+pub struct NewSketch;
+
+impl Operator for NewSketch {
+    type Params = NewSketchParams;
+    fn id() -> &'static str {
+        "sketch.new"
+    }
+    fn label() -> &'static str {
+        "New Sketch"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let (location, rotation) = match params.plane {
+            // Front: the sketch's Y up the world's Z, its X along the world's.
+            1 => (
+                DVec3::ZERO,
+                DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2),
+            ),
+            // Side: its X along the world's Y, its Y up the world's Z.
+            2 => (
+                DVec3::ZERO,
+                DQuat::from_mat3(&DMat3::from_cols(DVec3::Y, DVec3::Z, DVec3::X)),
+            ),
+            3 => {
+                let d = doc.document();
+                (d.cursor, d.cursor_rotation)
+            }
+            _ => (DVec3::ZERO, DQuat::IDENTITY),
+        };
+        let d = doc.document_mut();
+        let mesh = d.add_mesh(MeshData::from_faces(vec![Vec3::ZERO], &[]));
+        let name = d.unique_object_name("Sketch");
+        let mut object = Object::new(name, ObjectData::Mesh(mesh));
+        object.transform.translation = location;
+        object.transform.rotation = rotation;
+        object.sketch.push(Constraint::Fixed {
+            a: 0,
+            at: [0.0, 0.0],
+        });
+        let id = d.add_object(object);
+        d.selection.clear();
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        Ok(OpResult::Finished)
+    }
+}
+
+// --- lines -------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct LineParams {
+    /// The points in order, as x, y pairs.
+    #[param(hidden)]
+    pub points: Vec<f64>,
+    /// For each point, the existing point it lands on, plus one; zero, or
+    /// nothing, for a new one.
+    #[param(hidden)]
+    pub joins: Vec<u32>,
+    /// Back to the first point at the end.
+    pub closed: bool,
+}
+
+/// A run of lines, one after another: Fusion's Line tool.
+pub struct Line;
+
+impl Operator for Line {
+    type Params = LineParams;
+    fn id() -> &'static str {
+        "sketch.line"
+    }
+    fn label() -> &'static str {
+        "Line"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let mut pts = points(doc.document(), id);
+        let count = params.points.len() / 2;
+        let mut ids = Vec::new();
+        for i in 0..count {
+            let at = pair(&params.points, i)
+                .ok_or_else(|| OpError::Failed("a point is not a number".into()))?;
+            let v = place(&mut pts, at, params.joins.get(i));
+            if ids.last() != Some(&v) {
+                ids.push(v);
+            }
+        }
+        if params.closed && ids.len() > 2 && ids.first() != ids.last() {
+            ids.push(ids[0]);
+        }
+        if ids.len() < 2 {
+            return Ok(OpResult::Cancelled);
+        }
+        let lines: Vec<[u32; 2]> = ids.windows(2).map(|w| [w[0], w[1]]).collect();
+        let constraints = lines
+            .iter()
+            .filter_map(|l| squared(&pts, l[0], l[1]))
+            .collect();
+        commit(doc, id, pts, lines, constraints)
+    }
+}
+
+// --- rectangles --------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RectangleParams {
+    /// One corner — or the centre, for a centred one.
+    #[param(unit = "length")]
+    pub a: [f64; 3],
+    /// The opposite corner.
+    #[param(unit = "length")]
+    pub b: [f64; 3],
+    /// `a` is the middle rather than a corner.
+    pub centred: bool,
+    /// The existing point the first corner lands on, plus one.
+    #[param(hidden)]
+    pub join: u32,
+}
+
+/// Four lines square to the sketch's axes: its sides level and upright.
+pub struct Rectangle;
+
+impl Operator for Rectangle {
+    type Params = RectangleParams;
+    fn id() -> &'static str {
+        "sketch.rectangle"
+    }
+    fn label() -> &'static str {
+        "Rectangle"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let (a, b) = (xy(params.a), xy(params.b));
+        let (lo, hi) = if params.centred {
+            let half = (b - a).abs();
+            (a - half, a + half)
+        } else {
+            (a.min(b), a.max(b))
+        };
+        if (hi - lo).min_element() < 1e-9 || !lo.is_finite() || !hi.is_finite() {
+            return Err(OpError::Failed(
+                "a rectangle needs a width and a height".into(),
+            ));
+        }
+        let mut pts = points(doc.document(), id);
+        let corners = [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)];
+        // The corner drawn from keeps the join, whichever corner it is.
+        let first = if params.centred {
+            None
+        } else {
+            corners.iter().position(|c| (*c - a).length() < 1e-12)
+        };
+        let ids: Vec<u32> = corners
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let join = (Some(i) == first).then_some(&params.join);
+                place(&mut pts, *c, join)
+            })
+            .collect();
+        let lines: Vec<[u32; 2]> = (0..4).map(|i| [ids[i], ids[(i + 1) % 4]]).collect();
+        let constraints = vec![
+            Constraint::Horizontal {
+                a: ids[0],
+                b: ids[1],
+            },
+            Constraint::Vertical {
+                a: ids[1],
+                b: ids[2],
+            },
+            Constraint::Horizontal {
+                a: ids[2],
+                b: ids[3],
+            },
+            Constraint::Vertical {
+                a: ids[3],
+                b: ids[0],
+            },
+        ];
+        commit(doc, id, pts, lines, constraints)
+    }
+}
+
+// --- circles and arcs --------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct CircleParams {
+    #[param(unit = "length")]
+    pub centre: [f64; 3],
+    #[param(min = 0.0, unit = "length")]
+    pub radius: f64,
+    /// Points round it: the circle a mesh can be.
+    #[param(min = 8, max = 256, unit = "count")]
+    pub segments: u32,
+    /// The existing point the centre lands on, plus one.
+    #[param(hidden)]
+    pub join: u32,
+}
+
+impl Default for CircleParams {
+    fn default() -> Self {
+        Self {
+            centre: [0.0; 3],
+            radius: 0.01,
+            segments: 48,
+            join: 0,
+        }
+    }
+}
+
+/// A circle about a centre: a ring of points held round it.
+pub struct Circle;
+
+impl Operator for Circle {
+    type Params = CircleParams;
+    fn id() -> &'static str {
+        "sketch.circle"
+    }
+    fn label() -> &'static str {
+        "Circle"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        if !(params.radius > 0.0 && params.radius.is_finite()) {
+            return Err(OpError::Failed("a circle needs a radius".into()));
+        }
+        let mut pts = points(doc.document(), id);
+        let c = xy(params.centre);
+        let centre = place(&mut pts, c, Some(&params.join));
+        let n = params.segments.clamp(8, 256);
+        let ring: Vec<u32> = (0..n)
+            .map(|i| {
+                let a = i as f64 * std::f64::consts::TAU / n as f64;
+                pts.push(c + DVec2::new(a.cos(), a.sin()) * params.radius);
+                pts.len() as u32 - 1
+            })
+            .collect();
+        let lines = (0..n as usize)
+            .map(|i| [ring[i], ring[(i + 1) % n as usize]])
+            .collect();
+        commit(
+            doc,
+            id,
+            pts,
+            lines,
+            vec![Constraint::Circle { centre, ring }],
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct ArcParams {
+    #[param(unit = "length")]
+    pub start: [f64; 3],
+    /// A point it passes through, between the ends.
+    #[param(unit = "length")]
+    pub through: [f64; 3],
+    #[param(unit = "length")]
+    pub end: [f64; 3],
+    #[param(min = 2, max = 256, unit = "count")]
+    pub segments: u32,
+    /// The existing points the start and the end land on, plus one.
+    #[param(hidden)]
+    pub joins: Vec<u32>,
+}
+
+impl Default for ArcParams {
+    fn default() -> Self {
+        Self {
+            start: [0.0; 3],
+            through: [0.0; 3],
+            end: [0.0; 3],
+            segments: 24,
+            joins: Vec::new(),
+        }
+    }
+}
+
+/// The centre of the circle through three points, if they are not in a row.
+pub fn circumcentre(a: DVec2, b: DVec2, c: DVec2) -> Option<DVec2> {
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-18 {
+        return None;
+    }
+    let (a2, b2, c2) = (a.length_squared(), b.length_squared(), c.length_squared());
+    Some(DVec2::new(
+        (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d,
+        (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d,
+    ))
+}
+
+/// An arc through three points: Fusion's three-point arc.
+pub struct Arc;
+
+impl Operator for Arc {
+    type Params = ArcParams;
+    fn id() -> &'static str {
+        "sketch.arc"
+    }
+    fn label() -> &'static str {
+        "Arc"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let (s, m, e) = (xy(params.start), xy(params.through), xy(params.end));
+        let c = circumcentre(s, m, e)
+            .ok_or_else(|| OpError::Failed("three points in a row make no arc".into()))?;
+        let angle = |p: DVec2| (p - c).y.atan2((p - c).x);
+        let ccw = |from: f64, to: f64| (to - from).rem_euclid(std::f64::consts::TAU);
+        // Anticlockwise from start to end, if that passes the middle point;
+        // otherwise the other way, which is anticlockwise from end to start.
+        let forward = ccw(angle(s), angle(m)) < ccw(angle(s), angle(e));
+        let (from, to, from_join, to_join) = if forward {
+            (s, e, params.joins.first(), params.joins.get(1))
+        } else {
+            (e, s, params.joins.get(1), params.joins.first())
+        };
+        let r = (from - c).length();
+        let sweep = ccw(angle(from), angle(to));
+        let n = params.segments.clamp(2, 256);
+        let mut pts = points(doc.document(), id);
+        let centre = {
+            pts.push(c);
+            pts.len() as u32 - 1
+        };
+        let mut ring = vec![place(&mut pts, from, from_join)];
+        for i in 1..n {
+            let a = angle(from) + sweep * i as f64 / n as f64;
+            pts.push(c + DVec2::new(a.cos(), a.sin()) * r);
+            ring.push(pts.len() as u32 - 1);
+        }
+        ring.push(place(&mut pts, to, to_join));
+        let lines = ring.windows(2).map(|w| [w[0], w[1]]).collect();
+        commit(doc, id, pts, lines, vec![Constraint::Arc { centre, ring }])
+    }
+}
+
+// --- points ------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct PointParams {
+    #[param(unit = "length")]
+    pub at: [f64; 3],
+}
+
+/// A point on its own, to dimension to or revolve about.
+pub struct Point;
+
+impl Operator for Point {
+    type Params = PointParams;
+    fn id() -> &'static str {
+        "sketch.point"
+    }
+    fn label() -> &'static str {
+        "Point"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let mut pts = points(doc.document(), id);
+        pts.push(xy(params.at));
+        commit(doc, id, pts, Vec::new(), Vec::new())
+    }
+}
+
+// --- constraints and dimensions, by point -------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ConstrainParams {
+    /// What kind: see `kreate_scene::sketch::KINDS`.
+    #[param(variants(
+        "distance",
+        "horizontal",
+        "vertical",
+        "fixed",
+        "angle",
+        "parallel",
+        "perpendicular",
+        "equal",
+        "coincident",
+        "on_line",
+        "circle",
+        "arc",
+        "tangent"
+    ))]
+    pub kind: u32,
+    /// The points it is on, in the order the kind names them.
+    #[param(hidden)]
+    pub points: Vec<u32>,
+    /// Its dimension, for a distance or an angle (radians); zero takes it as
+    /// it is drawn.
+    pub value: f64,
+}
+
+/// Adds a constraint or a dimension on the points the tool picked, and
+/// solves: the sketch tools' way in, where `sketch.constraint_add` reads the
+/// edit-mode selection.
+pub struct Constrain;
+
+impl Operator for Constrain {
+    type Params = ConstrainParams;
+    fn id() -> &'static str {
+        "sketch.constrain"
+    }
+    fn label() -> &'static str {
+        "Constrain"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let pts = points(doc.document(), id);
+        if params.points.iter().any(|p| *p as usize >= pts.len()) {
+            return Err(OpError::Failed("a point that is not in the sketch".into()));
+        }
+        let tag = KINDS
+            .get(params.kind as usize)
+            .copied()
+            .ok_or_else(|| OpError::Failed("no such constraint".into()))?;
+        let given = (params.value != 0.0 && params.value.is_finite()).then_some(params.value);
+        let p = &params.points;
+        let at = |i: usize| pts[p[i] as usize];
+        let value = match tag {
+            "distance" if p.len() >= 2 => given.unwrap_or_else(|| at(0).distance(at(1))),
+            "angle" if p.len() >= 4 => given.unwrap_or_else(|| {
+                let (u, v) = (at(1) - at(0), at(3) - at(2));
+                u.perp_dot(v).atan2(u.dot(v))
+            }),
+            _ => 0.0,
+        };
+        let held = p.first().map_or([0.0; 2], |a| pts[*a as usize].to_array());
+        let c = Constraint::from_parts(tag, p, value, held)
+            .ok_or_else(|| OpError::Failed(format!("{tag} needs other points")))?;
+        doc.document_mut()
+            .object_mut(id)
+            .expect("the sketch")
+            .sketch
+            .push(c);
+        match solve(doc, id) {
+            Some(s) if !s.converged => Err(OpError::Failed(
+                "that contradicts what is already there".into(),
+            )),
+            _ => Ok(OpResult::Finished),
+        }
+    }
+}
+
+// --- moving and deleting -----------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MovePointsParams {
+    #[param(hidden)]
+    pub points: Vec<u32>,
+    #[param(unit = "length")]
+    pub offset: [f64; 3],
+}
+
+/// Drags points: they go where they are taken, as nearly as the
+/// constraints let them, and the rest of the sketch follows.
+pub struct MovePoints;
+
+impl Operator for MovePoints {
+    type Params = MovePointsParams;
+    fn id() -> &'static str {
+        "sketch.move"
+    }
+    fn label() -> &'static str {
+        "Move Sketch Points"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let mut pts = points(doc.document(), id);
+        let offset = xy(params.offset);
+        let mut held = doc
+            .document()
+            .object(id)
+            .expect("the sketch")
+            .sketch
+            .clone();
+        for p in &params.points {
+            if let Some(q) = pts.get_mut(*p as usize) {
+                *q += offset;
+                // Held where it was taken while the rest settles round it.
+                held.push(Constraint::Fixed {
+                    a: *p,
+                    at: q.to_array(),
+                });
+            }
+        }
+        kreate_scene::sketch::solve(&mut pts, &held);
+        set_points(doc, id, &pts).ok_or_else(|| OpError::Failed("no sketch".into()))?;
+        // Then the sketch's own constraints alone, which win where they and
+        // the drag disagree.
+        solve(doc, id);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DeleteParams {
+    /// Lines to take out, by their place in the sketch's list.
+    #[param(hidden)]
+    pub lines: Vec<u32>,
+    /// Points to take out; with them every line and constraint on them.
+    #[param(hidden)]
+    pub points: Vec<u32>,
+}
+
+/// Takes lines and points out of the sketch, and what hangs on them: a point
+/// no line uses any more goes too, and a constraint on a point that went.
+/// The origin stays.
+pub struct Delete;
+
+impl Operator for Delete {
+    type Params = DeleteParams;
+    fn id() -> &'static str {
+        "sketch.delete"
+    }
+    fn label() -> &'static str {
+        "Delete from Sketch"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let pts = points(doc.document(), id);
+        let object = doc.document().object(id).expect("the sketch");
+        let mut gone = vec![false; pts.len()];
+        for p in &params.points {
+            if (*p as usize) < gone.len() && *p != 0 {
+                gone[*p as usize] = true;
+            }
+        }
+        let lines: Vec<[u32; 2]> = object
+            .sketch_lines
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| {
+                !params.lines.contains(&(*i as u32)) && !gone[l[0] as usize] && !gone[l[1] as usize]
+            })
+            .map(|(_, l)| *l)
+            .collect();
+        // A point that only the lines taken out used goes with them; a point
+        // on its own, drawn as one, stays unless named.
+        let mut used = vec![false; pts.len()];
+        for l in &lines {
+            used[l[0] as usize] = true;
+            used[l[1] as usize] = true;
+        }
+        for (i, l) in object.sketch_lines.iter().enumerate() {
+            if params.lines.contains(&(i as u32)) {
+                for v in l {
+                    if !used[*v as usize] && *v != 0 {
+                        gone[*v as usize] = true;
+                    }
+                }
+            }
+        }
+        if !gone.iter().any(|g| *g) && lines.len() == object.sketch_lines.len() {
+            return Ok(OpResult::Cancelled);
+        }
+        // Renumbered without the points that went.
+        let mut map = vec![u32::MAX; pts.len()];
+        let mut kept = Vec::new();
+        for (i, p) in pts.iter().enumerate() {
+            if !gone[i] {
+                map[i] = kept.len() as u32;
+                kept.push(*p);
+            }
+        }
+        let renumber = |v: u32| map[v as usize];
+        let constraints: Vec<Constraint> = object
+            .sketch
+            .iter()
+            .filter(|c| c.points().iter().all(|v| !gone[*v as usize]))
+            .map(|c| c.remapped(&renumber))
+            .collect();
+        let lines: Vec<[u32; 2]> = lines
+            .iter()
+            .map(|l| [renumber(l[0]), renumber(l[1])])
+            .collect();
+        // Faces from a sketch drawn before lines were its own go with it.
+        let mesh_id = object.mesh().expect("a sketch is a mesh");
+        let positions: Vec<Vec3> = kept
+            .iter()
+            .map(|p| Vec3::new(p.x as f32, p.y as f32, 0.0))
+            .collect();
+        *doc.document_mut()
+            .mesh_mut(mesh_id)
+            .expect("the sketch's mesh") = MeshData::from_faces(positions, &[]);
+        let o = doc.document_mut().object_mut(id).expect("the sketch");
+        o.sketch_lines = lines;
+        o.sketch = constraints;
+        solve(doc, id);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::History;
+    use crate::operator::Mode;
+    use crate::{OperatorRegistry, PropertyMap, PropertyValue};
+
+    fn run(
+        registry: &OperatorRegistry,
+        history: &mut History,
+        doc: &mut Document,
+        id: &str,
+        pairs: &[(&'static str, PropertyValue)],
+    ) -> Result<OpResult, OpError> {
+        let mut p = PropertyMap::new();
+        for (k, v) in pairs {
+            p.set(k, v.clone());
+        }
+        history.dispatch(registry, doc, &Context { mode: Mode::Object }, id, &p)
+    }
+
+    fn setup() -> (OperatorRegistry, History, Document) {
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        (registry, History::new(), Document::new())
+    }
+
+    #[test]
+    fn a_new_sketch_has_its_origin_held_and_lies_in_its_plane() {
+        let (r, mut h, mut doc) = setup();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[("plane", PropertyValue::Enum(1))],
+        )
+        .unwrap();
+        let id = active_sketch(&doc).expect("a sketch");
+        assert_eq!(points(&doc, id), vec![DVec2::ZERO]);
+        // The front plane: the sketch's Y is the world's Z.
+        let up = doc.world_transform(id).transform_vector3(DVec3::Y);
+        assert!((up - DVec3::Z).length() < 1e-12, "{up:?}");
+    }
+
+    #[test]
+    fn a_line_drawn_nearly_level_is_made_level_and_joins_where_it_lands() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        // From the origin, nearly level, then nearly upright.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[
+                (
+                    "points",
+                    PropertyValue::Floats(vec![0.0, 0.0, 0.03, 0.0004, 0.0302, 0.02]),
+                ),
+                ("joins", PropertyValue::Ints(vec![1, 0, 0])),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        assert_eq!(o.sketch_lines, vec![[0, 1], [1, 2]], "from the origin");
+        let p = points(&doc, id);
+        assert!(p[1].y.abs() < 1e-7, "level: {p:?}");
+        assert!((p[2].x - p[1].x).abs() < 1e-7, "upright: {p:?}");
+        assert_eq!(h.entries().len(), 2, "one step a stroke");
+    }
+
+    #[test]
+    fn a_rectangle_dimensioned_and_a_circle_make_a_plate_with_a_hole() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([0.037, 0.022, 0.0])),
+                ("join", PropertyValue::Int(1)),
+            ],
+        )
+        .unwrap();
+        // Corners 0 (the origin), 1, 2, 3: dimension two sides.
+        for (pts, value) in [(vec![0u32, 1], 0.04), (vec![1u32, 2], 0.02)] {
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                "sketch.constrain",
+                &[
+                    ("kind", PropertyValue::Enum(0)),
+                    ("points", PropertyValue::Ints(pts)),
+                    ("value", PropertyValue::Float(value)),
+                ],
+            )
+            .unwrap();
+        }
+        let p = points(&doc, id);
+        assert!((p[2] - DVec2::new(0.04, 0.02)).length() < 1e-9, "{p:?}");
+        let pinned = kreate_scene::sketch::pinned(&p, &doc.object(id).unwrap().sketch);
+        assert!(pinned[..4].iter().all(|f| *f), "{pinned:?}");
+
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.circle",
+            &[
+                ("centre", PropertyValue::Vec3([0.02, 0.01, 0.0])),
+                ("radius", PropertyValue::Float(0.004)),
+            ],
+        )
+        .unwrap();
+        let regions = kreate_scene::feature::sketch_regions(&doc, id);
+        assert_eq!(regions.len(), 2, "the plate and the disc");
+    }
+
+    #[test]
+    fn an_arc_passes_through_its_middle_point() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        // A half circle over the top, drawn right to left.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.arc",
+            &[
+                ("start", PropertyValue::Vec3([1.0, 0.0, 0.0])),
+                ("through", PropertyValue::Vec3([0.0, 1.0, 0.0])),
+                ("end", PropertyValue::Vec3([-1.0, 0.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let p = points(&doc, id);
+        assert!(
+            p.iter().skip(2).all(|q| (q.length() - 1.0).abs() < 1e-6),
+            "{p:?}"
+        );
+        assert!(
+            p.iter().skip(2).all(|q| q.y >= -1e-9),
+            "over the top: {p:?}"
+        );
+    }
+
+    #[test]
+    fn deleting_a_line_takes_its_loose_points_and_their_constraints() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[("points", PropertyValue::Floats(vec![0.1, 0.1, 0.2, 0.1]))],
+        )
+        .unwrap();
+        assert_eq!(points(&doc, id).len(), 3);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.delete",
+            &[("lines", PropertyValue::Ints(vec![0]))],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        assert!(o.sketch_lines.is_empty());
+        assert_eq!(points(&doc, id).len(), 1, "the origin stays");
+        assert_eq!(
+            o.sketch.len(),
+            1,
+            "the origin's hold, and not the line's level"
+        );
+    }
+}
