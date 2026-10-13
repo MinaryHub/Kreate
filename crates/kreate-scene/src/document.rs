@@ -138,7 +138,7 @@ impl Linkage {
 }
 
 /// One object.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Object {
     pub name: String,
     pub parent: Option<ObjectId>,
@@ -598,7 +598,11 @@ pub enum ReparentError {
 /// A whole document.
 #[derive(Clone, Debug, Default)]
 pub struct Document {
-    objects: Arena<ObjectId, Object>,
+    /// `Arc`ed, as meshes are: a copy of the document — every undo step, and
+    /// the agreed scene a shared session keeps — shares the objects it did not
+    /// change, and those compare by pointer. A write goes through
+    /// `Arc::make_mut`.
+    objects: Arena<ObjectId, Arc<Object>>,
     /// Meshes are `Arc`ed so a document clone is a refcount bump. The `MeshData`
     /// inside is itself copy-on-write per attribute array.
     meshes: Arena<MeshId, MeshEntry>,
@@ -659,6 +663,15 @@ pub struct Document {
     site: u16,
     /// The last identity this participant handed out, in its own range.
     site_uids: UidCounters,
+    /// Which object holds each identity. A shared session looks objects up
+    /// by identity for every one a patch names, and a walk of the arena per
+    /// lookup made a scene of fifty thousand parts take seconds a patch.
+    /// Kept in step by the only places objects come and go:
+    /// `insert_object` and `remove_object`.
+    object_index: std::collections::HashMap<Uid, ObjectId>,
+    /// The same for meshes: `add_mesh`, `restore_mesh`, the purge and a
+    /// patch's new ones.
+    mesh_index: std::collections::HashMap<Uid, MeshId>,
 }
 
 mod sync;
@@ -769,7 +782,7 @@ impl Document {
 
     /// An object to write without counting as a change; see `touch_version`.
     pub(crate) fn object_untouched_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
-        self.objects.get_mut(id)
+        self.objects.get_mut(id).map(Arc::make_mut)
     }
 
     // --- objects ------------------------------------------------------------
@@ -833,7 +846,8 @@ impl Document {
     fn insert_object(&mut self, mut object: Object, uid: Uid) -> ObjectId {
         object.uid = uid;
         let has_parent = object.parent.is_some();
-        let id = self.objects.insert(object);
+        let id = self.objects.insert(Arc::new(object));
+        self.object_index.insert(uid, id);
         if !has_parent {
             self.roots.push(id);
         }
@@ -873,6 +887,12 @@ impl Document {
     /// nothing can take, which is worse than none: a reader would take it for
     /// evidence that the invariant is not relied on.
     pub fn object_by_uid(&self, uid: Uid) -> Option<ObjectId> {
+        let id = *self.object_index.get(&uid)?;
+        if self.objects.get(id).is_some_and(|o| o.uid == uid) {
+            return Some(id);
+        }
+        // An index out of step is a bug in its upkeep; answered right anyway.
+        debug_assert!(false, "the object index is out of step for {uid:?}");
         self.objects
             .iter()
             .find(|(_, o)| o.uid == uid)
@@ -886,6 +906,11 @@ impl Document {
 
     /// The mesh datablock with this identity, if it is still here.
     pub fn mesh_by_uid(&self, uid: Uid) -> Option<MeshId> {
+        let id = *self.mesh_index.get(&uid)?;
+        if self.meshes.get(id).is_some_and(|m| m.uid == uid) {
+            return Some(id);
+        }
+        debug_assert!(false, "the mesh index is out of step for {uid:?}");
         self.meshes
             .iter()
             .find(|(_, m)| m.uid == uid)
@@ -893,7 +918,7 @@ impl Document {
     }
 
     pub fn object(&self, id: ObjectId) -> Option<&Object> {
-        self.objects.get(id)
+        self.objects.get(id).map(Arc::as_ref)
     }
 
     /// Mutable access, bumping the version.
@@ -904,11 +929,11 @@ impl Document {
         if found {
             self.version += 1;
         }
-        self.objects.get_mut(id)
+        self.objects.get_mut(id).map(Arc::make_mut)
     }
 
     pub fn objects(&self) -> impl Iterator<Item = (ObjectId, &Object)> {
-        self.objects.iter()
+        self.objects.iter().map(|(id, o)| (id, o.as_ref()))
     }
 
     pub fn object_count(&self) -> usize {
@@ -932,7 +957,11 @@ impl Document {
             self.objects.values().filter_map(|o| o.mesh()).collect();
         let meshes: Vec<MeshId> = self.meshes.ids().filter(|m| !shown.contains(m)).collect();
         for mesh in meshes {
-            self.meshes.remove(mesh);
+            if let Some(entry) = self.meshes.remove(mesh) {
+                if self.mesh_index.get(&entry.uid) == Some(&mesh) {
+                    self.mesh_index.remove(&entry.uid);
+                }
+            }
             purged.meshes += 1;
         }
 
@@ -977,6 +1006,9 @@ impl Document {
     /// caller's explicit choice.
     pub fn remove_object(&mut self, id: ObjectId) -> Option<Object> {
         let removed = self.objects.remove(id)?;
+        if self.object_index.get(&removed.uid) == Some(&id) {
+            self.object_index.remove(&removed.uid);
+        }
         let children: Vec<ObjectId> = self
             .objects
             .iter()
@@ -984,7 +1016,7 @@ impl Document {
             .map(|(cid, _)| cid)
             .collect();
         for child in children {
-            if let Some(c) = self.objects.get_mut(child) {
+            if let Some(c) = self.objects.get_mut(child).map(Arc::make_mut) {
                 c.parent = removed.parent;
             }
             if removed.parent.is_none() {
@@ -997,7 +1029,7 @@ impl Document {
             c.objects.retain(|o| *o != id);
         }
         self.touch();
-        Some(removed)
+        Some(Arc::unwrap_or_clone(removed))
     }
 
     /// Reparents, keeping the object's world transform.
@@ -1027,7 +1059,7 @@ impl Document {
         };
         let was_root = self.objects[id].parent.is_none();
         {
-            let o = &mut self.objects[id];
+            let o = Arc::make_mut(&mut self.objects[id]);
             o.parent = parent;
             o.parent_inverse = parent_inverse;
             o.parent_bone = None;
@@ -1056,7 +1088,7 @@ impl Document {
         self.set_parent(id, Some(armature))?;
         let frame =
             self.world_transform(armature) * self.bone_frame(armature, bone).expect("checked");
-        let o = &mut self.objects[id];
+        let o = Arc::make_mut(&mut self.objects[id]);
         o.parent_inverse = frame.inverse();
         o.parent_bone = Some(bone.to_string());
         self.touch();
@@ -1219,13 +1251,15 @@ impl Document {
     pub fn add_mesh(&mut self, mesh: MeshData) -> MeshId {
         let uid = self.issue(DatablockKind::Mesh);
         self.touch();
-        self.meshes.insert(MeshEntry {
+        let id = self.meshes.insert(MeshEntry {
             uid,
             data: Arc::new(mesh),
             // A mesh arrives with no material slots. A freshly added cube has
             // no materials, which is a state and not an omission.
             slots: Vec::new(),
-        })
+        });
+        self.mesh_index.insert(uid, id);
+        id
     }
 
     /// Adds a mesh with an identity it already had. See
@@ -1236,13 +1270,15 @@ impl Document {
         }
         self.uids.mesh = self.uids.mesh.max(uid);
         self.touch();
-        self.meshes.insert(MeshEntry {
+        let id = self.meshes.insert(MeshEntry {
             uid,
             data: Arc::new(mesh),
             // A mesh arrives with no material slots. A freshly added cube has
             // no materials, which is a state and not an omission.
             slots: Vec::new(),
-        })
+        });
+        self.mesh_index.insert(uid, id);
+        id
     }
 
     pub fn mesh(&self, id: MeshId) -> Option<&MeshData> {
@@ -1415,7 +1451,7 @@ impl Document {
         );
         for id in holders {
             let action = {
-                let Some(o) = self.objects.get_mut(id) else {
+                let Some(o) = self.objects.get_mut(id).map(Arc::make_mut) else {
                     continue;
                 };
                 for b in &mut o.pose.bones {
@@ -1453,8 +1489,15 @@ impl Document {
                 o.action
             };
             // Objects hanging from the bone keep hanging from it.
-            for (_, child) in self.objects.iter_mut() {
-                if child.parent == Some(id) && child.parent_bone.as_deref() == Some(old) {
+            let hanging: Vec<ObjectId> = self
+                .objects
+                .iter()
+                .filter(|(_, c)| c.parent == Some(id) && c.parent_bone.as_deref() == Some(old))
+                .map(|(c, _)| c)
+                .collect();
+            for c in hanging {
+                let child = Arc::make_mut(&mut self.objects[c]);
+                {
                     child.parent_bone = Some(new.to_string());
                 }
             }
@@ -1756,7 +1799,7 @@ impl Document {
                         .collect()
                 })
                 .unwrap_or_default();
-            let Some(o) = self.objects.get_mut(object) else {
+            let Some(o) = self.objects.get_mut(object).map(Arc::make_mut) else {
                 continue;
             };
             let before = o.transform;
@@ -1808,8 +1851,14 @@ impl Document {
             let Some(at) = cache.index(frame, track.frames.len()) else {
                 continue;
             };
-            if let Some(o) = self.objects.get_mut(id) {
-                if o.transform != track.frames[at] {
+            // Looked at before it is written: a write copies an object an
+            // undo step or a session's agreed scene shares.
+            if self
+                .objects
+                .get(id)
+                .is_some_and(|o| o.transform != track.frames[at])
+            {
+                if let Some(o) = self.objects.get_mut(id).map(Arc::make_mut) {
                     o.transform = track.frames[at];
                     moved += 1;
                 }
@@ -2265,13 +2314,13 @@ impl Document {
     pub fn duplicate_linked(&mut self, id: ObjectId) -> Option<ObjectId> {
         // Numbered by `add_object`, which counts on from a name that already
         // ends in one.
-        let copy = self.objects.get(id)?.clone();
+        let copy = Object::clone(self.objects.get(id)?);
         Some(self.add_object(copy))
     }
 
     /// Duplicates an object *and* its mesh, so the two can diverge.
     pub fn duplicate_full(&mut self, id: ObjectId) -> Option<ObjectId> {
-        let mut copy = self.objects.get(id)?.clone();
+        let mut copy = Object::clone(self.objects.get(id)?);
         // Numbered by `add_object`, which counts on from a name that already
         // ends in one.
         if let ObjectData::Mesh(mesh_id) = copy.data {

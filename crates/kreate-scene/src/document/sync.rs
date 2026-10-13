@@ -109,18 +109,32 @@ impl Document {
         use DatablockKind as K;
         let mut changes = Changes::default();
 
-        let before: HashMap<Uid, &Object> = base.objects.values().map(|o| (o.uid, o)).collect();
-        for object in self.objects.values() {
-            let same = before
-                .get(&object.uid)
-                .is_some_and(|b| format!("{b:?}") == format!("{object:?}"));
+        // Objects are `Arc`ed and `base` is an earlier copy of this
+        // document, so one nobody wrote is the same allocation in the same
+        // slot: a pointer compare, no lookup. Anything else is found by
+        // identity through each document's index and compared field by
+        // field; only a pair that differs is printed and compared as text,
+        // which is what counts a value not equal to itself — a NaN — as
+        // unchanged, as the text always did, rather than sending that object
+        // every turn for ever.
+        for (id, object) in self.objects.iter() {
+            if base.objects.get(id).is_some_and(|b| Arc::ptr_eq(b, object)) {
+                continue;
+            }
+            let same = base
+                .object_by_uid(object.uid)
+                .and_then(|id| base.objects.get(id))
+                .is_some_and(|b| **b == **object || format!("{b:?}") == format!("{object:?}"));
             if !same {
                 changes.changed.insert((K::Object, object.uid));
             }
         }
-        for uid in before.keys() {
-            if !self.objects.values().any(|o| o.uid == *uid) {
-                changes.removed.insert(*uid);
+        for (id, b) in base.objects.iter() {
+            if self.objects.get(id).is_some_and(|o| Arc::ptr_eq(o, b)) {
+                continue;
+            }
+            if self.object_by_uid(b.uid).is_none() {
+                changes.removed.insert(b.uid);
             }
         }
 
@@ -327,7 +341,7 @@ impl Document {
                 .iter()
                 .map(|s| s.and_then(|m| materials.get(&m).copied()))
                 .collect();
-            let id = match find_mesh(&self.meshes, entry.uid) {
+            let id = match self.mesh_by_uid(entry.uid) {
                 Some(id) => {
                     if fresh(K::Mesh, entry.uid) {
                         let mine = &mut self.meshes[id];
@@ -338,11 +352,13 @@ impl Document {
                 }
                 None => {
                     self.site_uid_seen(K::Mesh, entry.uid);
-                    self.meshes.insert(MeshEntry {
+                    let id = self.meshes.insert(MeshEntry {
                         uid: entry.uid,
                         data: entry.data.clone(),
                         slots,
-                    })
+                    });
+                    self.mesh_index.insert(entry.uid, id);
+                    id
                 }
             };
             meshes.insert(pid, id);
@@ -361,7 +377,7 @@ impl Document {
                 }
                 continue;
             }
-            let mut copy = object.clone();
+            let mut copy = Object::clone(object);
             copy.data = match object.data {
                 ObjectData::Mesh(m) => meshes
                     .get(&m)
@@ -397,7 +413,7 @@ impl Document {
                 Some(id) => {
                     // The parent is the second pass's; keep the present one.
                     copy.parent = self.objects[id].parent;
-                    self.objects[id] = copy;
+                    self.objects[id] = Arc::new(copy);
                     id
                 }
                 None => {
@@ -418,7 +434,7 @@ impl Document {
             // loop; the later one is let go.
             let wanted = wanted.filter(|p| *p != *id && !self.is_ancestor(*id, *p));
             let was_root = self.objects[*id].parent.is_none();
-            self.objects[*id].parent = wanted;
+            Arc::make_mut(&mut self.objects[*id]).parent = wanted;
             match (was_root, wanted.is_none()) {
                 (true, false) => self.roots.retain(|r| r != id),
                 (false, true) => self.roots.push(*id),
@@ -507,10 +523,6 @@ fn find<I: kreate_mesh::arena::ArenaIndex, T: HasUid>(
     arena.iter().find(|(_, b)| b.uid() == uid).map(|(id, _)| id)
 }
 
-fn find_mesh(arena: &kreate_mesh::arena::Arena<MeshId, MeshEntry>, uid: Uid) -> Option<MeshId> {
-    arena.iter().find(|(_, m)| m.uid == uid).map(|(id, _)| id)
-}
-
 /// Takes one kind of `Arc`ed datablock in from a patch; returns where each of
 /// the patch's ended up here.
 fn merge_arc<I, T>(
@@ -572,7 +584,7 @@ impl Carry<'_> {
         let source = self.src.objects.get(id)?;
         let uid = source.uid;
         let copy = if self.changes.has(DatablockKind::Object, uid) {
-            let mut copy = source.clone();
+            let mut copy = Object::clone(source);
             copy.data = match source.data {
                 ObjectData::Mesh(m) => self.mesh(m).map_or(ObjectData::Empty, ObjectData::Mesh),
                 ObjectData::Light(l) => self.light(l).map_or(ObjectData::Empty, ObjectData::Light),
