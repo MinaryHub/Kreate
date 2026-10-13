@@ -207,6 +207,42 @@ impl Geometry {
         best.map(|b| b.0)
     }
 
+    /// Where drawing can snap that is not a point of the sketch: each line's
+    /// middle and every place two lines cross, in the plane.
+    pub fn snap_points(&self) -> Vec<DVec2> {
+        let seg = |l: &[u32; 2]| -> Option<(DVec2, DVec2)> {
+            Some((
+                *self.points.get(l[0] as usize)?,
+                *self.points.get(l[1] as usize)?,
+            ))
+        };
+        let segments: Vec<(DVec2, DVec2)> = self.lines.iter().filter_map(seg).collect();
+        let mut out: Vec<DVec2> = segments.iter().map(|(a, b)| (*a + *b) * 0.5).collect();
+        // Crossings, pair by pair: a sketch is drawn by hand, a few hundred
+        // lines at the most, and a sketch past that is spared the cost.
+        if segments.len() <= 600 {
+            for (i, (p0, p1)) in segments.iter().enumerate() {
+                for (q0, q1) in &segments[i + 1..] {
+                    if let Some(x) = crossing(*p0, *p1, *q0, *q1) {
+                        out.push(x);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The point of a line nearest `on_plane`, for a line within `radius`
+    /// of `at` on screen.
+    pub fn on_line(&self, at: DVec2, on_plane: DVec2, radius: f64) -> Option<DVec2> {
+        let line = self.line_near(at, radius)?;
+        let [a, b] = *self.lines.get(line as usize)?;
+        let (pa, pb) = (*self.points.get(a as usize)?, *self.points.get(b as usize)?);
+        let d = pb - pa;
+        let t = ((on_plane - pa).dot(d) / d.length_squared().max(1e-24)).clamp(0.0, 1.0);
+        Some(pa + d * t)
+    }
+
     /// The line nearest `at` on screen within `radius`, points or no points:
     /// what the trim tool acts on.
     pub fn line_near(&self, at: DVec2, radius: f64) -> Option<u32> {
@@ -360,6 +396,9 @@ pub struct SketchUi {
     pub drag: Option<(u32, DVec2)>,
     /// The line the trim tool is over, and where on the plane.
     pub trim: Option<(u32, DVec2)>,
+    /// The hover was caught by snapping — a midpoint, a crossing, the grid,
+    /// the scene — rather than by a point of the sketch.
+    pub snapped: bool,
 }
 
 impl SketchUi {
@@ -641,7 +680,7 @@ pub fn view(
     // What the tool would draw.
     let hover = ui.hover;
     if let Some((h, join)) = hover {
-        if join > 0 {
+        if join > 0 || ui.snapped {
             view.snap = Some(to_world(h));
         }
         let clicks: Vec<DVec2> = ui.clicks.iter().map(|c| c.0).collect();
@@ -754,6 +793,20 @@ pub fn view(
     view
 }
 
+/// Where two segments cross, strictly inside both: two lines meeting at an
+/// end already have a point there to snap to.
+fn crossing(p0: DVec2, p1: DVec2, q0: DVec2, q1: DVec2) -> Option<DVec2> {
+    let (r, s) = (p1 - p0, q1 - q0);
+    let denom = r.perp_dot(s);
+    if denom.abs() < 1e-18 {
+        return None;
+    }
+    let qp = q0 - p0;
+    let (t, u) = (qp.perp_dot(s) / denom, qp.perp_dot(r) / denom);
+    let inside = |x: f64| x > 1e-9 && x < 1.0 - 1e-9;
+    (inside(t) && inside(u)).then(|| p0 + r * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,6 +837,43 @@ mod tests {
             &[Constraint::Circle { centre: 4, ring }],
             |p| Some(p * 100.0),
         )
+    }
+
+    #[test]
+    fn drawing_snaps_to_a_lines_middle_and_where_two_lines_cross() {
+        let mut g = geometry();
+        // A diagonal across the square, crossing nothing but at its corners;
+        // and a line across the middle, crossing the diagonal at the centre.
+        g.lines.push([0, 2]);
+        g.points.push(DVec2::new(0.0, 0.5));
+        g.points.push(DVec2::new(1.0, 0.5));
+        let n = g.points.len() as u32;
+        g.lines.push([n - 2, n - 1]);
+        let snaps = g.snap_points();
+        let has = |p: DVec2| snaps.iter().any(|q| q.distance(p) < 1e-9);
+        assert!(has(DVec2::new(0.5, 0.0)), "the bottom's middle");
+        assert!(has(DVec2::new(0.5, 0.5)), "the crossing at the centre");
+        // Where lines meet at an end is a point already, not a crossing.
+        assert!(
+            !snaps
+                .iter()
+                .any(|q| q.distance(DVec2::new(1.0, 0.0)) < 1e-9),
+            "{snaps:?}"
+        );
+    }
+
+    #[test]
+    fn drawing_snaps_onto_a_line_under_the_pointer() {
+        let g = geometry();
+        // 3 px under the bottom edge on screen, a little off it on the plane.
+        let on = g
+            .on_line(DVec2::new(40.0, 3.0), DVec2::new(0.4, 0.03), 6.0)
+            .unwrap();
+        assert!(on.distance(DVec2::new(0.4, 0.0)) < 1e-9, "{on:?}");
+        assert_eq!(
+            g.on_line(DVec2::new(40.0, 30.0), DVec2::new(0.4, 0.3), 6.0),
+            None
+        );
     }
 
     #[test]

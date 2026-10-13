@@ -1002,6 +1002,9 @@ struct App {
     /// whenever it moves — an edit, an undo, a frame — so a driven property
     /// follows its variables while they are being changed.
     driven_at: u64,
+    /// The scene as drawing in a sketch snaps to it, and the document
+    /// version and snap mode it was gathered for.
+    sketch_snap_cache: Option<(u64, kreate::snap::Mode, Arc<kreate::snap::SnapWorld>)>,
     /// The object Auto dynamic topology last said it would not cut.
     dyntopo_told: Option<ObjectId>,
     /// File ▸ Shared Session, while in one.
@@ -1135,6 +1138,7 @@ impl App {
             playing: None,
             ui_repaint_at: None,
             driven_at: u64::MAX,
+            sketch_snap_cache: None,
             dyntopo_told: None,
             session: None,
             collab_locks: Vec::new(),
@@ -4068,11 +4072,113 @@ impl App {
             .sketch_cursor()
             .zip(self.sketch_geometry())
             .and_then(|(at, g)| Some((g.point_near(at, 10.0)?, g)));
-        self.sketching.hover = Some(match caught {
-            Some((v, g)) => (g.points[v as usize], v + 1),
-            None => (on_plane, 0),
-        });
+        // A point of the sketch first, always: drawing from it joins it.
+        // Then, with snapping on — the magnet, or Ctrl the other way —
+        // what the snap mode names.
+        let snapping = self.snap.enabled != self.input.ctrl_down;
+        let (hover, snapped) = match caught {
+            Some((v, g)) => ((g.points[v as usize], v + 1), false),
+            None => match snapping.then(|| self.sketch_snap(on_plane)).flatten() {
+                Some(p) => ((p, 0), true),
+                None => ((on_plane, 0), false),
+            },
+        };
+        self.sketching.hover = Some(hover);
+        self.sketching.snapped = snapped;
         self.redraw.set(RedrawReason::UI);
+    }
+
+    /// Where drawing snaps to near `on_plane`, by the snap mode: the grid
+    /// for increment; otherwise the sketch's own middles and crossings, the
+    /// rest of the scene — other sketches, meshes, bodies — laid onto the
+    /// sketch's plane, and, for edges, a point along a line.
+    fn sketch_snap(&mut self, on_plane: glam::DVec2) -> Option<glam::DVec2> {
+        use kreate::snap::Mode;
+        let mode = self.snap.mode;
+        if !mode.needs_geometry() {
+            let step = self.snap.length;
+            if step <= 0.0 {
+                return None;
+            }
+            return Some((on_plane / step).round() * step);
+        }
+        let (id, world) = self.sketch_target()?;
+        let ppp = self.egui_ctx.pixels_per_point() as f64;
+        let at = self.sketch_cursor()?;
+        let g = self.sketch_geometry()?;
+        let projector = self.ui.projector?;
+        let screen = |p: glam::DVec2| {
+            projector
+                .project(world.transform_point3(DVec3::new(p.x, p.y, 0.0)))
+                .map(|q| glam::DVec2::new(q.x as f64, q.y as f64))
+        };
+        const REACH: f64 = 10.0;
+        let mut best: Option<(glam::DVec2, f64)> = None;
+        let offer = |p: glam::DVec2, d: f64, best: &mut Option<(glam::DVec2, f64)>| {
+            if d <= REACH && best.is_none_or(|b| d < b.1) {
+                *best = Some((p, d));
+            }
+        };
+        // The sketch's own: a line's middle, two lines' crossing.
+        if matches!(mode, Mode::Element | Mode::Vertex | Mode::EdgeMidpoint) {
+            for p in g.snap_points() {
+                if let Some(s) = screen(p) {
+                    offer(p, s.distance(at), &mut best);
+                }
+            }
+        }
+        // The rest of the scene, laid onto the plane.
+        let size = self.gfx.as_ref().map(|g| g.viewport.render_size());
+        if let (Some((x, y)), Some((w, h))) = (self.cursor_viewport_px(), size) {
+            let scene = self.sketch_snap_world(id, mode);
+            if let Some(hit) = kreate::snap::resolve(
+                &scene,
+                mode,
+                (x as f32, y as f32),
+                &self.camera,
+                (w as f32, h as f32),
+            ) {
+                let local = world.inverse().transform_point3(hit.point);
+                offer(
+                    glam::DVec2::new(local.x, local.y),
+                    hit.distance_px as f64 / ppp,
+                    &mut best,
+                );
+            }
+        }
+        if let Some((p, _)) = best {
+            return Some(p);
+        }
+        // Last, a point along one of the sketch's lines.
+        if matches!(mode, Mode::Element | Mode::Edge) {
+            return g.on_line(at, on_plane, REACH);
+        }
+        None
+    }
+
+    /// The scene's snap candidates for drawing in sketch `id`: everything
+    /// shown but the sketch itself, with the other sketches' lines. Kept
+    /// while the scene and the mode stay as they are.
+    fn sketch_snap_world(
+        &mut self,
+        id: ObjectId,
+        mode: kreate::snap::Mode,
+    ) -> Arc<kreate::snap::SnapWorld> {
+        let version = self.doc.version();
+        if let Some((v, m, world)) = &self.sketch_snap_cache {
+            if *v == version && *m == mode {
+                return world.clone();
+            }
+        }
+        let mut world = self.build_snap_world(mode);
+        for [a, b] in kreate::sketching::other_lines(&self.doc, Some(id)) {
+            world.verts.push(a);
+            world.verts.push(b);
+            world.edges.push([a, b]);
+        }
+        let world = Arc::new(world);
+        self.sketch_snap_cache = Some((version, mode, world.clone()));
+        world
     }
 
     fn sketch_tool_done(&mut self) {
