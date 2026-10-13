@@ -109,7 +109,16 @@ impl App {
                     let message = self.ui.catalog.get("collab-replaced");
                     self.status(&message);
                 }
-                SessionEvent::Changed => {
+                SessionEvent::Changed(changes) => {
+                    // Before the drivers run: a rigged joint someone else
+                    // moved takes its bone along, or the rig sync would turn
+                    // it back and the two of us would undo each other. The
+                    // bone follows the same way everywhere, so it is not sent.
+                    if self.doc.hold_remote_joints(&changes) > 0 {
+                        if let Some(session) = &mut self.session {
+                            session.absorb(&self.doc);
+                        }
+                    }
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                 }
                 SessionEvent::Joined(peer) => {

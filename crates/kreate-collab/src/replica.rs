@@ -111,13 +111,13 @@ impl Replica {
 
     /// Takes in someone else's edit. **Call [`Replica::outgoing`] first** and
     /// send what it gives: `base` and `doc` must agree before a remote edit
-    /// lands on both. Returns whether anything here changed.
+    /// lands on both. Returns what changed here, `None` when nothing did.
     pub fn incoming(
         &mut self,
         doc: &mut Document,
         from: u16,
         bytes: &[u8],
-    ) -> Result<bool, sync::SyncError> {
+    ) -> Result<Option<Changes>, sync::SyncError> {
         let (patch, mut changes) = sync::decode(bytes)?;
         let mine_changed: BTreeSet<BlockKey> = self
             .in_flight
@@ -138,7 +138,7 @@ impl Replica {
             .removed
             .retain(|uid| !mine_changed.contains(&(DatablockKind::Object, *uid)));
         if changes.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         for key in &changes.changed {
             self.authors.insert(*key, from);
@@ -148,7 +148,17 @@ impl Replica {
         }
         doc.apply_patch(&patch, &changes);
         self.base = doc.clone();
-        Ok(true)
+        Ok(Some(changes))
+    }
+
+    /// Takes what `doc` is now as agreed, without sending it: for what
+    /// follows from a remote edit the same way on every participant — a
+    /// rigged joint's bone put under the joint someone moved — which, sent
+    /// back, would cross the next edit of the one who made it and undo it.
+    /// Only right straight after [`Replica::incoming`], when nothing of this
+    /// participant's own is waiting to go.
+    pub fn absorb(&mut self, doc: &Document) {
+        self.base = doc.clone();
     }
 
     /// After an undo or redo: puts back what someone else did, so stepping

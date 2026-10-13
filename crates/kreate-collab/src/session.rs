@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::time::{Duration, Instant};
 
-use kreate_scene::Document;
+use kreate_scene::{Changes, Document};
 
 use crate::client::{Connection, Incoming};
 use crate::relay::{Relay, RelayConfig};
@@ -27,8 +27,9 @@ pub enum SessionEvent {
     },
     /// The scene was replaced by the session's: history no longer applies.
     SceneReplaced,
-    /// Someone else's edit changed the scene.
-    Changed,
+    /// Someone else's edit changed the scene: these datablocks, all of a
+    /// turn's edits together.
+    Changed(Changes),
     Joined(Peer),
     Left(Peer),
     /// The relay would not let us in, or the line went.
@@ -181,6 +182,14 @@ impl Session {
         self.last_send = Instant::now();
     }
 
+    /// Takes what `doc` is now as agreed without sending it. See
+    /// [`Replica::absorb`].
+    pub fn absorb(&mut self, doc: &Document) {
+        if let Some(replica) = &mut self.replica {
+            replica.absorb(doc);
+        }
+    }
+
     /// After an undo or redo here: keeps everyone else's edits. See
     /// [`Replica::keep_others`].
     pub fn after_undo(&mut self, doc: &mut Document) {
@@ -245,9 +254,14 @@ impl Session {
             }
             Msg::Applied { from, .. } => {
                 if let Some(replica) = &mut self.replica {
-                    if let Ok(true) = replica.incoming(doc, from, &frame.body) {
-                        if events.last() != Some(&SessionEvent::Changed) {
-                            events.push(SessionEvent::Changed);
+                    if let Ok(Some(changes)) = replica.incoming(doc, from, &frame.body) {
+                        match events.last_mut() {
+                            Some(SessionEvent::Changed(all)) => {
+                                all.changed.extend(changes.changed);
+                                all.removed.extend(changes.removed);
+                                all.settings |= changes.settings;
+                            }
+                            _ => events.push(SessionEvent::Changed(changes)),
                         }
                     }
                 }

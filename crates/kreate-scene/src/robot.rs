@@ -796,6 +796,39 @@ impl Document {
         moved
     }
 
+    /// After someone else's edit lands: each rigged joint it moved has its
+    /// bone put where the joint now stands, so the next
+    /// [`Document::sync_robot_rigs`] — which reads bones and writes joints —
+    /// keeps the move instead of turning the joint back to its old bone and
+    /// sending that back to the session. A joint whose rig the same edit
+    /// posed is left to the sync: the pose is then what was meant. Returns
+    /// how many bones moved.
+    pub fn hold_remote_joints(&mut self, changes: &crate::Changes) -> usize {
+        use crate::DatablockKind as K;
+        let moved: Vec<(ObjectId, f64)> = changes
+            .changed
+            .iter()
+            .filter(|(kind, _)| *kind == K::Object)
+            .filter_map(|(_, uid)| {
+                let id = self.object_by_uid(*uid)?;
+                let o = self.object(id)?;
+                let Some(RobotPart::Joint(j)) = &o.robot else {
+                    return None;
+                };
+                let rig = self.robot_rig(id)?;
+                let rig_uid = self.object_uid(rig)?;
+                if changes.has(K::Object, rig_uid) {
+                    return None;
+                }
+                Some((id, j.position_of(&o.transform)))
+            })
+            .collect();
+        moved
+            .into_iter()
+            .filter(|(id, position)| self.hold_joint_in_rig(*id, *position))
+            .count()
+    }
+
     /// Puts the rig's bone for `joint` (if a rig poses it) at `position`, so
     /// setting a joint by its number and turning its bone agree. Returns
     /// whether a bone moved.
