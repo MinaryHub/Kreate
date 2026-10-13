@@ -79,6 +79,60 @@ pub fn is_closed(mesh: &MeshData) -> bool {
     mesh.num_faces() > 0 && uses.iter().all(|u| *u == 2)
 }
 
+/// Whether `point` is inside the closed surface `mesh`, both in the mesh's
+/// own space: rays out from it along three slanted directions, each counting
+/// the faces it crosses — odd is inside — and the three voting, so a ray that
+/// grazes an edge or a corner is outvoted rather than trusted.
+pub fn contains(mesh: &MeshData, point: DVec3) -> bool {
+    let tri = mesh.triangulate();
+    let positions = mesh.positions();
+    let (tris, _) = tri.indices.as_chunks::<3>();
+    let corners: Vec<[DVec3; 3]> = tris
+        .iter()
+        .map(|t| t.map(|v| positions[v as usize].as_dvec3()))
+        .collect();
+    let directions = [
+        DVec3::new(1.0, 0.123_456, 0.065_432).normalize(),
+        DVec3::new(-0.087_654, 1.0, 0.154_321).normalize(),
+        DVec3::new(0.111_111, -0.098_765, 1.0).normalize(),
+    ];
+    let inside = directions
+        .iter()
+        .filter(|d| {
+            corners
+                .iter()
+                .filter(|[a, b, c]| ray_hits(point, **d, *a, *b, *c))
+                .count()
+                % 2
+                == 1
+        })
+        .count();
+    inside >= 2
+}
+
+/// Möller–Trumbore: whether the ray from `o` along `d` crosses triangle
+/// `a b c` ahead of `o`.
+fn ray_hits(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> bool {
+    let (e1, e2) = (b - a, c - a);
+    let p = d.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-14 {
+        return false;
+    }
+    let inv = 1.0 / det;
+    let s = o - a;
+    let u = s.dot(p) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let q = s.cross(e1);
+    let v = d.dot(q) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    e2.dot(q) * inv > 1e-12
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +171,14 @@ mod tests {
         let p = mass_properties(&primitives::plane(2.0), |p| p);
         assert!(!p.closed);
         assert!((p.area - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_point_is_inside_a_cube_or_not() {
+        let cube = crate::primitives::cube(2.0);
+        assert!(super::contains(&cube, DVec3::ZERO));
+        assert!(super::contains(&cube, DVec3::new(0.9, -0.9, 0.5)));
+        assert!(!super::contains(&cube, DVec3::new(1.5, 0.0, 0.0)));
+        assert!(!super::contains(&cube, DVec3::new(0.0, 0.0, -3.0)));
     }
 }

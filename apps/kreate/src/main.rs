@@ -1005,6 +1005,10 @@ struct App {
     /// The scene as drawing in a sketch snaps to it, and the document
     /// version and snap mode it was gathered for.
     sketch_snap_cache: Option<(u64, kreate::snap::Mode, Arc<kreate::snap::SnapWorld>)>,
+    /// The extrude's automatic operation and target, and what they were
+    /// worked out for: the scene, the regions, the distance, symmetric.
+    #[allow(clippy::type_complexity)]
+    solid_auto: Option<((u64, Vec<[u64; 2]>, u64, bool), (u32, String))>,
     /// A sketch drag's step, live while the button is down.
     sketch_drag_session: Option<kreate_ops::ModalSession>,
     /// The object Auto dynamic topology last said it would not cut.
@@ -1142,6 +1146,7 @@ impl App {
             driven_at: u64::MAX,
             sketch_snap_cache: None,
             sketch_drag_session: None,
+            solid_auto: None,
             dyntopo_told: None,
             session: None,
             collab_locks: Vec::new(),
@@ -4744,6 +4749,77 @@ impl App {
             &self.ui.catalog,
             &self.sketch_pinned.1,
         ));
+        self.choose_solid_operation(id);
+    }
+
+    /// Fusion's choice for an extrude, while its dialog is open and nothing
+    /// was picked by hand: going into an object, a cut from it; coming out
+    /// of one, a join to it; in the open, a new body. Looked at in the
+    /// middle of what the extrude would fill, and just behind the sketch.
+    fn choose_solid_operation(&mut self, sketch: ObjectId) {
+        let seeds = self.sketching.seeds.clone();
+        if seeds.is_empty() {
+            // Closed: the next extrude chooses afresh.
+            self.ui.solid_dialog.chosen = false;
+            self.solid_auto = None;
+            return;
+        }
+        if self.sketching.tool != kreate::sketching::Tool::Extrude || self.ui.solid_dialog.chosen {
+            return;
+        }
+        let d = self.ui.solid_dialog.distance * self.ui.length_unit;
+        let symmetric = self.ui.solid_dialog.symmetric;
+        let key = (
+            self.doc.version(),
+            seeds
+                .iter()
+                .map(|s| [s.x.to_bits(), s.y.to_bits()])
+                .collect::<Vec<_>>(),
+            d.to_bits(),
+            symmetric,
+        );
+        if self.solid_auto.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let world = self.doc.world_transform(sketch);
+        let normal = world.transform_vector3(DVec3::Z).normalize_or_zero();
+        let along = if symmetric { d.abs() * 0.25 } else { d * 0.5 };
+        let behind = -d.signum() * (d.abs() * 0.02).max(1e-4);
+        let at = |s: glam::DVec2| world.transform_point3(DVec3::new(s.x, s.y, 0.0));
+        let mut cut: Option<String> = None;
+        let mut join: Option<String> = None;
+        for (id, mesh) in &self.evaluated {
+            let Some(o) = self.doc.object(*id) else {
+                continue;
+            };
+            if *id == sketch
+                || !self.doc.is_shown(*id)
+                || !o.sketch.is_empty()
+                || !o.sketch_lines.is_empty()
+            {
+                continue;
+            }
+            let to_local = self.doc.world_transform(*id).inverse();
+            let inside =
+                |p: DVec3| kreate_mesh::measure::contains(mesh, to_local.transform_point3(p));
+            if cut.is_none() && seeds.iter().any(|s| inside(at(*s) + normal * along)) {
+                cut = Some(o.name.clone());
+            }
+            if join.is_none()
+                && !symmetric
+                && seeds.iter().any(|s| inside(at(*s) + normal * behind))
+            {
+                join = Some(o.name.clone());
+            }
+        }
+        let choice = match (cut, join) {
+            (Some(name), _) => (2, name),
+            (None, Some(name)) => (1, name),
+            (None, None) => (0, String::new()),
+        };
+        self.ui.solid_dialog.operation = choice.0;
+        self.ui.solid_dialog.target = choice.1.clone();
+        self.solid_auto = Some((key, choice));
     }
 
     fn begin_knife(&mut self) {
@@ -14018,6 +14094,43 @@ kreate.ops.object.add_primitive()",
 
     /// A bake on its own thread: the bar moves, the result goes in as one
     /// undo step through `physics.bake`, and a cancelled one leaves nothing.
+    #[test]
+    fn an_extrude_into_an_object_cuts_it_and_out_of_one_joins_it() {
+        let mut app = app();
+        // A box from z = 0 to 2, and a sketch on the ground under it.
+        let mut mesh = kreate_mesh::primitives::cube(2.0);
+        for p in mesh.positions_mut() {
+            p.z += 1.0;
+        }
+        app.doc.add_mesh_object("Box", mesh);
+        app.run_op_with("sketch.new", &[]);
+        let sketch = kreate_ops::ops::sketch_draw::active_sketch(&app.doc).unwrap();
+        app.evaluate_scene();
+        app.sketching.tool = kreate::sketching::Tool::Extrude;
+        app.sketching.seeds = vec![glam::DVec2::new(0.0, 0.0)];
+        app.ui.length_unit = 1.0;
+        // Up, into the box: a cut from it.
+        app.ui.solid_dialog.distance = 0.5;
+        app.choose_solid_operation(sketch);
+        assert_eq!(app.ui.solid_dialog.operation, 2);
+        assert_eq!(app.ui.solid_dialog.target, "Box");
+        // Down, away from it with the box behind: a join.
+        app.ui.solid_dialog.distance = -0.5;
+        app.choose_solid_operation(sketch);
+        assert_eq!(app.ui.solid_dialog.operation, 1);
+        // Picked by hand, it stays.
+        app.ui.solid_dialog.chosen = true;
+        app.ui.solid_dialog.operation = 0;
+        app.ui.solid_dialog.distance = 0.5;
+        app.choose_solid_operation(sketch);
+        assert_eq!(app.ui.solid_dialog.operation, 0);
+        // In the open: a new body.
+        app.ui.solid_dialog.chosen = false;
+        app.sketching.seeds = vec![glam::DVec2::new(5.0, 5.0)];
+        app.choose_solid_operation(sketch);
+        assert_eq!(app.ui.solid_dialog.operation, 0);
+    }
+
     #[test]
     fn a_sketch_line_dragged_moves_live_from_where_it_began_and_is_one_step() {
         let mut app = app();

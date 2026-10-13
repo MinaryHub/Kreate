@@ -32,6 +32,23 @@ fn body_named(doc: &Document, name: &str) -> Option<ObjectId> {
         .map(|(id, _)| id)
 }
 
+/// What a feature joins or cuts: a body by name — the latest when the name
+/// is empty — or, named, any other mesh object that is not a sketch.
+fn target_of(doc: &Document, name: &str) -> Option<ObjectId> {
+    if let Some(body) = body_named(doc, name) {
+        return Some(body);
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    doc.objects()
+        .find(|(_, o)| {
+            o.name == name && o.mesh().is_some() && o.sketch.is_empty() && o.sketch_lines.is_empty()
+        })
+        .map(|(id, _)| id)
+}
+
 fn seeds_of(v: &[f64]) -> Vec<[f64; 2]> {
     v.as_chunks::<2>()
         .0
@@ -62,7 +79,7 @@ fn add(
     let into = match operation {
         0 => None,
         _ => Some(
-            body_named(d, target)
+            target_of(d, target)
                 .ok_or_else(|| OpError::Failed("there is no body to join or cut".into()))?,
         ),
     };
@@ -77,6 +94,10 @@ fn add(
         },
         order,
     };
+    let plain = into.filter(|o| d.object(*o).is_some_and(|o| o.features.is_empty()));
+    if let Some(target) = plain {
+        return join_or_cut_mesh(doc, f, target);
+    }
     let d = doc.document_mut();
     match into {
         Some(body) => d.object_mut(body).expect("a body").features.push(f),
@@ -88,6 +109,54 @@ fn add(
             d.add_object(object);
         }
     }
+    Ok(OpResult::Finished)
+}
+
+/// A feature joined to or cut from a mesh that is not a body: what it makes
+/// becomes a hidden object of its own, and the mesh gains a boolean against
+/// it — so the cut can be moved, changed or taken off later, as Blender's
+/// boolean cutters are.
+fn join_or_cut_mesh(
+    doc: &mut DocMut<'_>,
+    f: Feature,
+    target: ObjectId,
+) -> Result<OpResult, OpError> {
+    use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
+    let d = doc.document();
+    let mut piece = feature::solid(d, &f);
+    if piece.num_faces() == 0 {
+        return Err(OpError::Failed("the regions make no solid".into()));
+    }
+    let sketch_world = d
+        .object_by_uid(f.sketch)
+        .map(|id| d.world_transform(id))
+        .unwrap_or_default();
+    for p in piece.positions_mut() {
+        *p = sketch_world.transform_point3(p.as_dvec3()).as_vec3();
+    }
+    let cut = f.operation == Operation::Cut;
+    let target_name = d.object(target).map(|o| o.name.clone()).unwrap_or_default();
+    let d = doc.document_mut();
+    let mesh = d.add_mesh(piece);
+    let name = d.unique_object_name(&format!(
+        "{target_name} {}",
+        if cut { "Cut" } else { "Join" }
+    ));
+    let mut tool = Object::new(name, ObjectData::Mesh(mesh));
+    tool.visible = false;
+    let tool = d.add_object(tool);
+    let operand = d.object_uid(tool).expect("just added");
+    let op = if cut {
+        kreate_mesh::modifiers::BooleanOp::Difference
+    } else {
+        kreate_mesh::modifiers::BooleanOp::Union
+    };
+    d.object_mut(target)
+        .expect("the target")
+        .modifiers
+        .push(ModifierInstance::new(ModifierKind::Boolean(
+            BooleanModifier { operand, op },
+        )));
     Ok(OpResult::Finished)
 }
 
@@ -572,6 +641,56 @@ mod tests {
         h.undo(&mut doc);
         assert_eq!(doc.object(id).unwrap().features.len(), 1);
         assert_eq!(doc.mesh(mesh).unwrap().num_faces(), 0);
+    }
+
+    /// A cut into a mesh that is not a body: the extrude becomes a hidden
+    /// cutter and the mesh a boolean against it — one step.
+    #[test]
+    fn a_cut_into_a_plain_mesh_is_a_boolean_against_a_hidden_cutter() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let cube = doc.add_mesh_object("Box", kreate_mesh::primitives::cube(2.0));
+        // A square on the ground, cut upward into the box.
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([-0.5, -0.5, 0.0])),
+                ("b", PropertyValue::Vec3([0.5, 0.5, 0.0])),
+            ],
+        )
+        .unwrap();
+        let steps = h.entries().len();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.0, 0.0])),
+                ("distance", PropertyValue::Float(0.5)),
+                ("operation", PropertyValue::Enum(2)),
+                ("target", PropertyValue::Text("Box".into())),
+            ],
+        )
+        .unwrap();
+        assert_eq!(h.entries().len(), steps + 1, "one step");
+        let o = doc.object(cube).unwrap();
+        assert_eq!(o.modifiers.len(), 1);
+        let kreate_scene::modifier::ModifierKind::Boolean(b) = o.modifiers[0].kind else {
+            panic!("a boolean");
+        };
+        let cutter = doc.object_by_uid(b.operand).expect("the cutter");
+        assert!(!doc.object(cutter).unwrap().visible, "hidden");
+        let cut = kreate_scene::modifier::apply_one(&doc, cube, 0).unwrap();
+        let volume = kreate_mesh::measure::mass_properties(&cut, |p| p).volume;
+        // 8 less a 1 x 1 x 0.5 pocket.
+        assert!((volume - 7.5).abs() < 1e-3, "{volume}");
     }
 
     #[test]

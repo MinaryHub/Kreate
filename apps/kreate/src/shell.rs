@@ -12300,6 +12300,12 @@ pub struct SolidDialog {
     pub operation: u32,
     /// The revolve's angle, in degrees.
     pub angle: f64,
+    /// The operation was picked by hand: the automatic choice — cut going
+    /// into something, join coming out of it, Fusion's — stands aside.
+    pub chosen: bool,
+    /// What a join or cut acts on, by name, as the automatic choice found
+    /// it; empty for the latest body.
+    pub target: String,
 }
 
 impl Default for SolidDialog {
@@ -12309,6 +12315,8 @@ impl Default for SolidDialog {
             symmetric: false,
             operation: 0,
             angle: 360.0,
+            chosen: false,
+            target: String::new(),
         }
     }
 }
@@ -12647,10 +12655,20 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                             .selected_text(ops[d.operation.min(2) as usize].clone())
                             .show_ui(ui, |ui| {
                                 for (i, name) in ops.iter().enumerate() {
-                                    ui.selectable_value(&mut d.operation, i as u32, name.as_str());
+                                    if ui
+                                        .selectable_value(&mut d.operation, i as u32, name.as_str())
+                                        .clicked()
+                                    {
+                                        d.chosen = true;
+                                    }
                                 }
                             });
                         ui.end_row();
+                        if d.operation != 0 && !d.target.is_empty() {
+                            ui.label(state.catalog.get("feature-target"));
+                            ui.label(&d.target);
+                            ui.end_row();
+                        }
                     });
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -12675,6 +12693,9 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                 V::Floats(view.seeds.iter().flat_map(|s| [s[0], s[1]]).collect()),
             );
             p.set("operation", V::Enum(d.operation));
+            if d.operation != 0 {
+                p.set("target", V::Text(d.target.clone()));
+            }
             if revolve {
                 let axis = view.axis.unwrap_or([0, 0]);
                 p.set("axis", V::Ints(axis.to_vec()));

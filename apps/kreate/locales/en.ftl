@@ -1396,3 +1396,4 @@ sculpt-dyntopo-on = On
 sculpt-dyntopo-off = Off
 sculpt-dyntopo-hint = Auto cuts the surface finer wherever the brush goes, unless that would throw away the mesh's UVs for a texture, its colours, materials, mask or face sets. On always does.
 sculpt-dyntopo-kept = Dynamic topology is held back on this mesh so its { $what } are kept. Set Dynamic Topology to On in the Topology menu to cut it anyway.
+feature-target = Into

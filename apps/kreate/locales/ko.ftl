@@ -1402,3 +1402,4 @@ sculpt-dyntopo-on = 켬
 sculpt-dyntopo-off = 끔
 sculpt-dyntopo-hint = 자동: 브러시가 지나가는 곳의 표면을 촘촘하게 나눕니다. 다만 텍스처용 UV, 색, 재질, 마스크, 페이스 세트가 사라지는 메시는 건너뜁니다. 켬: 항상 나눕니다.
 sculpt-dyntopo-kept = 이 메시의 { $what } 정보를 지키려고 다이나믹 토폴로지를 쓰지 않습니다. 그래도 나누려면 토폴로지 메뉴에서 다이나믹 토폴로지를 켬으로 바꾸세요.
+feature-target = 대상
