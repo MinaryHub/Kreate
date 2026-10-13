@@ -957,6 +957,11 @@ struct App {
     /// See `walking.rs`.
     walk: Option<kreate::walk::Walk>,
     walk_clock: Option<Instant>,
+    /// A question is on screen (save before leaving?), so a second close
+    /// waits for its answer rather than asking again over it.
+    asking: bool,
+    /// The user has said to close: closes still queued close at once.
+    quitting: bool,
     /// Align Faces, while it is out: the first face clicked, once it has
     /// been — the part that moves, its face's middle and normal.
     mate: Option<Option<(ObjectId, DVec3, DVec3)>>,
@@ -1032,6 +1037,9 @@ impl App {
         // File ▸ Open Recent, as the last session left it.
         app.ui.resolution_scale = kreate::prefs::viewport_path()
             .map_or(1.0, |p| kreate::prefs::load_resolution_scale(&p));
+        app.ui.appearance = kreate::prefs::interface_path()
+            .map(|p| kreate::prefs::load_appearance(&p))
+            .unwrap_or_default();
         app.ui.recent_files = kreate::prefs::recent_path()
             .map(|p| kreate::prefs::load_recent(&p))
             .unwrap_or_default();
@@ -1134,6 +1142,8 @@ impl App {
             measure: None,
             walk: None,
             walk_clock: None,
+            asking: false,
+            quitting: false,
             mate: None,
             mass_cache: None,
             sectioned: Vec::new(),
@@ -4890,9 +4900,22 @@ impl App {
     /// crash, and after one the user has had their say they would only pile
     /// up as recoveries of work that was deliberately left.
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.confirm_discarding_changes("unsaved-what-quit") {
+        // Clicks on the close button while the question was up arrive after
+        // its answer: once leaving is decided they leave, and while it is
+        // being asked they wait. Each used to ask again, one dialog after
+        // another — in a shared session, where the others' edits keep the
+        // document changed, every time.
+        if self.quitting {
+            event_loop.exit();
             return;
         }
+        if self.asking || !self.confirm_discarding_changes("unsaved-what-quit") {
+            return;
+        }
+        self.quitting = true;
+        // Out of a shared session first, so the others see the leaving now
+        // rather than when the connection times out.
+        self.collab_leave_quietly();
         self.file.end_cleanly();
         event_loop.exit();
     }
@@ -5748,6 +5771,9 @@ impl App {
         if !self.file.is_modified(&self.doc) {
             return true;
         }
+        if self.asking {
+            return false;
+        }
         let t = |key: &str, args: &[(&str, &str)]| {
             self.ui.catalog.format(key, kreate_i18n::TextKind::Ui, args)
         };
@@ -5777,12 +5803,20 @@ impl App {
         } else {
             rfd::MessageButtons::YesNoCancelCustom(save.clone(), discard.clone(), cancel)
         };
-        let answer = rfd::MessageDialog::new()
+        let mut dialog = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title(t("unsaved-title", &[]))
             .set_description(description)
-            .set_buttons(buttons)
-            .show();
+            .set_buttons(buttons);
+        // Owned by the window, which it then holds still: without a parent
+        // the window stayed live under it, and a second close opened a
+        // second question.
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        self.asking = true;
+        let answer = dialog.show();
+        self.asking = false;
         match answer {
             rfd::MessageDialogResult::Yes => self.save_then_go_on(),
             rfd::MessageDialogResult::Custom(label) if label == save => self.save_then_go_on(),
@@ -8418,7 +8452,8 @@ impl App {
             });
 
         // --- run the interface, which tells us how big the viewport is -------
-        let raw_input = state.take_egui_input(&window);
+        let mut raw_input = state.take_egui_input(&window);
+        shell::keep_tab_for_the_keymap(&self.egui_ctx, &mut raw_input);
         let image = self.gfx.as_ref().map(|g| shell::ViewportImage {
             texture: g.target.id,
             uv: g.viewport.uv_extent(),
@@ -8665,10 +8700,7 @@ impl App {
             .map(|(id, _)| {
                 let slots = self
                     .doc
-                    .object(*id)
-                    .and_then(|o| o.mesh())
-                    .map(|m| self.doc.mesh_slots(m).len())
-                    .unwrap_or(0)
+                    .drawn_slot_count(*id)
                     .clamp(1, kreate_render::viewport::SOLID_SLOTS);
                 (0..slots)
                     .map(|slot| {
@@ -8705,10 +8737,7 @@ impl App {
                 }
                 let slots = self
                     .doc
-                    .object(*id)
-                    .and_then(|o| o.mesh())
-                    .map(|m| self.doc.mesh_slots(m).len())
-                    .unwrap_or(0)
+                    .drawn_slot_count(*id)
                     .clamp(1, kreate_render::viewport::SOLID_SLOTS);
                 (0..slots)
                     .map(|slot| {
@@ -10644,7 +10673,8 @@ impl ApplicationHandler for App {
         // After the fonts, because the theme is built on whatever style the
         // context already carries and installing it the other way round would
         // be a silent ordering trap for the next person.
-        kreate_ui::install_theme(&self.egui_ctx);
+        kreate_ui::Theme::new(self.ui.appearance, kreate_ui::Density::default())
+            .install(&self.egui_ctx);
         self.egui_state = Some(egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -12356,6 +12386,20 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While the save question is on screen, a second request to leave —
+    /// another click on the window's close button — is not a second
+    /// question: it is refused at once, without a dialog.
+    #[test]
+    fn a_second_close_while_asking_does_not_ask_again() {
+        let mut app = app();
+        app.doc
+            .add_mesh_object("Cube", kreate_mesh::primitives::cube(1.0));
+        assert!(app.file.is_modified(&app.doc));
+        app.asking = true;
+        // Would block on a dialog if it asked; returns at once instead.
+        assert!(!app.confirm_discarding_changes("unsaved-what-quit"));
     }
 
     /// A new document starts stopped at its first frame: the last one's

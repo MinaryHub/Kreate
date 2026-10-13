@@ -1045,6 +1045,48 @@ mod tests {
     }
 
     #[test]
+    fn baked_instances_arrive_mapped_and_in_their_own_material() {
+        use kreate_mesh::attribute::names;
+        let mut doc = Document::new();
+        short(&mut doc, 10);
+        let e = add(
+            &mut doc,
+            "Emitter",
+            kreate_mesh::primitives::plane(1.0),
+            DVec3::ZERO,
+        );
+        let leaf = add(
+            &mut doc,
+            "Leaf",
+            kreate_mesh::primitives::cube(0.2),
+            DVec3::new(5.0, 0.0, 0.0),
+        );
+        let bark = doc.add_material(crate::document::Material {
+            name: "Bark".into(),
+            ..Default::default()
+        });
+        let leaf_mesh = doc.object(leaf).unwrap().mesh().unwrap();
+        doc.set_mesh_slots(leaf_mesh, vec![Some(bark)]);
+        let mut spray = crate::physics::ParticleSettings::new("Spray", ParticleKind::Emitter);
+        (spray.count, spray.frame_start, spray.frame_end) = (20, 1, 5);
+        spray.instance = doc.object_uid(leaf);
+        doc.object_mut(e).unwrap().physics.particles = vec![spray];
+        let (cache, _) = bake(&doc);
+        doc.physics_cache = Arc::new(cache);
+        doc.animate(10.0);
+        let mut eval = ModifierCache::new();
+        let out = eval.evaluated(&doc, e, &EvalCtx::still()).unwrap();
+        let cube_faces = 6;
+        assert_eq!(out.num_faces(), 1 + 20 * cube_faces);
+        assert!(out.attributes().get(names::UV).is_some(), "the copies' UVs");
+        let slots = out.attributes().get_i32(names::MATERIAL_INDEX).unwrap();
+        assert_eq!(slots[0], 0, "the emitter's own face");
+        for s in &slots[1..] {
+            assert_eq!(doc.material_id_at(e, *s as usize), Some(bark));
+        }
+    }
+
+    #[test]
     fn a_liquid_falls_in_its_domain_and_the_domain_shows_it() {
         use crate::physics::{Fluid, FluidDomain, FluidFlow};
         let mut doc = Document::new();

@@ -205,8 +205,10 @@ pub const MODES: [ModeInfo; 7] = [
         edit_tools: false,
         shows_elements: false,
         transform: ["pose.translate", "pose.rotate", "pose.scale"],
-        // Blender's: Tab from pose mode goes to the skeleton's edit mode.
-        tab: Mode::EditArmature,
+        // Tab is the way back to object mode from every mode, as from the
+        // edit modes: one key, two places. Blender sends pose mode to the
+        // skeleton's edit mode instead; the mode menu still goes there.
+        tab: Mode::Object,
     },
     ModeInfo {
         mode: Mode::WeightPaint,
@@ -461,6 +463,6 @@ mod tests {
         assert_eq!(Mode::Object.toggled(mesh), Mode::EditMesh);
         assert_eq!(Mode::Object.toggled(armature), Mode::EditArmature);
         assert_eq!(Mode::EditArmature.toggled(armature), Mode::Object);
-        assert_eq!(Mode::Pose.toggled(armature), Mode::EditArmature);
+        assert_eq!(Mode::Pose.toggled(armature), Mode::Object);
     }
 }

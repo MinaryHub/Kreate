@@ -2065,13 +2065,103 @@ impl Document {
     /// material needs the id, and a caller that worked it out separately would
     /// be a second opinion about whether the object's override or the mesh's
     /// slot wins.
+    ///
+    /// Past the object's own slots come its particle instances' — see
+    /// [`Document::particle_slot_bases`] — so a particle drawn as another
+    /// object wears that object's materials.
     pub fn material_id_at(&self, object: ObjectId, slot: usize) -> Option<MaterialId> {
+        let own = self.own_slot_span(object);
+        if slot < own {
+            return self.own_material_id_at(object, slot);
+        }
+        let bases = self.particle_slot_bases(object);
+        bases
+            .iter()
+            .zip(&self.objects.get(object)?.physics.particles)
+            .filter_map(|(base, s)| Some((base.as_ref()?, s.instance?)))
+            .find_map(|(base, uid)| {
+                let instance = self.object_by_uid(uid)?;
+                let local = slot.checked_sub(*base)?;
+                (local < self.own_slot_span(instance))
+                    .then(|| self.own_material_id_at(instance, local))
+                    .flatten()
+            })
+    }
+
+    fn own_material_id_at(&self, object: ObjectId, slot: usize) -> Option<MaterialId> {
         let object = self.objects.get(object)?;
         if let Some(Some(overridden)) = object.material_overrides.get(slot) {
             return Some(*overridden);
         }
         let mesh = object.mesh()?;
         *self.meshes.get(mesh)?.slots.get(slot)?
+    }
+
+    /// How many slot numbers an object's own faces use: its mesh's slots or
+    /// its overrides, whichever reach further, and at least one.
+    fn own_slot_span(&self, object: ObjectId) -> usize {
+        let Some(o) = self.objects.get(object) else {
+            return 1;
+        };
+        let mesh = o
+            .mesh()
+            .and_then(|m| self.meshes.get(m))
+            .map_or(0, |e| e.slots.len());
+        mesh.max(o.material_overrides.len()).max(1)
+    }
+
+    /// Where each of an object's particle systems' instance slots begin in
+    /// the object's drawn mesh, `None` for a system drawn without one.
+    ///
+    /// After the object's own slots, one instance after another, so the
+    /// numbers a copy of the instance carries — the instance's own — only
+    /// need this added to name the same materials from the emitter.
+    pub fn particle_slot_bases(&self, object: ObjectId) -> Vec<Option<usize>> {
+        let Some(o) = self.objects.get(object) else {
+            return Vec::new();
+        };
+        let mut next = self.own_slot_span(object);
+        o.physics
+            .particles
+            .iter()
+            .map(|s| {
+                if s.kind != crate::physics::ParticleKind::Emitter {
+                    return None;
+                }
+                let instance = self.object_by_uid(s.instance?)?;
+                self.objects.get(instance)?.mesh()?;
+                let base = next;
+                next += self.own_slot_span(instance);
+                Some(base)
+            })
+            .collect()
+    }
+
+    /// How many slots an object is drawn with: its own and its particle
+    /// instances'. What a draw walks to resolve every face's material.
+    pub fn drawn_slot_count(&self, object: ObjectId) -> usize {
+        let own = self
+            .objects
+            .get(object)
+            .and_then(|o| o.mesh())
+            .and_then(|m| self.meshes.get(m))
+            .map_or(0, |e| e.slots.len());
+        let Some(o) = self.objects.get(object) else {
+            return own;
+        };
+        let mut end = own;
+        for (base, s) in self
+            .particle_slot_bases(object)
+            .iter()
+            .zip(&o.physics.particles)
+        {
+            if let (Some(base), Some(instance)) =
+                (base, s.instance.and_then(|u| self.object_by_uid(u)))
+            {
+                end = end.max(base + self.own_slot_span(instance));
+            }
+        }
+        end
     }
 
     pub fn add_collection(&mut self, collection: Collection) -> CollectionId {
@@ -2254,6 +2344,47 @@ impl Document {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_particle_instance_wears_its_own_materials_on_the_emitter() {
+        use crate::physics::{ParticleKind, ParticleSettings};
+        let mut doc = super::Document::new();
+        let ground = doc.add_mesh_object("Ground", kreate_mesh::primitives::plane(2.0));
+        let leaf = doc.add_mesh_object("Leaf", kreate_mesh::primitives::cube(0.2));
+        let grass = doc.add_material(super::Material {
+            name: "Grass".into(),
+            ..Default::default()
+        });
+        let bark = doc.add_material(super::Material {
+            name: "Bark".into(),
+            ..Default::default()
+        });
+        let green = doc.add_material(super::Material {
+            name: "Green".into(),
+            ..Default::default()
+        });
+        let ground_mesh = doc.object(ground).unwrap().mesh().unwrap();
+        let leaf_mesh = doc.object(leaf).unwrap().mesh().unwrap();
+        doc.set_mesh_slots(ground_mesh, vec![Some(grass)]);
+        doc.set_mesh_slots(leaf_mesh, vec![Some(bark), Some(green)]);
+        let leaf_uid = doc.object_uid(leaf).unwrap();
+        let mut system = ParticleSettings::new("Leaves", ParticleKind::Emitter);
+        system.instance = Some(leaf_uid);
+        let hair = ParticleSettings::new("Fur", ParticleKind::Hair);
+        let o = doc.object_mut(ground).unwrap();
+        o.physics.particles.push(hair);
+        o.physics.particles.push(system);
+
+        assert_eq!(doc.particle_slot_bases(ground), vec![None, Some(1)]);
+        assert_eq!(doc.drawn_slot_count(ground), 3);
+        assert_eq!(doc.material_id_at(ground, 0), Some(grass));
+        assert_eq!(doc.material_id_at(ground, 1), Some(bark));
+        assert_eq!(doc.material_id_at(ground, 2), Some(green));
+        assert_eq!(doc.material_id_at(ground, 3), None);
+        // The instance itself is untouched by being one.
+        assert_eq!(doc.material_id_at(leaf, 0), Some(bark));
+        assert_eq!(doc.drawn_slot_count(leaf), 2);
+    }
+
     use super::*;
     use kreate_math::DQuat;
 

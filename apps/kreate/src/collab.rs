@@ -55,7 +55,7 @@ impl App {
         }
     }
 
-    fn collab_leave_quietly(&mut self) {
+    pub(super) fn collab_leave_quietly(&mut self) {
         if let Some(mut session) = self.session.take() {
             session.flush(&self.doc);
         }

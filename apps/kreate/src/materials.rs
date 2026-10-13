@@ -188,12 +188,13 @@ impl Materials {
     /// nothing: an unassigned face is not an error, and a hole in the model
     /// reads as broken geometry when what is missing is an assignment.
     pub fn slots_of(&self, doc: &Document, object: kreate_scene::ObjectId) -> Vec<u32> {
-        let Some(&kreate_scene::document::ObjectData::Mesh(mesh)) =
+        let Some(&kreate_scene::document::ObjectData::Mesh(_)) =
             doc.object(object).map(|o| &o.data)
         else {
             return Vec::new();
         };
-        (0..doc.mesh_slots(mesh).len())
+        // The particle instances' slots too, past the object's own.
+        (0..doc.drawn_slot_count(object))
             .map(|slot| {
                 doc.material_id_at(object, slot)
                     .and_then(|id| self.index.get(&id).copied())

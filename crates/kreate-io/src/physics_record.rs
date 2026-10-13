@@ -79,6 +79,10 @@ pub struct ParticleRecord {
     pub gravity: f64,
     pub drag: f64,
     pub size: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub random_size: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub random_rotation: f64,
     /// The instance object, by identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<u64>,
@@ -87,6 +91,10 @@ pub struct ParticleRecord {
     pub hair_dynamic: bool,
     pub hair_stiffness: f64,
     pub show_emitter: bool,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// An object's part in a liquid: a domain's settings, or a flow's.
@@ -220,6 +228,8 @@ pub fn write(p: &ObjectPhysics) -> Option<PhysicsRecord> {
                 gravity: s.gravity,
                 drag: s.drag,
                 size: s.size,
+                random_size: s.random_size,
+                random_rotation: s.random_rotation,
                 instance: s.instance.map(|u| u.raw()),
                 hair_length: s.hair_length,
                 hair_segments: s.hair_segments,
@@ -355,6 +365,8 @@ pub fn read(r: &PhysicsRecord) -> ObjectPhysics {
                 gravity: p.gravity,
                 drag: p.drag.clamp(0.0, 1.0),
                 size: p.size.max(0.0),
+                random_size: p.random_size.clamp(0.0, 1.0),
+                random_rotation: p.random_rotation.clamp(0.0, 1.0),
                 instance: p.instance.map(kreate_scene::Uid::from_raw),
                 hair_length: p.hair_length.max(0.0),
                 hair_segments: p.hair_segments.clamp(1, 64),

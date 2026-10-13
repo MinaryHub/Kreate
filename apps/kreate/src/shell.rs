@@ -289,6 +289,8 @@ pub struct ShellState {
     /// The viewport drawn at this fraction of its pixels on each side, and
     /// stretched to fit: Blender's Resolution Scale, for a slow machine.
     pub resolution_scale: f32,
+    /// The chrome's appearance, as the preferences set it.
+    pub appearance: kreate_ui::Appearance,
     /// Whether the remapping panel is open.
 
     /// The binding waiting for a keystroke, if any.
@@ -706,6 +708,7 @@ impl Default for ShellState {
             recent_files: Vec::new(),
             node_clipboard: None,
             resolution_scale: 1.0,
+            appearance: kreate_ui::Appearance::Dark,
             capturing: None,
             palette: Default::default(),
             pie: Default::default(),
@@ -1035,6 +1038,27 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
 pub fn object_key(id: ObjectId) -> u32 {
     use kreate_mesh::arena::ArenaIndex as _;
     id.index()
+}
+
+/// Keeps `Tab` for the keymap unless a text field is being typed in.
+///
+/// egui spends `Tab` moving keyboard focus between widgets, and with nothing
+/// focused it hands focus to the first button on screen. That button then
+/// holds the keyboard, so the keymap is off: the first `Tab` entered edit mode
+/// and the second did nothing. In a field, `Tab` still moves to the next one.
+pub fn keep_tab_for_the_keymap(ctx: &egui::Context, input: &mut egui::RawInput) {
+    if ctx.text_edit_focused() {
+        return;
+    }
+    input.events.retain(|event| {
+        !matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                ..
+            }
+        )
+    });
 }
 
 /// Finds the object an outliner row refers to.
@@ -2244,8 +2268,11 @@ pub fn draw(
     // that starts on one is not stolen by whatever is under it — a handle is
     // four points wide and always overlaps an editor's edge.
     let mut viewport_rect = egui::Rect::ZERO;
+    // The gaps between the areas in the window's own colour, not whatever
+    // the frame was cleared to: black seams on the light chrome.
+    let gaps = kreate_ui::theme::from_ui(ui).sunken;
     egui::CentralPanel::default()
-        .frame(egui::Frame::NONE)
+        .frame(egui::Frame::NONE.fill(gaps))
         .show(ui, |ui| {
             let screen = ui.available_rect_before_wrap();
             let layout = state.screen().layout(screen);
@@ -3093,6 +3120,27 @@ fn draw_area(
                     draw_drivers(ui, state, doc, area.id);
                 }
                 "preferences" => {
+                    ui.horizontal(|ui| {
+                        ui.label(state.catalog.get("prefs-theme"));
+                        for a in kreate_ui::Appearance::ALL {
+                            let key = match a {
+                                kreate_ui::Appearance::Dark => "prefs-theme-dark",
+                                kreate_ui::Appearance::Light => "prefs-theme-light",
+                            };
+                            if ui
+                                .selectable_label(state.appearance == a, state.catalog.get(key))
+                                .clicked()
+                                && state.appearance != a
+                            {
+                                state.appearance = a;
+                                kreate_ui::Theme::new(a, kreate_ui::Density::default())
+                                    .install(ui.ctx());
+                                if let Some(path) = crate::prefs::interface_path() {
+                                    let _ = crate::prefs::save_appearance(&path, a);
+                                }
+                            }
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label(state.catalog.get("prefs-resolution-scale"));
                         let mut scale = state.resolution_scale;
@@ -5395,7 +5443,8 @@ fn draw_view_info(
     viewport: egui::Rect,
     toolbar: egui::Rect,
 ) {
-    let theme = kreate_ui::theme::from_ui(ui);
+    // Over the picture, which stays dark whichever way round the chrome is.
+    let theme = kreate_ui::theme::from_ui(ui).over_viewport();
     let painter = ui.painter().with_clip_rect(viewport);
     let font = egui::TextStyle::Body.resolve(ui.style());
     let view = if state.view_status.orthographic {
@@ -5913,6 +5962,8 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         host: t("collab-host"),
         join: t("collab-join"),
         join_warning: t("collab-join-warning"),
+        need_name: t("collab-need-name"),
+        need_address: t("collab-need-address"),
         leave: t("collab-leave"),
         connecting: t("collab-connecting"),
         hosting_at: t("collab-hosting-at"),
@@ -11272,6 +11323,36 @@ pub fn load_catalog(locale: &str) -> Catalog {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tab_never_hands_the_keyboard_to_a_button() {
+        let ctx = egui::Context::default();
+        let frame = |ctx: &egui::Context, tab: bool| {
+            let mut input = egui::RawInput::default();
+            if tab {
+                input.events.push(egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            super::keep_tab_for_the_keymap(ctx, &mut input);
+            let _ = ctx.run_ui(input, |ui| {
+                let _ = ui.button("one");
+                let _ = ui.button("two");
+            });
+        };
+        frame(&ctx, false);
+        for _ in 0..3 {
+            frame(&ctx, true);
+            frame(&ctx, false);
+            assert!(
+                !ctx.egui_wants_keyboard_input(),
+                "a button took the keyboard, so the next Tab is lost"
+            );
+        }
+    }
 
     #[test]
     fn simulations_that_cannot_go_together_say_so_both_ways() {

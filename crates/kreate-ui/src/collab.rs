@@ -26,7 +26,11 @@ impl Default for CollabForm {
     fn default() -> Self {
         Self {
             open: false,
-            name: String::new(),
+            // The computer's user, so the window opens ready to host: an
+            // empty name held the buttons off with nothing saying why.
+            name: std::env::var("USERNAME")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_default(),
             address: String::new(),
             key: String::new(),
             port: "7878".into(),
@@ -72,6 +76,10 @@ pub struct CollabText {
     pub you: String,
     pub editing: String,
     pub sending: String,
+    /// Why Host and Join are off: no name yet.
+    pub need_name: String,
+    /// Why Join is off: no address yet.
+    pub need_address: String,
 }
 
 /// Draws the session window when it is open.
@@ -136,6 +144,7 @@ fn draw_form(ui: &mut Ui, text: &CollabText, form: &mut CollabForm, queue: &mut 
         let port = form.port.trim().parse::<u16>().ok();
         if ui
             .add_enabled(named && port.is_some(), egui::Button::new(&text.host))
+            .on_disabled_hover_text(&text.need_name)
             .clicked()
         {
             queue.push(Command::CollabHost {
@@ -157,6 +166,11 @@ fn draw_form(ui: &mut Ui, text: &CollabText, form: &mut CollabForm, queue: &mut 
         let ready = named && !form.address.trim().is_empty();
         if ui
             .add_enabled(ready, egui::Button::new(&text.join))
+            .on_disabled_hover_text(if named {
+                &text.need_address
+            } else {
+                &text.need_name
+            })
             .clicked()
         {
             queue.push(Command::CollabJoin {
@@ -195,7 +209,7 @@ fn draw_live(
     ui.add_space(4.0);
     ui.label(egui::RichText::new(&text.people).strong());
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("●").color(rgb(view.color)));
+        ui.label(egui::RichText::new("●").color(rgb(view.color))); // i18n-exempt: a colour swatch, not a word
         ui.label(format!("{} ({})", form.name, text.you));
     });
     if view.peers.is_empty() {
@@ -203,7 +217,7 @@ fn draw_live(
     }
     for (name, color, editing) in &view.peers {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("●").color(rgb(*color)));
+            ui.label(egui::RichText::new("●").color(rgb(*color))); // i18n-exempt: a colour swatch, not a word
             ui.label(name);
             if let Some(object) = editing {
                 ui.label(

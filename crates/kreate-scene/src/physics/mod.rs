@@ -239,6 +239,15 @@ pub struct ParticleSettings {
     pub drag: f64,
     /// A particle's size, or a hair's width, metres.
     pub size: f64,
+    /// Emitter: how much sizes vary, 0 to 1 — Blender's Scale Randomness.
+    /// Each particle is drawn `size × (1 − random_size × r)` for its own `r`
+    /// in [0, 1), so 1 lets one shrink to nothing and the largest stays
+    /// `size`.
+    pub random_size: f64,
+    /// Emitter: how much each particle is turned, 0 to 1 — Blender's
+    /// Randomize rotation. A turn about a random axis by up to a whole turn
+    /// times this, so 1 leaves every particle facing any way at all.
+    pub random_rotation: f64,
     /// The object drawn at each particle, by identity; `None` draws a small
     /// diamond.
     pub instance: Option<Uid>,
@@ -278,6 +287,8 @@ impl ParticleSettings {
             } else {
                 0.03
             },
+            random_size: 0.0,
+            random_rotation: 0.0,
             instance: None,
             hair_length: 0.2,
             hair_segments: 5,
@@ -461,6 +472,11 @@ pub struct Particle {
     pub position: Vec3,
     /// Which way it is going, unit length; zero when still.
     pub heading: Vec3,
+    /// Which particle it is: its order of birth, the same at every frame it
+    /// lives. What its random size and turn are drawn from, so a particle
+    /// keeps its own while it flies rather than flickering between others'.
+    /// For hair, the strand.
+    pub id: u32,
 }
 
 /// A particle system's baked frames: the particles alive at each, or for hair

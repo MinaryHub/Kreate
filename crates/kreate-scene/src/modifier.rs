@@ -419,6 +419,9 @@ struct SimEntry {
     /// The instance objects' meshes, by address: a changed one is new
     /// particles.
     instances: Vec<usize>,
+    /// Where each instance's slots were numbered from: a material slot
+    /// added to the emitter or an instance moves them.
+    bases: Vec<Option<usize>>,
     output: Arc<MeshData>,
     used: u64,
 }
@@ -569,6 +572,7 @@ impl ModifierCache {
             .map(|i| i.as_ref().map_or(0, |(m, _)| Arc::as_ptr(m) as usize))
             .collect();
         let cache_key = Arc::as_ptr(cache) as usize;
+        let bases = doc.particle_slot_bases(id);
         if let Some(entry) = self.sims.iter_mut().find(|e| {
             e.object == uid
                 && Arc::ptr_eq(&e.input, &input)
@@ -576,6 +580,7 @@ impl ModifierCache {
                 && e.frame == frame
                 && e.physics == *physics
                 && e.instances == instance_keys
+                && e.bases == bases
         }) {
             entry.used = self.generation;
             return entry.output.clone();
@@ -588,6 +593,7 @@ impl ModifierCache {
             }
         }
         let mut parts: Vec<MeshData> = Vec::new();
+        let mut part_bases: Vec<Option<usize>> = Vec::new();
         for (i, (s, inst)) in physics.particles.iter().zip(&instances).enumerate() {
             // The instance as it stands — turned and sized — but not moved:
             // every particle is its own place.
@@ -603,6 +609,11 @@ impl ModifierCache {
                 crate::physics::particles::system_mesh(&input, s, particles, shaped.as_ref())
             {
                 parts.push(m);
+                part_bases.push(if shaped.is_some() {
+                    bases.get(i).copied().flatten()
+                } else {
+                    None
+                });
             }
         }
         let show_emitter = physics.particles.iter().all(|s| s.show_emitter);
@@ -622,7 +633,36 @@ impl ModifierCache {
                     transform: kreate_math::DAffine3::IDENTITY,
                 });
             }
-            kreate_mesh::edit::join::join(&list).0
+            let mut joined = kreate_mesh::edit::join::join(&list).0;
+            // The join numbers each part's slots after the last part's; an
+            // instance's faces are numbered where the document looks for
+            // that instance's materials instead, and the rest — diamonds,
+            // hair — wear the emitter's first.
+            use kreate_mesh::attribute::{names, AttrData, Domain};
+            let read = |m: &MeshData| -> Vec<i32> {
+                m.attributes()
+                    .get_i32(names::MATERIAL_INDEX)
+                    .map(|v| v.to_vec())
+                    .unwrap_or_else(|| vec![0; m.num_faces() as usize])
+            };
+            let mut slots: Vec<i32> = Vec::with_capacity(joined.num_faces() as usize);
+            if show_emitter {
+                slots.extend(read(&mesh));
+            }
+            for (m, base) in parts.iter().zip(&part_bases) {
+                match base {
+                    Some(base) => slots.extend(read(m).iter().map(|s| s + *base as i32)),
+                    None => slots.extend(std::iter::repeat_n(0, m.num_faces() as usize)),
+                }
+            }
+            if slots.len() == joined.num_faces() as usize {
+                joined.attributes_mut().insert(
+                    names::MATERIAL_INDEX,
+                    Domain::Face,
+                    AttrData::I32(Arc::new(slots)),
+                );
+            }
+            joined
         };
         let output = Arc::new(output);
         self.sims.retain(|e| e.object != uid);
@@ -633,6 +673,7 @@ impl ModifierCache {
             frame,
             physics: physics.clone(),
             instances: instance_keys,
+            bases,
             output: output.clone(),
             used: self.generation,
         });

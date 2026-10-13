@@ -56,6 +56,36 @@ impl Density {
     }
 }
 
+/// Which way round the chrome is: graphite, or light grey as Fusion 360 and
+/// most CAD tools draw it.
+///
+/// The viewport is not part of it. The overlays drawn on the model — the
+/// wireframe, the gizmos, the labels — are tuned against the dark viewport,
+/// and a light chrome around a dark picture is how CAD tools that offer both
+/// look anyway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 2] = [Appearance::Dark, Appearance::Light];
+
+    /// The word a preferences file stores it as.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Appearance::Dark => "dark",
+            Appearance::Light => "light",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.tag() == tag)
+    }
+}
+
 /// Every colour and metric the chrome uses.
 ///
 /// A value rather than a set of constants so a preference, a high-contrast
@@ -101,6 +131,9 @@ pub struct Theme {
     pub panel_padding: f32,
 
     pub density: Density,
+    /// Which way round the surfaces go. The panels that paint by hand ask
+    /// this, through `dark`, rather than guessing from a colour.
+    pub appearance: Appearance,
 }
 
 /// A hex constant as an opaque `Color32`.
@@ -116,6 +149,62 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// The chrome for an appearance and a density.
+    pub fn new(appearance: Appearance, density: Density) -> Self {
+        match appearance {
+            Appearance::Dark => Self::studio(density),
+            Appearance::Light => Self::light(density),
+        }
+    }
+
+    /// The tokens for what is drawn straight on the viewport — a label over
+    /// the picture, a readout. The viewport is dark in either appearance, so
+    /// that text is graphite's whatever the panels are.
+    pub fn over_viewport(&self) -> Self {
+        Self::studio(self.density)
+    }
+
+    /// Whether the surfaces are dark.
+    pub fn dark(&self) -> bool {
+        self.appearance == Appearance::Dark
+    }
+
+    /// Light grey chrome, as Fusion 360 draws its panels: white fields on a
+    /// pale panel on a slightly darker window, dark text.
+    ///
+    /// The ramp runs the other way from graphite's — down from white rather
+    /// than up from black — so a field still reads as a step from the panel
+    /// it sits on. The accent is the same hue, darkened: the graphite
+    /// orange on white is under 2:1, which is a selection nobody can find.
+    pub fn light(density: Density) -> Self {
+        let accent = hex(0x00C4_6A00);
+        Self {
+            sunken: hex(0x00D9_DCE1),
+            base: hex(0x00EE_EFF2),
+            raised: hex(0x00FF_FFFF),
+            border: hex(0x00D2_D6DC),
+            border_strong: hex(0x00B4_BAC3),
+
+            text: hex(0x001C_1F24),
+            text_dim: hex(0x0047_4D57),
+            text_faint: hex(0x0062_6873),
+
+            accent,
+            accent_wash: hex(palette::ACCENT).gamma_multiply(0.22),
+            info: hex(0x0026_6FC9),
+
+            axis_x: hex(palette::AXIS_X),
+            axis_y: hex(palette::AXIS_Y),
+            axis_z: hex(palette::AXIS_Z),
+
+            radius: 4,
+            row_height: 24.0,
+            panel_padding: 12.0,
+            density,
+            appearance: Appearance::Light,
+        }
+    }
+
     /// Graphite chrome around the viewport.
     pub fn studio(density: Density) -> Self {
         Self {
@@ -143,6 +232,7 @@ impl Theme {
             row_height: 24.0,
             panel_padding: 12.0,
             density,
+            appearance: Appearance::Dark,
         }
     }
 
@@ -152,14 +242,17 @@ impl Theme {
     /// the status bar — never a control: orange stays the one colour for
     /// what is selected.
     pub fn mode_tint(&self, tag: &str) -> Option<(Color32, Color32)> {
-        let (fill, text) = match tag {
-            "edit_mesh" | "edit_armature" => (0x4F_B3_A9, 0x9F_DC_D5),
-            "sculpt" => (0xB4_8C_F0, 0xD3_BD_F7),
-            "pose" => (0x78_AA_E6, 0xB9_D3_F2),
-            "weight_paint" => (0xE6_78_AA, 0xF2_BC_D4),
-            "texture_paint" => (0xD6_C8_78, 0xE8_DC_A2),
+        // The text a light step on graphite, a dark step on the light chrome:
+        // the same hue either way, legible on its own fill.
+        let (fill, on_dark, on_light) = match tag {
+            "edit_mesh" | "edit_armature" => (0x4F_B3_A9, 0x9F_DC_D5, 0x1D_6B_63),
+            "sculpt" => (0xB4_8C_F0, 0xD3_BD_F7, 0x5B_3A_A6),
+            "pose" => (0x78_AA_E6, 0xB9_D3_F2, 0x23_5E_A8),
+            "weight_paint" => (0xE6_78_AA, 0xF2_BC_D4, 0xA3_2A_62),
+            "texture_paint" => (0xD6_C8_78, 0xE8_DC_A2, 0x6E_60_10),
             _ => return None,
         };
+        let text = if self.dark() { on_dark } else { on_light };
         Some((hex(fill).gamma_multiply(0.16), hex(text)))
     }
 
@@ -225,8 +318,12 @@ impl Theme {
                 expansion: 0.0,
             };
 
-        let mut visuals = egui::Visuals::dark();
-        visuals.dark_mode = true;
+        let mut visuals = if self.dark() {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        visuals.dark_mode = self.dark();
         visuals.override_text_color = Some(self.text);
         visuals.weak_text_color = Some(self.text_dim);
 
@@ -466,6 +563,58 @@ mod tests {
                 assert_ne!(a.1, b.1);
             }
         }
+    }
+
+    #[test]
+    fn the_light_chrome_is_legible_and_its_ramp_descends() {
+        let t = Theme::new(Appearance::Light, Density::Compact);
+        assert!(!t.dark());
+        let lum = |c: Color32| {
+            let f = |v: u8| kreate_math::srgb_to_linear(f32::from(v) / 255.0);
+            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+        };
+        let ratio = |a: Color32, b: Color32| {
+            let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+            (hi + 0.05) / (lo + 0.05)
+        };
+        // Down from white: the field, the panel, the window.
+        assert!(lum(t.raised) > lum(t.base) && lum(t.base) > lum(t.sunken));
+        assert!(ratio(t.text, t.base) > 7.0);
+        for surface in [t.base, t.raised] {
+            assert!(ratio(t.text_faint, surface) > 4.5, "faint text");
+        }
+        assert!(ratio(t.text_faint, t.sunken) > 3.0);
+        assert!(ratio(t.accent, t.raised) > 3.0, "the accent on white");
+        for tag in [
+            "edit_mesh",
+            "sculpt",
+            "pose",
+            "weight_paint",
+            "texture_paint",
+        ] {
+            let (_, text) = t.mode_tint(tag).unwrap();
+            assert!(
+                ratio(text, t.base) > 4.5,
+                "{tag}'s name on the light chrome"
+            );
+        }
+        let v = t.visuals();
+        assert!(!v.dark_mode);
+        assert_eq!(v.panel_fill, t.base);
+        // And the default is still graphite.
+        assert!(Theme::default().dark());
+        assert_eq!(
+            Theme::new(Appearance::Dark, Density::Compact).base,
+            Theme::default().base
+        );
+    }
+
+    #[test]
+    fn an_appearance_is_stored_by_a_word_that_reads_back() {
+        for a in Appearance::ALL {
+            assert_eq!(Appearance::from_tag(a.tag()), Some(a));
+        }
+        assert_eq!(Appearance::from_tag("sepia"), None);
     }
 
     #[test]

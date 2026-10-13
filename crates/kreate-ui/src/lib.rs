@@ -55,6 +55,6 @@ pub use property_editor::{
     FieldAction, FieldMenu, FieldMenuText, KeyMark, UnitDisplay,
 };
 pub use text::{wrap, wrap_to_width, wrap_tooltip, wrapped_label};
-pub use theme::{install as install_theme, Density, Theme};
+pub use theme::{install as install_theme, Appearance, Density, Theme};
 pub use uv_editor::{uv_editor, UvData, UvState, UvText, UvView};
 pub use workspace::{Workspace, Workspaces};

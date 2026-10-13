@@ -10,7 +10,7 @@
 //! "KBAKE\0" u32 version  i32 start
 //! u32 rigid   { u64 uid  u32 frames  frames × (3 f64 translation, 4 f64 rotation, 3 f64 scale) }
 //! u32 soft    { u64 uid  u32 frames  u32 verts  frames × verts × 3 f32 }
-//! u32 systems { u64 uid  u32 system  u32 frames  frames × (u32 n  n × 6 f32) }
+//! u32 systems { u64 uid  u32 system  u32 frames  frames × (u32 n  n × (6 f32  u32 id)) }
 //! u32 liquids { u64 uid  u32 frames  frames × (u32 verts  verts × 3 f32
 //!                                              u32 faces  faces × (u32 n  n × u32)) }
 //! u32 gases   { u64 uid  3 u32 cells  6 f32 box  u32 frames
@@ -19,7 +19,9 @@
 //! ```
 //!
 //! The liquids came in version 2 and the gases in 3; an older bake has none
-//! and still reads.
+//! and still reads. Particles' ids came in 4; an older bake's particles are
+//! numbered by their place in the frame, which is wrong only for random
+//! sizes and turns that bake predates.
 
 use std::sync::Arc;
 
@@ -31,7 +33,7 @@ use kreate_scene::physics::{
 use kreate_scene::Uid;
 
 const MAGIC: &[u8; 6] = b"KBAKE\0";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 pub fn write(cache: &PhysicsCache) -> Vec<u8> {
     let mut out = Vec::new();
@@ -85,6 +87,7 @@ pub fn write(cache: &PhysicsCache) -> Vec<u8> {
                 for v in [p.position.to_array(), p.heading.to_array()].concat() {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
+                out.extend_from_slice(&p.id.to_le_bytes());
             }
         }
     }
@@ -253,12 +256,16 @@ pub fn read(bytes: &[u8]) -> Option<PhysicsCache> {
         let n = r.count(4)?;
         let mut frames = Vec::with_capacity(n);
         for _ in 0..n {
-            let count = r.count(24)?;
+            let count = r.count(if version >= 4 { 28 } else { 24 })?;
             let mut f = Vec::with_capacity(count);
-            for _ in 0..count {
+            for k in 0..count {
+                let position = Vec3::new(r.f32()?, r.f32()?, r.f32()?);
+                let heading = Vec3::new(r.f32()?, r.f32()?, r.f32()?);
+                let id = if version >= 4 { r.u32()? } else { k as u32 };
                 f.push(Particle {
-                    position: Vec3::new(r.f32()?, r.f32()?, r.f32()?),
-                    heading: Vec3::new(r.f32()?, r.f32()?, r.f32()?),
+                    position,
+                    heading,
+                    id,
                 });
             }
             frames.push(Arc::<[Particle]>::from(f));
@@ -366,6 +373,7 @@ mod tests {
                     Arc::from(vec![Particle {
                         position: Vec3::ONE,
                         heading: Vec3::Z,
+                        id: 7,
                     }]),
                 ],
             }],

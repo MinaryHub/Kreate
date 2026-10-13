@@ -71,6 +71,8 @@ impl Surface {
 /// A particle while it is alive.
 #[derive(Clone, Copy, Debug)]
 struct Live {
+    /// Its order of birth: see [`Particle::id`].
+    id: u32,
     birth: f64,
     x: DVec3,
     v: DVec3,
@@ -127,6 +129,7 @@ impl ParticleSim {
                 let v = n * self.settings.normal_speed
                     + self.rng.direction() * self.settings.random_speed;
                 self.live.push(Live {
+                    id: self.next as u32,
                     birth: self.births[self.next],
                     x: world.transform_point3(p),
                     v,
@@ -170,6 +173,7 @@ impl ParticleSim {
             .map(|p| Particle {
                 position: back.transform_point3(p.x).as_vec3(),
                 heading: (back.matrix3 * p.v).normalize_or_zero().as_vec3(),
+                id: p.id,
             })
             .collect()
     }
@@ -216,6 +220,7 @@ pub fn hair_rest(mesh: &MeshData, settings: &ParticleSettings) -> Vec<Particle> 
                 position: (root + n * (settings.hair_length * k as f64 / segments as f64))
                     .as_vec3(),
                 heading: n.as_vec3(),
+                id: made,
             });
         }
         made += 1;
@@ -327,6 +332,7 @@ impl HairSim {
                 Particle {
                     position: back.transform_point3(here).as_vec3(),
                     heading: (back.matrix3 * (next - here)).normalize_or_zero().as_vec3(),
+                    id: (i / per) as u32,
                 }
             })
             .collect()
@@ -356,22 +362,46 @@ fn diamond(r: f32) -> (Vec<Vec3>, Vec<Vec<u32>>) {
     (p, f)
 }
 
-/// A copy of `instance` — or a diamond — at every particle.
-pub fn particle_mesh(particles: &[Particle], size: f64, instance: Option<&MeshData>) -> MeshData {
-    let (shape, faces): (Vec<Vec3>, Vec<Vec<u32>>) = match instance {
-        Some(m) => (
-            m.positions().iter().map(|p| *p * size as f32).collect(),
-            (0..m.num_faces())
-                .map(|f| m.face_verts(f).to_vec())
-                .collect(),
-        ),
-        None => diamond(size as f32),
-    };
+/// One particle's own size and turn: `settings.size` varied by
+/// `random_size`, turned by `random_rotation`.
+///
+/// Drawn from the system's seed and the particle's [`Particle::id`] alone, so
+/// a particle is the same size and faces the same way at every frame, and a
+/// bake made again draws the same.
+pub fn variation(settings: &ParticleSettings, id: u32) -> (f64, kreate_math::glam::DQuat) {
+    let mut rng = Rng::new((((settings.seed as u64) << 32) | id as u64) ^ 0x5EED_0F5A_1E00);
+    let shrink = settings.random_size.clamp(0.0, 1.0) * rng.unit();
+    let axis = rng.direction();
+    let angle = settings.random_rotation.clamp(0.0, 1.0) * rng.unit() * std::f64::consts::TAU;
+    (
+        settings.size * (1.0 - shrink),
+        kreate_math::glam::DQuat::from_axis_angle(axis, angle),
+    )
+}
+
+/// A copy of `instance` — or a diamond — at every particle, each sized and
+/// turned by its [`variation`].
+///
+/// A copy carries what the instance carries — its UVs, its normals, and the
+/// slot numbers of its faces as the instance numbers them — so a textured
+/// instance arrives textured. The emitter turns those slot numbers into its
+/// own (see `Document::particle_slot_bases`).
+pub fn particle_mesh(
+    particles: &[Particle],
+    settings: &ParticleSettings,
+    instance: Option<&MeshData>,
+) -> MeshData {
+    if let Some(m) = instance {
+        return instance_copies(particles, settings, m);
+    }
+    let (shape, faces) = diamond(1.0);
     let mut positions = Vec::with_capacity(particles.len() * shape.len());
     let mut all = Vec::with_capacity(particles.len() * faces.len());
     for p in particles {
         let base = positions.len() as u32;
-        positions.extend(shape.iter().map(|s| p.position + *s));
+        let (size, turn) = variation(settings, p.id);
+        let turn = turn.as_quat();
+        positions.extend(shape.iter().map(|s| p.position + turn * (*s * size as f32)));
         all.extend(
             faces
                 .iter()
@@ -379,6 +409,46 @@ pub fn particle_mesh(particles: &[Particle], size: f64, instance: Option<&MeshDa
         );
     }
     MeshData::from_faces(positions, &all)
+}
+
+/// `m`, sized, at every particle, with its layers.
+fn instance_copies(particles: &[Particle], settings: &ParticleSettings, m: &MeshData) -> MeshData {
+    use kreate_mesh::attribute::{names, AttrData, Domain};
+    use kreate_mesh::edit::join::{join, Part};
+    if particles.is_empty() || m.num_faces() == 0 {
+        return MeshData::from_faces(Vec::new(), &[]);
+    }
+    let parts: Vec<Part<'_>> = particles
+        .iter()
+        .map(|p| {
+            let (size, turn) = variation(settings, p.id);
+            Part {
+                mesh: m,
+                transform: DAffine3::from_scale_rotation_translation(
+                    DVec3::splat(size),
+                    turn,
+                    p.position.as_dvec3(),
+                ),
+            }
+        })
+        .collect();
+    let mut out = join(&parts).0;
+    // The join numbers each copy's slots after the last copy's, as it would
+    // for different meshes; these are one mesh's slots, again and again.
+    let own: Vec<i32> = m
+        .attributes()
+        .get_i32(names::MATERIAL_INDEX)
+        .map(|v| v.to_vec())
+        .unwrap_or_else(|| vec![0; m.num_faces() as usize]);
+    let all: Vec<i32> = (0..out.num_faces() as usize)
+        .map(|f| own[f % own.len()])
+        .collect();
+    out.attributes_mut().insert(
+        names::MATERIAL_INDEX,
+        Domain::Face,
+        AttrData::I32(std::sync::Arc::new(all)),
+    );
+    out
 }
 
 /// A thin ribbon along every strand, narrowing to its tip.
@@ -418,7 +488,7 @@ pub fn system_mesh(
     instance: Option<&MeshData>,
 ) -> Option<MeshData> {
     match settings.kind {
-        ParticleKind::Emitter => baked.map(|p| particle_mesh(p, settings.size, instance)),
+        ParticleKind::Emitter => baked.map(|p| particle_mesh(p, settings, instance)),
         ParticleKind::Hair => {
             let rest;
             let points = match baked {
@@ -438,6 +508,69 @@ mod tests {
     use super::*;
 
     const G: DVec3 = DVec3::new(0.0, 0.0, -9.81);
+
+    fn sized(size: f64) -> ParticleSettings {
+        ParticleSettings {
+            size,
+            ..ParticleSettings::new("P", ParticleKind::Emitter)
+        }
+    }
+
+    /// The edge lengths of each cube copy, and the direction of its first edge.
+    fn copies(m: &MeshData, verts: usize) -> Vec<(f32, Vec3)> {
+        m.positions()
+            .chunks(verts)
+            .map(|c| {
+                let edge = c[1] - c[0];
+                (edge.length(), edge.normalize())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn particles_vary_in_size_and_turn_and_each_keeps_its_own() {
+        let cube = kreate_mesh::primitives::cube(2.0);
+        let verts = cube.num_verts() as usize;
+        let edge = (cube.positions()[1] - cube.positions()[0]).length();
+        let ps: Vec<Particle> = (0..40)
+            .map(|i| Particle {
+                position: Vec3::X * i as f32 * 4.0,
+                heading: Vec3::Z,
+                id: i,
+            })
+            .collect();
+        let plain = copies(&particle_mesh(&ps, &sized(0.5), Some(&cube)), verts);
+        for (len, dir) in &plain {
+            assert!((len - edge * 0.5).abs() < 1e-5, "no variation asked: {len}");
+            assert!(dir.dot(plain[0].1) > 0.9999, "nor any turn");
+        }
+        let mut s = sized(0.5);
+        (s.random_size, s.random_rotation) = (0.8, 1.0);
+        let varied = copies(&particle_mesh(&ps, &s, Some(&cube)), verts);
+        let lens: Vec<f32> = varied.iter().map(|c| c.0).collect();
+        let (lo, hi) = lens
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), l| (a.min(*l), b.max(*l)));
+        assert!(hi <= edge * 0.5 + 1e-5, "never larger than the size: {hi}");
+        assert!(lo >= edge * 0.5 * 0.2 - 1e-5, "never under 1 − 0.8: {lo}");
+        assert!(hi - lo > edge * 0.5 * 0.4, "and they do differ: {lo}..{hi}");
+        let turned = varied.iter().filter(|c| c.1.dot(plain[0].1) < 0.9).count();
+        assert!(turned > 20, "most face elsewhere: {turned} of 40");
+        // A particle's own, wherever it is in the list: the dead leave the
+        // front, and a survivor must not take on the look of another.
+        let later = copies(&particle_mesh(&ps[7..], &s, Some(&cube)), verts);
+        for (k, c) in later.iter().enumerate() {
+            let was = varied[k + 7];
+            assert!((c.0 - was.0).abs() < 1e-5 && c.1.dot(was.1) > 0.9999);
+        }
+        // And another seed, another scatter.
+        s.seed = 1;
+        let other = copies(&particle_mesh(&ps, &s, Some(&cube)), verts);
+        assert!(other
+            .iter()
+            .zip(&varied)
+            .any(|(a, b)| (a.0 - b.0).abs() > 1e-3));
+    }
 
     #[test]
     fn particles_are_born_over_the_range_and_die_at_their_lifetime() {
@@ -544,13 +677,15 @@ mod tests {
             Particle {
                 position: Vec3::ZERO,
                 heading: Vec3::Z,
+                id: 0,
             },
             Particle {
                 position: Vec3::X * 5.0,
                 heading: Vec3::Z,
+                id: 1,
             },
         ];
-        let m = particle_mesh(&ps, 0.5, Some(&cube));
+        let m = particle_mesh(&ps, &sized(0.5), Some(&cube));
         assert_eq!(m.num_verts(), 16);
         assert_eq!(m.num_faces(), 12);
         let far = m.positions()[8..]
@@ -558,6 +693,59 @@ mod tests {
             .map(|p| p.x)
             .fold(f32::MIN, f32::max);
         assert!((far - 5.5).abs() < 1e-5, "half-size cube at x = 5: {far}");
-        assert_eq!(particle_mesh(&ps, 0.1, None).num_faces(), 16, "diamonds");
+        assert_eq!(
+            particle_mesh(&ps, &sized(0.1), None).num_faces(),
+            16,
+            "diamonds"
+        );
+    }
+
+    #[test]
+    fn an_instance_copy_keeps_its_uvs_and_its_own_slot_numbers() {
+        use kreate_mesh::attribute::{names, AttrData, Domain};
+        let mut cube = kreate_mesh::primitives::cube(2.0);
+        let faces = cube.num_faces() as usize;
+        let slots: Vec<i32> = (0..faces as i32).map(|f| f % 2).collect();
+        cube.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(std::sync::Arc::new(slots.clone())),
+        );
+        let uv = cube
+            .attributes()
+            .get(names::UV)
+            .expect("a cube has UVs")
+            .clone();
+        let ps: Vec<Particle> = (0..3)
+            .map(|i| Particle {
+                position: Vec3::X * i as f32 * 4.0,
+                heading: Vec3::Z,
+                id: i,
+            })
+            .collect();
+        let m = particle_mesh(&ps, &sized(0.5), Some(&cube));
+        let got = m
+            .attributes()
+            .get(names::UV)
+            .expect("the copies lost their UVs");
+        assert_eq!(got.domain, uv.domain);
+        let (AttrData::F32x2(a), AttrData::F32x2(b)) = (&uv.data, &got.data) else {
+            panic!("UVs are two floats");
+        };
+        assert_eq!(b.len(), a.len() * 3);
+        for (k, v) in b.iter().enumerate() {
+            assert_eq!(
+                *v,
+                a[k % a.len()],
+                "copy {} corner {}",
+                k / a.len(),
+                k % a.len()
+            );
+        }
+        let got = m.attributes().get_i32(names::MATERIAL_INDEX).unwrap();
+        assert_eq!(got.len(), faces * 3);
+        for (f, s) in got.iter().enumerate() {
+            assert_eq!(*s, slots[f % faces], "the instance's numbering, every copy");
+        }
     }
 }

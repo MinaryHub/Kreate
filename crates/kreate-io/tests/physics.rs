@@ -29,6 +29,8 @@ fn an_objects_physics_and_the_world_are_saved() {
     });
     o.physics.particles = vec![ParticleSettings {
         instance: Some(bead_uid),
+        random_size: 0.4,
+        random_rotation: 0.75,
         ..ParticleSettings::new("Spray", ParticleKind::Emitter)
     }];
     doc.add_object(o);

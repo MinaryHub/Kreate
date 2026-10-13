@@ -193,7 +193,12 @@ fn composite_with(
     // The same order the application uses. Without this the harness would be
     // picturing egui's defaults rather than the product, which is the one thing
     // a compositing test must not do.
-    kreate_ui::install_theme(&ctx);
+    // `KREATE_THEME=light` pictures the light chrome.
+    let appearance = std::env::var("KREATE_THEME")
+        .ok()
+        .and_then(|t| kreate_ui::Appearance::from_tag(&t))
+        .unwrap_or_default();
+    kreate_ui::Theme::new(appearance, kreate_ui::Density::default()).install(&ctx);
     // The surface is described to the renderer in *pixels* while egui lays out in
     // *points*. Pinning the ratio to 1 keeps the two consistent here; the
     // application takes the real value from the window instead.

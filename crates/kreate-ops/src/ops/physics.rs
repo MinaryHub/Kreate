@@ -809,6 +809,13 @@ pub struct ParticlesSetParams {
     /// A particle's size, or a hair's width, metres.
     #[param(min = 0.0, soft_max = 1.0, unit = "length")]
     pub size: f64,
+    /// How much sizes vary: 0 all the same, 1 from nothing up to the size.
+    #[param(min = 0.0, max = 1.0)]
+    pub random_size: f64,
+    /// How much each particle is turned: 0 all facing the same way, 1 any
+    /// way at all.
+    #[param(min = 0.0, max = 1.0)]
+    pub random_rotation: f64,
     /// The object drawn at each particle, by name; empty draws a small
     /// diamond.
     pub instance: String,
@@ -850,6 +857,8 @@ pub fn particle_params(doc: &Document, index: u32, s: &ParticleSettings) -> Part
         gravity: s.gravity,
         drag: s.drag,
         size: s.size,
+        random_size: s.random_size,
+        random_rotation: s.random_rotation,
         instance: s
             .instance
             .and_then(|u| doc.object_by_uid(u))
@@ -868,9 +877,8 @@ pub fn particle_params(doc: &Document, index: u32, s: &ParticleSettings) -> Part
 pub fn particle_param_applies(kind: u32, name: &str) -> bool {
     let hair = kind == 1;
     match name {
-        "frame_start" | "frame_end" | "lifetime" | "normal_speed" | "random_speed" | "instance" => {
-            !hair
-        }
+        "frame_start" | "frame_end" | "lifetime" | "normal_speed" | "random_speed" | "instance"
+        | "random_size" | "random_rotation" => !hair,
         "hair_length" | "hair_segments" | "hair_dynamic" | "hair_stiffness" => hair,
         _ => true,
     }
@@ -952,6 +960,8 @@ impl Operator for ParticlesSet {
             gravity: params.gravity,
             drag: params.drag.clamp(0.0, 1.0),
             size: params.size.max(0.0),
+            random_size: params.random_size.clamp(0.0, 1.0),
+            random_rotation: params.random_rotation.clamp(0.0, 1.0),
             instance,
             hair_length: params.hair_length.max(0.0),
             hair_segments: params.hair_segments.clamp(1, 64),

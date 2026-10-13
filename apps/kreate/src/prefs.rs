@@ -137,6 +137,32 @@ pub fn save_resolution_scale(path: &Path, scale: f32) -> Result<(), std::io::Err
     write_atomic(path, &format!("resolution_scale = {scale}\n"))
 }
 
+/// The interface preferences' file: `theme = light`.
+pub fn interface_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("interface.txt"))
+}
+
+/// The chrome's appearance, from its file; graphite when the file is missing
+/// or names something this build does not know.
+pub fn load_appearance(path: &Path) -> kreate_ui::Appearance {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|l| {
+                let (key, value) = l.split_once('=')?;
+                (key.trim() == "theme").then(|| kreate_ui::Appearance::from_tag(value.trim()))?
+            })
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_appearance(
+    path: &Path,
+    appearance: kreate_ui::Appearance,
+) -> Result<(), std::io::Error> {
+    write_atomic(path, &format!("theme = {}\n", appearance.tag()))
+}
+
 /// The workspace file's path.
 /// File ▸ Open Recent's list, one path per line, newest first.
 pub fn recent_path() -> Option<PathBuf> {
@@ -515,6 +541,19 @@ mod recent_tests {
         ];
         save_recent(&path, &list).unwrap();
         assert_eq!(load_recent(&path), list);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_theme_round_trips_and_an_unknown_one_is_graphite() {
+        let dir = std::env::temp_dir().join(format!("kreate-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("interface.txt");
+        assert_eq!(load_appearance(&path), kreate_ui::Appearance::Dark);
+        save_appearance(&path, kreate_ui::Appearance::Light).unwrap();
+        assert_eq!(load_appearance(&path), kreate_ui::Appearance::Light);
+        std::fs::write(&path, "theme = sepia\n").unwrap();
+        assert_eq!(load_appearance(&path), kreate_ui::Appearance::Dark);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
