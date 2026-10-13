@@ -13,7 +13,8 @@ use kreate_scene::sketch::Constraint;
 /// The tool in hand.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
-    /// Click a point or a line to select it; drag a point to move it.
+    /// Click a point, a line or a circle to select it, Shift to add; drag
+    /// what is selected to move it.
     #[default]
     Select,
     Line,
@@ -83,6 +84,18 @@ impl Tool {
             Tool::Line | Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Point
         )
     }
+}
+
+/// A drag of the select tool: the points that move, and the place on the
+/// plane that follows the pointer — the point taken, or where a line or a
+/// circle was taken.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SketchDrag {
+    pub points: Vec<u32>,
+    pub anchor: DVec2,
+    /// The one point taken, when a single point is dragged: what is joined to
+    /// a point it is dropped on.
+    pub single: Option<u32>,
 }
 
 /// Something of the sketch under the pointer.
@@ -205,6 +218,58 @@ impl Geometry {
             }
         }
         best.map(|b| b.0)
+    }
+
+    /// The sketch without what is being dragged: what a dragged point can
+    /// snap to is everything but itself and the lines that move with it.
+    pub fn without(&self, moving: &[u32]) -> Geometry {
+        let mut g = self.clone();
+        for v in moving {
+            if let Some(s) = g.screen.get_mut(*v as usize) {
+                *s = None;
+            }
+        }
+        g.lines
+            .retain(|l| !moving.contains(&l[0]) && !moving.contains(&l[1]));
+        g.rounds
+            .retain(|(c, ring, _)| !moving.contains(c) && !ring.iter().any(|v| moving.contains(v)));
+        g
+    }
+
+    /// The points a pick stands for when it is dragged: a point, a line's
+    /// two ends, a circle's centre and ring.
+    pub fn points_of(&self, pick: Pick) -> Vec<u32> {
+        match pick {
+            Pick::Point(v) => vec![v],
+            Pick::Line(l) => self
+                .lines
+                .get(l as usize)
+                .map(|l| l.to_vec())
+                .unwrap_or_default(),
+            Pick::Round { centre, on } => self
+                .rounds
+                .iter()
+                .find(|(c, ring, _)| *c == centre && ring.contains(&on))
+                .map(|(c, ring, _)| std::iter::once(*c).chain(ring.iter().copied()).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The lines of a circle or arc, by their place in the list.
+    pub fn lines_of_round(&self, centre: u32, on: u32) -> Vec<u32> {
+        let Some((_, ring, _)) = self
+            .rounds
+            .iter()
+            .find(|(c, ring, _)| *c == centre && ring.contains(&on))
+        else {
+            return Vec::new();
+        };
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| ring.contains(&l[0]) && ring.contains(&l[1]))
+            .map(|(i, _)| i as u32)
+            .collect()
     }
 
     /// Where drawing can snap that is not a point of the sketch: each line's
@@ -392,8 +457,8 @@ pub struct SketchUi {
     /// Selected points and lines.
     pub points: Vec<u32>,
     pub lines: Vec<u32>,
-    /// A point being dragged: which, and where the drag began on the plane.
-    pub drag: Option<(u32, DVec2)>,
+    /// What is being dragged, if anything.
+    pub drag: Option<SketchDrag>,
     /// The line the trim tool is over, and where on the plane.
     pub trim: Option<(u32, DVec2)>,
     /// The hover was caught by snapping — a midpoint, a crossing, the grid,
@@ -735,9 +800,6 @@ pub fn view(
                 view.cut.push([to_world(a), to_world(b)]);
             }
         }
-        if let Some((v, from)) = ui.drag {
-            view.preview.push(polyline(vec![at(v), at(v) + (h - from)]));
-        }
     }
     // The regions picked, and the one under the pointer.
     if matches!(ui.tool, Tool::Extrude | Tool::Revolve) {
@@ -860,6 +922,27 @@ mod tests {
                 .any(|q| q.distance(DVec2::new(1.0, 0.0)) < 1e-9),
             "{snaps:?}"
         );
+    }
+
+    #[test]
+    fn a_line_drags_by_its_ends_and_a_circle_with_its_centre() {
+        let g = geometry();
+        assert_eq!(g.points_of(Pick::Line(1)), vec![1, 2]);
+        let circle = g.points_of(Pick::Round { centre: 4, on: 5 });
+        assert_eq!(circle.len(), 9, "the centre and its eight: {circle:?}");
+        assert_eq!(circle[0], 4);
+        assert_eq!(g.lines_of_round(4, 5), (4..12).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn what_is_dragged_is_not_snapped_to() {
+        let g = geometry().without(&[1, 2]);
+        // Point 1 is under the pointer but moving: not caught.
+        assert_eq!(g.point_near(DVec2::new(101.0, 1.0), 10.0), None);
+        // The lines on the moving points went; the others stay.
+        assert!(g.lines.iter().all(|l| !l.contains(&1) && !l.contains(&2)));
+        assert!(g.lines.contains(&[3, 0]));
+        assert_eq!(g.point_near(DVec2::new(1.0, 1.0), 10.0), Some(0));
     }
 
     #[test]

@@ -1005,6 +1005,8 @@ struct App {
     /// The scene as drawing in a sketch snaps to it, and the document
     /// version and snap mode it was gathered for.
     sketch_snap_cache: Option<(u64, kreate::snap::Mode, Arc<kreate::snap::SnapWorld>)>,
+    /// A sketch drag's step, live while the button is down.
+    sketch_drag_session: Option<kreate_ops::ModalSession>,
     /// The object Auto dynamic topology last said it would not cut.
     dyntopo_told: Option<ObjectId>,
     /// File ▸ Shared Session, while in one.
@@ -1139,6 +1141,7 @@ impl App {
             ui_repaint_at: None,
             driven_at: u64::MAX,
             sketch_snap_cache: None,
+            sketch_drag_session: None,
             dyntopo_told: None,
             session: None,
             collab_locks: Vec::new(),
@@ -4070,7 +4073,7 @@ impl App {
         }
         let caught = self
             .sketch_cursor()
-            .zip(self.sketch_geometry())
+            .zip(self.sketch_snap_geometry())
             .and_then(|(at, g)| Some((g.point_near(at, 10.0)?, g)));
         // A point of the sketch first, always: drawing from it joins it.
         // Then, with snapping on — the magnet, or Ctrl the other way —
@@ -4085,6 +4088,10 @@ impl App {
         };
         self.sketching.hover = Some(hover);
         self.sketching.snapped = snapped;
+        // A drag follows: where the pointer is, snapped as drawing is.
+        if self.sketching.drag.is_some() {
+            self.drive_sketch_drag(hover.0);
+        }
         self.redraw.set(RedrawReason::UI);
     }
 
@@ -4105,7 +4112,7 @@ impl App {
         let (id, world) = self.sketch_target()?;
         let ppp = self.egui_ctx.pixels_per_point() as f64;
         let at = self.sketch_cursor()?;
-        let g = self.sketch_geometry()?;
+        let g = self.sketch_snap_geometry()?;
         let projector = self.ui.projector?;
         let screen = |p: glam::DVec2| {
             projector
@@ -4166,7 +4173,9 @@ impl App {
     ) -> Arc<kreate::snap::SnapWorld> {
         let version = self.doc.version();
         if let Some((v, m, world)) = &self.sketch_snap_cache {
-            if *v == version && *m == mode {
+            // A drag changes the sketch every move, and nothing else: the
+            // scene it snaps to stays as it was gathered.
+            if (*v == version || self.sketching.drag.is_some()) && *m == mode {
                 return world.clone();
             }
         }
@@ -4179,6 +4188,71 @@ impl App {
         let world = Arc::new(world);
         self.sketch_snap_cache = Some((version, mode, world.clone()));
         world
+    }
+
+    /// The sketch as what is dragged can snap to: all of it but what moves.
+    fn sketch_snap_geometry(&self) -> Option<kreate::sketching::Geometry> {
+        let g = self.sketch_geometry()?;
+        Some(match &self.sketching.drag {
+            Some(drag) => g.without(&drag.points),
+            None => g,
+        })
+    }
+
+    /// Moves what is dragged so its anchor is at `to`, live: one modal step,
+    /// begun on the first move and redone from where it began on each one
+    /// after.
+    fn drive_sketch_drag(&mut self, to: glam::DVec2) {
+        let Some(drag) = self.sketching.drag.clone() else {
+            return;
+        };
+        let offset = to - drag.anchor;
+        // A click is not a drag: nothing moves until the pointer does.
+        if self.sketch_drag_session.is_none() && offset.length() < 1e-9 {
+            return;
+        }
+        let mut params = PropertyMap::new();
+        params.set("points", PropertyValue::Ints(drag.points.clone()));
+        params.set("offset", PropertyValue::Vec3([offset.x, offset.y, 0.0]));
+        match self.sketch_drag_session.as_mut() {
+            Some(session) => {
+                if let Err(e) = self.history.update_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    None,
+                    &self.op_ctx,
+                    session,
+                    &params,
+                ) {
+                    tracing::warn!(error = %e, "sketch drag failed");
+                }
+            }
+            None => match self.history.begin_modal(
+                &self.registry,
+                &mut self.doc,
+                None,
+                &self.op_ctx,
+                "sketch.move",
+                &params,
+            ) {
+                Ok(Some(session)) => self.sketch_drag_session = Some(session),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "sketch drag failed"),
+            },
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Puts a drag back where it began: Esc or the right button.
+    fn cancel_sketch_drag(&mut self) -> bool {
+        if self.sketching.drag.take().is_none() {
+            return false;
+        }
+        if let Some(session) = self.sketch_drag_session.take() {
+            History::cancel_modal(session, &mut self.doc);
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+        true
     }
 
     fn sketch_tool_done(&mut self) {
@@ -4216,6 +4290,9 @@ impl App {
         let tool = self.sketching.tool;
         match (button, pressed) {
             (MouseButton::Right, true) => {
+                if self.cancel_sketch_drag() {
+                    return true;
+                }
                 if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
                     self.commit_sketch_line(false);
                 } else if !self.sketching.clicks.is_empty() || !self.sketching.picks.is_empty() {
@@ -4226,20 +4303,29 @@ impl App {
                 true
             }
             (MouseButton::Left, false) => {
-                // The end of a point's drag.
-                if let (Some((v, from)), Some(to)) =
-                    (self.sketching.drag.take(), self.sketch_plane_point())
-                {
-                    let offset = to - from;
-                    if offset.length() > 1e-9 {
-                        self.run_op_with(
-                            "sketch.move",
-                            &[
-                                ("points", PropertyValue::Ints(vec![v])),
-                                ("offset", PropertyValue::Vec3([offset.x, offset.y, 0.0])),
-                            ],
-                        );
+                // The end of a drag: what it moved is one step.
+                if let Some(drag) = self.sketching.drag.take() {
+                    if let Some(session) = self.sketch_drag_session.take() {
+                        self.history.commit_modal(session);
+                        // One point dropped on another of the sketch: joined.
+                        let (hover, snapped) = (self.sketching.hover, self.sketching.snapped);
+                        if let (Some(v), Some((_, join)), false) = (drag.single, hover, snapped) {
+                            if join > 0 && join - 1 != v {
+                                let kind = kreate_scene::sketch::KINDS
+                                    .iter()
+                                    .position(|k| *k == "coincident")
+                                    .unwrap_or(0) as u32;
+                                self.run_op_with(
+                                    "sketch.constrain",
+                                    &[
+                                        ("kind", PropertyValue::Enum(kind)),
+                                        ("points", PropertyValue::Ints(vec![v, join - 1])),
+                                    ],
+                                );
+                            }
+                        }
                     }
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
                     return true;
                 }
                 false
@@ -4372,17 +4458,72 @@ impl App {
                     }
                     Tool::Select => {
                         let extend = self.input.shift_down;
-                        if !extend {
+                        let g = self.sketch_geometry().unwrap_or_default();
+                        let lines_of = |pick: Pick| match pick {
+                            Pick::Line(l) => vec![l],
+                            Pick::Round { centre, on } => g.lines_of_round(centre, on),
+                            Pick::Point(_) => Vec::new(),
+                        };
+                        // Taking hold of what is already selected drags all
+                        // of it; anything else is selected first (Shift adds).
+                        let held = match pick {
+                            Some(Pick::Point(v)) => self.sketching.points.contains(&v),
+                            Some(other) => {
+                                let ls = lines_of(other);
+                                !ls.is_empty()
+                                    && ls.iter().all(|l| self.sketching.lines.contains(l))
+                            }
+                            None => false,
+                        };
+                        if !extend && !held {
                             self.sketching.points.clear();
                             self.sketching.lines.clear();
                         }
                         match pick {
-                            Some(Pick::Point(v)) => {
+                            Some(Pick::Point(v)) if !self.sketching.points.contains(&v) => {
                                 self.sketching.points.push(v);
-                                self.sketching.drag = Some((v, p));
                             }
-                            Some(Pick::Line(l)) => self.sketching.lines.push(l),
+                            Some(other @ (Pick::Line(_) | Pick::Round { .. })) => {
+                                for l in lines_of(other) {
+                                    if !self.sketching.lines.contains(&l) {
+                                        self.sketching.lines.push(l);
+                                    }
+                                }
+                            }
                             _ => {}
+                        }
+                        if let Some(pick) = pick {
+                            // Everything selected moves: its points and its
+                            // lines' ends, a circle's centre with its ring.
+                            let mut points = self.sketching.points.clone();
+                            for l in &self.sketching.lines {
+                                if let Some(ends) = g.lines.get(*l as usize) {
+                                    points.extend_from_slice(ends);
+                                }
+                            }
+                            if matches!(pick, Pick::Round { .. }) {
+                                points.extend(g.points_of(pick));
+                            }
+                            for (c, ring, _) in &g.rounds {
+                                if ring.iter().all(|v| points.contains(v)) {
+                                    points.push(*c);
+                                }
+                            }
+                            points.sort_unstable();
+                            points.dedup();
+                            let raw = self.sketch_plane_point().unwrap_or(p);
+                            let (anchor, single) = match pick {
+                                Pick::Point(v) => (
+                                    g.points.get(v as usize).copied().unwrap_or(raw),
+                                    (points.len() == 1).then_some(v),
+                                ),
+                                _ => (raw, None),
+                            };
+                            self.sketching.drag = Some(kreate::sketching::SketchDrag {
+                                points,
+                                anchor,
+                                single,
+                            });
                         }
                     }
                     Tool::Extrude | Tool::Revolve => {
@@ -4505,7 +4646,9 @@ impl App {
                 true
             }
             KeyCode::Escape => {
-                if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
+                if self.cancel_sketch_drag() {
+                    // Put back, nothing else.
+                } else if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
                     self.commit_sketch_line(false);
                 } else if !self.sketching.clicks.is_empty()
                     || !self.sketching.picks.is_empty()
@@ -13875,6 +14018,43 @@ kreate.ops.object.add_primitive()",
 
     /// A bake on its own thread: the bar moves, the result goes in as one
     /// undo step through `physics.bake`, and a cancelled one leaves nothing.
+    #[test]
+    fn a_sketch_line_dragged_moves_live_from_where_it_began_and_is_one_step() {
+        let mut app = app();
+        app.run_op_with("sketch.new", &[]);
+        app.run_op_with(
+            "sketch.line",
+            &[("points", PropertyValue::Floats(vec![1.0, 1.0, 2.0, 1.0]))],
+        );
+        let id = kreate_ops::ops::sketch_draw::active_sketch(&app.doc).unwrap();
+        let steps = app.history.entries().len();
+        app.sketching.drag = Some(kreate::sketching::SketchDrag {
+            points: vec![1, 2],
+            anchor: glam::DVec2::new(1.5, 1.0),
+            single: None,
+        });
+        // Two moves: the second from where the drag began, not from the first.
+        app.drive_sketch_drag(glam::DVec2::new(1.5, 2.0));
+        app.drive_sketch_drag(glam::DVec2::new(1.5, 3.0));
+        let p = kreate_ops::ops::sketch_draw::points(&app.doc, id);
+        assert!((p[1] - glam::DVec2::new(1.0, 3.0)).length() < 1e-9, "{p:?}");
+        assert!((p[2] - glam::DVec2::new(2.0, 3.0)).length() < 1e-9, "{p:?}");
+        let session = app.sketch_drag_session.take().expect("a live step");
+        app.history.commit_modal(session);
+        assert_eq!(app.history.entries().len(), steps + 1, "one step");
+
+        // Esc puts a drag back.
+        app.sketching.drag = Some(kreate::sketching::SketchDrag {
+            points: vec![1],
+            anchor: glam::DVec2::new(1.0, 3.0),
+            single: Some(1),
+        });
+        app.drive_sketch_drag(glam::DVec2::new(0.0, 0.0));
+        assert!(app.cancel_sketch_drag());
+        let p = kreate_ops::ops::sketch_draw::points(&app.doc, id);
+        assert!((p[1] - glam::DVec2::new(1.0, 3.0)).length() < 1e-9, "{p:?}");
+    }
+
     #[test]
     fn a_background_bake_lands_as_one_step_and_a_cancelled_one_does_not() {
         let mut app = app();
