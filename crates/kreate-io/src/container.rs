@@ -2610,13 +2610,16 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .collect();
         object.features = record.features.iter().filter_map(feature_from).collect();
         // A constraint of a kind this build does not know is dropped, not
-        // guessed at: the rest of the sketch still holds.
+        // guessed at: the rest of the sketch still holds. So is one naming a
+        // point the mesh does not have, as the lines are — the solver and
+        // the sketch tools index the points by it.
         object.sketch = record
             .sketch
             .iter()
             .filter_map(|(tag, points, value, at)| {
                 kreate_scene::sketch::Constraint::from_parts(tag, points, *value, *at)
             })
+            .filter(|c| c.points().iter().all(|v| *v < points))
             .collect();
         object.shape_keys = record
             .shape_keys

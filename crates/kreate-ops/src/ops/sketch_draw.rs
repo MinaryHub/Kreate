@@ -738,12 +738,19 @@ impl Operator for Delete {
                 gone[*p as usize] = true;
             }
         }
+        // A line or constraint naming a point the mesh no longer has — its
+        // vertices deleted in edit mode — goes too, rather than being read
+        // past the end of the points.
+        let missing = |v: u32| v as usize >= pts.len();
+        let gone_at = |gone: &[bool], v: u32| gone.get(v as usize).copied().unwrap_or(true);
         let lines: Vec<[u32; 2]> = object
             .sketch_lines
             .iter()
             .enumerate()
             .filter(|(i, l)| {
-                !params.lines.contains(&(*i as u32)) && !gone[l[0] as usize] && !gone[l[1] as usize]
+                !params.lines.contains(&(*i as u32))
+                    && !gone_at(&gone, l[0])
+                    && !gone_at(&gone, l[1])
             })
             .map(|(_, l)| *l)
             .collect();
@@ -757,7 +764,7 @@ impl Operator for Delete {
         for (i, l) in object.sketch_lines.iter().enumerate() {
             if params.lines.contains(&(i as u32)) {
                 for v in l {
-                    if !used[*v as usize] && *v != 0 {
+                    if !missing(*v) && !used[*v as usize] && *v != 0 {
                         gone[*v as usize] = true;
                     }
                 }
@@ -779,7 +786,7 @@ impl Operator for Delete {
         let constraints: Vec<Constraint> = object
             .sketch
             .iter()
-            .filter(|c| c.points().iter().all(|v| !gone[*v as usize]))
+            .filter(|c| c.points().iter().all(|v| !gone_at(&gone, *v)))
             .map(|c| c.remapped(&renumber))
             .collect();
         let lines: Vec<[u32; 2]> = lines
@@ -874,6 +881,43 @@ mod tests {
         assert!(p[1].y.abs() < 1e-7, "level: {p:?}");
         assert!((p[2].x - p[1].x).abs() < 1e-7, "upright: {p:?}");
         assert_eq!(h.entries().len(), 2, "one step a stroke");
+    }
+
+    #[test]
+    fn deleting_from_a_sketch_whose_lines_name_missing_points_does_not_crash() {
+        // Its vertices deleted in edit mode, a sketch's lines and constraints
+        // can name points it no longer has; deleting must clear them, not
+        // read past the end.
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[("points", PropertyValue::Floats(vec![0.01, 0.0, 0.02, 0.01]))],
+        )
+        .unwrap();
+        let o = doc.object_mut(id).unwrap();
+        o.sketch_lines.push([1, 999]);
+        o.sketch.push(Constraint::Horizontal { a: 1, b: 999 });
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.delete",
+            &[("points", PropertyValue::Ints(vec![2]))],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        let n = points(&doc, id).len() as u32;
+        assert!(
+            o.sketch_lines.iter().flatten().all(|v| *v < n),
+            "{:?}",
+            o.sketch_lines
+        );
+        assert!(o.sketch.iter().all(|c| c.points().iter().all(|v| *v < n)));
     }
 
     #[test]
