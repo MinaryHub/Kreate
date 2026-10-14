@@ -33,6 +33,8 @@
 //! being able to reach the document. See [`path`] for why the target is an id
 //! and the property is a name.
 
+pub mod expr;
+
 mod path;
 
 pub use path::{AnimatableDesc, DatablockKind, PathError, PropertyPath, Uid};

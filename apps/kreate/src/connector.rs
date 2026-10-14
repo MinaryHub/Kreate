@@ -983,6 +983,7 @@ impl App {
         let mut out = json!({
             "object": object.name,
             "space": if world { "world" } else { "local" },
+            "units": { "length": "m" },
             "vertex_count": mesh.num_verts(),
             "edge_count": mesh.num_edges(),
             "face_count": mesh.num_faces(),

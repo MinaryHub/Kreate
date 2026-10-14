@@ -249,9 +249,22 @@ impl History {
         let mut full = info.defaults();
         full.overlay(params);
 
+        let began = std::time::Instant::now();
         let mut edit = DocMut::with_sessions(doc, sessions);
         let result = registry.execute(op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
+        // Every operator into the log, with how long it took and how it
+        // went; a slow one said as such — what a frozen window is traced by.
+        let took = began.elapsed();
+        let how = match &result {
+            Ok(r) => format!("{r:?}"),
+            Err(e) => format!("error: {e}"),
+        };
+        if took.as_secs_f64() >= 1.0 {
+            tracing::warn!("slow operator {op_id}: {:.1} s, {how}", took.as_secs_f64());
+        } else {
+            tracing::info!("operator {op_id}: {} ms, {how}", took.as_millis());
+        }
 
         // A finished operator that broke a mesh is turned back and reported,
         // not let into the document — nor allowed to end the application,

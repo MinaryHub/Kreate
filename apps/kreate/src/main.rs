@@ -956,6 +956,8 @@ struct App {
     /// Sketch mode was asked for with no sketch to draw in: the plane menu
     /// is open, and choosing a plane starts one and enters.
     sketch_waiting: bool,
+    /// The conversation being kept on disk: see `kreate::chatlog`.
+    chat_record: Option<kreate::chatlog::Record>,
     /// Waiting for a click on a flat face, to start a sketch on it.
     sketch_face_pick: bool,
     /// The sketch the camera was last turned to face, so entering turns it
@@ -1169,6 +1171,7 @@ impl App {
             knife: None,
             sketching: Default::default(),
             sketch_waiting: false,
+            chat_record: None,
             sketch_face_pick: false,
             sketch_faced: None,
             sketch_pinned: (0, Vec::new()),
@@ -3112,6 +3115,132 @@ impl App {
                 .active
                 .map(|a| self.doc.world_transform(a).translation),
             _ => None,
+        }
+    }
+
+    /// The panel's conversation, written to its page in `chats/`: called
+    /// whenever it changes. Begun on the first message, with the document
+    /// that was open.
+    pub(crate) fn save_chat(&mut self) {
+        use kreate_ui::chat::ChatRole;
+        let Some(dir) = kreate::chatlog::chat_dir() else {
+            return;
+        };
+        let messages: Vec<(String, String)> = self
+            .ui
+            .chat_log
+            .iter()
+            .filter_map(|m| {
+                let who = match m.role {
+                    ChatRole::User => "you",
+                    ChatRole::Claude => "assistant",
+                    ChatRole::Tool => "tool",
+                    ChatRole::Error => "error",
+                    ChatRole::Note => "note",
+                    ChatRole::Turn(_) => return None,
+                };
+                Some((who.to_string(), m.text.clone()))
+            })
+            .collect();
+        if messages.is_empty() {
+            return;
+        }
+        let assistant = self
+            .chat
+            .as_ref()
+            .map(|c| c.provider().name().to_string())
+            .unwrap_or_default();
+        let session = self
+            .chat
+            .as_ref()
+            .and_then(|c| c.session().map(str::to_string));
+        let document = self.file.path().map(|p| p.display().to_string());
+        let record = self
+            .chat_record
+            .get_or_insert_with(|| kreate::chatlog::Record {
+                started: kreate::chatlog::now(),
+                assistant: assistant.clone(),
+                document,
+                ..Default::default()
+            });
+        if record.messages == messages && record.session == session {
+            return;
+        }
+        record.messages = messages;
+        record.session = session;
+        record.assistant = assistant;
+        if let Err(e) = kreate::chatlog::save_in(&dir, record) {
+            tracing::warn!("cannot keep the conversation: {e}");
+        }
+    }
+
+    /// The last conversation, shown again at start and carried on with the
+    /// same assistant.
+    fn restore_chat(&mut self) {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let Some(record) =
+            kreate::chatlog::chat_dir().and_then(|d| kreate::chatlog::load_last_in(&d))
+        else {
+            return;
+        };
+        let Some(chat) = self.chat.as_mut() else {
+            return;
+        };
+        if chat.provider().name() != record.assistant {
+            return;
+        }
+        // Carried on only where the assistant still has the session: one
+        // from before Claude ran in its own folder is not there to resume,
+        // and asking for it would fail the next message.
+        if let Some(s) = &record.session {
+            let there = chat.provider() != kreate::claude::Provider::Claude
+                || kreate::claude::claude_has_session(s);
+            if there {
+                chat.resume(s.clone());
+            }
+        }
+        self.ui.chat_log = record
+            .messages
+            .iter()
+            .map(|(who, text)| ChatMessage {
+                role: match who.as_str() {
+                    "you" => ChatRole::User,
+                    "assistant" => ChatRole::Claude,
+                    "tool" => ChatRole::Tool,
+                    "error" => ChatRole::Error,
+                    _ => ChatRole::Note,
+                },
+                text: text.clone(),
+            })
+            .collect();
+        self.ui.chat_log.push(ChatMessage {
+            role: ChatRole::Note,
+            text: self.ui.catalog.get("chat-restored"),
+        });
+        self.chat_record = Some(record);
+    }
+
+    /// The conversation as a Markdown file, where the user says.
+    fn export_chat(&mut self) {
+        self.save_chat();
+        let Some(record) = self.chat_record.clone() else {
+            let message = self.ui.catalog.get("chat-nothing-to-export");
+            self.status(&message);
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Markdown", &["md"])
+            .set_file_name(format!(
+                "Kreate chat {}.md",
+                record.started.replace(':', "-")
+            ))
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, kreate::chatlog::markdown(&record)) {
+            Ok(()) => self.status(&path.display().to_string()),
+            Err(e) => self.status(&e.to_string()),
         }
     }
 
@@ -5667,6 +5796,23 @@ impl App {
                     }
                     self.ui.chat_log.clear();
                     self.chat_turns.clear();
+                    // A new page for what comes next; nothing to bring back
+                    // after a restart.
+                    self.chat_record = None;
+                    if let Some(dir) = kreate::chatlog::chat_dir() {
+                        kreate::chatlog::forget_last_in(&dir);
+                    }
+                }
+                Command::ChatHistory => {
+                    if let Some(dir) = kreate::chatlog::chat_dir() {
+                        kreate::logs::reveal(&dir);
+                    }
+                }
+                Command::ChatExport => self.export_chat(),
+                Command::OpenLogFolder => {
+                    if let Some(dir) = kreate::logs::log_dir() {
+                        kreate::logs::reveal(&dir);
+                    }
                 }
                 Command::ChatRevertTurn { turn } => self.revert_chat_turn(turn),
                 Command::ConnectApp { index } => {
@@ -9659,6 +9805,22 @@ impl App {
     }
 
     fn render(&mut self) {
+        let began = std::time::Instant::now();
+        self.render_frame();
+        // A frame of more than a second is the window not answering: said
+        // in the log, for working out afterwards what it was doing.
+        let took = began.elapsed();
+        if took.as_secs_f64() >= 1.0 {
+            tracing::warn!(
+                "slow frame: {:.1} s, mode {:?}, last step {:?}",
+                took.as_secs_f64(),
+                self.op_ctx.mode,
+                self.history.last().map(|e| e.op_id.clone())
+            );
+        }
+    }
+
+    fn render_frame(&mut self) {
         // Every length the panels show and every number typed into one is in
         // the open document's unit.
         kreate_reflect::set_display_length_unit(self.doc.design.length_unit);
@@ -13232,12 +13394,8 @@ fn write_beside(path: &std::path::Path, files: &[(String, Vec<u8>)]) -> Result<(
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kreate=info,kreate_render=info".into()),
-        )
-        .init();
+    // To the console and to the day's file in the settings folder's `logs`.
+    kreate::logs::init();
 
     // The interface is in English. `--lang ko` still switches it, for the
     // Korean catalogue that is kept and tested.
@@ -13299,6 +13457,7 @@ fn main() {
     // talk as before anything is typed.
     chat.check_account();
     app.chat = Some(chat);
+    app.restore_chat();
     let outbox_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     app.outbox = Some(kreate::contact::Outbox::new(move || {
         if let Ok(proxy) = outbox_proxy.lock() {
@@ -15292,6 +15451,60 @@ kreate.ops.object.add_primitive()",
     fn with_viewport(app: &mut App) {
         app.viewport_px = Some((100.0, 50.0, 800.0, 600.0));
         app.input.cursor = Some((500.0, 350.0));
+    }
+
+    /// A conversation is kept as it goes and, after a restart, shown again
+    /// and carried on in the same session; New Chat leaves nothing to bring
+    /// back.
+    #[test]
+    fn the_chat_is_kept_and_comes_back_after_a_restart() {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let mut first = app();
+        let dir = kreate::chatlog::chat_dir().expect("a test settings folder");
+        kreate::chatlog::forget_last_in(&dir);
+        let mut chat = kreate::claude::Chat::new(|| {});
+        chat.resume("session-1".into());
+        first.chat = Some(chat);
+        first.ui.chat_log = vec![
+            ChatMessage {
+                role: ChatRole::User,
+                text: "a bracket, token: s3cr3t".into(),
+            },
+            ChatMessage {
+                role: ChatRole::Tool,
+                text: "run_script: kreate.ops.object.add_primitive()".into(),
+            },
+            ChatMessage {
+                role: ChatRole::Claude,
+                text: "Made it.".into(),
+            },
+        ];
+        first.save_chat();
+        let page = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "md"))
+            .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+            .expect("a page");
+        let md = std::fs::read_to_string(&page).unwrap();
+        assert!(md.contains("Made it."), "{md}");
+        assert!(!md.contains("s3cr3t"), "{md}");
+
+        let mut again = app();
+        again.chat = Some(kreate::claude::Chat::new(|| {}));
+        again.restore_chat();
+        assert_eq!(again.ui.chat_log.len(), 4, "three said and a note");
+        assert_eq!(again.ui.chat_log[2].text, "Made it.");
+        // Claude has no such session on this machine: shown, not resumed.
+        assert_eq!(again.chat.as_ref().unwrap().session(), None);
+
+        again.ui.queue.push(kreate_ui::Command::ChatNew);
+        again.drain_ui_commands();
+        let mut third = app();
+        third.chat = Some(kreate::claude::Chat::new(|| {}));
+        third.restore_chat();
+        assert!(third.ui.chat_log.is_empty());
     }
 
     /// Picking "on a face" and clicking a part: a sketch on the face under

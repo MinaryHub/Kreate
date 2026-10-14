@@ -83,6 +83,9 @@ pub struct ChatText {
     pub send: String,
     pub stop: String,
     pub new_chat: String,
+    /// The buttons that open the kept conversations and save this one.
+    pub history: String,
+    pub export: String,
     /// Shown while Claude is answering.
     pub working: String,
     pub checking: String,
@@ -189,6 +192,15 @@ pub fn chat(
                 .clicked()
             {
                 queue.push(Command::ChatNew);
+            }
+            if ui
+                .add_enabled(!messages.is_empty(), egui::Button::new(&text.export))
+                .clicked()
+            {
+                queue.push(Command::ChatExport);
+            }
+            if ui.button(&text.history).clicked() {
+                queue.push(Command::ChatHistory);
             }
         });
     });

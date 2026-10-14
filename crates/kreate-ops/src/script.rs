@@ -92,6 +92,7 @@ pub fn parse_call(registry: &OperatorRegistry, line: &str) -> Result<Call, Scrip
             }
         })?;
         let value = parse_value(raw.trim())?;
+        let value = with_units(value, desc.unit, desc.name)?;
         let value = coerce(value, &desc.kind, desc.name)?;
         params.set(desc.name, value);
     }
@@ -158,6 +159,58 @@ enum Raw {
     /// A bracketed list with a number that is not a whole one in it.
     FloatList(Vec<f64>),
     Text(String),
+    /// A number with a unit, or a tuple with one in it — `20mm`, `90deg`,
+    /// `(10mm, 0, 2cm)` — read once the parameter's unit is known.
+    Measured(Vec<String>),
+}
+
+/// A unit written after a number: what it is a measure of.
+fn has_unit(text: &str) -> bool {
+    let t = text.trim().trim_matches('"').trim();
+    let body = t.trim_end_matches(|c: char| c.is_alphabetic() || c == '°' || c == 'µ');
+    body.len() < t.len() && !body.is_empty() && body.trim().parse::<f64>().is_ok()
+}
+
+/// A number with a unit turned into the parameter's own — metres, radians —
+/// by the same calculator the number fields use. A unit the parameter cannot
+/// take (`90deg` for a length, `20mm` for a count) is an error, not a guess.
+fn with_units(raw: Raw, unit: kreate_reflect::Unit, name: &str) -> Result<Raw, ScriptError> {
+    use kreate_reflect::expr::{eval_in, Unit as Field};
+    let field = match unit {
+        kreate_reflect::Unit::Length => Some(Field::Length),
+        kreate_reflect::Unit::Angle => Some(Field::Angle),
+        _ => None,
+    };
+    let one = |text: &str| -> Result<f64, ScriptError> {
+        let text = text.trim().trim_matches('"').trim();
+        if let Ok(v) = text.parse::<f64>() {
+            // A bare number keeps the script's meaning: metres, radians.
+            return Ok(v);
+        }
+        let Some(field) = field else {
+            return Err(ScriptError::WrongType {
+                name: name.to_string(),
+                wanted: "a plain number: this parameter has no unit",
+                got: text.to_string(),
+            });
+        };
+        eval_in(text, field, kreate_reflect::LengthUnit::Metres).map_err(|_| {
+            ScriptError::WrongType {
+                name: name.to_string(),
+                wanted: match field {
+                    Field::Angle => "an angle: radians, or a number with deg or rad",
+                    _ => "a length: metres, or a number with mm, cm, m, in or ft",
+                },
+                got: text.to_string(),
+            }
+        })
+    };
+    Ok(match raw {
+        Raw::Measured(parts) if parts.len() == 1 => Raw::Float(one(&parts[0])?),
+        Raw::Measured(parts) => Raw::Tuple(parts.iter().map(|p| one(p)).collect::<Result<_, _>>()?),
+        Raw::Text(t) if field.is_some() && has_unit(&t) => Raw::Float(one(&t)?),
+        other => other,
+    })
 }
 
 fn parse_value(raw: &str) -> Result<Raw, ScriptError> {
@@ -167,6 +220,14 @@ fn parse_value(raw: &str) -> Result<Raw, ScriptError> {
         _ => {}
     }
     if let Some(inner) = raw.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        let items: Vec<&str> = inner
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        if items.iter().any(|p| has_unit(p)) {
+            return Ok(Raw::Measured(items.iter().map(|p| p.to_string()).collect()));
+        }
         let parts: Result<Vec<f64>, _> = inner
             .split(',')
             .map(|p| p.trim())
@@ -213,6 +274,9 @@ fn parse_value(raw: &str) -> Result<Raw, ScriptError> {
     }
     if let Ok(f) = raw.parse::<f64>() {
         return Ok(Raw::Float(f));
+    }
+    if has_unit(raw) {
+        return Ok(Raw::Measured(vec![raw.to_string()]));
     }
     Err(ScriptError::Syntax(format!("`{raw}` is not a value")))
 }
@@ -390,6 +454,62 @@ impl History {
 
 #[cfg(test)]
 mod tests {
+    /// Units in a script: `20mm` is 0.02, `90deg` a quarter turn, in a tuple
+    /// too and quoted too; a unit the parameter cannot take is refused.
+    #[test]
+    fn numbers_with_units_read_as_metres_and_radians() {
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let read = |line: &str| parse_call(&registry, line);
+        let f = |line: &str, name: &str| match read(line).unwrap().params.get(name) {
+            Some(PropertyValue::Float(v)) => *v,
+            other => panic!("{other:?}"),
+        };
+        let v = |line: &str, name: &str| match read(line).unwrap().params.get(name) {
+            Some(PropertyValue::Vec3(v)) => *v,
+            other => panic!("{other:?}"),
+        };
+        let same = |a: f64, b: f64| assert!((a - b).abs() < 1e-12, "{a} against {b}");
+        same(
+            f("kreate.ops.mesh.inset(thickness=20mm)", "thickness"),
+            0.02,
+        );
+        same(
+            f("kreate.ops.mesh.inset(thickness=\"2cm\")", "thickness"),
+            0.02,
+        );
+        same(
+            f("kreate.ops.mesh.inset(thickness=0.02)", "thickness"),
+            0.02,
+        );
+        same(
+            f("kreate.ops.object.rotate(angle=90deg)", "angle"),
+            std::f64::consts::FRAC_PI_2,
+        );
+        same(
+            f(
+                "kreate.ops.object.rotate(angle=1.5707963267948966)",
+                "angle",
+            ),
+            std::f64::consts::FRAC_PI_2,
+        );
+        same(f("kreate.ops.object.rotate(angle=1.57rad)", "angle"), 1.57);
+        let t = v(
+            "kreate.ops.object.translate(translation=(10mm, 0, 0.5in))",
+            "translation",
+        );
+        same(t[0], 0.01);
+        same(t[1], 0.0);
+        same(t[2], 0.0127);
+        let r = v(
+            "kreate.ops.object.set_transform(rotation=(0, 0, 90deg))",
+            "rotation",
+        );
+        same(r[2], std::f64::consts::FRAC_PI_2);
+        assert!(read("kreate.ops.object.rotate(angle=20mm)").is_err());
+        assert!(read("kreate.ops.mesh.inset(thickness=90deg)").is_err());
+    }
+
     use super::*;
 
     fn registry() -> OperatorRegistry {

@@ -230,6 +230,7 @@ impl App {
         }
         self.ui.chat_busy = chat.busy();
         self.publish_chat_attachments();
+        self.save_chat();
     }
 
     /// The panel's view of what goes with the next message.
@@ -412,6 +413,11 @@ impl App {
         self.ui.chat_busy = chat.busy();
         if answered {
             self.finish_chat_turn();
+        }
+        // Kept as it goes, so a crash mid-answer loses nothing said. A
+        // streamed answer is written when it settles, not each fragment.
+        if !self.chat_streaming || answered {
+            self.save_chat();
         }
         if let Some(w) = &self.window {
             w.request_redraw();

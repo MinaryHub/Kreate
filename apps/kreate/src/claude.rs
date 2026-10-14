@@ -49,7 +49,8 @@ use crate::attach::{claude_user_message, prompt_with_text, Attachment, Kind as A
 /// own instructions.
 const SYSTEM_PROMPT: &str = "You are talking with the user in the chat panel inside Kreate, \
 a 3D modelling application, while they look at the same document. The kreate tools act on \
-that document; use them, and nothing else, to look at and change it. Answer in the language \
+that document; use them to look at and change it. Your file tools reach only your own memory \
+folder: keep there what is worth remembering about this user and their work. Answer in the language \
 the user writes in. The tools take and give lengths in metres and angles in radians; tell the \
 user lengths in the unit get_scene calls display_length (millimetres, as a rule). Keep replies short: the panel is narrow. Say what you changed in a sentence \
 or two rather than repeating the script.";
@@ -113,7 +114,10 @@ impl Provider {
     /// A folder of Kreate's own for the tool to run in.
     fn folder(self) -> Option<PathBuf> {
         let id = match self {
-            Provider::Claude => return crate::prefs::config_dir().filter(|d| d.is_dir()),
+            // A folder of its own and nothing in it: Claude Code reads what is
+            // in its working folder without asking, and the settings folder
+            // holds the bridge's token.
+            Provider::Claude => "claude",
             Provider::Gemini => "gemini",
             Provider::ChatGpt => "codex",
             Provider::Ollama => return None,
@@ -122,6 +126,122 @@ impl Provider {
         std::fs::create_dir_all(&dir).ok()?;
         Some(dir)
     }
+}
+
+/// Claude Code's name for a project folder: the path with everything but
+/// letters and digits made `-`, as it names the folder of that project's
+/// sessions and memory under `~/.claude/projects`.
+pub fn project_key(folder: &Path) -> String {
+    folder
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The permission path of Claude's memory folder for a session run in
+/// `folder` — `~/.claude/projects/<key>/memory/**` — when this Claude Code
+/// can be held to it: one that knows `--permission-prompts`, with its
+/// settings in the usual place. `None` otherwise, and it runs without files.
+fn memory_rule(folder: Option<&Path>, tool: &Path) -> Option<String> {
+    let folder = folder?;
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() || !claude_knows_prompts(tool) {
+        return None;
+    }
+    migrate_memory(folder);
+    Some(format!(
+        "~/.claude/projects/{}/memory/**",
+        project_key(folder)
+    ))
+}
+
+/// The tools and permissions a Claude turn runs with: the connector always;
+/// with a memory rule, the file tools too, allowed only there.
+pub fn claude_tool_args(memory: Option<String>) -> Vec<String> {
+    match memory {
+        None => vec![
+            "--tools".into(),
+            String::new(),
+            "--allowedTools".into(),
+            "mcp__kreate".into(),
+        ],
+        Some(rule) => vec![
+            "--tools".into(),
+            "Read,Write,Edit".into(),
+            "--allowedTools".into(),
+            "mcp__kreate".into(),
+            // Edit rules cover every file-writing tool.
+            format!("Read({rule})"),
+            format!("Edit({rule})"),
+            "--permission-prompts".into(),
+            "none".into(),
+        ],
+    }
+}
+
+/// Whether this Claude Code can refuse what would need asking.
+fn claude_knows_prompts(tool: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static KNOWN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(answer) = known.lock().ok().and_then(|k| k.get(tool).copied()) {
+        return answer;
+    }
+    let answer = quiet_command(tool)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains("--permission-prompts"))
+        .unwrap_or(false);
+    if let Ok(mut k) = known.lock() {
+        k.insert(tool.to_path_buf(), answer);
+    }
+    answer
+}
+
+/// The memory kept when Claude ran in the settings folder itself, moved
+/// once to where it runs now, so what it knew it still knows.
+fn migrate_memory(folder: &Path) {
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return;
+    };
+    let projects = Path::new(&home).join(".claude").join("projects");
+    let new = projects.join(project_key(folder)).join("memory");
+    let Some(old_folder) = crate::prefs::config_dir() else {
+        return;
+    };
+    let old = projects.join(project_key(&old_folder)).join("memory");
+    if new.exists() || !old.is_dir() {
+        return;
+    }
+    if std::fs::create_dir_all(&new).is_err() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(&old) {
+        for e in entries.flatten() {
+            if e.path().is_file() {
+                let _ = std::fs::copy(e.path(), new.join(e.file_name()));
+            }
+        }
+    }
+}
+
+/// Whether Claude Code still has `session`, run in Kreate's folder for it —
+/// a conversation from before it ran there does not carry on.
+pub fn claude_has_session(session: &str) -> bool {
+    let Some(folder) = Provider::Claude.folder() else {
+        return false;
+    };
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return false;
+    };
+    Path::new(&home)
+        .join(".claude")
+        .join("projects")
+        .join(project_key(&folder))
+        .join(format!("{session}.jsonl"))
+        .is_file()
 }
 
 /// The prefixes the tools put on the connector's tool names.
@@ -252,6 +372,17 @@ impl Chat {
             crate::ollama::save_model(&m.name);
             self.model = Some(index);
         }
+    }
+
+    /// The assistant's session, which the next message carries on.
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    /// Carries on `session` — a conversation kept from before a restart —
+    /// with the next message.
+    pub fn resume(&mut self, session: String) {
+        self.session = Some(session);
     }
 
     /// Which assistant this is talking to.
@@ -512,7 +643,7 @@ impl Chat {
         )?;
         let folder = provider.folder();
         let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
-        let mut command = quiet_command(tool);
+        let mut command = quiet_command(&tool);
         let parse: fn(&str) -> Vec<Event> = match provider {
             // Sent by Kreate itself, above.
             Provider::Ollama => return Err("Ollama is not a program to start".into()),
@@ -531,12 +662,12 @@ impl Chat {
                     .args(["--output-format", "stream-json", "--verbose"])
                     .arg("--mcp-config")
                     .arg(config.to_string())
-                    .arg("--strict-mcp-config")
-                    // Only the document: no shell, no files, no web.
-                    .args(["--tools", ""])
-                    .args(["--allowedTools", "mcp__kreate"])
-                    .arg("--append-system-prompt")
-                    .arg(SYSTEM_PROMPT);
+                    .arg("--strict-mcp-config");
+                // The document, and its own memory folder: no shell, no web,
+                // and no file anywhere else — anything not allowed here is
+                // refused, there being nobody to ask.
+                command.args(claude_tool_args(memory_rule(folder.as_deref(), &tool)));
+                command.arg("--append-system-prompt").arg(SYSTEM_PROMPT);
                 if let Some(session) = &self.session {
                     command.args(["--resume", session]);
                 }
@@ -1426,6 +1557,34 @@ pub fn find_connector() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_is_held_to_its_memory_folder() {
+        assert_eq!(
+            project_key(Path::new(
+                r"C:\Users\SMIC\AppData\Roaming\Kreate\agents\claude"
+            )),
+            "C--Users-SMIC-AppData-Roaming-Kreate-agents-claude"
+        );
+        // Without a memory rule: no file tools at all.
+        assert_eq!(
+            claude_tool_args(None),
+            vec!["--tools", "", "--allowedTools", "mcp__kreate"]
+        );
+        let args = claude_tool_args(Some("~/.claude/projects/K/memory/**".into()));
+        assert!(args.contains(&"Read,Write,Edit".to_string()));
+        assert!(args.contains(&"Edit(~/.claude/projects/K/memory/**)".to_string()));
+        assert!(args.contains(&"Read(~/.claude/projects/K/memory/**)".to_string()));
+        // Nothing else allowed, and nobody to ask: refused.
+        let at = args
+            .iter()
+            .position(|a| a == "--permission-prompts")
+            .unwrap();
+        assert_eq!(args[at + 1], "none");
+        assert!(!args
+            .iter()
+            .any(|a| a.contains("Bash") || a.contains("WebFetch")));
+    }
+
     use super::*;
 
     #[test]

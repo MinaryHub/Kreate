@@ -183,6 +183,12 @@ pub enum Command {
     ChatStop,
     /// From the Claude panel: forget the conversation and start another.
     ChatNew,
+    /// Opens the folder the conversations are kept in.
+    ChatHistory,
+    /// Saves the conversation as a Markdown file, where the user says.
+    ChatExport,
+    /// Opens the folder the application's logs are kept in.
+    OpenLogFolder,
     /// Help ▸ Connect to AI Apps: add Kreate's connector to this assistant,
     /// by its place in `kreate::connect::App::ALL`.
     ConnectApp {
