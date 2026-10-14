@@ -187,3 +187,47 @@ fn sketch_lines_and_a_bodys_features_are_saved() {
         .unwrap();
     assert!(built.num_faces() > 0);
 }
+
+/// A path array — the path by its identity, every setting off its default —
+/// comes back as it went, and still lays its copies along the path.
+#[test]
+fn a_path_array_is_saved_with_its_path_and_settings() {
+    use kreate_mesh::modifiers::PathArrayParams;
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::modifier::{ModifierInstance, ModifierKind, PathArrayModifier};
+    let mut doc = Document::new();
+    let line = doc.add_mesh(kreate_mesh::MeshData::from_faces(
+        vec![
+            kreate_math::Vec3::ZERO,
+            kreate_math::Vec3::new(3.0, 0.0, 0.0),
+        ],
+        &[],
+    ));
+    let mut path = Object::new("Path", ObjectData::Mesh(line));
+    path.sketch_lines = vec![[0, 1]];
+    let path = doc.add_object(path);
+    let uid = doc.object_uid(path).unwrap();
+    let post = doc.add_mesh_object("Post", kreate_mesh::primitives::cube(0.1));
+    let modifier = PathArrayModifier {
+        path: uid,
+        params: PathArrayParams {
+            count: 4,
+            spacing: 0.75,
+            start: 0.25,
+            offset: kreate_math::Vec3::new(0.0, 0.5, 0.125),
+            align: false,
+        },
+    };
+    doc.object_mut(post)
+        .unwrap()
+        .modifiers
+        .push(ModifierInstance::new(ModifierKind::PathArray(modifier)));
+    let back = round_trip(&doc);
+    let (p, o) = back.objects().find(|(_, o)| o.name == "Post").unwrap();
+    assert_eq!(o.modifiers[0].kind, ModifierKind::PathArray(modifier));
+    let mut cache = kreate_scene::modifier::ModifierCache::new();
+    let built = cache
+        .evaluated(&back, p, &kreate_scene::modifier::EvalCtx::still())
+        .unwrap();
+    assert_eq!(built.num_faces(), 24, "four posts");
+}

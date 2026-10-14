@@ -28,6 +28,7 @@ pub mod bevel;
 pub mod boolean;
 pub mod catmull_clark;
 pub mod mirror;
+pub mod path_array;
 pub mod solidify;
 pub mod subdivide;
 
@@ -35,6 +36,7 @@ pub use array::{array, ArrayParams};
 pub use bevel::{bevel, BevelParams};
 pub use boolean::{boolean, BooleanOp};
 pub use mirror::{mirror, MirrorParams};
+pub use path_array::{path_array, path_chain, PathArrayParams};
 pub use solidify::{solidify, SolidifyParams};
 pub use subdivide::{subdivide, SubdivideParams};
 

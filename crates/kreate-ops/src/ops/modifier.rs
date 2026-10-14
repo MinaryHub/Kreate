@@ -36,6 +36,7 @@ pub const KINDS: &[&str] = &[
     "solidify",
     "bevel",
     "boolean",
+    "path_array",
 ];
 
 fn kind_of(index: u32) -> ModifierKind {
@@ -45,6 +46,7 @@ fn kind_of(index: u32) -> ModifierKind {
         3 => ModifierKind::Solidify(SolidifyParams::default()),
         4 => ModifierKind::Bevel(BevelParams::default()),
         5 => ModifierKind::Boolean(BooleanModifier::default()),
+        6 => ModifierKind::PathArray(kreate_scene::modifier::PathArrayModifier::default()),
         _ => ModifierKind::Array(ArrayParams::default()),
     }
 }
@@ -73,7 +75,15 @@ fn has(doc: &Document, id: ObjectId, index: u32) -> bool {
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct AddParams {
     /// Which modifier to add.
-    #[param(variants("mirror", "subdivide", "array", "solidify", "bevel", "boolean"))]
+    #[param(variants(
+        "mirror",
+        "subdivide",
+        "array",
+        "solidify",
+        "bevel",
+        "boolean",
+        "path_array"
+    ))]
     pub kind: u32,
 }
 
@@ -372,6 +382,31 @@ pub fn setter_params(
                     kreate_mesh::modifiers::BooleanOp::Intersect => 2,
                 }),
             );
+        }
+        ModifierKind::PathArray(m) => {
+            let name = doc
+                .object_by_uid(m.path)
+                .and_then(|id| doc.object(id))
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            p.set("object", kreate_reflect::PropertyValue::Text(name));
+            p.set(
+                "count",
+                kreate_reflect::PropertyValue::Int(m.params.count as i64),
+            );
+            p.set(
+                "spacing",
+                kreate_reflect::PropertyValue::Float(m.params.spacing as f64),
+            );
+            p.set(
+                "start",
+                kreate_reflect::PropertyValue::Float(m.params.start as f64),
+            );
+            p.set(
+                "offset",
+                kreate_reflect::PropertyValue::Vec3(m.params.offset.as_dvec3().to_array()),
+            );
+            p.set("align", kreate_reflect::PropertyValue::Bool(m.params.align));
         }
         ModifierKind::Array(a) => {
             p.set("count", kreate_reflect::PropertyValue::Int(a.count as i64));
@@ -830,6 +865,107 @@ impl Operator for SetBoolean {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetPathArrayParams {
+    /// Which entry in the stack.
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// The object whose edges — or a sketch's lines — the copies follow,
+    /// by name.
+    pub object: String,
+    /// How many copies.
+    #[param(min = 1.0, max = 1000.0)]
+    pub count: u32,
+    /// The step along the path; zero spreads them over the whole of it.
+    #[param(min = 0.0, unit = "length")]
+    pub spacing: f64,
+    /// Where the first copy sits, along the path from its start.
+    #[param(unit = "length")]
+    pub start: f64,
+    /// Each copy moved from the path: along it, across it, up from it.
+    #[param(unit = "length")]
+    pub offset: [f64; 3],
+    /// The copies turn to follow the path.
+    pub align: bool,
+}
+
+impl Default for SetPathArrayParams {
+    fn default() -> Self {
+        let d = kreate_mesh::modifiers::PathArrayParams::default();
+        Self {
+            index: 0,
+            object: String::new(),
+            count: d.count,
+            spacing: d.spacing as f64,
+            start: d.start as f64,
+            offset: [0.0; 3],
+            align: d.align,
+        }
+    }
+}
+
+/// Sets a path array's path and how its copies sit along it. The object is
+/// named here and held by its identity, so renaming it keeps the link.
+pub struct SetPathArray;
+
+impl Operator for SetPathArray {
+    type Params = SetPathArrayParams;
+    fn id() -> &'static str {
+        "object.modifier_set_path_array"
+    }
+    fn label() -> &'static str {
+        "Path Array Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "path_array")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let path = if params.object.is_empty() {
+            kreate_scene::Uid::default()
+        } else {
+            let Some(uid) = d
+                .objects()
+                .find(|(_, o)| o.name == params.object)
+                .and_then(|(id, _)| d.object_uid(id))
+            else {
+                return Err(OpError::Failed(format!(
+                    "no object called {}",
+                    params.object
+                )));
+            };
+            uid
+        };
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::PathArray(kreate_scene::modifier::PathArrayModifier {
+                path,
+                params: kreate_mesh::modifiers::PathArrayParams {
+                    count: params
+                        .count
+                        .clamp(1, kreate_mesh::modifiers::array::MAX_COUNT),
+                    spacing: params.spacing.max(0.0) as f32,
+                    start: params.start as f32,
+                    offset: kreate_math::DVec3::from_array(params.offset).as_vec3(),
+                    align: params.align,
+                },
+            }),
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct BooleanParams {
     /// What the selected objects do to the active one.
@@ -912,6 +1048,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetSolidify>();
     registry.register::<SetBevel>();
     registry.register::<SetBoolean>();
+    registry.register::<SetPathArray>();
     registry.register::<Add>();
     registry.register::<Apply>();
     registry.register::<Remove>();
@@ -1248,6 +1385,7 @@ mod tests {
             "object.modifier_set_solidify",
             "object.modifier_set_bevel",
             "object.modifier_set_boolean",
+            "object.modifier_set_path_array",
             "object.modifier_apply",
         ] {
             assert!(r.get(id).is_some(), "{id} is not registered");
@@ -1258,7 +1396,7 @@ mod tests {
     fn the_add_menu_and_the_kind_list_agree() {
         // The variant list drives the dropdown; `kind_of` turns the choice into a
         // modifier. They are two lists and would otherwise drift apart silently.
-        assert_eq!(KINDS.len(), 6);
+        assert_eq!(KINDS.len(), 7);
         for (i, name) in KINDS.iter().enumerate() {
             assert_eq!(kind_of(i as u32).id(), *name);
         }

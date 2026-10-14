@@ -31,6 +31,8 @@ pub enum Tool {
     Dimension,
     Extrude,
     Revolve,
+    /// Copies of what is selected, in rows and columns or round a centre.
+    Pattern,
 }
 
 impl Tool {
@@ -47,6 +49,7 @@ impl Tool {
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
             "revolve" => Tool::Revolve,
+            "pattern" => Tool::Pattern,
             "coincident" => Tool::Constrain("coincident"),
             "horizontal" => Tool::Constrain("horizontal"),
             "vertical" => Tool::Constrain("vertical"),
@@ -72,6 +75,7 @@ impl Tool {
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
             Tool::Revolve => "revolve",
+            Tool::Pattern => "pattern",
             Tool::Constrain(kind) => kind,
         }
     }
@@ -464,6 +468,8 @@ pub struct SketchUi {
     /// The hover was caught by snapping — a midpoint, a crossing, the grid,
     /// the scene — rather than by a point of the sketch.
     pub snapped: bool,
+    /// A drag-box: where it began and where the pointer is, on screen.
+    pub band: Option<[DVec2; 2]>,
 }
 
 impl SketchUi {
@@ -513,6 +519,54 @@ pub fn other_lines(
         }
     }
     others
+}
+
+/// The other sketches' points a drawing can start from, in the world: their
+/// ends and corners, lone points and the centres of their circles and arcs
+/// — not the points round a circle, which are only how it is drawn, nor any
+/// sketch's origin.
+pub fn other_points(
+    doc: &kreate_scene::Document,
+    active: Option<kreate_scene::document::ObjectId>,
+) -> Vec<kreate_math::DVec3> {
+    use kreate_math::DVec3;
+    let mut out = Vec::new();
+    for (id, o) in doc.objects() {
+        if (o.sketch_lines.is_empty() && o.sketch.is_empty())
+            || Some(id) == active
+            || !doc.is_shown(id)
+        {
+            continue;
+        }
+        let world = doc.world_transform(id);
+        let pts = kreate_ops::ops::sketch_draw::points(doc, id);
+        let mut along = vec![false; pts.len()];
+        for c in &o.sketch {
+            match c {
+                Constraint::Circle { ring, .. } => {
+                    for v in ring {
+                        if let Some(a) = along.get_mut(*v as usize) {
+                            *a = true;
+                        }
+                    }
+                }
+                Constraint::Arc { ring, .. } if ring.len() > 2 => {
+                    for v in &ring[1..ring.len() - 1] {
+                        if let Some(a) = along.get_mut(*v as usize) {
+                            *a = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (i, p) in pts.iter().enumerate().skip(1) {
+            if !along[i] {
+                out.push(world.transform_point3(DVec3::new(p.x, p.y, 0.0)));
+            }
+        }
+    }
+    out
 }
 
 /// The feature list: every feature, and each sketch just before the first
@@ -859,13 +913,49 @@ pub fn view(
             }
         }
         (Tool::Select, _) => "sketch-prompt-select",
+        (Tool::Pattern, _) => "sketch-prompt-pattern",
     };
     view.prompt = format!(
         "{} — {}",
         catalog.get(&format!("sketch-tool-{}", ui.tool.name())),
         catalog.get(prompt_key)
     );
+    view.picked_points = ui.points.clone();
+    view.picked_lines = ui.lines.clone();
+    view.band = ui.band;
+    view.drawing = ui.tool.draws();
     view
+}
+
+/// What a drag-box from `a` to `b` on screen takes: the points inside it,
+/// and every line with both ends inside — a circle or an arc whole.
+pub fn in_band(g: &Geometry, a: DVec2, b: DVec2) -> (Vec<u32>, Vec<u32>) {
+    let (lo, hi) = (a.min(b), a.max(b));
+    let inside = |v: u32| {
+        g.screen
+            .get(v as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|q| q.x >= lo.x && q.x <= hi.x && q.y >= lo.y && q.y <= hi.y)
+    };
+    let ring: Vec<u32> = g
+        .rounds
+        .iter()
+        .flat_map(|(_, ring, _)| ring.iter().copied())
+        .collect();
+    // The origin is not something to select; a circle's ring points are
+    // its, not points of their own.
+    let points: Vec<u32> = (1..g.points.len() as u32)
+        .filter(|v| inside(*v) && !ring.contains(v))
+        .collect();
+    let lines: Vec<u32> = g
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, [p, q])| inside(*p) && inside(*q))
+        .map(|(i, _)| i as u32)
+        .collect();
+    (points, lines)
 }
 
 /// Where two segments cross, strictly inside both: two lines meeting at an
@@ -912,6 +1002,24 @@ mod tests {
             &[Constraint::Circle { centre: 4, ring }],
             |p| Some(p * 100.0),
         )
+    }
+
+    #[test]
+    fn a_drag_box_takes_the_points_inside_and_the_lines_wholly_in_it() {
+        let g = geometry();
+        // Round the square's right half: its two right corners and the side
+        // between them, not the origin's sides.
+        let (points, lines) = in_band(&g, DVec2::new(50.0, -10.0), DVec2::new(150.0, 110.0));
+        assert_eq!(points, vec![1, 2]);
+        assert_eq!(lines, vec![1]);
+        // Round the circle, drawn either way: its centre and every piece of
+        // it, but not the points it is drawn through.
+        let (points, lines) = in_band(&g, DVec2::new(360.0, 110.0), DVec2::new(240.0, -10.0));
+        assert_eq!(points, vec![4]);
+        assert_eq!(lines, (4..12).collect::<Vec<u32>>());
+        // The origin is never taken.
+        let (points, _) = in_band(&g, DVec2::new(-10.0, -10.0), DVec2::new(10.0, 10.0));
+        assert!(points.is_empty());
     }
 
     #[test]

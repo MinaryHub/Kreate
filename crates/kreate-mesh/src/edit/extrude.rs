@@ -171,11 +171,350 @@ pub fn extrude_faces(
 /// Extrudes the selected faces along the region normal.
 ///
 /// The form a keystroke reaches: `E` extrudes along the normal, and the modal
-/// transform that follows constrains to that axis by default.
+/// transform that follows constrains to that axis by default. Into the solid
+/// — a negative distance — it is a push: see [`push_faces`].
 pub fn extrude_selected_faces(mesh: &mut BMesh, distance: f32) -> Result<Extrusion, BmError> {
     let faces = mesh.selected_faces();
     let normal = mesh.region_normal(&faces);
+    if distance < 0.0 {
+        return push_faces(mesh, &faces, normal * distance);
+    }
     extrude_faces(mesh, &faces, normal * distance)
+}
+
+/// Faces pushed into the solid, as Fusion's Press Pull cuts: what they sweep
+/// through is taken away, not wrapped in walls.
+///
+/// A plain extrude inward stands a wall on every edge of the region. Where
+/// the face beyond an edge is level with the region — a face inset in a
+/// larger one — that wall is right: it is the side of the pocket. Where the
+/// face beyond already runs the way the push goes — the side of a box under
+/// its top — the wall lies on that face, two surfaces in one place, and the
+/// box is not cut at all. So every edge vertex whose faces outside the region
+/// all run along the push is welded to its moved copy: those faces follow
+/// the region down, and the walls on them fold to nothing. The top of a box
+/// pushed in makes a shorter box; an inset face pushed in makes a pocket.
+///
+/// A region that reaches a side face at one end only — a strip of a box's
+/// front, at its right-hand edge — slides at that end and stands a wall at
+/// the other, and the wall over the top is then a triangle in the top's own
+/// plane. Any wall left lying in the plane of the face beyond it is merged
+/// into that face, which is then the top with a notch in it.
+pub fn push_faces(mesh: &mut BMesh, faces: &[FaceId], offset: Vec3) -> Result<Extrusion, BmError> {
+    let dir = offset.normalize_or_zero();
+    if dir == Vec3::ZERO {
+        return extrude_faces(mesh, faces, offset);
+    }
+    let mut in_region = vec![false; mesh.slot_count(crate::Domain::Face)];
+    for f in faces {
+        if let Some(slot) = in_region.get_mut(f.index() as usize) {
+            *slot = true;
+        }
+    }
+    let inside = |f: FaceId| in_region.get(f.index() as usize).copied().unwrap_or(false);
+    // The region's vertices that slide: on its edge, and every face beyond
+    // runs along the push.
+    let mut sliding: Vec<VertId> = Vec::new();
+    for f in faces {
+        for v in mesh.face_verts(*f) {
+            if sliding.contains(&v) {
+                continue;
+            }
+            let outside: Vec<FaceId> = mesh
+                .vert_faces(v)
+                .into_iter()
+                .filter(|g| !inside(*g))
+                .collect();
+            if !outside.is_empty()
+                && outside.iter().all(|g| {
+                    let n = mesh.face_normal(*g).normalize_or_zero();
+                    n != Vec3::ZERO && n.dot(dir).abs() < 0.02
+                })
+            {
+                sliding.push(v);
+            }
+        }
+    }
+    // A face beyond follows the push only whole: every corner of it that
+    // is on the region must slide, or the one that does drags the face
+    // askew — a top quarter pulled in at one corner and not the other. Such
+    // a corner stands instead, and its wall cuts a notch in the face.
+    let mut region_points: Vec<VertId> = faces.iter().flat_map(|f| mesh.face_verts(*f)).collect();
+    region_points.sort_unstable_by_key(|v| v.index());
+    region_points.dedup();
+    loop {
+        let before = sliding.len();
+        let snapshot = sliding.clone();
+        sliding.retain(|v| {
+            mesh.vert_faces(*v)
+                .into_iter()
+                .filter(|g| !inside(*g))
+                .all(|g| {
+                    mesh.face_verts(g)
+                        .iter()
+                        .filter(|u| {
+                            region_points
+                                .binary_search_by_key(&u.index(), |r| r.index())
+                                .is_ok()
+                        })
+                        .all(|u| snapshot.contains(u))
+                })
+        });
+        if sliding.len() == before {
+            break;
+        }
+    }
+    let positions: Vec<(VertId, Vec3)> = sliding
+        .iter()
+        .filter_map(|v| Some((*v, mesh.position(*v)?)))
+        .collect();
+    // Every region vertex and where it was, to find its copy afterwards.
+    let mut region_verts: Vec<(VertId, Vec3)> = Vec::new();
+    for f in faces {
+        for v in mesh.face_verts(*f) {
+            if !region_verts.iter().any(|(u, _)| *u == v) {
+                if let Some(p) = mesh.position(v) {
+                    region_verts.push((v, p));
+                }
+            }
+        }
+    }
+    let out = extrude_faces(mesh, faces, offset)?;
+    // Each sliding vertex's copy: the new vertex where it was, moved.
+    let mut groups: Vec<Vec<VertId>> = Vec::new();
+    for (v, p) in &positions {
+        let target = *p + offset;
+        if let Some(copy) = out
+            .new_verts
+            .iter()
+            .copied()
+            .find(|n| mesh.position(*n).is_some_and(|q| q.distance(target) < 1e-7))
+        {
+            mesh.set_position(*v, target);
+            groups.push(vec![*v, copy]);
+        }
+    }
+    // The vertices the pushed faces stand on now, to find them again: the
+    // merge builds every face it touches anew.
+    let mut lifted: Vec<VertId> = out.new_verts.clone();
+    lifted.extend(groups.iter().map(|g| g[0]));
+    // The vertices that stay and their copies: what the walls run between.
+    let standing: Vec<(VertId, VertId)> = region_verts
+        .iter()
+        .filter(|(v, _)| !sliding.contains(v))
+        .filter_map(|(v, p)| {
+            let target = *p + offset;
+            let copy = out
+                .new_verts
+                .iter()
+                .copied()
+                .find(|n| mesh.position(*n).is_some_and(|q| q.distance(target) < 1e-7))?;
+            Some((*v, copy))
+        })
+        .collect();
+    crate::edit::merge::merge_groups(mesh, &groups, crate::edit::merge::MergeTarget::First)?;
+    let lifted: Vec<VertId> = lifted
+        .into_iter()
+        .filter(|v| mesh.vert(*v).is_some())
+        .collect();
+    let mut on = vec![false; mesh.slot_count(crate::Domain::Point)];
+    for v in &lifted {
+        on[v.index() as usize] = true;
+    }
+    let new_faces: Vec<FaceId> = mesh
+        .face_ids()
+        .filter(|f| {
+            let ring = mesh.face_verts(*f);
+            !ring.is_empty()
+                && ring
+                    .iter()
+                    .all(|v| on.get(v.index() as usize).copied().unwrap_or(false))
+        })
+        .collect();
+    let mut new_faces = new_faces;
+    let is_new = |f: FaceId, new_faces: &[FaceId]| new_faces.contains(&f);
+    // The walls left: faces with an edge from a standing vertex to its copy.
+    let walls: Vec<FaceId> = mesh
+        .face_ids()
+        .filter(|f| !is_new(*f, &new_faces))
+        .filter(|f| {
+            let ring = mesh.face_verts(*f);
+            (0..ring.len()).any(|i| {
+                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                standing
+                    .iter()
+                    .any(|(v, c)| (a == *v && b == *c) || (a == *c && b == *v))
+            })
+        })
+        .collect();
+    // Each wall lying in the plane of a face beyond it, with that face. The
+    // wall faces the other way and covers part of that face: merged across
+    // their shared edge — whose two sides run opposite ways, as any edge's
+    // do — the face's outline goes round the wall's, and the part the wall
+    // covered is cut out of it. The notch.
+    let mut joined: Vec<Vec<FaceId>> = Vec::new();
+    for w in &walls {
+        let nw = mesh.face_normal(*w).normalize_or_zero();
+        if nw == Vec3::ZERO {
+            continue;
+        }
+        for l in mesh.face_loops(*w) {
+            let Some(e) = mesh.loop_edge(l) else { continue };
+            for g in mesh.edge_faces(e) {
+                if g == *w || walls.contains(&g) || is_new(g, &new_faces) {
+                    continue;
+                }
+                if mesh.face_normal(g).normalize_or_zero().dot(nw).abs() > 0.9999 {
+                    match joined.iter_mut().find(|j| j.contains(&g) || j.contains(w)) {
+                        Some(j) => {
+                            for f in [*w, g] {
+                                if !j.contains(&f) {
+                                    j.push(f);
+                                }
+                            }
+                        }
+                        None => joined.push(vec![*w, g]),
+                    }
+                }
+            }
+        }
+    }
+    let mut merged = Vec::new();
+    for group in &joined {
+        merged.extend(crate::edit::dissolve_faces(mesh, group, &[])?.faces);
+    }
+    unspike(mesh, merged)?;
+    // The pushed faces themselves are untouched by that, but look again.
+    new_faces.retain(|f| mesh.face(*f).is_some());
+    let side_faces: Vec<FaceId> = out
+        .side_faces
+        .iter()
+        .copied()
+        .filter(|f| mesh.face(*f).is_some())
+        .collect();
+    mesh.select_none();
+    for f in &new_faces {
+        mesh.set_face_selected(*f, true);
+    }
+    mesh.flush_selection(SelectMode::Face);
+    Ok(Extrusion {
+        new_faces,
+        side_faces,
+        new_verts: lifted,
+        normal: out.normal,
+    })
+}
+
+/// Takes the spikes out of `faces`: an outline that runs out to a vertex
+/// and straight back, which a notch merged into a face leaves where the
+/// notch was the face's whole width. The vertex goes from the outline, and
+/// the face beyond the edge the spike ran along takes the point the outline
+/// now turns at, so the two still meet edge to edge. A vertex no face uses
+/// any more goes too.
+fn unspike(mesh: &mut BMesh, mut faces: Vec<FaceId>) -> Result<(), BmError> {
+    let position = |mesh: &BMesh, v: VertId| mesh.position(v).unwrap_or(Vec3::ZERO);
+    let mut loose: Vec<VertId> = Vec::new();
+    // Each pass mends one spike and rebuilds two faces; the bound is only a
+    // guard against an outline that will not settle.
+    for _ in 0..faces.len() * 8 + 8 {
+        let mut mended = false;
+        'faces: for fi in 0..faces.len() {
+            let f = faces[fi];
+            if mesh.face(f).is_none() {
+                continue;
+            }
+            let ring = mesh.face_verts(f);
+            let n = ring.len();
+            if n < 4 {
+                continue;
+            }
+            for i in 0..n {
+                let (pi, ni) = ((i + n - 1) % n, (i + 1) % n);
+                let v = ring[i];
+                let a = position(mesh, ring[pi]) - position(mesh, v);
+                let b = position(mesh, ring[ni]) - position(mesh, v);
+                if a.length() < 1e-7 || b.length() < 1e-7 || (a.length() - b.length()).abs() < 1e-7
+                {
+                    continue;
+                }
+                if a.normalize().dot(b.normalize()) < 0.9999 {
+                    continue;
+                }
+                // Out along one edge and back along the other: the nearer end
+                // is where the outline turns now; the farther, the edge's other
+                // end, which the face beyond shares.
+                let (near, far) = if a.length() < b.length() {
+                    (ring[pi], ring[ni])
+                } else {
+                    (ring[ni], ring[pi])
+                };
+                let beyond = mesh.vert_faces(v).into_iter().find(|g| {
+                    if *g == f {
+                        return false;
+                    }
+                    let r = mesh.face_verts(*g);
+                    (0..r.len()).any(|k| {
+                        let (x, y) = (r[k], r[(k + 1) % r.len()]);
+                        (x == v && y == far) || (x == far && y == v)
+                    })
+                });
+                let Some(beyond) = beyond else {
+                    continue;
+                };
+                let mut other = mesh.face_verts(beyond);
+                let m = other.len();
+                if other.contains(&near) {
+                    // Both faces fold at `v` through the same two points —
+                    // a corner the notch took whole: it leaves both.
+                    let k = other.iter().position(|x| *x == v).expect("shares v");
+                    let (x, y) = (other[(k + m - 1) % m], other[(k + 1) % m]);
+                    if !((x == near && y == far) || (x == far && y == near)) || m < 4 {
+                        continue;
+                    }
+                    other.remove(k);
+                } else {
+                    let at = (0..m).find(|k| {
+                        let (x, y) = (other[*k], other[(k + 1) % m]);
+                        (x == v && y == far) || (x == far && y == v)
+                    });
+                    let Some(at) = at else { continue };
+                    other.insert(at + 1, near);
+                }
+                let mut mine = ring.clone();
+                mine.remove(i);
+                mesh.remove_face(f);
+                mesh.remove_face(beyond);
+                let f2 = mesh.add_face(&mine)?;
+                let beyond2 = mesh.add_face(&other)?;
+                faces[fi] = f2;
+                // The face beyond is rebuilt too, under a new name; it may
+                // have a spike of its own still.
+                match faces.iter().position(|g| *g == beyond) {
+                    Some(k) => faces[k] = beyond2,
+                    None => faces.push(beyond2),
+                }
+                loose.push(v);
+                mended = true;
+                break 'faces;
+            }
+        }
+        if !mended {
+            break;
+        }
+    }
+    if loose.is_empty() {
+        return Ok(());
+    }
+    let wires: Vec<_> = mesh.edge_ids().filter(|e| mesh.is_wire_edge(*e)).collect();
+    for e in wires {
+        mesh.remove_edge(e);
+    }
+    for v in loose {
+        if mesh.vert(v).is_some() && mesh.vert_faces(v).is_empty() {
+            mesh.remove_vert(v);
+        }
+    }
+    Ok(())
 }
 
 /// What an edge-and-vertex extrusion produced: the new vertices, which a
@@ -613,5 +952,236 @@ mod tests {
         assert_eq!(out.new_verts.len(), 1);
         assert_eq!(m.num_edges(), edges_before + 1);
         assert_eq!(m.num_faces(), 1);
+    }
+}
+
+#[cfg(test)]
+mod push_tests {
+    use super::*;
+    use crate::measure::{is_closed, mass_properties};
+    use crate::primitives;
+
+    fn top(m: &BMesh) -> FaceId {
+        m.face_ids()
+            .find(|f| m.face_normal(*f).normalize_or_zero().dot(Vec3::Z) > 0.999)
+            .unwrap()
+    }
+
+    /// Every edge of every face along an axis — nothing pulled askew, as a
+    /// corner that slid alone pulls its top quarter — and no outline that
+    /// runs out and straight back.
+    fn square(m: &BMesh) {
+        for g in m.face_ids() {
+            let ring: Vec<Vec3> = m
+                .face_verts(g)
+                .iter()
+                .filter_map(|v| m.position(*v))
+                .collect();
+            for i in 0..ring.len() {
+                let d = ring[(i + 1) % ring.len()] - ring[i];
+                let along = [d.x, d.y, d.z].iter().filter(|c| c.abs() > 1e-5).count();
+                assert!(along <= 1, "a slanted edge in {ring:?}");
+                let next = ring[(i + 2) % ring.len()] - ring[(i + 1) % ring.len()];
+                assert!(
+                    d.normalize_or_zero().dot(next.normalize_or_zero()) > -0.999,
+                    "a spike in {ring:?}"
+                );
+            }
+        }
+    }
+
+    fn volume(m: &BMesh) -> f64 {
+        let data = m.to_mesh_data();
+        assert!(is_closed(&data), "the solid is not closed");
+        mass_properties(&data, |p| p).volume
+    }
+
+    #[test]
+    fn a_boxs_top_pushed_in_makes_a_shorter_box() {
+        // Fusion's Press Pull on the top of a box: the box loses the slab the
+        // face swept through. A plain extrude stood four walls on the box's
+        // own sides and took nothing away.
+        let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+        let f = top(&m);
+        m.set_face_selected(f, true);
+        m.flush_selection(SelectMode::Face);
+        let out = extrude_selected_faces(&mut m, -0.5).unwrap();
+        assert_eq!(m.num_faces(), 6, "still a box");
+        assert_eq!(m.num_verts(), 8);
+        assert!(
+            (volume(&m) - 2.0 * 2.0 * 1.5).abs() < 1e-4,
+            "{}",
+            volume(&m)
+        );
+        square(&m);
+        assert_eq!(out.new_faces.len(), 1, "the top stays selected");
+        let n = m.face_normal(out.new_faces[0]).normalize_or_zero();
+        assert!(n.dot(Vec3::Z) > 0.999);
+    }
+
+    #[test]
+    fn an_inset_face_pushed_in_makes_a_pocket() {
+        let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+        let f = top(&m);
+        m.set_face_selected(f, true);
+        m.flush_selection(SelectMode::Face);
+        crate::edit::inset_selected(&mut m, 0.25, 0.0).unwrap();
+        extrude_selected_faces(&mut m, -0.5).unwrap();
+        // 8, less a 1.5 × 1.5 × 0.5 pocket.
+        assert!(
+            (volume(&m) - (8.0 - 1.5 * 1.5 * 0.5)).abs() < 1e-4,
+            "{}",
+            volume(&m)
+        );
+    }
+
+    /// A box cut into strips by two loop cuts on its front; `strip` picks
+    /// which strip to push: 0 at the left edge, 1 in the middle.
+    fn strips() -> BMesh {
+        // A 3 x 1 x 2 block whose front (-Y) is three faces side by side,
+        // and whose top is three faces to match.
+        let p = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let verts = vec![
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(2.0, 0.0, 0.0),
+            p(3.0, 0.0, 0.0),
+            p(0.0, 1.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(2.0, 1.0, 0.0),
+            p(3.0, 1.0, 0.0),
+            p(0.0, 0.0, 2.0),
+            p(1.0, 0.0, 2.0),
+            p(2.0, 0.0, 2.0),
+            p(3.0, 0.0, 2.0),
+            p(0.0, 1.0, 2.0),
+            p(1.0, 1.0, 2.0),
+            p(2.0, 1.0, 2.0),
+            p(3.0, 1.0, 2.0),
+        ];
+        let faces: Vec<Vec<u32>> = vec![
+            // front, three strips, facing -Y
+            vec![0, 1, 9, 8],
+            vec![1, 2, 10, 9],
+            vec![2, 3, 11, 10],
+            // top, three, facing +Z
+            vec![8, 9, 13, 12],
+            vec![9, 10, 14, 13],
+            vec![10, 11, 15, 14],
+            // bottom, three, facing -Z
+            vec![0, 4, 5, 1],
+            vec![1, 5, 6, 2],
+            vec![2, 6, 7, 3],
+            // back, three, facing +Y
+            vec![4, 12, 13, 5],
+            vec![5, 13, 14, 6],
+            vec![6, 14, 15, 7],
+            // left and right ends
+            vec![0, 8, 12, 4],
+            vec![3, 7, 15, 11],
+        ];
+        BMesh::from_mesh_data(&crate::MeshData::from_faces(verts, &faces))
+    }
+
+    fn front_strip(m: &BMesh, x: f32) -> FaceId {
+        m.face_ids()
+            .find(|f| {
+                let n = m.face_normal(*f).normalize_or_zero();
+                let c: Vec3 = m
+                    .face_verts(*f)
+                    .iter()
+                    .filter_map(|v| m.position(*v))
+                    .sum::<Vec3>()
+                    / 4.0;
+                n.dot(-Vec3::Y) > 0.999 && (c.x - x).abs() < 1e-4
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_strip_at_the_end_of_a_box_pushed_in_notches_it_with_no_triangles_left() {
+        // The picture a user sent: the end strip of a front pushed in left a
+        // triangle on the top, in the top's plane, beside the top.
+        let mut m = strips();
+        let f = front_strip(&m, 2.5);
+        m.set_face_selected(f, true);
+        m.flush_selection(SelectMode::Face);
+        extrude_selected_faces(&mut m, -0.4).unwrap();
+        assert!(
+            (volume(&m) - (6.0 - 0.4 * 2.0)).abs() < 1e-4,
+            "{}",
+            volume(&m)
+        );
+        square(&m);
+        for g in m.face_ids() {
+            assert!(
+                m.face_verts(g).len() > 3,
+                "a triangle is left: {:?}",
+                m.face_verts(g)
+            );
+        }
+    }
+
+    #[test]
+    fn a_strip_in_the_middle_pushed_in_notches_top_and_bottom_cleanly() {
+        let mut m = strips();
+        let f = front_strip(&m, 1.5);
+        m.set_face_selected(f, true);
+        m.flush_selection(SelectMode::Face);
+        extrude_selected_faces(&mut m, -0.4).unwrap();
+        assert!(
+            (volume(&m) - (6.0 - 0.4 * 2.0)).abs() < 1e-4,
+            "{}",
+            volume(&m)
+        );
+        square(&m);
+        // No face lies on another in the top's plane: the top pieces and
+        // the walls over the notch are one face per piece.
+        let tops = m
+            .face_ids()
+            .filter(|g| m.face_normal(*g).normalize_or_zero().dot(Vec3::Z) > 0.999)
+            .count();
+        assert_eq!(tops, 3, "the top's three pieces, the middle one notched");
+    }
+
+    #[test]
+    fn a_quarter_of_a_face_at_a_corner_pushed_in_leaves_its_neighbours_square() {
+        // The second picture: a cube cut in two each way, the front's upper
+        // quarter by a side pushed in. Its corner on the cube's edge slid on
+        // its own and pulled the top and the side askew.
+        let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+        let all: Vec<FaceId> = m.face_ids().collect();
+        crate::edit::subdivide::subdivide_faces(&mut m, &all).unwrap();
+        m.select_none();
+        // The front (-Y) quarter at the top and the -X side.
+        let f = m
+            .face_ids()
+            .find(|f| {
+                let n = m.face_normal(*f).normalize_or_zero();
+                let c: Vec3 = m
+                    .face_verts(*f)
+                    .iter()
+                    .filter_map(|v| m.position(*v))
+                    .sum::<Vec3>()
+                    / 4.0;
+                n.dot(-Vec3::Y) > 0.999 && c.x < 0.0 && c.z > 0.0
+            })
+            .unwrap();
+        m.set_face_selected(f, true);
+        m.flush_selection(SelectMode::Face);
+        extrude_selected_faces(&mut m, -0.5).unwrap();
+        assert!((volume(&m) - (8.0 - 0.5)).abs() < 1e-4, "{}", volume(&m));
+        square(&m);
+    }
+
+    #[test]
+    fn outward_is_the_plain_extrude_still() {
+        let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+        let f = top(&m);
+        m.set_face_selected(f, true);
+        m.flush_selection(SelectMode::Face);
+        extrude_selected_faces(&mut m, 0.5).unwrap();
+        assert_eq!(m.num_faces(), 10, "walls on every side");
+        assert!((volume(&m) - 2.0 * 2.0 * 2.5).abs() < 1e-4);
     }
 }

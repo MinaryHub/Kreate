@@ -29,6 +29,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Constrain>();
     registry.register::<MovePoints>();
     registry.register::<Delete>();
+    registry.register::<Pattern>();
 }
 
 /// How near level or upright a line has to be drawn to be made so: about a
@@ -810,6 +811,210 @@ impl Operator for Delete {
     }
 }
 
+// --- patterns ----------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct PatternParams {
+    /// The points to repeat, with every line between two of them.
+    #[param(hidden)]
+    pub points: Vec<u32>,
+    /// Lines to repeat, by their place in the sketch's list; their ends
+    /// count as picked points.
+    #[param(hidden)]
+    pub lines: Vec<u32>,
+    /// In rows and columns, or round a centre.
+    #[param(variants("rectangular", "circular"))]
+    pub kind: u32,
+    /// How many along the first direction — or round the circle — the
+    /// original counted.
+    #[param(min = 1.0, max = 500.0)]
+    pub count: u32,
+    /// The step along the sketch's X.
+    #[param(unit = "length")]
+    pub spacing: f64,
+    /// How many along the sketch's Y, the original counted.
+    #[param(min = 1.0, max = 500.0)]
+    pub count2: u32,
+    /// The step along the sketch's Y.
+    #[param(unit = "length")]
+    pub spacing2: f64,
+    /// What a circular pattern turns round, in the sketch's plane.
+    #[param(unit = "length")]
+    pub centre: [f64; 3],
+    /// How far round a circular pattern goes, in radians. A full turn puts
+    /// the copies evenly round it; less, the last copy lands on the angle.
+    #[param(unit = "angle")]
+    pub angle: f64,
+}
+
+impl Default for PatternParams {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            lines: Vec::new(),
+            kind: 0,
+            count: 3,
+            spacing: 0.01,
+            count2: 1,
+            spacing2: 0.01,
+            centre: [0.0; 3],
+            angle: std::f64::consts::TAU,
+        }
+    }
+}
+
+/// Where each copy of a pattern goes: the moves that take the original to
+/// each copy, the original's own left out.
+pub fn pattern_moves(params: &PatternParams) -> Vec<kreate_math::glam::DAffine2> {
+    use kreate_math::glam::DAffine2;
+    let mut out = Vec::new();
+    if params.kind == 1 {
+        let n = params.count.clamp(1, 500);
+        let full = (params.angle.abs() - std::f64::consts::TAU).abs() < 1e-9;
+        let step = if full || n < 2 {
+            params.angle / n as f64
+        } else {
+            params.angle / (n - 1) as f64
+        };
+        let c = xy(params.centre);
+        for k in 1..n {
+            out.push(
+                DAffine2::from_translation(c)
+                    * DAffine2::from_angle(step * k as f64)
+                    * DAffine2::from_translation(-c),
+            );
+        }
+    } else {
+        for j in 0..params.count2.clamp(1, 500) {
+            for i in 0..params.count.clamp(1, 500) {
+                if i == 0 && j == 0 {
+                    continue;
+                }
+                out.push(DAffine2::from_translation(DVec2::new(
+                    params.spacing * i as f64,
+                    params.spacing2 * j as f64,
+                )));
+            }
+        }
+    }
+    out
+}
+
+/// What a pattern repeats: the points picked, the ends of the lines picked,
+/// and the centre of any circle or arc wholly among them; then every line
+/// with both ends in that set.
+pub fn pattern_source(
+    lines: &[[u32; 2]],
+    constraints: &[Constraint],
+    points: &[u32],
+    picked_lines: &[u32],
+    count: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut set: Vec<u32> = points
+        .iter()
+        .copied()
+        .filter(|v| (*v as usize) < count)
+        .collect();
+    for l in picked_lines {
+        if let Some(ends) = lines.get(*l as usize) {
+            set.extend_from_slice(ends);
+        }
+    }
+    for c in constraints {
+        if let Constraint::Circle { centre, ring } | Constraint::Arc { centre, ring } = c {
+            if !ring.is_empty() && ring.iter().all(|v| set.contains(v)) {
+                set.push(*centre);
+            }
+        }
+    }
+    set.retain(|v| (*v as usize) < count);
+    set.sort_unstable();
+    set.dedup();
+    let with: Vec<u32> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, [a, b])| set.contains(a) && set.contains(b))
+        .map(|(i, _)| i as u32)
+        .collect();
+    (set, with)
+}
+
+/// Copies of picked lines and points in rows and columns, or round a
+/// centre — Fusion's Rectangular and Circular Pattern for a sketch. The
+/// copies keep the shape the picked ones have: a circle stays a circle,
+/// lines that were parallel stay so; the dimensions and fixings stay with
+/// the original. One step.
+pub struct Pattern;
+
+impl Operator for Pattern {
+    type Params = PatternParams;
+    fn id() -> &'static str {
+        "sketch.pattern"
+    }
+    fn label() -> &'static str {
+        "Sketch Pattern"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let mut pts = points(doc.document(), id);
+        let object = doc.document().object(id).expect("the sketch");
+        let (set, with) = pattern_source(
+            &object.sketch_lines,
+            &object.sketch,
+            &params.points,
+            &params.lines,
+            pts.len(),
+        );
+        let moves = pattern_moves(params);
+        if set.is_empty() || moves.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        if (set.len() + with.len()) * moves.len() > 200_000 {
+            return Err(OpError::Failed("that pattern is too large".into()));
+        }
+        let turning = params.kind == 1;
+        // The shape, not where it is: kept on every copy. Level and upright
+        // only where the copy is not turned.
+        let shape: Vec<Constraint> = object
+            .sketch
+            .iter()
+            .filter(|c| c.points().iter().all(|v| set.contains(v)))
+            .filter(|c| match c {
+                Constraint::Horizontal { .. } | Constraint::Vertical { .. } => !turning,
+                Constraint::Distance { .. }
+                | Constraint::Angle { .. }
+                | Constraint::Fixed { .. } => false,
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        let source_lines: Vec<[u32; 2]> = with
+            .iter()
+            .map(|l| object.sketch_lines[*l as usize])
+            .collect();
+        let mut lines = Vec::new();
+        let mut constraints = Vec::new();
+        for m in &moves {
+            let mut map = std::collections::HashMap::new();
+            for v in &set {
+                map.insert(*v, pts.len() as u32);
+                pts.push(m.transform_point2(pts[*v as usize]));
+            }
+            let to = |v: u32| map.get(&v).copied().unwrap_or(v);
+            lines.extend(source_lines.iter().map(|[a, b]| [to(*a), to(*b)]));
+            constraints.extend(shape.iter().map(|c| c.remapped(&to)));
+        }
+        commit(doc, id, pts, lines, constraints)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,6 +1086,123 @@ mod tests {
         assert!(p[1].y.abs() < 1e-7, "level: {p:?}");
         assert!((p[2].x - p[1].x).abs() < 1e-7, "upright: {p:?}");
         assert_eq!(h.entries().len(), 2, "one step a stroke");
+    }
+
+    #[test]
+    fn a_circle_patterned_in_rows_and_columns_is_six_circles_one_step() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.circle",
+            &[
+                ("centre", PropertyValue::Vec3([0.01, 0.01, 0.0])),
+                ("radius", PropertyValue::Float(0.002)),
+            ],
+        )
+        .unwrap();
+        let circle_lines: Vec<i64> =
+            (0..doc.object(id).unwrap().sketch_lines.len() as i64).collect();
+        let before = points(&doc, id).len();
+        let steps = h.entries().len();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.pattern",
+            &[
+                (
+                    "lines",
+                    PropertyValue::Ints(circle_lines.iter().map(|l| *l as u32).collect()),
+                ),
+                ("count", PropertyValue::Int(3)),
+                ("spacing", PropertyValue::Float(0.01)),
+                ("count2", PropertyValue::Int(2)),
+                ("spacing2", PropertyValue::Float(0.02)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(h.entries().len(), steps + 1, "one step");
+        let o = doc.object(id).unwrap();
+        let circles: Vec<_> = o
+            .sketch
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Circle { centre, .. } => Some(*centre),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles.len(), 6, "every copy is still a circle");
+        let p = points(&doc, id);
+        // The origin aside, the circle's points six times over.
+        assert_eq!(p.len() - 1, (before - 1) * 6);
+        let mut centres: Vec<(i64, i64)> = circles
+            .iter()
+            .map(|c| {
+                let q = p[*c as usize];
+                ((q.x * 1e4).round() as i64, (q.y * 1e4).round() as i64)
+            })
+            .collect();
+        centres.sort();
+        assert_eq!(
+            centres,
+            vec![
+                (100, 100),
+                (100, 300),
+                (200, 100),
+                (200, 300),
+                (300, 100),
+                (300, 300)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_patterned_round_a_centre_turns_with_each_copy() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[("points", PropertyValue::Floats(vec![0.01, 0.0, 0.02, 0.0]))],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.pattern",
+            &[
+                ("lines", PropertyValue::Ints(vec![0])),
+                ("kind", PropertyValue::Enum(1)),
+                ("count", PropertyValue::Int(4)),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        assert_eq!(o.sketch_lines.len(), 4);
+        // Level once, not on the turned copies.
+        let level = o
+            .sketch
+            .iter()
+            .filter(|c| matches!(c, Constraint::Horizontal { .. }))
+            .count();
+        assert_eq!(level, 1);
+        let p = points(&doc, id);
+        let [a, b] = o.sketch_lines[1];
+        // A quarter turn: from (0, 0.01) to (0, 0.02).
+        assert!(
+            (p[a as usize] - DVec2::new(0.0, 0.01)).length() < 1e-9,
+            "{:?}",
+            p[a as usize]
+        );
+        assert!((p[b as usize] - DVec2::new(0.0, 0.02)).length() < 1e-9);
     }
 
     #[test]

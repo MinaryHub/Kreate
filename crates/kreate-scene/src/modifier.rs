@@ -111,6 +111,9 @@ pub enum ModifierKind {
     /// Combined with another object's mesh — the one thing in the stack that
     /// reads beyond its own input, so the cache keys it on that object too.
     Boolean(BooleanModifier),
+    /// Copies set along another object's edges or sketch lines; read as a
+    /// boolean reads its cutter.
+    PathArray(PathArrayModifier),
     /// A modifier that moves the mesh according to the clock.
     ///
     /// Exists so that the cache's time-keyed path can be driven, and only in a
@@ -138,6 +141,7 @@ impl ModifierKind {
             ModifierKind::Solidify(_) => "solidify",
             ModifierKind::Bevel(_) => "bevel",
             ModifierKind::Boolean(_) => "boolean",
+            ModifierKind::PathArray(_) => "path_array",
             #[cfg(test)]
             ModifierKind::Drift(_) => "drift",
         }
@@ -155,6 +159,7 @@ impl ModifierKind {
             ModifierKind::Solidify(_) => "modifier-solidify",
             ModifierKind::Bevel(_) => "modifier-bevel",
             ModifierKind::Boolean(_) => "modifier-boolean",
+            ModifierKind::PathArray(_) => "modifier-path-array",
             #[cfg(test)]
             ModifierKind::Drift(_) => "modifier-drift",
         }
@@ -177,7 +182,8 @@ impl ModifierKind {
             | ModifierKind::Array(_)
             | ModifierKind::Solidify(_)
             | ModifierKind::Bevel(_)
-            | ModifierKind::Boolean(_) => false,
+            | ModifierKind::Boolean(_)
+            | ModifierKind::PathArray(_) => false,
             #[cfg(test)]
             ModifierKind::Drift(_) => true,
         }
@@ -207,6 +213,25 @@ impl ModifierKind {
                 // gone: the input as it was, not nothing.
                 None => input.clone(),
             },
+            ModifierKind::PathArray(m) => {
+                let Some(operand) = operands.iter().find(|o| o.uid == m.path) else {
+                    return input.clone();
+                };
+                let points: Vec<kreate_math::Vec3> = operand
+                    .mesh
+                    .positions()
+                    .iter()
+                    .map(|p| operand.to_local.transform_point3(p.as_dvec3()).as_vec3())
+                    .collect();
+                let mut edges: Vec<[u32; 2]> = operand.mesh.edges().to_vec();
+                edges.extend(operand.lines.iter().copied());
+                match kreate_mesh::modifiers::path_chain(&points, &edges) {
+                    Some((path, closed)) => {
+                        kreate_mesh::modifiers::path_array(input, &path, closed, &m.params)
+                    }
+                    None => input.clone(),
+                }
+            }
             #[cfg(test)]
             ModifierKind::Drift(per_second) => {
                 let mut moved = input.clone();
@@ -228,13 +253,24 @@ pub struct BooleanModifier {
     pub op: BooleanOp,
 }
 
+/// A path array's settings: the object whose edges — or sketch lines —
+/// the copies follow, by its identity, and how they are set along it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PathArrayModifier {
+    pub path: Uid,
+    pub params: kreate_mesh::modifiers::PathArrayParams,
+}
+
 /// Another object's mesh, as a boolean reads it: its datablock, and the
 /// transform from its space into the space of the object being evaluated.
+/// With a sketch's lines, which are its own and not its mesh's edges, for a
+/// path array.
 #[derive(Clone, Debug)]
 pub struct Operand {
     pub uid: Uid,
     pub mesh: Arc<MeshData>,
     pub to_local: kreate_math::DAffine3,
+    pub lines: Arc<Vec<[u32; 2]>>,
 }
 
 impl PartialEq for Operand {
@@ -242,6 +278,7 @@ impl PartialEq for Operand {
         self.uid == other.uid
             && Arc::ptr_eq(&self.mesh, &other.mesh)
             && self.to_local == other.to_local
+            && self.lines == other.lines
     }
 }
 
@@ -340,13 +377,15 @@ fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<
     let mut out: Vec<Operand> = Vec::new();
     let to_local = doc.world_transform(id).inverse();
     for m in stack.iter().filter(|m| m.enabled) {
-        let ModifierKind::Boolean(b) = m.kind else {
-            continue;
+        let uid = match m.kind {
+            ModifierKind::Boolean(b) => b.operand,
+            ModifierKind::PathArray(p) => p.path,
+            _ => continue,
         };
-        if out.iter().any(|o| o.uid == b.operand) {
+        if out.iter().any(|o| o.uid == uid) {
             continue;
         }
-        let Some(other) = doc.object_by_uid(b.operand).filter(|o| *o != id) else {
+        let Some(other) = doc.object_by_uid(uid).filter(|o| *o != id) else {
             continue;
         };
         let Some(mesh) = doc
@@ -356,10 +395,15 @@ fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<
         else {
             continue;
         };
+        let lines = doc
+            .object(other)
+            .map(|o| o.sketch_lines.clone())
+            .unwrap_or_default();
         out.push(Operand {
-            uid: b.operand,
+            uid,
             mesh: mesh.clone(),
             to_local: to_local * doc.world_transform(other),
+            lines: Arc::new(lines),
         });
     }
     out
@@ -1574,6 +1618,63 @@ mod time_tests {
                 op: BooleanOp::Difference,
             });
         assert_eq!(cache.evaluated(&doc, target, &ctx).unwrap().num_faces(), 6);
+    }
+
+    #[test]
+    fn a_path_array_follows_a_sketchs_lines_and_moves_with_them() {
+        use kreate_mesh::modifiers::PathArrayParams;
+        let mut doc = Document::new();
+        let post = doc.add_mesh_object("Post", kreate_mesh::primitives::cube(0.2));
+        // A sketch's path: points and its own lines, no faces — a 4 m line
+        // along X, two metres up the scene.
+        let mesh = doc.add_mesh(MeshData::from_faces(
+            vec![
+                kreate_math::Vec3::ZERO,
+                kreate_math::Vec3::new(0.0, 0.0, 0.0),
+                kreate_math::Vec3::new(4.0, 0.0, 0.0),
+            ],
+            &[],
+        ));
+        let mut path =
+            crate::document::Object::new("Fence", crate::document::ObjectData::Mesh(mesh));
+        path.sketch_lines = vec![[1, 2]];
+        path.transform.translation = kreate_math::DVec3::new(0.0, 0.0, 2.0);
+        let path = doc.add_object(path);
+        let uid = doc.object_uid(path).unwrap();
+        doc.object_mut(post)
+            .unwrap()
+            .modifiers
+            .push(ModifierInstance::new(ModifierKind::PathArray(
+                PathArrayModifier {
+                    path: uid,
+                    params: PathArrayParams {
+                        count: 5,
+                        offset: kreate_math::Vec3::new(0.0, 0.5, 0.0),
+                        ..Default::default()
+                    },
+                },
+            )));
+        let mut cache = ModifierCache::new();
+        let ctx = EvalCtx::still();
+        let a = cache.evaluated(&doc, post, &ctx).unwrap();
+        assert_eq!(a.num_faces(), 30, "five posts");
+        let b = a.bounds();
+        // Along the line's 4 m, half a metre to its side, at its height.
+        assert!(
+            (b.min.x + 0.1).abs() < 1e-5 && (b.max.x - 4.1).abs() < 1e-5,
+            "{b:?}"
+        );
+        assert!((b.min.y - 0.4).abs() < 1e-5, "{b:?}");
+        assert!((b.min.z - 1.9).abs() < 1e-5, "{b:?}");
+        // The sketch lengthened: the posts spread with it.
+        let m = doc.object(path).unwrap().mesh().unwrap();
+        doc.mesh_mut(m).unwrap().positions_mut()[2].x = 8.0;
+        let c = cache.evaluated(&doc, post, &ctx).unwrap();
+        assert!((c.bounds().max.x - 8.1).abs() < 1e-5);
+        // No path: the post as it was.
+        doc.object_mut(post).unwrap().modifiers[0].kind =
+            ModifierKind::PathArray(PathArrayModifier::default());
+        assert_eq!(cache.evaluated(&doc, post, &ctx).unwrap().num_faces(), 6);
     }
 
     #[test]

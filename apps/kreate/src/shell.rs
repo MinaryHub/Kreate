@@ -361,6 +361,8 @@ pub struct ShellState {
     pub sketch_dim_edit: Option<(usize, String)>,
     /// The extrude and revolve dialog's settings, kept between uses.
     pub solid_dialog: SolidDialog,
+    /// The sketch pattern's settings, while its tool is in hand.
+    pub pattern_dialog: PatternDialog,
     /// The feature list: every sketch and feature, in the order made.
     pub features: Vec<FeatureRow>,
     /// A feature being edited from the list.
@@ -753,6 +755,7 @@ impl Default for ShellState {
             sketch_lines: Vec::new(),
             sketch_dim_edit: None,
             solid_dialog: SolidDialog::default(),
+            pattern_dialog: PatternDialog::default(),
             features: Vec::new(),
             feature_edit: None,
             measure_preview: Vec::new(),
@@ -1040,6 +1043,13 @@ pub fn modifier_rows(
                 params: kreate_ops::ops::modifier::setter_params(doc, index as u32, &entry.kind),
                 // A boolean names another mesh object: offer them.
                 choices: match entry.kind {
+                    // A path is any other object with points: a mesh's
+                    // edges or a sketch's lines.
+                    ModifierKind::PathArray(_) => doc
+                        .objects()
+                        .filter(|(other, o)| *other != id && o.mesh().is_some())
+                        .map(|(_, o)| o.name.clone())
+                        .collect(),
                     ModifierKind::Boolean(_) => doc
                         .objects()
                         .filter(|(other, o)| *other != id && o.mesh().is_some())
@@ -1061,6 +1071,7 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
         ModifierKind::Solidify(_) => "object.modifier_set_solidify",
         ModifierKind::Bevel(_) => "object.modifier_set_bevel",
         ModifierKind::Boolean(_) => "object.modifier_set_boolean",
+        ModifierKind::PathArray(_) => "object.modifier_set_path_array",
     }
 }
 
@@ -4131,7 +4142,16 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                 label: l.menu_sketch.clone(),
                 nodes: sketch_tool_nodes(
                     l,
-                    &["line", "rectangle", "circle", "arc", "point", "trim"],
+                    &[
+                        "select",
+                        "line",
+                        "rectangle",
+                        "circle",
+                        "arc",
+                        "pattern",
+                        "point",
+                        "trim",
+                    ],
                 ),
             }),
             kreate_ops::mode::Menu::Constrain => out.push(TopMenu {
@@ -11397,6 +11417,7 @@ const KIND_KEYS: &[&str] = &[
     "modifier-solidify",
     "modifier-bevel",
     "modifier-boolean",
+    "modifier-path-array",
 ];
 
 /// The built-in English catalog.
@@ -11461,6 +11482,8 @@ enum RibbonIcon {
     SkPerpendicular,
     SkHorizontal,
     SkFinish,
+    SkSelect,
+    SkPattern,
 }
 
 impl RibbonIcon {
@@ -11486,6 +11509,8 @@ impl RibbonIcon {
                 "circle" => Self::SkCircle,
                 "arc" => Self::SkArc,
                 "point" => Self::SkPoint,
+                "select" => Self::SkSelect,
+                "pattern" => Self::SkPattern,
                 "dimension" => Self::SkDimension,
                 "coincident" => Self::SkCoincident,
                 "perpendicular" => Self::SkPerpendicular,
@@ -11542,7 +11567,9 @@ impl RibbonIcon {
             | Self::SkRect
             | Self::SkCircle
             | Self::SkArc
-            | Self::SkPoint => theme.accent,
+            | Self::SkPoint
+            | Self::SkPattern => theme.accent,
+            Self::SkSelect => theme.text,
             Self::SkDimension | Self::SkCoincident | Self::SkPerpendicular | Self::SkHorizontal => {
                 theme.info
             }
@@ -11789,6 +11816,29 @@ impl RibbonIcon {
             Self::SkArc => {
                 line(ellipse(0.5, 0.65, 0.38, 0.38, pi, tau));
             }
+            Self::SkSelect => {
+                // An arrow pointer.
+                closed(vec![
+                    p(0.3, 0.12),
+                    p(0.3, 0.8),
+                    p(0.45, 0.65),
+                    p(0.58, 0.9),
+                    p(0.68, 0.85),
+                    p(0.55, 0.6),
+                    p(0.75, 0.6),
+                ]);
+            }
+            Self::SkPattern => {
+                // Three squares in a row and a fourth below: copies.
+                for (x, y) in [(0.1, 0.15), (0.4, 0.15), (0.7, 0.15), (0.1, 0.55)] {
+                    closed(vec![
+                        p(x, y),
+                        p(x + 0.2, y),
+                        p(x + 0.2, y + 0.2),
+                        p(x, y + 0.2),
+                    ]);
+                }
+            }
             Self::SkPoint => {
                 painter.circle_filled(p(0.5, 0.5), 0.12 * s, colour);
                 line(vec![p(0.2, 0.5), p(0.35, 0.5)]);
@@ -11990,23 +12040,39 @@ fn draw_tool_group(
     menu: &TopMenu,
     theme: &kreate_ui::Theme,
 ) {
-    fn featured<'a>(nodes: &'a [MenuNode], out: &mut Vec<(&'a MenuEntry, RibbonIcon)>) {
+    fn featured<'a>(
+        nodes: &'a [MenuNode],
+        most: usize,
+        out: &mut Vec<(&'a MenuEntry, RibbonIcon)>,
+    ) {
         for node in nodes {
             match node {
                 MenuNode::Entry(e) => {
                     if let Some(icon) = RibbonIcon::of(e) {
-                        if out.len() < 3 && !out.iter().any(|(_, i)| *i == icon) {
+                        if out.len() < most && !out.iter().any(|(_, i)| *i == icon) {
                             out.push((e, icon));
                         }
                     }
                 }
-                MenuNode::Sub(_, children) => featured(children, out),
+                MenuNode::Sub(_, children) => featured(children, most, out),
                 _ => {}
             }
         }
     }
+    // The sketch's drawing tools are what it is used for: all of them on
+    // show, selecting first.
+    let most = if menu.label == l.menu_sketch { 6 } else { 3 };
     let mut buttons = Vec::new();
-    featured(&menu.nodes, &mut buttons);
+    featured(&menu.nodes, most, &mut buttons);
+    // The sketch tool in hand, lit, so it is plain whether a click draws.
+    let in_hand = state.sketch_view.as_ref().map(|v| v.tool);
+    let held = |entry: &MenuEntry| {
+        entry.id == "app.sketch_tool"
+            && entry.variant.iter().any(|(n, v)| {
+                *n == "tool"
+                    && matches!(v, kreate_reflect::PropertyValue::Text(t) if Some(t.as_str()) == in_hand)
+            })
+    };
     // As wide as its buttons, its name centred under them; a group with no
     // buttons is its name alone, at the buttons' height.
     let width = (buttons.len() as f32 * 52.0).max(56.0);
@@ -12025,7 +12091,16 @@ fn draw_tool_group(
                     egui::Sense::hover()
                 };
                 let (rect, response) = ui.allocate_exact_size(size, sense);
-                if response.hovered() && entry.enabled {
+                if held(entry) {
+                    ui.painter()
+                        .rect_filled(rect, 5.0, theme.accent.gamma_multiply(0.25));
+                    ui.painter().rect_stroke(
+                        rect.shrink(0.5),
+                        5.0,
+                        egui::Stroke::new(1.0, theme.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if response.hovered() && entry.enabled {
                     ui.painter().rect_filled(rect, 5.0, theme.border);
                 }
                 let picture = egui::Rect::from_center_size(
@@ -12164,7 +12239,9 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 18] = [
+const SKETCH_TOOLS: [&str; 20] = [
+    "select",
+    "pattern",
     "line",
     "rectangle",
     "circle",
@@ -12246,6 +12323,13 @@ pub struct SketchView {
     pub axis: Option<[u32; 2]>,
     /// The scene's length unit: metres in one, and its symbol.
     pub unit: (f64, &'static str),
+    /// What is selected, by index: the points and the lines.
+    pub picked_points: Vec<u32>,
+    pub picked_lines: Vec<u32>,
+    /// A drag-box being drawn, corner to corner, on screen.
+    pub band: Option<[kreate_math::DVec2; 2]>,
+    /// Whether the tool in hand draws, for the badge and the pointer.
+    pub drawing: bool,
 }
 
 /// A closed area of a sketch, for drawing: its outline and holes, and the
@@ -12286,6 +12370,52 @@ impl SketchDim {
             DimKind::Length => typed * unit_metres,
             DimKind::Diameter => typed * unit_metres * 0.5,
             DimKind::Angle => typed.to_radians(),
+        }
+    }
+}
+
+/// The sketch pattern dialog's settings, in the scene's units and degrees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PatternDialog {
+    pub circular: bool,
+    pub count: u32,
+    pub spacing: f64,
+    pub count2: u32,
+    pub spacing2: f64,
+    pub angle: f64,
+    /// The circular pattern's centre, in the sketch's plane, in metres.
+    pub centre: [f64; 2],
+    /// The next click in the view puts the centre.
+    pub picking_centre: bool,
+}
+
+impl Default for PatternDialog {
+    fn default() -> Self {
+        Self {
+            circular: false,
+            count: 3,
+            spacing: 10.0,
+            count2: 1,
+            spacing2: 10.0,
+            angle: 360.0,
+            centre: [0.0, 0.0],
+            picking_centre: false,
+        }
+    }
+}
+
+impl PatternDialog {
+    /// The operator's parameters, with `unit` metres to the scene's unit.
+    pub fn params(&self, unit: f64) -> kreate_ops::ops::sketch_draw::PatternParams {
+        kreate_ops::ops::sketch_draw::PatternParams {
+            kind: u32::from(self.circular),
+            count: self.count.max(1),
+            spacing: self.spacing * unit,
+            count2: if self.circular { 1 } else { self.count2.max(1) },
+            spacing2: self.spacing2 * unit,
+            centre: [self.centre[0], self.centre[1], 0.0],
+            angle: self.angle.to_radians(),
+            ..Default::default()
         }
     }
 }
@@ -12545,10 +12675,201 @@ fn draw_sketches(
     }
 
     // The dimension being typed into.
+    // The drag-box, as the viewport's own box select draws it.
+    if let Some([a, b]) = view.band {
+        let rect = egui::Rect::from_two_pos(
+            egui::pos2(a.x as f32, a.y as f32),
+            egui::pos2(b.x as f32, b.y as f32),
+        );
+        painter.rect_filled(rect, 0.0, theme.accent.gamma_multiply(0.08));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, theme.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    draw_tool_badge(ui, state, &view, inner);
+    // A drawing tool's pointer is a cross, so a click is plainly a point.
+    if view.drawing
+        && ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|p| inner.contains(p))
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+
     draw_dimension_edit(ui, state, &view, projector);
     // The extrude or revolve dialog, once a region is picked.
     if matches!(view.tool, "extrude" | "revolve") && !view.seeds.is_empty() {
         draw_solid_dialog(ui, state, &view, inner);
+    }
+    if view.tool == "pattern" {
+        draw_pattern_dialog(ui, state, &view, inner);
+    }
+}
+
+/// The tool in hand, at the top of the view where the eye is: a drawing
+/// tool filled in the accent, selecting plain, and how to get back to
+/// selecting.
+fn draw_tool_badge(ui: &Ui, state: &ShellState, view: &SketchView, inner: egui::Rect) {
+    let theme = kreate_ui::theme::from_ui(ui).over_viewport();
+    let selecting = view.tool == "select";
+    let name = tool_label(state, view.tool);
+    let text = if selecting {
+        name
+    } else {
+        format!("{name}   ·   {}", state.catalog.get("sketch-badge-back"))
+    };
+    let ink = if selecting {
+        theme.text
+    } else {
+        egui::Color32::WHITE
+    };
+    let at = egui::pos2(inner.center().x, inner.top() + 14.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, egui::FontId::proportional(13.0), ink);
+    let rect = egui::Align2::CENTER_TOP
+        .anchor_size(at, galley.size())
+        .expand2(egui::vec2(12.0, 5.0));
+    let painter = ui.painter();
+    if selecting {
+        painter.rect_filled(rect, 6.0, theme.sunken.gamma_multiply(0.85));
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, theme.border_strong),
+            egui::StrokeKind::Outside,
+        );
+    } else {
+        painter.rect_filled(rect, 6.0, theme.accent);
+    }
+    painter.galley(rect.min + egui::vec2(12.0, 5.0), galley, ink);
+}
+
+/// The sketch pattern's settings, beside the view: rows and columns or
+/// round a centre, how many and how far apart. The copies show in the view
+/// as they would be made.
+fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: egui::Rect) {
+    let t = |key: &str| state.catalog.get(key);
+    let title = tool_label(state, "pattern").to_uppercase();
+    let (ok, cancel) = (t("dialog-ok"), t("dialog-cancel"));
+    let kinds = [t("pattern-rectangular"), t("pattern-circular")];
+    let count = t("pattern-count");
+    let spacing = t("pattern-spacing");
+    let count_y = t("pattern-count-y");
+    let spacing_y = t("pattern-spacing-y");
+    let angle = t("pattern-angle");
+    let centre = t("pattern-centre");
+    let centre_pick = t("pattern-centre-pick");
+    let centre_picking = t("pattern-centre-picking");
+    let nothing = t("pattern-nothing");
+    let picked = !view.picked_points.is_empty() || !view.picked_lines.is_empty();
+    let mut d = state.pattern_dialog.clone();
+    let mut done: Option<bool> = None;
+    let shown = egui::Area::new(egui::Id::new("pattern-dialog"))
+        .order(egui::Order::Middle)
+        .pivot(egui::Align2::RIGHT_TOP)
+        .fixed_pos(inner.right_top() + egui::vec2(-12.0, 132.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(250.0);
+                ui.label(egui::RichText::new(title).strong().small());
+                ui.separator();
+                if !picked {
+                    ui.label(egui::RichText::new(&nothing).small());
+                    ui.separator();
+                }
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut d.circular, false, &kinds[0]);
+                    ui.selectable_value(&mut d.circular, true, &kinds[1]);
+                });
+                egui::Grid::new("pattern-dialog-grid")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        let unit = format!(" {}", view.unit.1);
+                        ui.label(&count);
+                        ui.add(egui::DragValue::new(&mut d.count).range(1..=500).speed(0.1));
+                        ui.end_row();
+                        if d.circular {
+                            ui.label(&angle);
+                            ui.add(
+                                egui::DragValue::new(&mut d.angle)
+                                    .range(-360.0..=360.0)
+                                    .speed(1.0)
+                                    .suffix("°"),
+                            );
+                            ui.end_row();
+                            ui.label(&centre);
+                            let pick = if d.picking_centre {
+                                &centre_picking
+                            } else {
+                                &centre_pick
+                            };
+                            if ui.selectable_label(d.picking_centre, pick).clicked() {
+                                d.picking_centre = !d.picking_centre;
+                            }
+                            ui.end_row();
+                        } else {
+                            ui.label(&spacing);
+                            ui.add(
+                                egui::DragValue::new(&mut d.spacing)
+                                    .speed(0.1)
+                                    .suffix(unit.clone()),
+                            );
+                            ui.end_row();
+                            ui.label(&count_y);
+                            ui.add(
+                                egui::DragValue::new(&mut d.count2)
+                                    .range(1..=500)
+                                    .speed(0.1),
+                            );
+                            ui.end_row();
+                            ui.label(&spacing_y);
+                            ui.add(
+                                egui::DragValue::new(&mut d.spacing2)
+                                    .speed(0.1)
+                                    .suffix(unit),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(&cancel).clicked() {
+                        done = Some(false);
+                    }
+                    if ui.add_enabled(picked, egui::Button::new(&ok)).clicked() {
+                        done = Some(true);
+                    }
+                });
+            });
+        });
+    state.viewport_blockers.push(shown.response.rect);
+    state.pattern_dialog = d.clone();
+    let mut back = PropertyMap::new();
+    back.set("tool", kreate_reflect::PropertyValue::Text("select".into()));
+    match done {
+        Some(true) => {
+            use kreate_reflect::PropertyValue as V;
+            let params = d.params(view.unit.0);
+            let mut p = PropertyMap::new();
+            p.set("points", V::Ints(view.picked_points.clone()));
+            p.set("lines", V::Ints(view.picked_lines.clone()));
+            p.set("kind", V::Enum(params.kind));
+            p.set("count", V::Int(params.count as i64));
+            p.set("spacing", V::Float(params.spacing));
+            p.set("count2", V::Int(params.count2 as i64));
+            p.set("spacing2", V::Float(params.spacing2));
+            p.set("centre", V::Vec3(params.centre));
+            p.set("angle", V::Float(params.angle));
+            state.queue.run("sketch.pattern", p);
+            state.queue.dispatch("app.sketch_tool", back);
+        }
+        Some(false) => state.queue.dispatch("app.sketch_tool", back),
+        None => {}
     }
 }
 

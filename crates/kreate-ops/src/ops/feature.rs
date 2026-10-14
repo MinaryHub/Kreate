@@ -693,6 +693,190 @@ mod tests {
         assert!((volume - 7.5).abs() < 1e-3, "{volume}");
     }
 
+    /// Where a vertical line through `(x, y)` meets the mesh's faces, top
+    /// first.
+    fn heights_at(mesh: &kreate_mesh::MeshData, x: f32, y: f32) -> Vec<f32> {
+        let p = mesh.positions();
+        let tri = mesh.triangulate();
+        let mut out = Vec::new();
+        for t in tri.indices.chunks(3) {
+            let [a, b, c] = [p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]];
+            let cross = |u: kreate_math::Vec3, v: kreate_math::Vec3| {
+                (v.x - u.x) * (y - u.y) - (v.y - u.y) * (x - u.x)
+            };
+            let (d1, d2, d3) = (cross(a, b), cross(b, c), cross(c, a));
+            let inside =
+                (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0);
+            let area = (b - a).truncate().perp_dot((c - a).truncate());
+            if !inside || area.abs() < 1e-12 {
+                continue;
+            }
+            // Barycentric height.
+            let w1 = (b - x_y(x, y, a))
+                .truncate()
+                .perp_dot((c - x_y(x, y, a)).truncate())
+                / area;
+            let w2 = (c - x_y(x, y, a))
+                .truncate()
+                .perp_dot((a - x_y(x, y, a)).truncate())
+                / area;
+            let _ = (w1, w2);
+            let n = (b - a).cross(c - a);
+            if n.z.abs() < 1e-12 {
+                continue;
+            }
+            let z = a.z - (n.x * (x - a.x) + n.y * (y - a.y)) / n.z;
+            out.push(z);
+        }
+        out.sort_by(|a, b| b.total_cmp(a));
+        out.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+        out
+    }
+
+    fn x_y(x: f32, y: f32, like: kreate_math::Vec3) -> kreate_math::Vec3 {
+        kreate_math::Vec3::new(x, y, like.z)
+    }
+
+    /// Fusion's commonest cut: a sketch on a body's top face, extruded back
+    /// into the body. The cutter's top lies in the body's top face; the hole
+    /// must open there, not stay covered by a skin of the old face.
+    #[test]
+    fn a_hole_sketched_on_a_bodys_face_and_extruded_in_opens_through_it() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([0.04, 0.02, 0.0])),
+                ("join", PropertyValue::Int(1)),
+            ],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.002, 0.002])),
+                ("distance", PropertyValue::Float(0.01)),
+            ],
+        )
+        .unwrap();
+        let plate = body(&doc);
+        let name = doc.object(plate).unwrap().name.clone();
+        // On the top face, through the cursor, as the app puts a sketch on
+        // a face.
+        doc.cursor = kreate_math::DVec3::new(0.0, 0.0, 0.01);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[("plane", PropertyValue::Enum(3))],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.circle",
+            &[
+                ("centre", PropertyValue::Vec3([0.02, 0.01, 0.0])),
+                ("radius", PropertyValue::Float(0.005)),
+            ],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.02, 0.01])),
+                ("distance", PropertyValue::Float(-0.004)),
+                ("operation", PropertyValue::Enum(2)),
+                ("target", PropertyValue::Text(name)),
+            ],
+        )
+        .unwrap();
+        let mut cache = ModifierCache::new();
+        let mesh = cache.evaluated(&doc, plate, &EvalCtx::still()).unwrap();
+        let v = kreate_mesh::measure::mass_properties(&mesh, |p| p).volume;
+        let want = 0.04 * 0.02 * 0.01 - std::f64::consts::PI * 0.005f64.powi(2) * 0.004;
+        assert!((v - want).abs() < want * 5e-3, "{v} against {want}");
+        // Down through the hole: the pocket's floor first, no lid above it.
+        let at = heights_at(&mesh, 0.02, 0.01);
+        assert!(
+            (at[0] - 0.006).abs() < 1e-6,
+            "the first face down through the hole is at {:?}, not the floor at 0.006",
+            at
+        );
+        // Beside the hole, the top face is where it was.
+        let beside = heights_at(&mesh, 0.003, 0.003);
+        assert!((beside[0] - 0.01).abs() < 1e-6, "{beside:?}");
+    }
+
+    /// The same into a plain mesh — a cube from the Add menu — whose top
+    /// the cutter's top lies in.
+    #[test]
+    fn a_hole_sketched_on_a_plain_meshs_face_and_extruded_in_opens_through_it() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let cube = doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        doc.cursor = kreate_math::DVec3::new(0.0, 0.0, 1.0);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[("plane", PropertyValue::Enum(3))],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.circle",
+            &[
+                ("centre", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("radius", PropertyValue::Float(0.4)),
+            ],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.0, 0.0])),
+                ("distance", PropertyValue::Float(-0.5)),
+                ("operation", PropertyValue::Enum(2)),
+                ("target", PropertyValue::Text("Cube".into())),
+            ],
+        )
+        .unwrap();
+        let mut cache = ModifierCache::new();
+        let mesh = cache.evaluated(&doc, cube, &EvalCtx::still()).unwrap();
+        let at = heights_at(&mesh, 0.05, 0.03);
+        let beside = heights_at(&mesh, 0.8, 0.8);
+        let v = kreate_mesh::measure::mass_properties(&mesh, |p| p).volume;
+        assert!(
+            (at[0] - 0.5).abs() < 1e-5 && (beside[0] - 1.0).abs() < 1e-5,
+            "through the hole {at:?}, beside it {beside:?}, volume {v}"
+        );
+    }
+
     #[test]
     fn a_cut_takes_a_region_out_of_the_body_it_names() {
         let mut r = OperatorRegistry::new();

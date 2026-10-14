@@ -4076,19 +4076,27 @@ impl App {
                 self.redraw.set(RedrawReason::UI);
             }
         }
+        let pointer = self.sketch_cursor();
+        if let (Some(band), Some(at)) = (self.sketching.band.as_mut(), pointer) {
+            band[1] = at;
+        }
         let caught = self
             .sketch_cursor()
             .zip(self.sketch_snap_geometry())
             .and_then(|(at, g)| Some((g.point_near(at, 10.0)?, g)));
         // A point of the sketch first, always: drawing from it joins it.
-        // Then, with snapping on — the magnet, or Ctrl the other way —
-        // what the snap mode names.
+        // Then, as always, the other sketches' points and lines, as Fusion
+        // catches them. Then, with snapping on — the magnet, or Ctrl the
+        // other way — what the snap mode names.
         let snapping = self.snap.enabled != self.input.ctrl_down;
         let (hover, snapped) = match caught {
             Some((v, g)) => ((g.points[v as usize], v + 1), false),
-            None => match snapping.then(|| self.sketch_snap(on_plane)).flatten() {
+            None => match self.sketch_other_snap() {
                 Some(p) => ((p, 0), true),
-                None => ((on_plane, 0), false),
+                None => match snapping.then(|| self.sketch_snap(on_plane)).flatten() {
+                    Some(p) => ((p, 0), true),
+                    None => ((on_plane, 0), false),
+                },
             },
         };
         self.sketching.hover = Some(hover);
@@ -4098,6 +4106,52 @@ impl App {
             self.drive_sketch_drag(hover.0);
         }
         self.redraw.set(RedrawReason::UI);
+    }
+
+    /// The other sketches' points and lines near the pointer, laid onto this
+    /// sketch's plane: a point within reach first, then the nearest place
+    /// on a line. Whatever the snap toggle says — they are drawing too, and
+    /// what a new line most often starts from.
+    fn sketch_other_snap(&self) -> Option<glam::DVec2> {
+        const REACH: f64 = 10.0;
+        let (id, world) = self.sketch_target()?;
+        let at = self.sketch_cursor()?;
+        let projector = self.ui.projector?;
+        let screen = |p: DVec3| {
+            projector
+                .project(p)
+                .map(|q| glam::DVec2::new(q.x as f64, q.y as f64))
+        };
+        let to_plane = |p: DVec3| {
+            let local = world.inverse().transform_point3(p);
+            glam::DVec2::new(local.x, local.y)
+        };
+        let points = kreate::sketching::other_points(&self.doc, Some(id));
+        let near = points
+            .iter()
+            .filter_map(|p| Some((*p, screen(*p)?.distance(at))))
+            .filter(|(_, d)| *d <= REACH)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((p, _)) = near {
+            return Some(to_plane(p));
+        }
+        let mut best: Option<(DVec3, f64)> = None;
+        for [a, b] in kreate::sketching::other_lines(&self.doc, Some(id)) {
+            let (Some(sa), Some(sb)) = (screen(a), screen(b)) else {
+                continue;
+            };
+            let d = sb - sa;
+            let t = if d.length_squared() > 1e-12 {
+                ((at - sa).dot(d) / d.length_squared()).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let gap = (sa + d * t).distance(at);
+            if gap <= REACH && best.is_none_or(|(_, g)| gap < g) {
+                best = Some((a.lerp(b, t), gap));
+            }
+        }
+        best.map(|(p, _)| to_plane(p))
     }
 
     /// Where drawing snaps to near `on_plane`, by the snap mode: the grid
@@ -4307,6 +4361,26 @@ impl App {
                 }
                 true
             }
+            (MouseButton::Left, false) if self.sketching.band.is_some() => {
+                // The end of a drag-box: what is inside is selected.
+                if let (Some([a, b]), Some(g)) =
+                    (self.sketching.band.take(), self.sketch_geometry())
+                {
+                    let (points, lines) = kreate::sketching::in_band(&g, a, b);
+                    for v in points {
+                        if !self.sketching.points.contains(&v) {
+                            self.sketching.points.push(v);
+                        }
+                    }
+                    for l in lines {
+                        if !self.sketching.lines.contains(&l) {
+                            self.sketching.lines.push(l);
+                        }
+                    }
+                }
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
             (MouseButton::Left, false) => {
                 // The end of a drag: what it moved is one step.
                 if let Some(drag) = self.sketching.drag.take() {
@@ -4461,7 +4535,15 @@ impl App {
                             }
                         }
                     }
-                    Tool::Select => {
+                    // The pattern's centre, when the dialog asks for it.
+                    Tool::Pattern
+                        if self.ui.pattern_dialog.circular
+                            && self.ui.pattern_dialog.picking_centre =>
+                    {
+                        self.ui.pattern_dialog.centre = [p.x, p.y];
+                        self.ui.pattern_dialog.picking_centre = false;
+                    }
+                    Tool::Select | Tool::Pattern => {
                         let extend = self.input.shift_down;
                         let g = self.sketch_geometry().unwrap_or_default();
                         let lines_of = |pick: Pick| match pick {
@@ -4497,6 +4579,14 @@ impl App {
                             }
                             _ => {}
                         }
+                        // On nothing: a drag-box, from here.
+                        if pick.is_none() {
+                            if let Some(at) = self.sketch_cursor() {
+                                self.sketching.band = Some([at, at]);
+                            }
+                        }
+                        // Only the select tool drags; the pattern selects.
+                        let pick = pick.filter(|_| tool == Tool::Select);
                         if let Some(pick) = pick {
                             // Everything selected moves: its points and its
                             // lines' ends, a circle's centre with its ring.
@@ -4651,7 +4741,9 @@ impl App {
                 true
             }
             KeyCode::Escape => {
-                if self.cancel_sketch_drag() {
+                if self.sketching.band.take().is_some() {
+                    // The box let go, nothing else.
+                } else if self.cancel_sketch_drag() {
                     // Put back, nothing else.
                 } else if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
                     self.commit_sketch_line(false);
@@ -4749,7 +4841,53 @@ impl App {
             &self.ui.catalog,
             &self.sketch_pinned.1,
         ));
+        self.preview_sketch_pattern(id, world);
         self.choose_solid_operation(id);
+    }
+
+    /// The pattern's copies, as they would be made, into the view's preview;
+    /// a circular one's centre marked.
+    fn preview_sketch_pattern(&mut self, id: ObjectId, world: glam::DAffine3) {
+        if self.sketching.tool != kreate::sketching::Tool::Pattern {
+            return;
+        }
+        let Some(object) = self.doc.object(id) else {
+            return;
+        };
+        let pts = kreate_ops::ops::sketch_draw::points(&self.doc, id);
+        let (_, with) = kreate_ops::ops::sketch_draw::pattern_source(
+            &object.sketch_lines,
+            &object.sketch,
+            &self.sketching.points,
+            &self.sketching.lines,
+            pts.len(),
+        );
+        let dialog = &self.ui.pattern_dialog;
+        let params = dialog.params(self.doc.design.length_unit.metres());
+        let moves = kreate_ops::ops::sketch_draw::pattern_moves(&params);
+        let to_world = |p: glam::DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
+        let mut preview = Vec::new();
+        for m in moves.iter().take(2000) {
+            for l in &with {
+                let [a, b] = object.sketch_lines[*l as usize];
+                let (Some(pa), Some(pb)) = (pts.get(a as usize), pts.get(b as usize)) else {
+                    continue;
+                };
+                preview.push(vec![
+                    to_world(m.transform_point2(*pa)),
+                    to_world(m.transform_point2(*pb)),
+                ]);
+            }
+        }
+        let centre = dialog
+            .circular
+            .then(|| to_world(glam::DVec2::from(dialog.centre)));
+        if let Some(view) = self.ui.sketch_view.as_mut() {
+            view.preview.extend(preview);
+            if centre.is_some() {
+                view.snap = centre;
+            }
+        }
     }
 
     /// Fusion's choice for an extrude, while its dialog is open and nothing
@@ -10930,7 +11068,13 @@ impl App {
                     if self.op_ctx.mode != OpMode::Sketch {
                         self.set_mode(OpMode::Sketch);
                     }
+                    // The pattern works on what is selected: it is kept.
+                    let picked = (self.sketching.points.clone(), self.sketching.lines.clone());
                     self.sketching.take(tool);
+                    if tool == kreate::sketching::Tool::Pattern {
+                        (self.sketching.points, self.sketching.lines) = picked;
+                        self.ui.pattern_dialog.picking_centre = false;
+                    }
                     self.redraw.set(RedrawReason::UI);
                 }
             }
@@ -12657,6 +12801,11 @@ impl Splash {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(background))
                 .show(ui, |ui| {
+                    // Behind everything: the ground running, the solids
+                    // turning, the motes rising.
+                    let backdrop =
+                        kreate::splash::backdrop(ui.max_rect(), t, theme.text_dim, theme.accent);
+                    ui.painter().extend(backdrop);
                     ui.vertical_centered(|ui| {
                         ui.add_space((ui.available_height() * 0.5 - 150.0).max(0.0));
                         // The logo breathing: a few per cent larger and back
@@ -14129,6 +14278,63 @@ kreate.ops.object.add_primitive()",
         app.sketching.seeds = vec![glam::DVec2::new(5.0, 5.0)];
         app.choose_solid_operation(sketch);
         assert_eq!(app.ui.solid_dialog.operation, 0);
+    }
+
+    #[test]
+    fn drawing_catches_another_sketchs_ends_and_centres_not_its_circles_points() {
+        let mut app = app();
+        app.run_op_with("sketch.new", &[]);
+        app.run_op_with(
+            "sketch.line",
+            &[("points", PropertyValue::Floats(vec![0.01, 0.0, 0.02, 0.0]))],
+        );
+        app.run_op_with(
+            "sketch.circle",
+            &[
+                ("centre", PropertyValue::Vec3([0.05, 0.0, 0.0])),
+                ("radius", PropertyValue::Float(0.01)),
+            ],
+        );
+        app.run_op_with("sketch.new", &[("plane", PropertyValue::Enum(1))]);
+        let second = kreate_ops::ops::sketch_draw::active_sketch(&app.doc).unwrap();
+        let mut caught: Vec<(i64, i64)> = kreate::sketching::other_points(&app.doc, Some(second))
+            .iter()
+            .map(|p| ((p.x * 1e4).round() as i64, (p.y * 1e4).round() as i64))
+            .collect();
+        caught.sort();
+        assert_eq!(caught, vec![(100, 0), (200, 0), (500, 0)]);
+    }
+
+    #[test]
+    fn the_pattern_tool_keeps_the_selection_and_shows_its_copies() {
+        let mut app = app();
+        app.run_op_with("sketch.new", &[]);
+        app.run_op_with(
+            "sketch.line",
+            &[(
+                "points",
+                PropertyValue::Floats(vec![0.01, 0.01, 0.02, 0.01]),
+            )],
+        );
+        let id = kreate_ops::ops::sketch_draw::active_sketch(&app.doc).unwrap();
+        app.set_mode(OpMode::Sketch);
+        app.sketching.lines = vec![0];
+        app.dispatch(
+            &Action::new("app.sketch_tool").with("tool", PropertyValue::Text("pattern".into())),
+        );
+        assert_eq!(app.sketching.tool, kreate::sketching::Tool::Pattern);
+        assert_eq!(
+            app.sketching.lines,
+            vec![0],
+            "what was selected is what repeats"
+        );
+        app.ui.pattern_dialog.count = 4;
+        app.ui.pattern_dialog.spacing = 5.0;
+        let world = app.doc.world_transform(id);
+        app.ui.sketch_view = Some(Default::default());
+        app.preview_sketch_pattern(id, world);
+        let view = app.ui.sketch_view.as_ref().unwrap();
+        assert_eq!(view.preview.len(), 3, "three copies of the one line");
     }
 
     #[test]

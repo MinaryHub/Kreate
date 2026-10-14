@@ -552,6 +552,16 @@ pub struct ModifierRecord {
     pub operand: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
+    /// A path array's step and start along its path, its offset from it,
+    /// and whether the copies turn with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<bool>,
 }
 
 fn enabled_default() -> bool {
@@ -588,6 +598,14 @@ fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<Modif
             r.width = Some(p.width);
             r.angle = Some(p.angle);
             r.segments = (p.segments != 1).then_some(p.segments);
+        }
+        K::PathArray(m) => {
+            r.operand = Some(m.path.raw());
+            r.count = Some(m.params.count);
+            r.spacing = Some(m.params.spacing);
+            r.start = Some(m.params.start);
+            r.shift = Some(m.params.offset.to_array());
+            r.align = Some(m.params.align);
         }
         K::Boolean(b) => {
             r.operand = Some(b.operand.raw());
@@ -653,6 +671,19 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
                 width: r.width.unwrap_or(d.width),
                 angle: r.angle.unwrap_or(d.angle),
                 segments: r.segments.unwrap_or(d.segments).clamp(1, 64),
+            })
+        }
+        "path_array" => {
+            let d = PathArrayParams::default();
+            K::PathArray(kreate_scene::modifier::PathArrayModifier {
+                path: kreate_scene::Uid::from_raw(r.operand.unwrap_or(0)),
+                params: PathArrayParams {
+                    count: r.count.unwrap_or(d.count),
+                    spacing: r.spacing.unwrap_or(d.spacing),
+                    start: r.start.unwrap_or(d.start),
+                    offset: v3(r.shift, d.offset),
+                    align: r.align.unwrap_or(d.align),
+                },
             })
         }
         "boolean" => K::Boolean(BooleanModifier {
