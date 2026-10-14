@@ -2425,9 +2425,13 @@ impl Operator for Translate {
         }
         let offset = DVec3::from_array(params.translation);
         let d = doc.document_mut();
-        for id in &targets {
-            if let Some(o) = d.object_mut(*id) {
-                o.transform.translation += offset;
+        // The move is in the world: each object takes it in its parent's
+        // space, so a child of a turned or scaled parent goes as far and the
+        // same way as the rest; one under a selected parent goes with it.
+        for id in movable(d, &targets) {
+            let local = d.above(id).inverse().transform_vector3(offset);
+            if let Some(o) = d.object_mut(id) {
+                o.transform.translation += local;
             }
         }
         if params.autokey {
@@ -2617,19 +2621,22 @@ impl Operator for Rotate {
         let pivot = pivot_point(doc.document(), &targets, params.pivot);
 
         let d = doc.document_mut();
-        for &id in &targets {
+        for id in movable(d, &targets) {
+            let at = d.world_transform(id).translation;
             // `individual` rotates each object about its own origin, so there is
             // no orbiting component.
-            let about = if params.pivot == 1 {
-                d.object(id).map(|o| o.transform.translation)
-            } else {
-                pivot
-            };
+            let about = if params.pivot == 1 { Some(at) } else { pivot };
             let Some(about) = about else { continue };
+            let above = d.above(id);
+            let (_, turn, _) = above.to_scale_rotation_translation();
+            let to = above
+                .inverse()
+                .transform_point3(about + rotation * (at - about));
             if let Some(o) = d.object_mut(id) {
-                let offset = o.transform.translation - about;
-                o.transform.translation = about + rotation * offset;
-                o.transform.rotation = (rotation * o.transform.rotation).normalize();
+                o.transform.translation = to;
+                // The world turn, seen from the parent's frame.
+                o.transform.rotation =
+                    (turn.inverse() * rotation * turn * o.transform.rotation).normalize();
             }
         }
         if params.autokey {
@@ -2704,16 +2711,16 @@ impl Operator for Scale {
         let pivot = pivot_point(doc.document(), &targets, params.pivot);
 
         let d = doc.document_mut();
-        for &id in &targets {
-            let about = if params.pivot == 1 {
-                d.object(id).map(|o| o.transform.translation)
-            } else {
-                pivot
-            };
+        for id in movable(d, &targets) {
+            let at = d.world_transform(id).translation;
+            let about = if params.pivot == 1 { Some(at) } else { pivot };
             let Some(about) = about else { continue };
+            let to = d
+                .above(id)
+                .inverse()
+                .transform_point3(about + (at - about) * factor);
             if let Some(o) = d.object_mut(id) {
-                let offset = o.transform.translation - about;
-                o.transform.translation = about + offset * factor;
+                o.transform.translation = to;
                 o.transform.scale *= factor;
             }
         }
@@ -2725,8 +2732,18 @@ impl Operator for Scale {
     }
 }
 
-/// Resolves a pivot mode to a point, or `None` for `individual`, which has a
-/// different point per object.
+/// The selected objects a transform moves itself: those with no selected
+/// object above them, which carry them along — moved twice otherwise.
+fn movable(doc: &Document, targets: &[ObjectId]) -> Vec<ObjectId> {
+    targets
+        .iter()
+        .copied()
+        .filter(|id| !targets.iter().any(|a| a != id && doc.is_ancestor(*a, *id)))
+        .collect()
+}
+
+/// Resolves a pivot mode to a point in the world, or `None` for
+/// `individual`, which has a different point per object.
 fn pivot_point(doc: &Document, targets: &[ObjectId], mode: u32) -> Option<DVec3> {
     match mode {
         // median
@@ -2734,8 +2751,8 @@ fn pivot_point(doc: &Document, targets: &[ObjectId], mode: u32) -> Option<DVec3>
             let mut sum = DVec3::ZERO;
             let mut count = 0.0;
             for id in targets {
-                if let Some(o) = doc.object(*id) {
-                    sum += o.transform.translation;
+                if doc.object(*id).is_some() {
+                    sum += doc.world_transform(*id).translation;
                     count += 1.0;
                 }
             }
@@ -2746,8 +2763,8 @@ fn pivot_point(doc: &Document, targets: &[ObjectId], mode: u32) -> Option<DVec3>
         2 => doc
             .selection
             .active
-            .and_then(|a| doc.object(a))
-            .map(|o| o.transform.translation),
+            .filter(|a| doc.object(*a).is_some())
+            .map(|a| doc.world_transform(a).translation),
         // The 3D cursor, which is in the world; exact for objects without a
         // parent, as the median is.
         4 => Some(doc.cursor),
@@ -3971,6 +3988,79 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Several objects moved, turned or scaled together go together, whatever
+    /// their parents: a child of a turned, scaled parent as far and the same
+    /// way as the rest, and one under a selected parent once, with it.
+    #[test]
+    fn a_selection_moves_as_one_whatever_its_parents() {
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let mesh = || kreate_mesh::primitives::cube(1.0);
+        let parent = doc.add_mesh_object("Parent", mesh());
+        let child = doc.add_mesh_object("Child", mesh());
+        let loose = doc.add_mesh_object("Loose", mesh());
+        doc.set_parent(child, Some(parent)).unwrap();
+        {
+            let p = doc.object_mut(parent).unwrap();
+            p.transform.rotation = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+            p.transform.scale = DVec3::splat(2.0);
+        }
+        doc.object_mut(child).unwrap().transform.translation = DVec3::new(1.0, 0.0, 0.0);
+        let world = |doc: &Document, id| doc.world_transform(id).translation;
+        let mut h = History::new();
+        let run = |doc: &mut Document,
+                   h: &mut History,
+                   id: &str,
+                   pairs: &[(&'static str, PropertyValue)]| {
+            let mut p = PropertyMap::new();
+            for (k, v) in pairs {
+                p.set(k, v.clone());
+            }
+            h.dispatch(&r, doc, &Context::default(), id, &p).unwrap();
+        };
+        let close = |a: DVec3, b: DVec3| assert!((a - b).length() < 1e-9, "{a} against {b}");
+        // The child and a loose object: both a metre up x.
+        doc.selection.add(child);
+        doc.selection.add(loose);
+        let (c0, l0) = (world(&doc, child), world(&doc, loose));
+        run(
+            &mut doc,
+            &mut h,
+            "object.translate",
+            &[("translation", PropertyValue::Vec3([1.0, 0.0, 0.0]))],
+        );
+        close(world(&doc, child) - c0, DVec3::X);
+        close(world(&doc, loose) - l0, DVec3::X);
+        // A quarter turn about their median: both orbit it alike.
+        let (c0, l0) = (world(&doc, child), world(&doc, loose));
+        let mid = (c0 + l0) * 0.5;
+        run(
+            &mut doc,
+            &mut h,
+            "object.rotate",
+            &[
+                ("angle", PropertyValue::Float(std::f64::consts::FRAC_PI_2)),
+                ("axis", PropertyValue::Enum(2)),
+            ],
+        );
+        let turn = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        close(world(&doc, child), mid + turn * (c0 - mid));
+        close(world(&doc, loose), mid + turn * (l0 - mid));
+        // Parent and child together: the child goes once, with its parent.
+        doc.selection.clear();
+        doc.selection.add(parent);
+        doc.selection.add(child);
+        let c0 = world(&doc, child);
+        run(
+            &mut doc,
+            &mut h,
+            "object.translate",
+            &[("translation", PropertyValue::Vec3([0.0, 0.0, 1.0]))],
+        );
+        close(world(&doc, child) - c0, DVec3::Z);
+    }
 
     /// An area light's outline and spread are set from the panel and read
     /// back the same, for each outline.

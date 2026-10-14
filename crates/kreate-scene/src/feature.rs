@@ -52,6 +52,9 @@ pub enum Shape {
     /// Turned about the line through two of the sketch's points, by this
     /// many radians.
     Revolve { axis: [u32; 2], angle: f64 },
+    /// Every sharp edge of the body so far rounded to this radius, in
+    /// metres — or cut back this far, for a chamfer. Names no sketch.
+    Round { radius: f64, chamfer: bool },
 }
 
 /// One step of a body.
@@ -73,6 +76,8 @@ impl Feature {
         match self.shape {
             Shape::Extrude { .. } => "extrude",
             Shape::Revolve { .. } => "revolve",
+            Shape::Round { chamfer: false, .. } => "fillet",
+            Shape::Round { chamfer: true, .. } => "chamfer",
         }
     }
 }
@@ -148,6 +153,7 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
                 };
                 regions::revolve_region(&all[i], a, b - a, angle as f32, 64)
             }
+            Shape::Round { .. } => continue,
         };
         out = if out.num_faces() == 0 {
             piece
@@ -164,6 +170,13 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
     let to_body = body_world.inverse();
     let mut out = MeshData::empty();
     for f in features {
+        // A round works on what the body is so far, not on a sketch.
+        if let Shape::Round { radius, chamfer } = f.shape {
+            if out.num_faces() > 0 && radius > 0.0 {
+                out = kreate_mesh::modifiers::bevel::round_edges(&out, radius as f32, chamfer);
+            }
+            continue;
+        }
         let mut piece = solid(doc, f);
         if piece.num_faces() == 0 {
             continue;

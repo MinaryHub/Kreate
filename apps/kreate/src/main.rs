@@ -2580,7 +2580,10 @@ impl App {
             &self.camera,
             (w, h),
             basis,
-            self.snap,
+            kreate::modal::Snap {
+                length: snap_step(self.doc.design.length_unit),
+                ..self.snap
+            },
             self.build_snap_world(self.snap.mode),
         );
         if matches!(
@@ -3084,6 +3087,7 @@ impl App {
             pivot: self.ui.pivot,
             cursor: self.doc.cursor,
             plane: (self.ui.tools.orientation == 2).then_some(self.doc.cursor_rotation),
+            auto_merge: self.ui.tools.auto_merge,
         }
     }
 
@@ -3475,7 +3479,7 @@ impl App {
     /// Adds what the brush has covered since the last frame to the stroke,
     /// and applies it — live, so the selection grows under the brush.
     fn drive_circle_stroke(&mut self) {
-        let Some(resolved) = self
+        let Some(mut resolved) = self
             .gfx
             .as_ref()
             .and_then(|g| g.region.resolved())
@@ -3484,6 +3488,19 @@ impl App {
             return;
         };
         let edits = self.op_ctx.mode.edits_elements();
+        if self.xray && !edits {
+            if let (Some((x, y)), Some(radius)) = (
+                self.cursor_viewport_px(),
+                self.circle.as_ref().map(|c| c.radius),
+            ) {
+                resolved.extend(
+                    self.xray_region_objects(&kreate_render::SelectShape::Circle {
+                        centre: (x as f32, y as f32),
+                        radius,
+                    }),
+                );
+            }
+        }
         let mode = match self.pick_domain() {
             kreate_render::PickDomain::Vert => 0u32,
             kreate_render::PickDomain::Edge => 1,
@@ -7544,6 +7561,97 @@ impl App {
         }
     }
 
+    /// The objects a region covers, through everything: what X-ray selects.
+    ///
+    /// Not read from the id buffer, which keeps one object a pixel even with
+    /// X-ray on — so an object wholly behind another had no pixel left and a
+    /// box over both took only the front one. Each shown object's evaluated
+    /// mesh is projected instead: it is in the region if a vertex is, an
+    /// edge crosses the region's outline, or the region lies inside a face.
+    fn xray_region_objects(&self, shape: &kreate_render::SelectShape) -> Vec<u32> {
+        use kreate_math::Vec2;
+        let Some(gfx) = self.gfx.as_ref() else {
+            return Vec::new();
+        };
+        let (w, h) = gfx.viewport.render_size();
+        let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+        let vp = self.camera.view_projection(w as f64 / h as f64);
+        let eye = self.camera.eye();
+        let outline: Vec<Vec2> = match shape {
+            kreate_render::SelectShape::Box { from, to } => {
+                let (a, b) = (Vec2::new(from.0, from.1), Vec2::new(to.0, to.1));
+                let (lo, hi) = (a.min(b), a.max(b));
+                vec![lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)]
+            }
+            kreate_render::SelectShape::Lasso(path) => {
+                path.iter().map(|p| Vec2::new(p.0, p.1)).collect()
+            }
+            kreate_render::SelectShape::Circle { .. } => Vec::new(),
+        };
+        let inside = |p: Vec2| -> bool {
+            match shape {
+                kreate_render::SelectShape::Circle { centre, radius } => {
+                    p.distance(Vec2::new(centre.0, centre.1)) <= *radius
+                }
+                _ => in_polygon(&outline, p),
+            }
+        };
+        let crosses = |a: Vec2, b: Vec2| -> bool {
+            match shape {
+                kreate_render::SelectShape::Circle { centre, radius } => {
+                    let c = Vec2::new(centre.0, centre.1);
+                    let ab = b - a;
+                    let t =
+                        ((c - a).dot(ab) / ab.length_squared().max(f32::EPSILON)).clamp(0.0, 1.0);
+                    (a + ab * t).distance(c) <= *radius
+                }
+                _ => (0..outline.len())
+                    .any(|i| segments_cross(a, b, outline[i], outline[(i + 1) % outline.len()])),
+            }
+        };
+        // A point of the region, for a region wholly inside one face.
+        let anchor = match shape {
+            kreate_render::SelectShape::Circle { centre, .. } => Vec2::new(centre.0, centre.1),
+            _ => outline.first().copied().unwrap_or(Vec2::ZERO),
+        };
+        let mut out = Vec::new();
+        for (id, mesh) in &self.evaluated {
+            if !self.doc.is_shown(*id) {
+                continue;
+            }
+            let world = self.doc.world_transform(*id);
+            let px: Vec<Option<Vec2>> = mesh
+                .positions()
+                .iter()
+                .map(|p| {
+                    let rel = (world.transform_point3(p.as_dvec3()) - eye).as_vec3();
+                    let c = vp * rel.extend(1.0);
+                    // Behind the eye: no place on screen.
+                    (c.w > 1e-6).then(|| {
+                        let n = c.truncate() / c.w;
+                        Vec2::new((n.x * 0.5 + 0.5) * w, (0.5 - n.y * 0.5) * h)
+                    })
+                })
+                .collect();
+            let hit = px.iter().flatten().any(|p| inside(*p))
+                || mesh.edges().iter().any(|[a, b]| {
+                    matches!(
+                        (px[*a as usize], px[*b as usize]),
+                        (Some(a), Some(b)) if crosses(a, b)
+                    )
+                })
+                || (0..mesh.num_faces()).any(|f| {
+                    let ring: Option<Vec<Vec2>> =
+                        mesh.face_verts(f).iter().map(|v| px[*v as usize]).collect();
+                    ring.is_some_and(|r| in_polygon(&r, anchor))
+                });
+            if hit {
+                out.push(shell::object_key(*id));
+            }
+        }
+        out
+    }
+
     /// What a rubber band in progress should collect.
     ///
     /// `None` when nothing is being dragged, which is the overwhelmingly common
@@ -8869,6 +8977,13 @@ impl App {
             // outliner round-trips — so this goes through the same command, and
             // the same resolution against the *current* document.
             let mut objects = resolved;
+            if self.xray {
+                for key in self.xray_region_objects(&drag.shape()) {
+                    if !objects.contains(&key) {
+                        objects.push(key);
+                    }
+                }
+            }
             if drag.extend || drag.deselect {
                 let existing: Vec<u32> = self
                     .doc
@@ -12923,6 +13038,47 @@ impl Splash {
     }
 }
 
+/// Whether `p` is inside the closed outline `ring` (even-odd).
+fn in_polygon(ring: &[kreate_math::Vec2], p: kreate_math::Vec2) -> bool {
+    let mut inside = false;
+    let n = ring.len();
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+/// Whether segments `ab` and `cd` cross.
+fn segments_cross(
+    a: kreate_math::Vec2,
+    b: kreate_math::Vec2,
+    c: kreate_math::Vec2,
+    d: kreate_math::Vec2,
+) -> bool {
+    let side =
+        |p: kreate_math::Vec2, q: kreate_math::Vec2, r: kreate_math::Vec2| (q - p).perp_dot(r - p);
+    let (d1, d2) = (side(c, d, a), side(c, d, b));
+    let (d3, d4) = (side(a, b, c), side(a, b, d));
+    (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0)
+}
+
+/// A move's snapping step in the document's unit: a round number of what
+/// the panels show — 1 mm, 1 cm, 0.1 m, 1/10 in, 1 in — so a part drawn in
+/// millimetres does not jump a tenth of a metre at a time.
+fn snap_step(unit: kreate_scene::design::LengthUnit) -> f64 {
+    use kreate_scene::design::LengthUnit as U;
+    match unit {
+        U::Millimetres => 0.001,
+        U::Centimetres => 0.01,
+        U::Inches => 0.00254,
+        U::Feet => 0.0254,
+        U::Metres => 0.1,
+    }
+}
+
 /// Builds the starting document, from a file if one was named.
 /// Loads the document named on the command line, or a starter scene.
 ///
@@ -13195,6 +13351,8 @@ struct AppParams {
     /// The work plane's turn, when the Cursor orientation is chosen: new
     /// shapes are set square to it.
     plane: Option<kreate_math::DQuat>,
+    /// The header's Auto Merge, for the edit mode's move, rotate and scale.
+    auto_merge: bool,
 }
 
 /// A turn whose Z is `normal` and whose X is level (along the ground) where
@@ -13239,6 +13397,11 @@ impl AppParams {
         if let (Some(offset), None) = (offset, out.get("location")) {
             let at = self.cursor + offset;
             out.set("location", PropertyValue::Vec3(at.to_array()));
+        }
+        if matches!(op_id, "mesh.translate" | "mesh.rotate" | "mesh.scale")
+            && out.get("auto_merge").is_none()
+        {
+            out.set("auto_merge", PropertyValue::Bool(self.auto_merge));
         }
         if let (Some(q), "object.add_primitive", None) = (self.plane, op_id, out.get("rotation")) {
             let euler = kreate_scene::animation::to_euler(q);
@@ -13303,6 +13466,32 @@ fn segment_distance(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_xray_region_tests_see_inside_and_across() {
+        use kreate_math::Vec2;
+        let square = [
+            Vec2::ZERO,
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 10.0),
+            Vec2::new(0.0, 10.0),
+        ];
+        assert!(in_polygon(&square, Vec2::new(5.0, 5.0)));
+        assert!(!in_polygon(&square, Vec2::new(15.0, 5.0)));
+        // A long edge through the box with no end in it still crosses it.
+        assert!(segments_cross(
+            Vec2::new(-5.0, 5.0),
+            Vec2::new(5.0, 5.0),
+            square[3],
+            square[0]
+        ));
+        assert!(!segments_cross(
+            Vec2::new(1.0, 1.0),
+            Vec2::new(2.0, 2.0),
+            square[0],
+            square[1]
+        ));
+    }
+
+    #[test]
     fn a_new_object_is_set_beside_what_the_cursor_is_inside() {
         use super::*;
         let cube = (DVec3::splat(-1.0), DVec3::splat(1.0));
@@ -13349,6 +13538,7 @@ mod tests {
             pivot: 3,
             cursor: DVec3::new(1.0, 2.0, 3.0),
             plane: None,
+            auto_merge: false,
         };
         let none = PropertyMap::new();
         assert_eq!(

@@ -45,7 +45,9 @@ pub use join::{join, separate_selected, Part, Report as JoinReport};
 pub use knife::{knife, Knife};
 pub use limited::limited_dissolve;
 pub use loopcut::{loop_cut, loop_cut_selected, LoopCut};
-pub use merge::{merge_groups, merge_selected, weld_all, weld_by_distance, Merge, MergeTarget};
+pub use merge::{
+    merge_groups, merge_selected, weld_all, weld_by_distance, weld_onto, Merge, MergeTarget,
+};
 pub use normals::{
     auto_smooth, flip, recalculate, set_crease, set_shade_smooth, set_sharp, set_sharp_selected,
     Recalculation,

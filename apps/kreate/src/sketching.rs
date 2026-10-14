@@ -584,11 +584,13 @@ pub fn feature_rows(
                     symmetric,
                 } => (false, distance, symmetric),
                 kreate_scene::feature::Shape::Revolve { angle, .. } => (true, angle, false),
+                kreate_scene::feature::Shape::Round { radius, .. } => (false, radius, false),
             };
-            let kind = catalog.get(if revolve {
-                "sketch-tool-revolve"
-            } else {
-                "sketch-tool-extrude"
+            let kind = catalog.get(match f.kind_tag() {
+                "revolve" => "sketch-tool-revolve",
+                "fillet" => "feature-fillet",
+                "chamfer" => "feature-chamfer",
+                _ => "sketch-tool-extrude",
             });
             rows.push(crate::shell::FeatureRow {
                 order: f.order * 2 + 1,

@@ -255,7 +255,7 @@ fn circle(r: f64, n: usize) -> Vec<DVec2> {
 /// A section swept up Z from 0 to `width` in `layers` steps: `outline`
 /// (anticlockwise) and `hole` (anticlockwise too; it is turned round here)
 /// each moved at height fraction `t` by their own `place`.
-fn sweep(
+pub(crate) fn sweep(
     outline: &[DVec2],
     hole: &[DVec2],
     width: f64,
@@ -697,141 +697,23 @@ pub fn worm(w: &WormParams) -> MeshData {
     let m = w.module;
     let (ha, hf) = (m, 1.25 * m);
     let pitch = PI * m;
-    let lead = w.lead();
     let s = pitch * 0.5 - w.backlash;
     let slope = w.pressure_angle.tan();
     let length = w.length.max(pitch);
-    // The axial section — the basic rack, as a height above the axis — at
-    // place u along it, a tooth centred on u = 0, and where it bends: the
-    // corners of the tip and the root, each pitch over.
-    let (tip_half, root_half) = (s * 0.5 - ha * slope, s * 0.5 + hf * slope);
-    let radius = |u: f64| -> f64 {
-        let u = (u.rem_euclid(pitch) + pitch * 0.5).rem_euclid(pitch) - pitch * 0.5;
-        let d = u.abs();
-        if d <= tip_half {
-            r + ha
-        } else if d >= root_half {
-            r - hf
-        } else {
-            r + ha - (d - tip_half) / (root_half - tip_half) * (ha + hf)
-        }
-    };
-    let corners = [-root_half, -tip_half, tip_half, root_half];
-
-    // One column per step round: the section's corners wound on by the
-    // lead, cut off flat at both ends. Every corner a vertex, so the flanks
-    // are flat and the tip and root edges clean helices.
-    let around = 128usize;
-    let mut positions: Vec<Vec3> = Vec::new();
-    let mut columns: Vec<Vec<(f64, u32)>> = Vec::with_capacity(around);
-    for i in 0..around {
-        let phi = i as f64 * TAU / around as f64;
-        // A groove facing +X half way along.
-        let shift = lead * phi / TAU + length * 0.5 + pitch * 0.5;
-        let mut zs: Vec<f64> = vec![0.0, length];
-        let first = ((-shift - pitch) / pitch).floor() as i64;
-        let last = ((length - shift + pitch) / pitch).ceil() as i64;
-        for k in first..=last {
-            for c in corners {
-                let z = c + k as f64 * pitch + shift;
-                if z > 1e-9 && z < length - 1e-9 {
-                    zs.push(z);
-                }
-            }
-        }
-        zs.sort_by(f64::total_cmp);
-        zs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        let (sn, c) = phi.sin_cos();
-        let column = zs
-            .into_iter()
-            .map(|z| {
-                let rr = radius(z - shift);
-                positions.push(Vec3::new((rr * c) as f32, (rr * sn) as f32, z as f32));
-                (z, positions.len() as u32 - 1)
-            })
-            .collect();
-        columns.push(column);
-    }
-
-    let mut faces: Vec<Vec<u32>> = Vec::new();
-    // Each column to the next, zipped by height: a triangle at a time from
-    // whichever side climbs least.
-    for i in 0..around {
-        let a = &columns[i];
-        let b = &columns[(i + 1) % around];
-        let (mut p, mut q) = (0usize, 0usize);
-        while p + 1 < a.len() || q + 1 < b.len() {
-            let take_a = q + 1 >= b.len() || (p + 1 < a.len() && a[p + 1].0 <= b[q + 1].0);
-            if take_a {
-                faces.push(vec![a[p].1, b[q].1, a[p + 1].1]);
-                p += 1;
-            } else {
-                faces.push(vec![a[p].1, b[q].1, b[q + 1].1]);
-                q += 1;
-            }
-        }
-    }
-
-    // The ends, flat, with the bore through.
-    let bore_r = (w.bore * 0.5).clamp(0.0, worm_bore_limit(w) * 0.5);
-    let holes = if bore_r > 0.0 { 48 } else { 0 };
-    let mut bore_rings = [Vec::new(), Vec::new()];
-    for (k, z) in [0.0, length].into_iter().enumerate() {
-        for i in 0..holes {
-            // Clockwise: a hole runs the other way.
-            let a = -(i as f64) * TAU / holes as f64;
-            positions.push(Vec3::new(
-                (bore_r * a.cos()) as f32,
-                (bore_r * a.sin()) as f32,
-                z as f32,
-            ));
-            bore_rings[k].push(positions.len() as u32 - 1);
-        }
-    }
-    for (k, top) in [false, true].into_iter().enumerate() {
-        let ends: Vec<u32> = columns
-            .iter()
-            .map(|c| if top { c.last().unwrap().1 } else { c[0].1 })
-            .collect();
-        let outline: Vec<DVec2> = ends
-            .iter()
-            .map(|v| {
-                let p = positions[*v as usize];
-                DVec2::new(p.x as f64, p.y as f64)
-            })
-            .collect();
-        let mut rings = vec![outline];
-        if holes > 0 {
-            rings.push(circle(bore_r, holes));
-        }
-        let index = |v: usize| -> u32 {
-            if v < around {
-                ends[v]
-            } else {
-                // The circle given anticlockwise, the ring kept clockwise.
-                bore_rings[k][(holes - (v - around)) % holes]
-            }
-        };
-        let tris = crate::earcut::triangulate(&rings);
-        let cap = crate::regions::merged(
-            tris.iter()
-                .map(|[a, b, c]| vec![index(*a), index(*b), index(*c)])
-                .collect(),
-        );
-        for f in cap {
-            if top {
-                faces.push(f);
-            } else {
-                faces.push(f.into_iter().rev().collect());
-            }
-        }
-    }
-    for i in 0..holes {
-        let j = (i + 1) % holes;
-        let (lo, hi) = (&bore_rings[0], &bore_rings[1]);
-        faces.push(vec![lo[i], lo[j], hi[j], hi[i]]);
-    }
-    MeshData::from_faces(positions, &faces)
+    let bore = (w.bore * 0.5).clamp(0.0, worm_bore_limit(w) * 0.5);
+    // The basic rack wound round: a tooth centred on each crest, a groove
+    // facing +X half way along.
+    crate::mech::thread_solid(
+        length,
+        pitch,
+        w.lead(),
+        r + ha,
+        r - hf,
+        s * 0.5 - ha * slope,
+        s * 0.5 + hf * slope,
+        length * 0.5 + pitch * 0.5,
+        bore,
+    )
 }
 
 #[cfg(test)]

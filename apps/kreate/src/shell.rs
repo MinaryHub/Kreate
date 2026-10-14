@@ -363,6 +363,8 @@ pub struct ShellState {
     pub solid_dialog: SolidDialog,
     /// The sketch pattern's settings, while its tool is in hand.
     pub pattern_dialog: PatternDialog,
+    /// The ISO 286 fit calculator, when open.
+    pub fits: FitsDialog,
     /// The feature list: every sketch and feature, in the order made.
     pub features: Vec<FeatureRow>,
     /// A feature being edited from the list.
@@ -756,6 +758,7 @@ impl Default for ShellState {
             sketch_dim_edit: None,
             solid_dialog: SolidDialog::default(),
             pattern_dialog: PatternDialog::default(),
+            fits: FitsDialog::default(),
             features: Vec::new(),
             feature_edit: None,
             measure_preview: Vec::new(),
@@ -770,7 +773,10 @@ impl Default for ShellState {
             history_steps: Vec::new(),
             history_at: 0,
             pivot: 0,
-            tools: ToolSettings::default(),
+            tools: ToolSettings {
+                auto_merge: true,
+                ..ToolSettings::default()
+            },
             select_lasso: Vec::new(),
             timeline: Default::default(),
             uv: None,
@@ -1163,6 +1169,8 @@ pub struct ToolSettings {
     pub orientation: u32,
     /// 0 box, 1 lasso, 2 circle: what a left drag in the viewport selects with.
     pub select_tool: u32,
+    /// Edit mode: a vertex moved onto another merges with it.
+    pub auto_merge: bool,
 }
 
 /// The viewport's on-off settings, as the Overlays menu shows them.
@@ -1587,6 +1595,8 @@ struct Labels {
     add_shapes: [String; 8],
     /// Each kind of gear the Add menu makes, in `object.add_gear`'s order.
     add_gears: [String; 5],
+    /// The Mechanical menu's names, by their catalogue key.
+    mech: std::collections::BTreeMap<&'static str, String>,
     shading_studio: String,
     shading_flat: String,
     shading_wireframe: String,
@@ -1952,6 +1962,7 @@ impl Labels {
                 t("menu-add-cone"),
                 t("menu-add-torus"),
             ],
+            mech: mech_keys().into_iter().map(|k| (k, t(k))).collect(),
             add_gears: [
                 t("menu-add-gear"),
                 t("menu-add-gear-internal"),
@@ -3738,6 +3749,8 @@ enum Run {
     Dispatch(&'static str, PropertyMap),
     /// A command of the interface's own.
     Command(Command),
+    /// Opens the fit calculator, a window of the shell's own.
+    Fits,
 }
 
 /// One entry.
@@ -3779,7 +3792,7 @@ impl MenuEntry {
     pub fn runs(&self) -> Option<&'static str> {
         match &self.run {
             Run::Op(id, _) | Run::Dispatch(id, _) => Some(id),
-            Run::Command(_) => None,
+            Run::Command(_) | Run::Fits => None,
         }
     }
 }
@@ -4076,16 +4089,31 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
     // act on is. Object mode acts on whole objects; edit mode on the parts of one.
     for menu in mode.info().menus {
         match menu {
-            kreate_ops::mode::Menu::Object => out.push(TopMenu {
-                label: l.menu_object.clone(),
-                nodes: {
-                    let mut nodes = object_nodes(l);
-                    nodes.push(MenuNode::Separator);
-                    nodes.extend(transform_nodes(l));
-                    nodes.push(physics_node(l));
-                    nodes
+            kreate_ops::mode::Menu::Object => out.extend([
+                TopMenu {
+                    label: l.menu_object.clone(),
+                    nodes: {
+                        let mut nodes = object_nodes(l);
+                        nodes.push(MenuNode::Separator);
+                        nodes.extend(transform_nodes(l));
+                        nodes.push(physics_node(l));
+                        nodes
+                    },
                 },
-            }),
+                TopMenu {
+                    label: l.m("menu-mechanical"),
+                    nodes: {
+                        let mut n = mechanical_nodes(l);
+                        n.push(MenuNode::Separator);
+                        n.push(MenuNode::Entry(MenuEntry::new(
+                            "mech.fits",
+                            &l.m("mech-fits"),
+                            Run::Fits,
+                        )));
+                        n
+                    },
+                },
+            ]),
             kreate_ops::mode::Menu::Mesh => out.extend(mesh_menus(l, select_mode)),
             kreate_ops::mode::Menu::Pose => out.push(TopMenu {
                 label: l.menu_pose.clone(),
@@ -4347,6 +4375,7 @@ fn run_entry(state: &mut ShellState, entry: &MenuEntry) {
         Run::Op(id, params) => state.queue.run(*id, params.clone()),
         Run::Dispatch(id, params) => state.queue.dispatch(*id, params.clone()),
         Run::Command(command) => state.queue.push(command.clone()),
+        Run::Fits => state.fits.open = true,
     }
 }
 
@@ -4589,6 +4618,191 @@ const ADD_SHAPES: [&str; 8] = [
 /// that "Move" from the menu starts the same drag the G key starts. A menu
 /// entry that moved by a fixed amount would be a different command wearing the
 /// same name.
+/// An argument a Mechanical menu entry gives its operator.
+#[derive(Clone, Copy)]
+enum MechArg {
+    None,
+    Enum(&'static str, u32),
+    Bool(&'static str, bool),
+}
+
+/// The Mechanical menu, as data: each group (a submenu, or "" for entries
+/// at the top), and in it each entry's name key, operator and argument.
+/// What a machine's parts are made with — edges broken, holes cut, standard
+/// parts put in — and the checks on them.
+/// One Mechanical menu entry: its name key, operator and argument.
+type MechEntry = (&'static str, &'static str, MechArg);
+
+const MECH_MENU: &[(&str, &[MechEntry])] = &[
+    (
+        "",
+        &[
+            (
+                "mech-fillet",
+                "feature.round",
+                MechArg::Bool("chamfer", false),
+            ),
+            (
+                "mech-chamfer",
+                "feature.round",
+                MechArg::Bool("chamfer", true),
+            ),
+        ],
+    ),
+    (
+        "mech-holes",
+        &[
+            ("mech-hole-simple", "object.hole", MechArg::Enum("kind", 0)),
+            (
+                "mech-hole-counterbore",
+                "object.hole",
+                MechArg::Enum("kind", 1),
+            ),
+            (
+                "mech-hole-countersink",
+                "object.hole",
+                MechArg::Enum("kind", 2),
+            ),
+            ("mech-hole-tapped", "object.hole", MechArg::Enum("kind", 3)),
+        ],
+    ),
+    (
+        "mech-fasteners",
+        &[
+            (
+                "mech-cap-screw",
+                "object.add_fastener",
+                MechArg::Enum("kind", 0),
+            ),
+            (
+                "mech-hex-bolt",
+                "object.add_fastener",
+                MechArg::Enum("kind", 1),
+            ),
+            ("mech-nut", "object.add_fastener", MechArg::Enum("kind", 2)),
+            (
+                "mech-washer",
+                "object.add_fastener",
+                MechArg::Enum("kind", 3),
+            ),
+        ],
+    ),
+    (
+        "",
+        &[(
+            "mech-interference",
+            "object.check_interference",
+            MechArg::None,
+        )],
+    ),
+    (
+        "mech-drive",
+        &[
+            ("mech-bearing", "object.add_bearing", MechArg::None),
+            ("mech-shaft", "object.add_shaft", MechArg::None),
+            ("mech-pulley", "object.add_pulley", MechArg::None),
+            ("mech-sprocket", "object.add_sprocket", MechArg::None),
+        ],
+    ),
+    (
+        "mech-springs",
+        &[
+            (
+                "mech-spring-compression",
+                "object.add_spring",
+                MechArg::Enum("kind", 0),
+            ),
+            (
+                "mech-spring-extension",
+                "object.add_spring",
+                MechArg::Enum("kind", 1),
+            ),
+            (
+                "mech-spring-torsion",
+                "object.add_spring",
+                MechArg::Enum("kind", 2),
+            ),
+        ],
+    ),
+    ("", &[("mech-gear-link", "object.gear_link", MechArg::None)]),
+    (
+        "mech-shapes",
+        &[
+            ("mech-sweep-along", "object.sweep_along", MechArg::None),
+            ("mech-loft", "object.loft", MechArg::None),
+        ],
+    ),
+    (
+        "mech-sheet",
+        &[
+            (
+                "mech-sheet-folded",
+                "object.add_sheet_metal",
+                MechArg::Bool("flat", false),
+            ),
+            (
+                "mech-sheet-flat",
+                "object.add_sheet_metal",
+                MechArg::Bool("flat", true),
+            ),
+        ],
+    ),
+];
+
+/// Every key the Mechanical menu names, to look up once.
+fn mech_keys() -> Vec<&'static str> {
+    // Named here too: the edit mode's Face menu has the shell and draft.
+    let mut keys = vec!["menu-mechanical", "mech-shell", "mech-draft", "mech-fits"];
+    keys.extend(FITS_KEYS);
+    for (group, entries) in MECH_MENU {
+        if !group.is_empty() {
+            keys.push(group);
+        }
+        keys.extend(entries.iter().map(|(k, _, _)| *k));
+    }
+    keys
+}
+
+impl Labels {
+    /// A Mechanical menu name by its key.
+    fn m(&self, key: &str) -> String {
+        self.mech
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    }
+}
+
+/// The Mechanical menu's entries, from [`MECH_MENU`].
+fn mechanical_nodes(l: &Labels) -> Vec<MenuNode> {
+    use kreate_reflect::PropertyValue as V;
+    let node = |(key, id, arg): &MechEntry| {
+        type Pair = (&'static str, V);
+        let (pairs, variant): (Vec<Pair>, Option<Pair>) = match *arg {
+            MechArg::None => (Vec::new(), None),
+            MechArg::Enum(n, v) => (vec![(n, V::Enum(v))], Some((n, V::Enum(v)))),
+            MechArg::Bool(n, v) => (vec![(n, V::Bool(v))], Some((n, V::Bool(v)))),
+        };
+        let mut e = MenuEntry::new(id, &l.m(key), op(id, &pairs));
+        if let Some((n, v)) = variant {
+            e = e.variant(n, v);
+        }
+        MenuNode::Entry(e)
+    };
+    let mut out = Vec::new();
+    for (group, entries) in MECH_MENU {
+        if group.is_empty() {
+            out.extend(entries.iter().map(node));
+        } else {
+            out.push(MenuNode::Sub(
+                l.m(group),
+                entries.iter().map(node).collect(),
+            ));
+        }
+    }
+    out
+}
+
 fn object_nodes(l: &Labels) -> Vec<MenuNode> {
     use kreate_reflect::PropertyValue as V;
     vec![
@@ -6194,6 +6408,165 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         &crate::version::platform(),
     );
     draw_render_result(ctx, state, l);
+    draw_fits(ctx, state, l);
+}
+
+/// The words of the fit calculator, from the Mechanical menu's catalog.
+const FITS_KEYS: [&str; 10] = [
+    "fits-size",
+    "fits-hole",
+    "fits-shaft",
+    "fits-limits",
+    "fits-clearance",
+    "fits-transition",
+    "fits-interference",
+    "fits-max",
+    "fits-min",
+    "fits-none",
+];
+
+/// The fit calculator's choices, kept between openings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FitsDialog {
+    pub open: bool,
+    /// The nominal size, mm.
+    pub size: f64,
+    /// Indices into `kreate_mesh::fits::LETTERS`.
+    pub hole_letter: usize,
+    pub hole_grade: u32,
+    pub shaft_letter: usize,
+    pub shaft_grade: u32,
+}
+
+impl Default for FitsDialog {
+    fn default() -> Self {
+        // H7/g6 at 20 mm: the sliding fit every handbook starts from.
+        Self {
+            open: false,
+            size: 20.0,
+            hole_letter: 3,
+            hole_grade: 7,
+            shaft_letter: 2,
+            shaft_grade: 6,
+        }
+    }
+}
+
+/// ISO 286: a hole and a shaft by letter and grade at a size, their limits
+/// and what fit they make.
+fn draw_fits(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
+    use kreate_mesh::fits;
+    if !state.fits.open {
+        return;
+    }
+    let mut d = state.fits.clone();
+    let mut open = true;
+    egui::Window::new(l.m("mech-fits"))
+        .id(egui::Id::new("fits-calculator"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(ctx.content_rect().center())
+        .show(ctx, |ui| {
+            egui::Grid::new("fits-grid").num_columns(2).show(ui, |ui| {
+                ui.label(l.m("fits-size"));
+                ui.add(
+                    egui::DragValue::new(&mut d.size)
+                        .range(0.1..=500.0)
+                        .speed(0.1)
+                        .suffix(" mm"),
+                );
+                ui.end_row();
+                for (name, letter, grade, upper) in [
+                    ("fits-hole", &mut d.hole_letter, &mut d.hole_grade, true),
+                    ("fits-shaft", &mut d.shaft_letter, &mut d.shaft_grade, false),
+                ] {
+                    ui.label(l.m(name));
+                    ui.horizontal(|ui| {
+                        let show = |i: usize| {
+                            if upper {
+                                fits::LETTERS[i].to_uppercase()
+                            } else {
+                                fits::LETTERS[i].to_string()
+                            }
+                        };
+                        egui::ComboBox::from_id_salt((name, "letter"))
+                            .width(48.0)
+                            .selected_text(show(*letter))
+                            .show_ui(ui, |ui| {
+                                for i in 0..fits::LETTERS.len() {
+                                    ui.selectable_value(letter, i, show(i));
+                                }
+                            });
+                        egui::ComboBox::from_id_salt((name, "grade"))
+                            .width(40.0)
+                            .selected_text(grade.to_string())
+                            .show_ui(ui, |ui| {
+                                for g in fits::GRADES {
+                                    ui.selectable_value(grade, g, g.to_string());
+                                }
+                            });
+                    });
+                    ui.end_row();
+                }
+            });
+            ui.separator();
+            let hl = fits::LETTERS[d.hole_letter].to_uppercase();
+            let sl = fits::LETTERS[d.shaft_letter];
+            let Some(f) = fits::fit(d.size, &hl, d.hole_grade, sl, d.shaft_grade) else {
+                ui.label(l.m("fits-none"));
+                return;
+            };
+            // i18n-exempt: numbers and the standard's own symbols
+            let um = |v: f64| format!("{v:+.1} µm");
+            // i18n-exempt: the standard's own designation
+            ui.heading(format!(
+                "ø{} {}{}/{}{}",
+                d.size, hl, d.hole_grade, sl, d.shaft_grade
+            ));
+            egui::Grid::new("fits-result")
+                .num_columns(3)
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.label(l.m("fits-hole"));
+                    ui.label(l.m("fits-shaft"));
+                    ui.end_row();
+                    ui.label(l.m("fits-limits"));
+                    // i18n-exempt: numbers
+                    ui.label(format!("{} / {}", um(f.hole.upper), um(f.hole.lower)));
+                    // i18n-exempt: numbers
+                    ui.label(format!("{} / {}", um(f.shaft.upper), um(f.shaft.lower)));
+                    ui.end_row();
+                    // i18n-exempt: a unit
+                    ui.label("mm");
+                    // i18n-exempt: numbers
+                    ui.label(format!(
+                        "{:.3} - {:.3}",
+                        d.size + f.hole.lower / 1000.0,
+                        d.size + f.hole.upper / 1000.0
+                    ));
+                    // i18n-exempt: numbers
+                    ui.label(format!(
+                        "{:.3} - {:.3}",
+                        d.size + f.shaft.lower / 1000.0,
+                        d.size + f.shaft.upper / 1000.0
+                    ));
+                    ui.end_row();
+                });
+            ui.separator();
+            // i18n-exempt: a translated label and a number
+            ui.label(format!("{} {}", l.m("fits-max"), um(f.max_clearance)));
+            // i18n-exempt: a translated label and a number
+            ui.label(format!("{} {}", l.m("fits-min"), um(f.min_clearance)));
+            let kind = match f.kind {
+                fits::FitKind::Clearance => "fits-clearance",
+                fits::FitKind::Transition => "fits-transition",
+                fits::FitKind::Interference => "fits-interference",
+            };
+            ui.strong(l.m(kind));
+        });
+    d.open = open;
+    state.fits = d;
 }
 
 /// A finished render, shown as Blender's Render window shows it: the
@@ -8850,6 +9223,22 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                     &l.bevel,
                     op("mesh.bevel", &[("width", V::Float(0.1))]),
                 ),
+                MenuNode::Entry(
+                    MenuEntry::new(
+                        "mesh.fillet",
+                        &l.m("mech-fillet"),
+                        op("mesh.fillet", &[("chamfer", V::Bool(false))]),
+                    )
+                    .variant("chamfer", V::Bool(false)),
+                ),
+                MenuNode::Entry(
+                    MenuEntry::new(
+                        "mesh.fillet",
+                        &l.m("mech-chamfer"),
+                        op("mesh.fillet", &[("chamfer", V::Bool(true))]),
+                    )
+                    .variant("chamfer", V::Bool(true)),
+                ),
                 entry(
                     "mesh.loop_cut",
                     &l.loop_cut,
@@ -8920,6 +9309,9 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                 ),
                 Separator,
                 entry("mesh.fill", &l.fill, op("mesh.fill", &[])),
+                Separator,
+                entry("mesh.shell", &l.m("mech-shell"), op("mesh.shell", &[])),
+                entry("mesh.draft", &l.m("mech-draft"), op("mesh.draft", &[])),
             ],
         },
     ]
@@ -9117,6 +9509,8 @@ fn draw_tool_settings(
             })
             .response
             .on_hover_text(get(state, "proportional-hint"));
+        ui.toggle_value(&mut tools.auto_merge, get(state, "auto-merge"))
+            .on_hover_text(get(state, "auto-merge-hint"));
     }
 
     state.tools = tools;

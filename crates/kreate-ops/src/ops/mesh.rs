@@ -843,6 +843,28 @@ fn run_transform(
     Ok(OpResult::Finished)
 }
 
+/// How close, in a mesh's own space, two vertices must be for Auto Merge to
+/// take them as one place: a hundredth of a millimetre, far under anything
+/// drawn on purpose and far over a snap's rounding.
+pub const AUTO_MERGE_DISTANCE: f32 = 1e-5;
+
+/// After a transform: with Auto Merge on, every selected vertex that landed
+/// on another is merged with it, in the same step.
+fn merge_after(
+    doc: &mut DocMut<'_>,
+    done: OpResult,
+    auto_merge: bool,
+) -> Result<OpResult, OpError> {
+    if !auto_merge || !matches!(done, OpResult::Finished) {
+        return Ok(done);
+    }
+    each_bmesh(doc, |bm| {
+        let moved = bm.selected_verts();
+        edit::weld_onto(bm, &moved, AUTO_MERGE_DISTANCE).map_err(|e| OpError::Failed(e.to_string()))
+    })?;
+    Ok(done)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct MeshTranslateParams {
     /// How far to move the selection, in object space.
@@ -854,6 +876,10 @@ pub struct MeshTranslateParams {
     /// The shape the influence falls off in. See [`FALLOFF_CURVES`].
     #[param(variants("smooth", "sphere", "root", "sharp", "linear", "constant"))]
     pub proportional_falloff: u32,
+    /// Merge each moved vertex with any other now in its place: Auto
+    /// Merge, filled in by the application from its header toggle.
+    #[param(hidden)]
+    pub auto_merge: bool,
 }
 
 /// Moves the selected vertices, edges or faces.
@@ -878,14 +904,15 @@ impl Operator for TranslateSelection {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let offset = glam::DVec3::from_array(params.translation);
-        run_transform(
+        let done = run_transform(
             doc,
             params.proportional_size,
             params.proportional_falloff,
             false,
             None,
             |p, weight, _| p + offset * weight as f64,
-        )
+        )?;
+        merge_after(doc, done, params.auto_merge)
     }
 }
 
@@ -1114,6 +1141,10 @@ pub struct MeshRotateParams {
     /// What it turns about: the selection's median, or the 3D cursor.
     #[param(variants("median", "cursor"))]
     pub pivot: u32,
+    /// Merge each moved vertex with any other now in its place: Auto
+    /// Merge, filled in by the application from its header toggle.
+    #[param(hidden)]
+    pub auto_merge: bool,
 }
 
 /// Rotates the selected vertices, edges or faces about their median.
@@ -1144,7 +1175,7 @@ impl Operator for RotateSelection {
         };
         let rotation = glam::DQuat::from_axis_angle(axis, params.angle);
         let pivot = (params.pivot == 1).then_some(doc.document().cursor);
-        run_transform(
+        let done = run_transform(
             doc,
             params.proportional_size,
             params.proportional_falloff,
@@ -1160,7 +1191,8 @@ impl Operator for RotateSelection {
                 let partial = glam::DQuat::IDENTITY.slerp(rotation, weight as f64);
                 about + partial * (p - about)
             },
-        )
+        )?;
+        merge_after(doc, done, params.auto_merge)
     }
 }
 
@@ -1177,6 +1209,10 @@ pub struct MeshScaleParams {
     /// What it scales about: the selection's median, or the 3D cursor.
     #[param(variants("median", "cursor"))]
     pub pivot: u32,
+    /// Merge each moved vertex with any other now in its place: Auto
+    /// Merge, filled in by the application from its header toggle.
+    #[param(hidden)]
+    pub auto_merge: bool,
 }
 
 impl Default for MeshScaleParams {
@@ -1186,6 +1222,7 @@ impl Default for MeshScaleParams {
             proportional_size: 0.0,
             proportional_falloff: 0,
             pivot: 0,
+            auto_merge: false,
         }
     }
 }
@@ -1222,7 +1259,7 @@ impl Operator for ScaleSelection {
     ) -> Result<OpResult, OpError> {
         let factor = glam::DVec3::from_array(params.scale);
         let pivot = (params.pivot == 1).then_some(doc.document().cursor);
-        run_transform(
+        let done = run_transform(
             doc,
             params.proportional_size,
             params.proportional_falloff,
@@ -1241,7 +1278,8 @@ impl Operator for ScaleSelection {
                 let partial = glam::DVec3::ONE.lerp(factor, weight as f64);
                 about + (p - about) * partial
             },
-        )
+        )?;
+        merge_after(doc, done, params.auto_merge)
     }
 }
 
@@ -1549,6 +1587,65 @@ impl Operator for BevelEdges {
         // Every selected edge was a boundary or a non-manifold fan, so there was
         // nowhere to put a chamfer. A no-op rather than a failure: the selection
         // was legitimate, the operation just does not apply to it.
+        Ok(if built == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct FilletParams {
+    /// The round's radius: where it leaves each face, for an edge at right
+    /// angles; or how far a chamfer cuts back along each face.
+    #[param(min = 0.0, soft_max = 0.05, unit = "length")]
+    pub radius: f64,
+    /// A flat cut instead of a round.
+    pub chamfer: bool,
+}
+
+impl Default for FilletParams {
+    fn default() -> Self {
+        Self {
+            radius: 0.001,
+            chamfer: false,
+        }
+    }
+}
+
+/// The selected edges rounded to a radius — a fillet — or cut back a
+/// distance — a chamfer: a bevel in a machinist's terms.
+pub struct Fillet;
+
+impl Operator for Fillet {
+    type Params = FilletParams;
+    fn id() -> &'static str {
+        "mesh.fillet"
+    }
+    fn label() -> &'static str {
+        "Fillet or Chamfer"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let segments = if params.chamfer {
+            1
+        } else {
+            kreate_mesh::modifiers::bevel::FILLET_SEGMENTS
+        };
+        let built: usize = each_bmesh(doc, |bm| {
+            edit::bevel_selected_segments(bm, params.radius as f32, segments)
+                .map(|out| out.faces.len())
+                .map_err(|e| OpError::Failed(e.to_string()))
+        })?
+        .into_iter()
+        .sum();
         Ok(if built == 0 {
             OpResult::Cancelled
         } else {
@@ -3507,6 +3604,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SelectNothing>();
     registry.register::<DissolveElements>();
     registry.register::<BevelEdges>();
+    registry.register::<Fillet>();
     registry.register::<BridgeEdgeLoops>();
     registry.register::<ExtrudeRegion>();
     registry.register::<MedianSet>();
@@ -4182,6 +4280,56 @@ mod tests {
         assert!(!DeleteElements::poll(&object_mode, &doc));
         assert!(!DissolveElements::poll(&object_mode, &doc));
         assert!(!Subdivide::poll(&object_mode, &doc));
+    }
+
+    #[test]
+    fn a_vertex_moved_onto_another_merges_with_auto_merge_on() {
+        for (auto, want) in [(true, 6), (false, 8)] {
+            let r = registry();
+            let mut h = History::new();
+            let mut doc = Document::new();
+            // Two quads half a metre apart; the first's right side selected.
+            let split = {
+                let mut bm = kreate_mesh::bmesh::BMesh::new();
+                let quad = |bm: &mut kreate_mesh::bmesh::BMesh, x: f32, pick: bool| {
+                    let a = bm.add_vert(kreate_math::Vec3::new(x, 0.0, 0.0));
+                    let b = bm.add_vert(kreate_math::Vec3::new(x + 1.0, 0.0, 0.0));
+                    let c = bm.add_vert(kreate_math::Vec3::new(x + 1.0, 1.0, 0.0));
+                    let d = bm.add_vert(kreate_math::Vec3::new(x, 1.0, 0.0));
+                    bm.add_face(&[a, b, c, d]).unwrap();
+                    if pick {
+                        bm.set_vert_selected(b, true);
+                        bm.set_vert_selected(c, true);
+                    }
+                };
+                quad(&mut bm, 0.0, true);
+                quad(&mut bm, 1.5, false);
+                bm.to_mesh_data()
+            };
+            let mesh = doc.add_mesh(split);
+            let obj = doc.add_object(Object::new("Split", ObjectData::Mesh(mesh)));
+            doc.selection.add(obj);
+            let ctx = Context {
+                mode: Mode::EditMesh,
+            };
+            h.dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "mesh.translate",
+                &params(&[
+                    ("translation", PropertyValue::Vec3([0.5, 0.0, 0.0])),
+                    ("auto_merge", PropertyValue::Bool(auto)),
+                ]),
+            )
+            .unwrap();
+            let after = doc.mesh(mesh).unwrap();
+            assert_eq!(after.num_verts(), want, "auto merge {auto}");
+            assert_eq!(after.validate(), Vec::new());
+            // One step: undone, the gap and all eight are back.
+            assert!(h.undo(&mut doc));
+            assert_eq!(doc.mesh(mesh).unwrap().num_verts(), 8);
+        }
     }
 
     #[test]

@@ -2830,6 +2830,7 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
             symmetric,
         } => (distance, symmetric, [0, 0], 0.0),
         Shape::Revolve { axis, angle } => (0.0, false, axis, angle),
+        Shape::Round { radius, .. } => (radius, false, [0, 0], 0.0),
     };
     FeatureRecord {
         kind: f.kind_tag().into(),
@@ -2856,6 +2857,10 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         "revolve" if r.angle.is_finite() => Shape::Revolve {
             axis: r.axis,
             angle: r.angle,
+        },
+        "fillet" | "chamfer" if r.distance.is_finite() => Shape::Round {
+            radius: r.distance,
+            chamfer: r.kind == "chamfer",
         },
         _ => return None,
     };

@@ -274,6 +274,70 @@ pub fn weld_by_distance(
     merge_groups(mesh, &groups, MergeTarget::Centre)
 }
 
+/// Merges each of `moved` with whatever other vertex now sits in its place,
+/// within `threshold`: Blender's Auto Merge, run after a vertex is moved or
+/// snapped onto another. Only groups with a moved vertex in them merge —
+/// two vertices left overlapping on purpose elsewhere in the mesh stay two.
+pub fn weld_onto(mesh: &mut BMesh, moved: &[VertId], threshold: f32) -> Result<Merge, BmError> {
+    if threshold <= 0.0 || moved.is_empty() {
+        return Ok(Merge::default());
+    }
+    let cell = threshold.max(f32::MIN_POSITIVE);
+    let key = |p: Vec3| -> [i32; 3] {
+        [
+            (p.x / cell).floor() as i32,
+            (p.y / cell).floor() as i32,
+            (p.z / cell).floor() as i32,
+        ]
+    };
+    let mut cells: Vec<([i32; 3], VertId)> = mesh
+        .vert_ids()
+        .filter_map(|v| Some((key(mesh.position(v)?), v)))
+        .collect();
+    cells.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.index().cmp(&b.1.index())));
+    let lookup = |k: [i32; 3]| -> &[([i32; 3], VertId)] {
+        let lo = cells.partition_point(|(c, _)| *c < k);
+        let hi = cells.partition_point(|(c, _)| *c <= k);
+        &cells[lo..hi]
+    };
+    let t2 = threshold * threshold;
+    let mut taken: std::collections::HashSet<VertId> = std::collections::HashSet::new();
+    let mut ordered: Vec<VertId> = moved.to_vec();
+    ordered.sort_unstable_by_key(|v| v.index());
+    ordered.dedup();
+    let mut groups: Vec<Vec<VertId>> = Vec::new();
+    for v in ordered {
+        if taken.contains(&v) {
+            continue;
+        }
+        let Some(p) = mesh.position(v) else { continue };
+        let k = key(p);
+        let mut group = vec![v];
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    for &(_, other) in lookup([k[0] + dx, k[1] + dy, k[2] + dz]) {
+                        if other == v || taken.contains(&other) {
+                            continue;
+                        }
+                        if mesh
+                            .position(other)
+                            .is_some_and(|q| (q - p).length_squared() <= t2)
+                        {
+                            group.push(other);
+                        }
+                    }
+                }
+            }
+        }
+        if group.len() > 1 {
+            taken.extend(group.iter().copied());
+            groups.push(group);
+        }
+    }
+    merge_groups(mesh, &groups, MergeTarget::Centre)
+}
+
 /// Welds every vertex of the mesh.
 pub fn weld_all(mesh: &mut BMesh, threshold: f32) -> Result<Merge, BmError> {
     let all: Vec<VertId> = mesh.vert_ids().collect();
@@ -285,6 +349,32 @@ mod tests {
     use super::*;
     use crate::primitives;
     use crate::SelectMode;
+
+    #[test]
+    fn a_vertex_moved_onto_another_merges_and_others_overlapping_stay() {
+        // Two quads side by side, not sharing their middle edge.
+        let mut m = BMesh::from_mesh_data(&crate::MeshData::from_faces(
+            vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0, 1.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+            ],
+            &[vec![0, 1, 2, 3], vec![4, 5, 6, 7]],
+        ));
+        let ids: Vec<VertId> = m.vert_ids().collect();
+        // Vertex 1 "moved": it merges with 4, and 2 and 7 stay two.
+        let out = weld_onto(&mut m, &[ids[1]], 1e-5).unwrap();
+        assert_eq!(out.removed, 1);
+        assert_eq!(m.vert_ids().count(), 7);
+        // Nothing near: nothing merges.
+        let ids: Vec<VertId> = m.vert_ids().collect();
+        assert_eq!(weld_onto(&mut m, &[ids[0]], 1e-5).unwrap().removed, 0);
+    }
 
     #[test]
     fn merging_two_corners_of_a_quad_leaves_a_triangle() {

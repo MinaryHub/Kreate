@@ -12,6 +12,7 @@ pub mod design;
 pub mod driver;
 pub mod feature;
 pub mod geo;
+pub mod mech;
 pub mod mesh;
 pub mod modifier;
 pub mod node;
@@ -37,6 +38,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     collection::register(registry);
     driver::register(registry);
     geo::register(registry);
+    mech::register(registry);
     mesh::register(registry);
     modifier::register(registry);
     node::register(registry);

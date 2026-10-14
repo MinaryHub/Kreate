@@ -20,6 +20,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Set>();
     registry.register::<Remove>();
     registry.register::<ToMesh>();
+    registry.register::<Round>();
 }
 
 /// A body, by name; the most recently made when the name is empty.
@@ -341,6 +342,7 @@ impl Operator for Set {
                     *symmetric = params.symmetric;
                 }
                 Shape::Revolve { angle, .. } => *angle = params.amount,
+                Shape::Round { radius, .. } => *radius = params.amount.abs(),
             }
         }
         f.operation = if params.operation == 1 {
@@ -393,6 +395,81 @@ impl Operator for Remove {
         if o.features.is_empty() {
             d.remove_object(body);
         }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct RoundParams {
+    /// The body by name; empty for the active one.
+    pub body: String,
+    /// The fillet's radius, or how far a chamfer cuts back along each face.
+    #[param(min = 0.0, soft_max = 0.02, unit = "length")]
+    pub radius: f64,
+    /// A flat cut instead of a round.
+    pub chamfer: bool,
+}
+
+impl Default for RoundParams {
+    fn default() -> Self {
+        Self {
+            body: String::new(),
+            radius: 0.001,
+            chamfer: false,
+        }
+    }
+}
+
+/// A fillet or a chamfer on every sharp edge of a body, as a step of its
+/// timeline: the sketches change, the body is built again, and its edges
+/// are broken again.
+pub struct Round;
+
+impl Operator for Round {
+    type Params = RoundParams;
+    fn id() -> &'static str {
+        "feature.round"
+    }
+    fn label() -> &'static str {
+        "Fillet or Chamfer Edges"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let body = if params.body.trim().is_empty() {
+            d.selection
+                .active
+                .filter(|id| d.object(*id).is_some_and(|o| !o.features.is_empty()))
+        } else {
+            body_named(d, &params.body)
+        }
+        .ok_or_else(|| {
+            OpError::Failed(
+                "pick a body made from a sketch; on a mesh, round its edges in edit mode".into(),
+            )
+        })?;
+        if params.radius.is_nan() || params.radius <= 0.0 {
+            return Ok(OpResult::Cancelled);
+        }
+        let order = feature::next_order(d);
+        let f = Feature {
+            shape: Shape::Round {
+                radius: params.radius,
+                chamfer: params.chamfer,
+            },
+            sketch: kreate_scene::Uid::NONE,
+            seeds: Vec::new(),
+            operation: Operation::Join,
+            order,
+        };
+        doc.document_mut()
+            .object_mut(body)
+            .expect("a body")
+            .features
+            .push(f);
         Ok(OpResult::Finished)
     }
 }
@@ -875,6 +952,87 @@ mod tests {
             (at[0] - 0.5).abs() < 1e-5 && (beside[0] - 1.0).abs() < 1e-5,
             "through the hole {at:?}, beside it {beside:?}, volume {v}"
         );
+    }
+
+    /// A 40 × 20 × 10 mm block, made from a sketch.
+    fn block(r: &OperatorRegistry, h: &mut History, doc: &mut Document) -> ObjectId {
+        run(r, h, doc, "sketch.new", &[]).unwrap();
+        run(
+            r,
+            h,
+            doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([0.04, 0.02, 0.0])),
+                ("join", PropertyValue::Int(1)),
+            ],
+        )
+        .unwrap();
+        run(
+            r,
+            h,
+            doc,
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.002, 0.002])),
+                ("distance", PropertyValue::Float(0.01)),
+            ],
+        )
+        .unwrap();
+        body(doc)
+    }
+
+    #[test]
+    fn a_fillet_and_a_chamfer_take_what_they_should_off_every_edge() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        // Twelve edges, 280 mm of them, each losing (1 − π/4) r² rounded or
+        // r²/2 cut, less a little where three meet at a corner.
+        let whole = 0.04 * 0.02 * 0.01;
+        for (chamfer, per_mm2) in [(false, 1.0 - std::f64::consts::PI / 4.0), (true, 0.5)] {
+            let mut h = History::new();
+            let mut doc = Document::new();
+            let id = block(&r, &mut h, &mut doc);
+            doc.selection.active = Some(id);
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                "feature.round",
+                &[
+                    ("radius", PropertyValue::Float(0.001)),
+                    ("chamfer", PropertyValue::Bool(chamfer)),
+                ],
+            )
+            .unwrap();
+            let v = volume(&doc, id);
+            let gone = (whole - v) * 1e9;
+            let want = per_mm2 * 280.0;
+            assert!(
+                (gone - want).abs() < want * 0.15,
+                "chamfer {chamfer}: {gone} mm³ off, against about {want}"
+            );
+            assert_eq!(doc.object(id).unwrap().features.len(), 2);
+            // The radius is a step to change, like any other.
+            let name = doc.object(id).unwrap().name.clone();
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                "feature.set",
+                &[
+                    ("body", PropertyValue::Text(name)),
+                    ("index", PropertyValue::Int(1)),
+                    ("amount", PropertyValue::Float(0.002)),
+                ],
+            )
+            .unwrap();
+            assert!(
+                whole - volume(&doc, id) > (whole - v) * 3.0,
+                "doubling the radius"
+            );
+        }
     }
 
     #[test]

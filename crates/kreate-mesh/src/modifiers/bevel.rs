@@ -28,6 +28,25 @@ impl Default for BevelParams {
     }
 }
 
+/// How many strips a fillet takes: enough that the round reads as round,
+/// one more for every 15° of turn.
+pub const FILLET_SEGMENTS: u32 = 6;
+
+/// Every edge of a solid where its faces turn by more than 30° rounded to
+/// `radius` — or, for a chamfer, cut back `radius` along each face. What a
+/// machined part's "break all sharp edges" means; exact for edges at right
+/// angles, which is what nearly every edge of one is.
+pub fn round_edges(input: &MeshData, radius: f32, chamfer: bool) -> MeshData {
+    bevel(
+        input,
+        &BevelParams {
+            width: radius,
+            angle: 30f32.to_radians(),
+            segments: if chamfer { 1 } else { FILLET_SEGMENTS },
+        },
+    )
+}
+
 /// Chamfers `input`'s sharp edges.
 pub fn bevel(input: &MeshData, params: &BevelParams) -> MeshData {
     if input.is_empty() || params.width.is_nan() || params.width <= 0.0 {
