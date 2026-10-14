@@ -9289,6 +9289,7 @@ impl App {
                 Some(Ok(call)) => self.run_app_call(call),
                 Some(Err(e)) => Err(e),
                 None => {
+                    let _ = kreate_ops::report::take();
                     let outcome = self
                         .history
                         .run_script(
@@ -9299,9 +9300,16 @@ impl App {
                             trimmed,
                         )
                         .pop();
+                    let said = kreate_ops::report::take();
+                    let with = |base: String| match &said {
+                        Some(s) => format!("{base}: {s}"),
+                        None => base,
+                    };
                     match outcome.map(|o| o.result) {
-                        Some(Ok(kreate_ops::OpResult::Finished)) => Ok("finished".to_string()),
-                        Some(Ok(other)) => Ok(format!("{other:?}")),
+                        Some(Ok(kreate_ops::OpResult::Finished)) => {
+                            Ok(with("finished".to_string()))
+                        }
+                        Some(Ok(other)) => Ok(with(format!("{other:?}"))),
                         Some(Err(e)) => Err(e.to_string()),
                         None => continue,
                     }
@@ -13628,6 +13636,89 @@ mod tests {
 
     /// The middle button, which the default preset orbits with.
     const ORBIT: usize = 1;
+
+    /// A rotation read from get_scene goes back into set_transform as it
+    /// is: both in radians, and the units said.
+    #[test]
+    fn get_scene_gives_rotations_in_the_unit_operators_take() {
+        let mut app = app();
+        let id = app
+            .doc
+            .add_mesh_object("Part", kreate_mesh::primitives::cube(0.02));
+        app.doc.selection.add(id);
+        app.doc.selection.active = Some(id);
+        let set = |app: &mut App, r: [f64; 3]| {
+            let mut p = PropertyMap::new();
+            p.set("rotation", PropertyValue::Vec3(r));
+            app.history
+                .dispatch(
+                    &app.registry,
+                    &mut app.doc,
+                    &app.op_ctx,
+                    "object.set_transform",
+                    &p,
+                )
+                .unwrap();
+        };
+        let wanted = [0.3, -0.7, 1.2];
+        set(&mut app, wanted);
+        let scene = app.scene_json();
+        assert_eq!(scene["units"]["angle"], "rad");
+        assert_eq!(scene["units"]["length"], "m");
+        let read: Vec<f64> = scene["objects"][0]["rotation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        for (r, w) in read.iter().zip(wanted) {
+            assert!((r - w).abs() < 1e-9, "{read:?}");
+        }
+        let before = app.doc.object(id).unwrap().transform.rotation;
+        set(&mut app, [read[0], read[1], read[2]]);
+        let after = app.doc.object(id).unwrap().transform.rotation;
+        assert!(before.dot(after).abs() > 1.0 - 1e-12);
+    }
+
+    /// Parts that only scrape — pressed together by a hundredth of a
+    /// millimetre — are touching, not crossing; parts that really run into
+    /// each other are crossing, with the volume they share.
+    #[test]
+    fn check_overlaps_tells_a_scrape_from_an_overlap() {
+        let mut app = app();
+        let cube = |s: f32| kreate_mesh::primitives::cube(s);
+        // A cradle with a 10 mm pocket, and a servo pressed into it a
+        // hundredth of a millimetre too wide: its sides scrape the walls.
+        let mut pocket = cube(0.01);
+        for p in pocket.positions_mut() {
+            p.z += 0.006;
+        }
+        let cradle = kreate_mesh::modifiers::boolean::boolean(
+            &cube(0.02),
+            &pocket,
+            kreate_mesh::modifiers::BooleanOp::Difference,
+        );
+        app.doc.add_mesh_object("Cradle", cradle);
+        let servo = app.doc.add_mesh_object("Servo", cube(0.01 + 2e-5));
+        app.doc.object_mut(servo).unwrap().transform.translation = DVec3::new(0.0, 0.0, 0.006);
+        // And a bracket that really runs 5 mm into the cradle's side.
+        let bracket = app.doc.add_mesh_object("Bracket", cube(0.02));
+        app.doc.object_mut(bracket).unwrap().transform.translation = DVec3::new(-0.015, 0.0, 0.0);
+        let out = app.overlaps_json(0.001, true);
+        let names = |key: &str| -> Vec<String> {
+            out[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| format!("{}-{}", p["a"].as_str().unwrap(), p["b"].as_str().unwrap()))
+                .collect()
+        };
+        assert_eq!(names("touching"), vec!["Cradle-Servo"], "{out}");
+        assert_eq!(names("overlapping"), vec!["Cradle-Bracket"], "{out}");
+        assert_eq!(out["overlapping"][0]["contact"], "crossing", "{out}");
+        let v = out["overlapping"][0]["volume"].as_f64().unwrap();
+        assert!((v - 0.005 * 0.02 * 0.02).abs() < 1e-9, "{v}");
+    }
 
     /// The connector finds an asset and adds it: search by words, add by
     /// the id the search gave, the model arriving in the scene once fetched.

@@ -54,6 +54,17 @@ pub enum ShadingMode {
     Material,
 }
 
+/// Which wires are drawn: every mesh's edges, and the objects drawn only as
+/// wire (a boolean's cutters). The rendered view shows none — it is the
+/// picture as it will be rendered, and a render has no wireframe.
+pub fn wires_shown(shading: ShadingMode, overlay: bool) -> (bool, bool) {
+    match shading {
+        ShadingMode::Rendered => (false, false),
+        ShadingMode::Wireframe => (true, true),
+        _ => (overlay, true),
+    }
+}
+
 impl ShadingMode {
     /// Whether the picture goes through the lit, scene-linear passes: the
     /// rendered view and the material preview.
@@ -4520,8 +4531,8 @@ impl Viewport {
 
         // Wireframe over the solid pass, before the grid, so geometry occludes
         // the grid but its own edges sit on top of it.
-        let all_wires = self.show_wireframe || self.shading == ShadingMode::Wireframe;
-        if all_wires || draws.iter().any(|d| d.wire_only) {
+        let (all_wires, wire_only) = wires_shown(self.shading, self.show_wireframe);
+        if all_wires || (wire_only && draws.iter().any(|d| d.wire_only)) {
             pass.set_pipeline(&self.edges);
             pass.set_bind_group(0, &self.edge_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
@@ -4536,7 +4547,7 @@ impl Viewport {
                     continue;
                 }
                 // With the wireframe overlay off, only the wire-only draws.
-                if !all_wires && !draw.wire_only {
+                if !all_wires && !(wire_only && draw.wire_only) {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.edge_bind, &[]);
@@ -5555,6 +5566,15 @@ fn wire_alpha(shading: ShadingMode, wire_only: bool, detail: crate::lod::Detail)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_rendered_view_draws_no_wires() {
+        assert_eq!(wires_shown(ShadingMode::Rendered, true), (false, false));
+        assert_eq!(wires_shown(ShadingMode::Studio, true), (true, true));
+        assert_eq!(wires_shown(ShadingMode::Studio, false), (false, true));
+        assert_eq!(wires_shown(ShadingMode::Wireframe, false), (true, true));
+        assert_eq!(wires_shown(ShadingMode::Material, true), (true, true));
+    }
+
     use super::*;
 
     /// Far off, a dense mesh's overlay fades — but in the wireframe mode the

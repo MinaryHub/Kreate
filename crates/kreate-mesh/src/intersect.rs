@@ -263,8 +263,72 @@ pub fn world_triangles(mesh: &crate::MeshData, to_world: kreate_math::DAffine3) 
     out
 }
 
+/// How much of `a` is also in `b`, in cubic units, both closed meshes in the
+/// world (`a_world`, `b_world` place them): the volume of their intersection.
+/// What tells parts that really run into each other from parts that only
+/// touch — face to face, or a servo's case against its horn — which the
+/// surface test above cannot: touching surfaces meet, and it calls that
+/// crossing. `None` when either mesh is open, so has no inside, or the
+/// intersection is too big to work out in time.
+///
+/// With the volume, how deep the overlap is on average: the volume over half
+/// its surface — a slab's thickness — so a skin of a hundredth of a
+/// millimetre over a large face reads as the scrape it is.
+pub fn shared_volume(
+    a: &crate::MeshData,
+    a_world: kreate_math::DAffine3,
+    b: &crate::MeshData,
+    b_world: kreate_math::DAffine3,
+) -> Option<(f64, f64)> {
+    if !crate::measure::is_closed(a) || !crate::measure::is_closed(b) {
+        return None;
+    }
+    let placed = |m: &crate::MeshData, w: kreate_math::DAffine3| {
+        let mut m = m.clone();
+        for p in m.positions_mut() {
+            *p = w.transform_point3(p.as_dvec3()).as_vec3();
+        }
+        m
+    };
+    let both = crate::modifiers::boolean::try_boolean(
+        &placed(a, a_world),
+        &placed(b, b_world),
+        crate::modifiers::BooleanOp::Intersect,
+    )
+    .ok()?;
+    let m = crate::measure::mass_properties(&both, |p| p);
+    let volume = m.volume.abs();
+    let depth = if m.area > 0.0 {
+        volume / (m.area * 0.5)
+    } else {
+        0.0
+    };
+    Some((volume, depth))
+}
+
 #[cfg(test)]
 mod tests {
+    /// Two boxes face to face: their surfaces meet, so the surface test says
+    /// crossing — but they share no volume. Overlapping, they share theirs.
+    #[test]
+    fn touching_shares_no_volume_and_overlapping_does() {
+        let a = primitives::cube(2.0);
+        let at = |x: f64| DAffine3::from_translation(kreate_math::DVec3::new(x, 0.0, 0.0));
+        let (touching, _) = shared_volume(&a, DAffine3::IDENTITY, &a, at(2.0)).unwrap();
+        assert!(touching < 1e-9, "{touching}");
+        let (over, depth) = shared_volume(&a, DAffine3::IDENTITY, &a, at(1.5)).unwrap();
+        assert!((over - 2.0).abs() < 1e-6, "{over}");
+        // A 0.5 x 2 x 2 slab: two of volume over half its twelve of surface.
+        assert!((depth - 1.0 / 3.0).abs() < 1e-6, "{depth}");
+        // Pressed in by a hundredth: the surface test sees something (with
+        // faces in one plane it takes the overlap for one inside the other),
+        // and what they share is a skin.
+        let tris = |x| world_triangles(&a, at(x));
+        assert_ne!(contact(&tris(0.0), &tris(1.99)), Contact::Clear);
+        let (_, skin) = shared_volume(&a, DAffine3::IDENTITY, &a, at(1.99)).unwrap();
+        assert!(skin < 0.011, "{skin}");
+    }
+
     use super::*;
     use crate::primitives;
     use kreate_math::{DAffine3, DVec3};

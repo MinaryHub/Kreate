@@ -1036,6 +1036,7 @@ impl Operator for CheckSelect {
         } else {
             0.0
         };
+        let mut count = 0usize;
         let found = for_each_edit_mesh(doc, |target, mesh| {
             let report = kreate_mesh::check::check(
                 mesh,
@@ -1057,8 +1058,25 @@ impl Operator for CheckSelect {
                 selection::set_selected(mesh, domain, *i, true);
             }
             selection::flush(mesh, mode);
+            count += list.len();
             !list.is_empty()
         })?;
+        // How many, said: "Cancelled" for none and "finished" for some read
+        // as how the operator went, not as what the check found.
+        let what = [
+            "open edges",
+            "non-manifold edges",
+            "flipped edges",
+            "degenerate faces",
+            "loose vertices",
+            "intersecting faces",
+            "thin faces",
+        ][issue as usize];
+        crate::report::say(if count == 0 {
+            format!("found 0 {what}: none")
+        } else {
+            format!("found {count} {what}, selected")
+        });
         Ok(if found {
             OpResult::Finished
         } else {
@@ -2447,7 +2465,23 @@ impl Operator for MergeVerts {
                 if verts.is_empty() && empty {
                     verts = bm.vert_ids().collect();
                 }
-                edit::weld_by_distance(bm, &verts, params.distance as f32)
+                // A distance longer than the mesh's own detail does not weld
+                // seams, it crushes features — a thread's flanks into each
+                // other — and opens the solid. A closed mesh that would come
+                // out open is left as it was, and the reason said.
+                let closed = kreate_mesh::measure::is_closed(&bm.to_mesh_data());
+                let backup = closed.then(|| bm.clone());
+                let merged = edit::weld_by_distance(bm, &verts, params.distance as f32);
+                if let (Some(backup), Ok(_)) = (backup, &merged) {
+                    if !kreate_mesh::measure::is_closed(&bm.to_mesh_data()) {
+                        *bm = backup;
+                        return Err(OpError::Failed(format!(
+                            "merging within {} m would open this closed mesh: it has detail finer than that. Use a smaller distance",
+                            params.distance
+                        )));
+                    }
+                }
+                merged
             } else {
                 edit::merge_selected(bm, target)
             };
@@ -3415,6 +3449,12 @@ pub struct SelectWhereParams {
     pub extend: bool,
     /// Remove the matches from the selection instead of adding them.
     pub deselect: bool,
+    /// How far outside the box, in metres, still counts as in it: a box
+    /// read off numbers rounded to a tenth of a millimetre misses the
+    /// corner it was meant to catch. Negative: a ten-thousandth of the
+    /// meshes' size.
+    #[param(unit = "length")]
+    pub tolerance: f64,
 }
 
 impl Default for SelectWhereParams {
@@ -3428,6 +3468,7 @@ impl Default for SelectWhereParams {
             material: -1,
             extend: false,
             deselect: false,
+            tolerance: -1.0,
         }
     }
 }
@@ -3463,9 +3504,28 @@ impl Operator for SelectWhere {
             2 => SelectMode::Face,
             _ => SelectMode::Vert,
         };
+        let margin = if params.tolerance >= 0.0 {
+            params.tolerance
+        } else {
+            // The size of what is being edited, in the world.
+            let d = doc.document();
+            let size = edit_targets(d)
+                .iter()
+                .filter_map(|t| {
+                    let m = d.mesh(t.mesh)?;
+                    let b = m.bounds();
+                    let (lo, hi) = (
+                        t.to_world.transform_point3(b.min.as_dvec3()),
+                        t.to_world.transform_point3(b.max.as_dvec3()),
+                    );
+                    Some((hi - lo).length())
+                })
+                .fold(0.0, f64::max);
+            size * 1e-4
+        };
         let (lo, hi) = (
-            glam::DVec3::from_array(params.min),
-            glam::DVec3::from_array(params.max),
+            glam::DVec3::from_array(params.min) - glam::DVec3::splat(margin),
+            glam::DVec3::from_array(params.max) + glam::DVec3::splat(margin),
         );
         // The nearest tested point outside the box, for saying where things
         // are when nothing was caught.
@@ -3568,8 +3628,8 @@ impl Operator for SelectWhere {
             let what = ["vertex", "edge midpoint", "face center"][params.mode.min(2) as usize];
             let near = match nearest.get() {
                 Some((gap, p)) => format!(
-                    "; the nearest {what} outside the box is at ({:.4}, {:.4}, {:.4}), {gap:.4} m away",
-                    p.x, p.y, p.z
+                    "; the nearest {what} outside the box is at ({:.4}, {:.4}, {:.4}), {gap:.6} m away — tolerance={:.6} would take it",
+                    p.x, p.y, p.z, gap + margin + 1e-9
                 ),
                 None => String::new(),
             };
@@ -4330,6 +4390,137 @@ mod tests {
             assert!(h.undo(&mut doc));
             assert_eq!(doc.mesh(mesh).unwrap().num_verts(), 8);
         }
+    }
+
+    /// A box that misses a face by a rounding still catches it; one that
+    /// misses by more says what tolerance would, and takes it when given.
+    #[test]
+    fn select_where_allows_a_little_slack() {
+        let r = registry();
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(0.04));
+        let obj = doc.add_object(Object::new("Box", ObjectData::Mesh(mesh)));
+        doc.selection.add(obj);
+        let ctx = Context {
+            mode: Mode::EditMesh,
+        };
+        let at = |z: f64| {
+            vec![
+                ("mode", PropertyValue::Enum(2)),
+                ("min", PropertyValue::Vec3([-1.0, -1.0, z])),
+                ("max", PropertyValue::Vec3([1.0, 1.0, z])),
+            ]
+        };
+        // The top's centre is at 0.02; a micrometre off is caught.
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.select_where",
+            &params(&at(0.020001)),
+        )
+        .unwrap();
+        // A fifth of a millimetre off is not, and the error says what would.
+        let err = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "mesh.select_where",
+                &params(&at(0.0198)),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("tolerance="), "{err}");
+        let mut given = at(0.0198);
+        given.push(("tolerance", PropertyValue::Float(0.0003)));
+        h.dispatch(&r, &mut doc, &ctx, "mesh.select_where", &params(&given))
+            .unwrap();
+    }
+
+    /// The mesh check says how many it found, whichever way it went: none on
+    /// a closed box, the four open edges of a box without its top.
+    #[test]
+    fn check_select_says_how_many_it_found() {
+        let r = registry();
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let box_ = kreate_mesh::primitives::cube(1.0);
+        let mesh = doc.add_mesh(box_.clone());
+        let obj = doc.add_object(Object::new("Box", ObjectData::Mesh(mesh)));
+        doc.selection.add(obj);
+        let ctx = Context {
+            mode: Mode::EditMesh,
+        };
+        let _ = crate::report::take();
+        let ran = h
+            .dispatch(&r, &mut doc, &ctx, "mesh.check_select", &params(&[]))
+            .unwrap();
+        assert_eq!(ran, OpResult::Cancelled);
+        assert_eq!(
+            crate::report::take().as_deref(),
+            Some("found 0 open edges: none")
+        );
+        let normals = box_.compute_face_normals();
+        let keep: Vec<Vec<u32>> = (0..box_.num_faces())
+            .filter(|f| normals[*f as usize].z < 0.9)
+            .map(|f| box_.face_verts(f).to_vec())
+            .collect();
+        *doc.mesh_mut(mesh).unwrap() =
+            kreate_mesh::MeshData::from_faces(box_.positions().to_vec(), &keep);
+        h.dispatch(&r, &mut doc, &ctx, "mesh.check_select", &params(&[]))
+            .unwrap();
+        assert_eq!(
+            crate::report::take().as_deref(),
+            Some("found 4 open edges, selected")
+        );
+    }
+
+    /// A distance weld on a closed boolean result: a small distance keeps it
+    /// closed; one longer than its detail is refused, the mesh untouched.
+    #[test]
+    fn a_distance_merge_never_opens_a_closed_mesh() {
+        use kreate_mesh::modifiers::boolean::{boolean, BooleanOp};
+        let mut plate = kreate_mesh::primitives::cube(1.0);
+        for p in plate.positions_mut() {
+            *p *= kreate_math::Vec3::new(0.06, 0.04, 0.003);
+        }
+        let mut c = kreate_mesh::mech::internal_thread_cutter(0.003, 0.0005, 0.01, 0.0);
+        for p in c.positions_mut() {
+            *p += kreate_math::Vec3::new(0.015, 0.01, -0.005);
+        }
+        let cut = boolean(&plate, &c, BooleanOp::Difference);
+        assert!(kreate_mesh::measure::is_closed(&cut));
+        let r = registry();
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(cut);
+        let obj = doc.add_object(Object::new("Plate", ObjectData::Mesh(mesh)));
+        doc.selection.add(obj);
+        let ctx = Context {
+            mode: Mode::EditMesh,
+        };
+        let faces = doc.mesh(mesh).unwrap().num_faces();
+        let err = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &ctx,
+                "mesh.merge",
+                &params(&[("distance", PropertyValue::Float(1e-4))]),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("would open"), "{err}");
+        assert_eq!(doc.mesh(mesh).unwrap().num_faces(), faces);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.merge",
+            &params(&[("distance", PropertyValue::Float(1e-6))]),
+        )
+        .unwrap();
+        assert!(kreate_mesh::measure::is_closed(doc.mesh(mesh).unwrap()));
     }
 
     #[test]

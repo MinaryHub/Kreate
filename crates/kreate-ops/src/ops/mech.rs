@@ -29,14 +29,19 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddSheetMetal>();
 }
 
-/// Where a part or a cutter goes: the cursor, or a place given.
+/// Where a part or a cutter goes: the cursor, or a place given. A place
+/// given — a location or a turn other than zero — wins over `at_cursor`,
+/// which is on by default for the menus: a script that said where a hole
+/// goes and left the flag alone had the hole made at the cursor, off the
+/// part, with nothing cut.
 fn placement(
     doc: &Document,
     at_cursor: bool,
     location: [f64; 3],
     rotation: [f64; 3],
 ) -> (DVec3, DQuat) {
-    if at_cursor {
+    let given = location != [0.0; 3] || rotation != [0.0; 3];
+    if at_cursor && !given {
         (doc.cursor, doc.cursor_rotation)
     } else {
         let angles = DVec3::from_array(rotation);
@@ -63,7 +68,8 @@ fn target(doc: &Document, name: &str) -> Result<ObjectId, OpError> {
 }
 
 /// A hidden object holding `mesh`, placed, that `into` loses as a boolean:
-/// what makes a cut that can be moved or taken off later.
+/// what makes a cut that can be moved or taken off later. Its identity, for
+/// deleting it when the cut is applied.
 fn cut_with(
     doc: &mut DocMut<'_>,
     into: ObjectId,
@@ -71,7 +77,7 @@ fn cut_with(
     mesh: kreate_mesh::MeshData,
     at: DVec3,
     turn: DQuat,
-) {
+) -> kreate_scene::Uid {
     let d = doc.document_mut();
     let mesh = d.add_mesh(mesh);
     let mut cutter = Object::new(name, ObjectData::Mesh(mesh));
@@ -89,6 +95,7 @@ fn cut_with(
                 op: kreate_mesh::modifiers::BooleanOp::Difference,
             },
         )));
+    operand
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -113,13 +120,20 @@ pub struct HoleParams {
     /// A tapped hole's thread cut as well as its drill: for a part to be
     /// printed. A part to be tapped wants only the drill.
     pub thread: bool,
-    /// At the 3D cursor, going down its Z; otherwise at `location`.
+    /// At the 3D cursor, going down its Z, unless `location` or `rotation`
+    /// is given.
     pub at_cursor: bool,
+    /// Where the hole starts, on the part's surface, in the world; it goes
+    /// down the rotated Z.
     pub location: [f64; 3],
     #[param(unit = "angle")]
     pub rotation: [f64; 3],
     /// The part to cut, by name; empty for the active object.
     pub target: String,
+    /// Cut it into the mesh now and delete the cutter. Off, the hole stays
+    /// a boolean modifier with a hidden cutter, to move or apply later
+    /// (`object.modifier_apply`).
+    pub apply: bool,
 }
 
 impl Default for HoleParams {
@@ -135,6 +149,7 @@ impl Default for HoleParams {
             location: [0.0; 3],
             rotation: [0.0; 3],
             target: String::new(),
+            apply: false,
         }
     }
 }
@@ -189,10 +204,38 @@ impl Operator for Hole {
             depth,
             params.through,
         );
+        // A cutter that does not reach the part cuts nothing; said, rather
+        // than left as an object in empty space.
+        let part = {
+            let o = d.object(into).expect("checked");
+            let m = o.mesh().and_then(|m| d.mesh(m)).expect("a mesh");
+            let w = d.world_transform(into);
+            m.positions()
+                .iter()
+                .map(|p| w.transform_point3(p.as_dvec3()))
+                .fold(
+                    (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+                    |(lo, hi), p| (lo.min(p), hi.max(p)),
+                )
+        };
+        let reach = cutter
+            .positions()
+            .iter()
+            .map(|p| at + turn * p.as_dvec3())
+            .fold(
+                (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+                |(lo, hi), p| (lo.min(p), hi.max(p)),
+            );
+        if !(reach.0.cmple(part.1).all() && reach.1.cmpge(part.0).all()) {
+            return Err(OpError::Failed(format!(
+                "the hole at ({:.4}, {:.4}, {:.4}) misses the part, which spans ({:.4}, {:.4}, {:.4}) to ({:.4}, {:.4}, {:.4}): give `location` on its surface",
+                at.x, at.y, at.z, part.0.x, part.0.y, part.0.z, part.1.x, part.1.y, part.1.z
+            )));
+        }
         let what = ["", " counterbore", " countersink", " tapped"][params.kind.min(3) as usize];
         // i18n-exempt: a feature's designation
         let name = format!("Hole {}{what}", size.name);
-        cut_with(doc, into, name.clone(), cutter, at, turn);
+        let mut cutters = vec![cut_with(doc, into, name.clone(), cutter, at, turn)];
         if kind == HoleKind::Tapped && params.thread {
             // The thread, the tap drill's depth, cut downward: an external
             // thread turned over, with a tenth of a millimetre of play.
@@ -204,7 +247,17 @@ impl Operator for Hole {
                 p.z = -p.z;
             }
             // i18n-exempt: a feature's designation
-            cut_with(doc, into, format!("{name} thread"), thread, at, turn);
+            cutters.push(cut_with(
+                doc,
+                into,
+                format!("{name} thread"),
+                thread,
+                at,
+                turn,
+            ));
+        }
+        if params.apply {
+            crate::ops::modifier::bake_last(doc, into, cutters.len(), &cutters)?;
         }
         Ok(OpResult::Finished)
     }
@@ -1091,7 +1144,18 @@ impl Operator for Shell {
             if open.is_empty() {
                 return Ok(0);
             }
+            // Every face open leaves nothing to give a wall to: the mesh came
+            // back empty, all its faces gone, with nothing said.
+            if open.len() >= bm.face_ids().count() {
+                return Err(OpError::Failed(
+                    "every face is selected: select only the faces to open (a box's top), then shell"
+                        .into(),
+                ));
+            }
             let shelled = mech::shell(&bm.to_mesh_data(), &open, params.thickness as f32);
+            if shelled.num_faces() == 0 {
+                return Err(OpError::Failed("shelling left no faces".into()));
+            }
             *bm = kreate_mesh::BMesh::from_mesh_data(&shelled);
             Ok(1)
         })?
@@ -1532,6 +1596,130 @@ mod tests {
         doc.selection.add(id);
         doc.selection.active = Some(id);
         id
+    }
+
+    /// A box with its top selected, shelled: a tray, its walls the thickness.
+    /// A hole asked for at a place goes there, and cuts: `location` given
+    /// is used, whatever `at_cursor` says, and a hole that would miss the
+    /// part is refused rather than left as a cutter in empty space.
+    #[test]
+    fn a_hole_at_a_location_cuts_the_part_there() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let id = plate(&mut doc);
+        // The plate away from the cursor, which stays at the origin.
+        doc.object_mut(id).unwrap().transform.translation = DVec3::new(0.5, 0.0, 0.0);
+        let whole = volume(&doc, id);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "object.hole",
+            &[("location", PropertyValue::Vec3([0.5, 0.0, 0.0]))],
+        )
+        .unwrap();
+        let cut = volume(&doc, id);
+        assert!(cut < whole * 0.99, "{cut} against {whole}");
+        let err = run(
+            &r,
+            &mut h,
+            &mut doc,
+            "object.hole",
+            &[("location", PropertyValue::Vec3([3.0, 0.0, 0.0]))],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("misses"), "{err}");
+        // Applied: the mesh itself has the hole, no modifier, no cutter.
+        let objects = doc.objects().count();
+        let modifiers = doc.object(id).unwrap().modifiers.len();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "object.hole",
+            &[
+                ("location", PropertyValue::Vec3([0.51, 0.01, 0.0])),
+                ("apply", PropertyValue::Bool(true)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(doc.objects().count(), objects, "the cutter is gone");
+        assert_eq!(doc.object(id).unwrap().modifiers.len(), modifiers);
+        let mesh = doc.mesh(doc.object(id).unwrap().mesh().unwrap()).unwrap();
+        let baked = kreate_mesh::measure::mass_properties(mesh, |p| p).volume;
+        assert!(baked < whole * 0.99, "the mesh itself is cut: {baked}");
+    }
+
+    #[test]
+    fn shelling_a_box_by_its_selected_top_makes_a_tray() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        // The cube the Add menu makes, as a user or a script has it.
+        let mut p = PropertyMap::new();
+        p.set("size", PropertyValue::Float(2.0));
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "object.add_primitive",
+            &p,
+        )
+        .unwrap();
+        let made = doc.selection.active.unwrap();
+        let made_mesh = doc
+            .mesh(doc.object(made).unwrap().mesh().unwrap())
+            .unwrap()
+            .clone();
+        println!(
+            "cube verts {} faces {}",
+            made_mesh.num_verts(),
+            made_mesh.num_faces()
+        );
+        let mut bm = made_mesh.to_bmesh();
+        let top = bm.face_ids().find(|f| bm.face_normal(*f).z > 0.9).unwrap();
+        bm.set_face_selected(top, true);
+        bm.flush_selection(kreate_mesh::bmesh::SelectMode::Face);
+        let id = doc.add_mesh_object("Box", bm.to_mesh_data());
+        doc.selection.add(id);
+        doc.selection.active = Some(id);
+        let ctx = Context {
+            mode: Mode::EditMesh,
+        };
+        let mut p = PropertyMap::new();
+        p.set("thickness", PropertyValue::Float(0.1));
+        // In edit mode, as the application runs it: through the session.
+        let mesh_id = doc.object(id).unwrap().mesh().unwrap();
+        let mut sessions = crate::EditSessions::new();
+        sessions.open_for(&doc, &[mesh_id]);
+        h.dispatch_in_session(&r, &mut doc, Some(&mut sessions), &ctx, "mesh.shell", &p)
+            .unwrap();
+        let mesh = doc.mesh(mesh_id).unwrap();
+        assert!(mesh.num_faces() > 6, "faces left: {}", mesh.num_faces());
+        // Every face selected: refused, and the mesh left as it was — not
+        // emptied.
+        let before = mesh.num_faces();
+        h.dispatch_in_session(
+            &r,
+            &mut doc,
+            Some(&mut sessions),
+            &ctx,
+            "mesh.select",
+            &PropertyMap::new(),
+        )
+        .unwrap();
+        let err = h
+            .dispatch_in_session(&r, &mut doc, Some(&mut sessions), &ctx, "mesh.shell", &p)
+            .unwrap_err();
+        assert!(err.to_string().contains("every face"), "{err}");
+        assert_eq!(doc.mesh(mesh_id).unwrap().num_faces(), before);
+        let mesh = doc.mesh(mesh_id).unwrap();
+        let v = kreate_mesh::measure::mass_properties(mesh, |q| q).volume;
+        let want = 8.0 - 1.8 * 1.8 * 1.9;
+        assert!((v - want).abs() < want * 0.01, "{v} against {want}");
     }
 
     #[test]

@@ -28,7 +28,7 @@ const INSTRUCTIONS: &str = "Kreate is a 3D modelling application, open on the us
 These tools act on the document it has open: every edit goes through the same operators as \
 its menus and lands in its undo history. Start with get_scene to see what is there. Edits are \
 script lines run by run_script; list_operators gives every operator and its parameters. \
-Units are metres, Z is up. Use capture_viewport to look at the result, or camera=true to see \
+Units: lengths in metres and angles in radians, in what every tool takes and gives (get_scene also gives rotations in degrees, to read); speak to the user in the length unit get_scene names as display_length. Z is up. Use capture_viewport to look at the result, or camera=true to see \
 the shot through the scene camera; render_image writes a finished, path-traced picture \
 through a camera to a file.\n\
 Workflow: object.* operators work in object mode on the selection and the active object. \
@@ -144,7 +144,7 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "get_scene",
-            "description": "What the open document holds: every object (name, uid, type, location, rotation in degrees as XYZ Euler, scale, visibility, selection, parent; for meshes vertex and face counts, dimensions in metres, world-space bounds and the materials in its slots with their uids; kind, colour and intensity for lights; lens and exposure settings for cameras), every material (uid, how many objects use it, base colour, metallic, roughness, emission, transmission, IOR; colours are sRGB, as material.set_properties takes them), every image (name, uid, size), the editing mode, the view's exposure in stops and whether the meter set it, the 3D cursor, the current frame and the document's file.",
+            "description": "What the open document holds: the units (lengths in metres, angles in radians, and the unit the user's screen shows lengths in); every object (name, uid, type, location, rotation as XYZ Euler in radians — as operators take it — and in degrees, scale, visibility, selection, parent; for meshes vertex and face counts, dimensions in metres, world-space bounds and the materials in its slots with their uids; kind, colour and intensity for lights; lens and exposure settings for cameras), every material (uid, how many objects use it, base colour, metallic, roughness, emission, transmission, IOR; colours are sRGB, as material.set_properties takes them), every image (name, uid, size), the editing mode, the view's exposure in stops and whether the meter set it, the 3D cursor, the current frame and the document's file.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
@@ -203,7 +203,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "check_overlaps",
-            "description": "Which visible mesh objects run into each other. Pairs whose bounding boxes overlap by more than the tolerance are tested on their actual surfaces: reported with contact \"crossing\" when the surfaces pass through each other, or \"X inside Y\" when one is wholly within the other, and the box overlap in metres. Touching (a vase standing on a table, a chair against a wall) is not reported, nor are a shape and its own parent or child. exact=false skips the surface test and reports every box overlap, which is quicker and cruder.",
+            "description": "Which visible mesh objects run into each other. Pairs whose bounding boxes overlap by more than the tolerance are tested on their actual surfaces: reported with contact \"crossing\" when they share volume — with that volume in cubic metres and its average depth in metres — or \"X inside Y\" when one is wholly within the other, and the box overlap in metres. Parts whose surfaces only meet or scrape (sharing less than a tenth of the tolerance in depth) are listed apart under \"touching\", not as overlaps; a shape and its own parent or child are not reported. exact=false skips the surface test and reports every box overlap, which is quicker and cruder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

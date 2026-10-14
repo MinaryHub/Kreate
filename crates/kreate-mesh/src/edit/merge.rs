@@ -145,18 +145,20 @@ pub fn merge_groups(
         if rebuilt.len() > 1 && rebuilt.first() == rebuilt.last() {
             rebuilt.pop();
         }
-        let mut sorted = rebuilt.clone();
-        sorted.sort_unstable_by_key(|v| v.index());
-        let before = sorted.len();
-        sorted.dedup();
-        // A vertex repeated non-consecutively is a bowtie: the face crosses
-        // itself. Dropping it is a loss, but making one up is worse — the repair
-        // is a guess about which of two faces the user wanted.
-        if rebuilt.len() < 3 || sorted.len() != before {
+        // A vertex now met twice: the face's edge came round close to
+        // another part of itself — a long face round a hole, a sliver beside
+        // a big face — and the merge pinched it there. It is the two faces
+        // either side of the pinch, not a face to throw away: dropped, it
+        // left a hole the size of the face, round a plate's top after a
+        // weld of a micrometre. A part with fewer than three corners is an
+        // edge folded back on itself, and goes.
+        let loops = pinched_apart(rebuilt);
+        if loops.is_empty() {
             out.faces_dropped += 1;
-            continue;
         }
-        mesh.add_face(&rebuilt)?;
+        for l in loops {
+            mesh.add_face(&l)?;
+        }
     }
 
     for v in doomed {
@@ -174,6 +176,38 @@ pub fn merge_groups(
 
     mesh.select_none();
     Ok(out)
+}
+
+/// A ring cut at every vertex it meets twice into the rings it is, those of
+/// three corners or more.
+fn pinched_apart(ring: Vec<VertId>) -> Vec<Vec<VertId>> {
+    let mut out = Vec::new();
+    let mut work = vec![ring];
+    while let Some(mut ring) = work.pop() {
+        ring.dedup();
+        while ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        if ring.len() < 3 {
+            continue;
+        }
+        let repeat = (0..ring.len()).find_map(|i| {
+            ring[i + 1..]
+                .iter()
+                .position(|v| *v == ring[i])
+                .map(|d| (i, i + 1 + d))
+        });
+        match repeat {
+            None => out.push(ring),
+            Some((i, j)) => {
+                let mut outer = ring[j..].to_vec();
+                outer.extend_from_slice(&ring[..i]);
+                work.push(ring[i..j].to_vec());
+                work.push(outer);
+            }
+        }
+    }
+    out
 }
 
 /// Collapses the selected vertices into one.

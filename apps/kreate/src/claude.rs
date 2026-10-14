@@ -50,7 +50,8 @@ use crate::attach::{claude_user_message, prompt_with_text, Attachment, Kind as A
 const SYSTEM_PROMPT: &str = "You are talking with the user in the chat panel inside Kreate, \
 a 3D modelling application, while they look at the same document. The kreate tools act on \
 that document; use them, and nothing else, to look at and change it. Answer in the language \
-the user writes in. Keep replies short: the panel is narrow. Say what you changed in a sentence \
+the user writes in. The tools take and give lengths in metres and angles in radians; tell the \
+user lengths in the unit get_scene calls display_length (millimetres, as a rule). Keep replies short: the panel is narrow. Say what you changed in a sentence \
 or two rather than repeating the script.";
 
 /// Which assistant the panel talks to.

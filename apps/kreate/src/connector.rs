@@ -1050,6 +1050,7 @@ impl App {
             false
         };
         let mut pairs = Vec::new();
+        let mut touching = Vec::new();
         for (i, (a, an, (alo, ahi))) in boxes.iter().enumerate() {
             for (b, bn, (blo, bhi)) in &boxes[i + 1..] {
                 let depth = ahi.min(*bhi) - alo.max(*blo);
@@ -1058,19 +1059,54 @@ impl App {
                         pairs.push(json!({ "a": an, "b": bn, "overlap": depth.to_array() }));
                         continue;
                     }
-                    let triangles = |id| {
-                        let mesh = doc
-                            .object(id)
+                    let mesh = |id| {
+                        doc.object(id)
                             .and_then(|o| o.mesh())
-                            .and_then(|m| doc.mesh(m))?;
-                        Some(kreate_mesh::intersect::world_triangles(
-                            mesh,
-                            doc.world_transform(id),
-                        ))
+                            .and_then(|m| doc.mesh(m))
                     };
-                    let (Some(ta), Some(tb)) = (triangles(*a), triangles(*b)) else {
+                    let (Some(ma), Some(mb)) = (mesh(*a), mesh(*b)) else {
                         continue;
                     };
+                    let (wa, wb) = (doc.world_transform(*a), doc.world_transform(*b));
+                    let box_overlap = depth.to_array();
+                    // Closed parts: by the volume they share. Surfaces that
+                    // cross may only scrape — pressed together by a hair, an
+                    // import's rounding — and faces that lie in one plane fool
+                    // a surface test into calling a plain overlap one part
+                    // "inside" the other. Under a tenth of the tolerance deep
+                    // is touching; all of the smaller one shared is inside.
+                    if let Some((volume, deep)) =
+                        kreate_mesh::intersect::shared_volume(ma, wa, mb, wb)
+                    {
+                        if deep < tolerance * 0.1 {
+                            if volume > 0.0 {
+                                touching.push(json!({ "a": an, "b": bn, "depth": deep }));
+                            }
+                            continue;
+                        }
+                        let own = |m, w: kreate_math::DAffine3| {
+                            let det = w.matrix3.determinant().abs();
+                            kreate_mesh::measure::mass_properties(m, |p| p).volume.abs() * det
+                        };
+                        let (va, vb) = (own(ma, wa), own(mb, wb));
+                        let how = if volume >= va * 0.999 {
+                            format!("{an} inside {bn}")
+                        } else if volume >= vb * 0.999 {
+                            format!("{bn} inside {an}")
+                        } else {
+                            "crossing".to_string()
+                        };
+                        pairs.push(json!({
+                            "a": an, "b": bn, "contact": how,
+                            "volume": volume, "depth": deep, "box_overlap": box_overlap,
+                        }));
+                        continue;
+                    }
+                    // Open, or too big to measure: by the surfaces alone.
+                    let (ta, tb) = (
+                        kreate_mesh::intersect::world_triangles(ma, wa),
+                        kreate_mesh::intersect::world_triangles(mb, wb),
+                    );
                     use kreate_mesh::intersect::Contact;
                     let how = match kreate_mesh::intersect::contact(&ta, &tb) {
                         Contact::Clear => continue,
@@ -1082,11 +1118,13 @@ impl App {
                             first_in_second: false,
                         } => format!("{bn} inside {an}"),
                     };
-                    pairs.push(json!({ "a": an, "b": bn, "contact": how, "box_overlap": depth.to_array() }));
+                    pairs.push(
+                        json!({ "a": an, "b": bn, "contact": how, "box_overlap": box_overlap }),
+                    );
                 }
             }
         }
-        json!({ "checked": boxes.len(), "overlapping": pairs })
+        json!({ "checked": boxes.len(), "overlapping": pairs, "touching": touching })
     }
 
     pub(super) fn scene_json(&self) -> serde_json::Value {
@@ -1117,6 +1155,9 @@ impl App {
                     "name": o.name,
                     "type": kind,
                     "location": t.translation.to_array(),
+                    // In radians, as every operator takes it, so a value read
+                    // here goes back unchanged; and in degrees, to read.
+                    "rotation": [r.x, r.y, r.z],
                     "rotation_degrees": [r.x.to_degrees(), r.y.to_degrees(), r.z.to_degrees()],
                     "scale": t.scale.to_array(),
                     "visible": doc.is_shown(id),
@@ -1201,6 +1242,13 @@ impl App {
             })
             .collect();
         json!({
+            // What every number here and every operator's parameters are in,
+            // and the unit the user sees lengths in on screen.
+            "units": {
+                "length": "m",
+                "angle": "rad",
+                "display_length": doc.design.length_unit.tag(),
+            },
             "file": self.file.path().map(|p| p.display().to_string()),
             "mode": self.op_ctx.mode.tag(),
             "frame": doc.playback.frame,

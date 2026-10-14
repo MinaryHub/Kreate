@@ -971,6 +971,10 @@ pub struct BooleanParams {
     /// What the selected objects do to the active one.
     #[param(variants("difference", "union", "intersect"))]
     pub operation: u32,
+    /// Bake the result into the mesh now and delete the cutters. Off, the
+    /// boolean stays a modifier — live, the cutters kept and drawn as wire —
+    /// to be applied later with `object.modifier_apply`.
+    pub apply: bool,
 }
 
 /// Blender's Bool Tool in one step: the active object gets a boolean for each
@@ -1031,16 +1035,74 @@ impl Operator for Boolean {
             2 => BooleanOp::Intersect,
             _ => BooleanOp::Difference,
         };
+        let count = operands.len();
         let object = doc.document_mut().object_mut(id).expect("target checked");
-        for operand in operands {
+        for operand in &operands {
             object
                 .modifiers
                 .push(ModifierInstance::new(ModifierKind::Boolean(
-                    BooleanModifier { operand, op },
+                    BooleanModifier {
+                        operand: *operand,
+                        op,
+                    },
                 )));
+        }
+        if params.apply {
+            bake_last(doc, id, count, &operands)?;
         }
         Ok(OpResult::Finished)
     }
+}
+
+/// Bakes the last `count` modifiers of `id` into its mesh, in order, takes
+/// them off, and deletes the objects `remove` names: a boolean made and
+/// applied in one step, its cutters gone. An error, with nothing baked, when
+/// the mesh is shared or a boolean was too big to finish.
+pub(crate) fn bake_last(
+    doc: &mut DocMut<'_>,
+    id: ObjectId,
+    count: usize,
+    remove: &[kreate_scene::Uid],
+) -> Result<(), OpError> {
+    let d = doc.document();
+    let mesh = d
+        .object(id)
+        .and_then(|o| o.mesh())
+        .ok_or_else(|| OpError::Failed("not a mesh".into()))?;
+    if d.mesh_users(mesh) > 1 {
+        return Err(OpError::Failed(
+            "a mesh used by more than one object cannot have a boolean applied: leave apply off"
+                .into(),
+        ));
+    }
+    let _ = kreate_scene::modifier::take_boolean_gave_up();
+    let mut work = d.clone();
+    for _ in 0..count {
+        let last = work.object(id).expect("target").modifiers.len() - count;
+        let baked = kreate_scene::modifier::apply_one(&work, id, last)
+            .ok_or_else(|| OpError::Failed("nothing to apply".into()))?;
+        if kreate_scene::modifier::take_boolean_gave_up() {
+            return Err(OpError::Failed(
+                "the boolean has too many faces to finish: nothing was applied".into(),
+            ));
+        }
+        *work.mesh_mut(mesh).expect("checked") = baked;
+        work.object_mut(id).expect("target").modifiers.remove(last);
+    }
+    let d = doc.document_mut();
+    *d.mesh_mut(mesh).expect("checked") = work.mesh(mesh).expect("checked").clone();
+    let o = d.object_mut(id).expect("target");
+    let keep = o.modifiers.len() - count;
+    o.modifiers.truncate(keep);
+    for uid in remove {
+        if let Some(c) = d.object_by_uid(*uid) {
+            d.remove_object(c);
+        }
+    }
+    d.selection.clear();
+    d.selection.add(id);
+    d.selection.active = Some(id);
+    Ok(())
 }
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
@@ -1409,6 +1471,33 @@ mod tests {
             kreate_reflect::PropertyKind::Enum { variants } => assert_eq!(variants, KINDS),
             other => panic!("expected an enum, got {other:?}"),
         }
+    }
+
+    /// With `apply`, the boolean is in the mesh at once: no modifier, the
+    /// cutter deleted, one undo step back to both.
+    #[test]
+    fn a_boolean_applied_in_one_step_cuts_the_mesh_and_removes_the_cutter() {
+        let (r, mut h, mut d, id, c) = setup();
+        let mut small = kreate_mesh::primitives::cube(1.0);
+        for p in small.positions_mut() {
+            *p += kreate_math::Vec3::new(1.0, 0.0, 0.0);
+        }
+        let cutter = d.add_mesh_object("Cutter", small);
+        d.selection.clear();
+        d.selection.add(cutter);
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        let before = d.objects().count();
+        let mut p = PropertyMap::new();
+        p.set("apply", PropertyValue::Bool(true));
+        h.dispatch(&r, &mut d, &c, "object.boolean", &p).unwrap();
+        assert_eq!(d.objects().count(), before - 1);
+        assert!(d.object(id).unwrap().modifiers.is_empty());
+        let mesh = d.mesh(d.object(id).unwrap().mesh().unwrap()).unwrap();
+        let v = kreate_mesh::measure::mass_properties(mesh, |q| q).volume;
+        assert!((v - (8.0 - 0.5)).abs() < 1e-3, "{v}");
+        assert!(h.undo(&mut d));
+        assert_eq!(d.objects().count(), before);
     }
 
     #[test]

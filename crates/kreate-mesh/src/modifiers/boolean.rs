@@ -1105,6 +1105,152 @@ fn dissolve_straight_vertices(positions: &[DVec3], faces: &mut [Vec<u32>]) {
 
 #[cfg(test)]
 mod tests {
+    /// More solids that touch without overlapping, at a part's size: turned,
+    /// offset so only part of a face meets, several bosses on a plate one
+    /// after another, and triangles against quads.
+    #[test]
+    fn more_touching_solids_unite_closed() {
+        let turn = |m: &mut MeshData, a: f32, off: Vec3, s: Vec3| {
+            let q = glam::Quat::from_rotation_z(a);
+            for p in m.positions_mut() {
+                *p = q * (*p * s) + off;
+            }
+        };
+        let mm = 0.001f32;
+        // Rotated boxes face to face.
+        let mut a = crate::primitives::cube(1.0);
+        turn(&mut a, 0.5, Vec3::ZERO, Vec3::new(20.0, 10.0, 3.0) * mm);
+        let mut b = crate::primitives::cube(1.0);
+        let side = glam::Quat::from_rotation_z(0.5) * Vec3::new(15.0 * mm, 0.0, 0.0);
+        turn(&mut b, 0.5, side, Vec3::new(10.0, 6.0, 3.0) * mm);
+        let r = try_boolean(&a, &b, BooleanOp::Union).unwrap();
+        assert_eq!(unmatched_edges(&r), 0, "rotated");
+        // Offset in two axes, partly touching.
+        let mut a = crate::primitives::cube(1.0);
+        turn(&mut a, 0.0, Vec3::ZERO, Vec3::new(20.0, 10.0, 3.0) * mm);
+        let mut b = crate::primitives::cube(1.0);
+        turn(
+            &mut b,
+            0.0,
+            Vec3::new(13.0, 6.0, 1.0) * mm,
+            Vec3::new(6.0, 6.0, 3.0) * mm,
+        );
+        let r = try_boolean(&a, &b, BooleanOp::Union).unwrap();
+        assert_eq!(unmatched_edges(&r), 0, "offset");
+        // Several bosses on a plate, one after another.
+        let mut plate = crate::primitives::cube(1.0);
+        turn(&mut plate, 0.0, Vec3::ZERO, Vec3::new(60.0, 40.0, 3.0) * mm);
+        for x in [-20.0f32, 0.0, 20.0] {
+            let mut boss = crate::primitives::cylinder(4.0 * mm, 6.0 * mm, 24);
+            let lo = boss
+                .positions()
+                .iter()
+                .map(|p| p.z)
+                .fold(f32::MAX, f32::min);
+            for p in boss.positions_mut() {
+                p.z += 1.5 * mm - lo;
+                p.x += x * mm;
+            }
+            plate = try_boolean(&plate, &boss, BooleanOp::Union).unwrap();
+            assert_eq!(unmatched_edges(&plate), 0, "boss");
+        }
+        // A triangulated block against a quad one.
+        let mut a = crate::primitives::cube(1.0);
+        turn(&mut a, 0.0, Vec3::ZERO, Vec3::splat(10.0 * mm));
+        let c = crate::primitives::cube(1.0);
+        let tri = c.triangulate();
+        let (tris, _) = tri.indices.as_chunks::<3>();
+        let faces: Vec<Vec<u32>> = tris.iter().map(|t| t.to_vec()).collect();
+        let mut b = MeshData::from_faces(c.positions().to_vec(), &faces);
+        turn(
+            &mut b,
+            0.0,
+            Vec3::new(10.0 * mm, 2.0 * mm, 0.0),
+            Vec3::splat(10.0 * mm),
+        );
+        let r = try_boolean(&a, &b, BooleanOp::Union).unwrap();
+        assert_eq!(unmatched_edges(&r), 0, "triangles");
+    }
+
+    /// Two solids that only touch, face to face, joined: one closed solid,
+    /// no seam left open where the smaller face meets the larger.
+    #[test]
+    fn solids_touching_face_to_face_unite_closed() {
+        let cases: [(f32, Vec3); 3] = [
+            // A small box against the middle of a big one's side.
+            (1.0, Vec3::new(1.5, 0.0, 0.0)),
+            // Against a corner, half on and half off.
+            (1.0, Vec3::new(1.5, 0.7, 0.4)),
+            // Two the same size, face to face.
+            (2.0, Vec3::new(2.0, 0.0, 0.0)),
+        ];
+        for (size, at) in cases {
+            let a = crate::primitives::cube(2.0);
+            let mut b = crate::primitives::cube(size);
+            for p in b.positions_mut() {
+                *p += at;
+            }
+            let r = try_boolean(&a, &b, BooleanOp::Union).unwrap();
+            assert_eq!(unmatched_edges(&r), 0, "{size} at {at}");
+            let v = crate::measure::mass_properties(&r, |p| p).volume;
+            let want = 8.0 + (size as f64).powi(3);
+            assert!(
+                (v - want).abs() < 1e-3,
+                "{size} at {at}: {v} against {want}"
+            );
+        }
+        // At a part's size: a round boss standing on a 3 mm plate, its foot
+        // a hair off the plate's top, as positions typed in millimetres are.
+        let mut plate = crate::primitives::cube(1.0);
+        for p in plate.positions_mut() {
+            *p *= Vec3::new(0.06, 0.04, 0.003);
+        }
+        for gap in [0.0f32, 1e-7, -1e-7] {
+            let mut boss = crate::primitives::cylinder(0.004, 0.006, 32);
+            let lo = boss
+                .positions()
+                .iter()
+                .map(|p| p.z)
+                .fold(f32::MAX, f32::min);
+            for p in boss.positions_mut() {
+                p.z += 0.0015 - lo + gap;
+                p.x += 0.012;
+            }
+            let r = try_boolean(&plate, &boss, BooleanOp::Union).unwrap();
+            assert_eq!(unmatched_edges(&r), 0, "boss off by {gap}");
+        }
+    }
+
+    /// A weld by distance on a boolean's result keeps it closed: merging two
+    /// vertices of one long face — round a threaded hole — pinched the face,
+    /// and the merge threw the whole face away.
+    #[test]
+    fn welding_a_boolean_result_keeps_it_closed() {
+        let mut plate = crate::primitives::cube(1.0);
+        for p in plate.positions_mut() {
+            *p *= Vec3::new(0.06, 0.04, 0.003);
+        }
+        let mut c = crate::mech::internal_thread_cutter(0.003, 0.0005, 0.01, 0.0);
+        for p in c.positions_mut() {
+            *p += Vec3::new(0.015, 0.01, -0.005);
+        }
+        let r = try_boolean(&plate, &c, BooleanOp::Difference).unwrap();
+        assert_eq!(unmatched_edges(&r), 0);
+        for d in [1e-6f32, 1e-5] {
+            let mut bm = r.to_bmesh();
+            let all: Vec<_> = bm.vert_ids().collect();
+            let m = crate::edit::weld_by_distance(&mut bm, &all, d).unwrap();
+            let out = bm.to_mesh_data();
+            assert!(m.removed > 0, "{d}: something to weld");
+            assert_eq!(unmatched_edges(&out), 0, "weld {d}");
+            assert!(
+                out.num_faces() > r.num_faces() - 40,
+                "weld {d}: {} faces",
+                out.num_faces()
+            );
+        }
+    }
+
     /// A 3 mm plate cut by a modelled M3 thread, a plain hole and another
     /// thread, one after another, as a part is made: closed, every edge one
     /// face each way, after each. At this size the welding distance, as an
