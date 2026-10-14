@@ -274,7 +274,7 @@ fn caps(region: &Region) -> Vec<Vec<u32>> {
 /// each stays a simple ring — one that never comes back to a point. Across
 /// an edge `u → v` of one face and `v → u` of the other, the merged ring is
 /// the first from `v` round to `u` and then the second's points between.
-fn merged(mut faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+pub(crate) fn merged(mut faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
     loop {
         let mut joined = false;
         let mut owner: std::collections::HashMap<(u32, u32), usize> = Default::default();

@@ -3258,3 +3258,119 @@ fn a_sketch_becomes_a_plate_and_the_plate_follows_the_sketch() {
         ),
     );
 }
+
+/// A gear pair as Add ▸ Gear makes it: module 2, 20 and 30 teeth, meshed.
+/// Writes `target/composite-gears.png`.
+#[test]
+#[ignore]
+fn shot_gears() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue as V};
+    let mut r = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut r);
+    let mut h = History::new();
+    let mut doc = Document::new();
+    let mut p = PropertyMap::new();
+    p.set("teeth", V::Int(20));
+    p.set("mate_teeth", V::Int(30));
+    p.set("helix", V::Float(0.35));
+    h.dispatch(
+        &r,
+        &mut doc,
+        &kreate_ops::operator::Context::default(),
+        "object.add_gear",
+        &p,
+    )
+    .unwrap();
+    FRAMING.with(|f| {
+        f.set(Some((
+            glam::DVec3::new(0.025, 0.0, 0.005),
+            0.045,
+            Some(glam::DQuat::from_rotation_z(-0.3) * glam::DQuat::from_rotation_x(0.8)),
+            false,
+        )))
+    });
+    let shot = composite(&doc, "ko-KR");
+    FRAMING.with(|f| f.set(None));
+    if shot.is_some() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let _ = std::fs::copy(
+            dir.join("composite-scene-ko-KR.png"),
+            dir.join("composite-gears.png"),
+        );
+    }
+}
+
+/// Each kind of gear the Add menu makes, with its mate. Writes
+/// `target/composite-gear-<kind>.png`.
+#[test]
+#[ignore]
+fn shot_gear_kinds() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue as V};
+    let mut r = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut r);
+    let kinds: [(&str, u32, i64, i64, glam::DVec3, f64); 5] = [
+        (
+            "internal",
+            1,
+            60,
+            20,
+            glam::DVec3::new(0.0, 0.0, 0.005),
+            0.075,
+        ),
+        (
+            "rack",
+            2,
+            12,
+            20,
+            glam::DVec3::new(0.012, 0.01, 0.005),
+            0.045,
+        ),
+        ("bevel", 3, 20, 30, glam::DVec3::new(0.02, 0.0, 0.02), 0.045),
+        ("worm", 4, 30, 0, glam::DVec3::new(0.018, 0.03, 0.0), 0.05),
+        (
+            "worm-close",
+            4,
+            30,
+            0,
+            glam::DVec3::new(0.018, 0.0, 0.0),
+            0.022,
+        ),
+    ];
+    for (label, kind, teeth, mate, centre, radius) in kinds {
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        p.set("kind", V::Enum(kind));
+        p.set("teeth", V::Int(teeth));
+        p.set("mate_teeth", V::Int(mate));
+        h.dispatch(
+            &r,
+            &mut doc,
+            &kreate_ops::operator::Context::default(),
+            "object.add_gear",
+            &p,
+        )
+        .unwrap();
+        if label.ends_with("close") {
+            // The surface itself, not the selection's outline over it.
+            doc.selection.clear();
+        }
+        FRAMING.with(|f| {
+            f.set(Some((
+                centre,
+                radius,
+                Some(glam::DQuat::from_rotation_z(-0.5) * glam::DQuat::from_rotation_x(0.9)),
+                false,
+            )))
+        });
+        let shot = composite(&doc, "ko-KR");
+        FRAMING.with(|f| f.set(None));
+        if shot.is_some() {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+            let _ = std::fs::copy(
+                dir.join("composite-scene-ko-KR.png"),
+                dir.join(format!("composite-gear-{label}.png")),
+            );
+        }
+    }
+}

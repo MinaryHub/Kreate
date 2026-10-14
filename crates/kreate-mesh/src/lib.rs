@@ -13,6 +13,7 @@ pub mod check;
 pub mod dyntopo;
 pub mod earcut;
 pub mod edit;
+pub mod gear;
 pub mod intersect;
 pub mod measure;
 pub mod mesh_data;

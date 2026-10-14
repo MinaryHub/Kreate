@@ -1200,7 +1200,7 @@ impl App {
         // beside it instead, and said, when the spot is taken.
         if matches!(
             op_id,
-            "object.add_primitive" | "object.add_empty" | "object.add_armature"
+            "object.add_primitive" | "object.add_empty" | "object.add_armature" | "object.add_gear"
         ) && params.get("location").is_none()
         {
             let spot = self.free_spot(self.doc.cursor);
@@ -1898,6 +1898,22 @@ impl App {
                     )
                 })
                 .collect();
+                let gears = [
+                    "menu-add-gear",
+                    "menu-add-gear-internal",
+                    "menu-add-gear-rack",
+                    "menu-add-gear-bevel",
+                    "menu-add-gear-worm",
+                ];
+                let mut mesh: Vec<_> = mesh;
+                for (kind, key) in gears.iter().enumerate() {
+                    mesh.push(row(
+                        self,
+                        t(key),
+                        "object.add_gear",
+                        &[("kind", PropertyValue::Enum(kind as u32))],
+                    ));
+                }
                 let other = vec![
                     row(self, t("menu-add-camera"), "object.add_camera", &[]),
                     row(self, t("menu-add-empty"), "object.add_empty", &[]),
@@ -5725,7 +5741,9 @@ impl App {
                         &params,
                     ) {
                         Ok(_) => self.redraw.set(RedrawReason::SCENE_CHANGED),
-                        Err(e) => println!("  adjust failed: {e}"),
+                        // Said where it is seen: a value the panel takes back
+                        // without a word reads as one that was ignored.
+                        Err(e) => self.status(&e.to_string()),
                     }
                 }
                 Command::SetShading(mode) => {
@@ -13210,9 +13228,10 @@ impl AppParams {
         // own offset from it — above and back — so a new one lights and sees
         // the thing at the cursor rather than sitting inside it.
         let offset = match op_id {
-            "object.add_primitive" | "object.add_empty" | "object.add_armature" => {
-                Some(DVec3::ZERO)
-            }
+            "object.add_primitive"
+            | "object.add_empty"
+            | "object.add_armature"
+            | "object.add_gear" => Some(DVec3::ZERO),
             "object.add_light" => Some(DVec3::new(0.0, 0.0, 4.0)),
             "object.add_camera" => Some(DVec3::new(0.0, -8.0, 2.0)),
             _ => None,

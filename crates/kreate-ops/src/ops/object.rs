@@ -156,6 +156,340 @@ impl Operator for AddPrimitive {
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddGearParams {
+    /// What kind: a spur or helical gear; an internal (ring) gear; a rack; a
+    /// straight bevel gear; a worm and its wheel.
+    #[param(variants("spur", "internal", "rack", "bevel", "worm"))]
+    pub kind: u32,
+    /// The module, in millimetres, from ISO 54's first series: what sets
+    /// the size of the teeth, and what two gears that mesh share.
+    #[param(variants(
+        "0.5", "0.6", "0.8", "1", "1.25", "1.5", "2", "2.5", "3", "4", "5", "6", "8", "10"
+    ))]
+    pub module: u32,
+    /// How many teeth.
+    #[param(min = 6, max = 400, unit = "count")]
+    pub teeth: u32,
+    /// The face width, along the axis.
+    #[param(min = 0.0001, soft_max = 0.2, unit = "length")]
+    pub width: f64,
+    /// The bore's diameter; zero for none.
+    #[param(min = 0.0, soft_max = 0.1, unit = "length")]
+    pub bore: f64,
+    /// The basic rack's pressure angle, in degrees: 20 is ISO 53's, and
+    /// what nearly every gear made now has.
+    #[param(variants("20", "14.5", "25"))]
+    pub pressure_angle: u32,
+    /// The helix angle; zero for a spur gear. The mate is wound the other
+    /// way, as a pair on parallel shafts must be.
+    #[param(min = -0.79, max = 0.79, unit = "angle")]
+    pub helix: f64,
+    /// The profile shift, in modules: positive for fewer than 17 teeth,
+    /// whose roots a cutter would otherwise undercut.
+    #[param(min = -1.0, max = 1.0)]
+    pub shift: f64,
+    /// Play between the teeth, taken off each tooth's thickness on the
+    /// pitch circle: a tenth of a millimetre suits a printed pair.
+    #[param(min = 0.0, soft_max = 0.001, unit = "length")]
+    pub backlash: f64,
+    /// Teeth of a second gear made to run with this one, set at the centre
+    /// distance and turned to mesh: beside a spur gear, inside a ring gear,
+    /// on a rack, at right angles to a bevel gear; zero for none. A bevel
+    /// gear with none is a mitre gear, made for a mate of its own size.
+    #[param(min = 0, max = 400, unit = "count")]
+    pub mate_teeth: u32,
+    /// A ring gear's wall round its teeth; a rack's back below its roots.
+    #[param(min = 0.0, soft_max = 0.05, unit = "length")]
+    pub rim: f64,
+    /// A worm's starts: how many threads wind round it.
+    #[param(min = 1, max = 6, unit = "count")]
+    pub starts: u32,
+    /// A worm's diameter factor q: its pitch diameter over the module.
+    #[param(min = 4.0, max = 25.0)]
+    pub diameter_factor: f64,
+    /// Where the gear's axis stands, on its bottom face.
+    pub location: [f64; 3],
+}
+
+impl Default for AddGearParams {
+    fn default() -> Self {
+        Self {
+            module: 6,
+            teeth: 20,
+            width: 0.01,
+            bore: 0.005,
+            pressure_angle: 0,
+            helix: 0.0,
+            shift: 0.0,
+            backlash: 0.0001,
+            mate_teeth: 0,
+            rim: 0.005,
+            starts: 1,
+            diameter_factor: 10.0,
+            kind: 0,
+            location: [0.0; 3],
+        }
+    }
+}
+
+impl AddGearParams {
+    /// The gear these describe, in the mesh crate's terms.
+    pub fn gear(&self) -> kreate_mesh::gear::GearParams {
+        use kreate_mesh::gear::ISO_MODULES;
+        let module = ISO_MODULES[(self.module as usize).min(ISO_MODULES.len() - 1)];
+        let pressure = match self.pressure_angle {
+            1 => 14.5f64,
+            2 => 25.0,
+            _ => 20.0,
+        };
+        kreate_mesh::gear::GearParams {
+            module: module * 0.001,
+            teeth: self.teeth.clamp(6, 400),
+            width: self.width.max(0.0001),
+            bore: self.bore.max(0.0),
+            pressure_angle: pressure.to_radians(),
+            helix: self.helix.clamp(-0.79, 0.79),
+            shift: self.shift.clamp(-1.0, 1.0),
+            backlash: self.backlash.max(0.0),
+        }
+    }
+}
+
+/// An involute gear to the standard basic rack (ISO 53) in a standard
+/// module (ISO 54) — with, if asked, a second one set beside it to mesh.
+/// Named for what it is ("Gear m2 z20"), so the numbers to order or cut it
+/// by are on it.
+pub struct AddGear;
+
+impl Operator for AddGear {
+    type Params = AddGearParams;
+    fn id() -> &'static str {
+        "object.add_gear"
+    }
+    fn label() -> &'static str {
+        "Add Gear"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_mesh::gear;
+        let g = params.gear();
+        let m_mm = g.module * 1000.0;
+        // i18n-exempt: parts' designations, numbers and letters
+        let label = |what: &str, teeth: u32| format!("{what} m{m_mm} z{teeth}");
+        let mate = params.mate_teeth.min(400);
+        let at = DVec3::from_array(params.location);
+        // What to make: each part's name, mesh, and where it goes.
+        // Asked for more than the shape can be: said, with the most it can,
+        // rather than quietly made smaller — a value that changes nothing is
+        // a value the user cannot tell was ignored.
+        let mm = |v: f64| (v * 10000.0).round() / 10.0;
+        let too_big = |what: &str, asked: f64, most: f64| -> Result<(), OpError> {
+            if asked > most + 1e-12 {
+                return Err(OpError::Failed(format!(
+                    "the {what} can be at most {} mm here; {} mm was asked for",
+                    mm(most),
+                    mm(asked)
+                )));
+            }
+            Ok(())
+        };
+        match params.kind {
+            1 | 2 => {}
+            3 => {
+                let partner = if mate >= 6 { mate } else { g.teeth };
+                let face = gear::bevel_face_limit(g.teeth, partner, g.module);
+                if g.width > face + 1e-12 {
+                    return Err(OpError::Failed(format!(
+                        "the face width of this bevel gear can be at most {} mm, half its                          cone distance (a third, {} mm, is usual); {} mm was asked for",
+                        mm(face),
+                        mm(face * 2.0 / 3.0),
+                        mm(g.width)
+                    )));
+                }
+                too_big("bore", g.bore, gear::bevel_bore_limit(&g, partner))?;
+                if mate >= 6 {
+                    let other = gear::GearParams { teeth: mate, ..g };
+                    too_big("bore", g.bore, gear::bevel_bore_limit(&other, g.teeth))?;
+                }
+            }
+            4 => {
+                let w = gear::WormParams {
+                    module: g.module,
+                    starts: params.starts.clamp(1, 6),
+                    diameter_factor: params.diameter_factor.clamp(4.0, 25.0),
+                    length: 0.0,
+                    pressure_angle: g.pressure_angle,
+                    bore: g.bore,
+                    backlash: g.backlash,
+                };
+                too_big("worm's bore", g.bore, gear::worm_bore_limit(&w))?;
+                let wheel = gear::worm_wheel_params(&w, g.teeth, g.width, g.bore);
+                too_big("wheel's bore", g.bore, gear::bore_limit(&wheel))?;
+            }
+            _ => {
+                too_big("bore", g.bore, gear::bore_limit(&g))?;
+                if mate >= 6 {
+                    let other = gear::GearParams { teeth: mate, ..g };
+                    too_big("mate's bore", g.bore, gear::bore_limit(&other))?;
+                }
+            }
+        }
+        let mut parts: Vec<(String, kreate_mesh::MeshData, DQuat, DVec3)> = Vec::new();
+        match params.kind {
+            // A ring gear, and a pinion running inside it.
+            1 => {
+                parts.push((
+                    label("Ring gear", g.teeth),
+                    gear::internal_gear(&g, params.rim, 0.0),
+                    DQuat::IDENTITY,
+                    at,
+                ));
+                if mate >= 6 {
+                    if g.teeth < mate + 10 {
+                        return Err(OpError::Failed(format!(
+                            "a pinion of {mate} teeth inside a ring of {} would foul it: \
+                             keep the ring at least ten teeth larger",
+                            g.teeth
+                        )));
+                    }
+                    let pinion = gear::GearParams { teeth: mate, ..g };
+                    too_big("pinion's bore", g.bore, gear::bore_limit(&pinion))?;
+                    parts.push((
+                        label("Gear", mate),
+                        gear::gear(&pinion, 0.0),
+                        DQuat::IDENTITY,
+                        at + DVec3::X * gear::internal_centre_distance(&g, &pinion),
+                    ));
+                }
+            }
+            // A rack along X, and a pinion standing on it.
+            2 => {
+                parts.push((
+                    // i18n-exempt: a part's designation
+                    format!("Rack m{m_mm} {}", g.teeth),
+                    gear::rack(&g, params.rim),
+                    DQuat::IDENTITY,
+                    at,
+                ));
+                if mate >= 6 {
+                    // Its teeth lean as the rack's do where they meet: the
+                    // same helix.
+                    let pinion = gear::GearParams { teeth: mate, ..g };
+                    too_big("pinion's bore", g.bore, gear::bore_limit(&pinion))?;
+                    let r = gear::gear_info(&pinion).pitch * 0.5;
+                    parts.push((
+                        label("Gear", mate),
+                        gear::gear(&pinion, gear::rack_mate_turn(mate)),
+                        DQuat::IDENTITY,
+                        at + DVec3::Y * r,
+                    ));
+                }
+            }
+            // A straight bevel gear, and its mate at right angles.
+            3 => {
+                let partner = if mate >= 6 { mate } else { g.teeth };
+                parts.push((
+                    label("Bevel gear", g.teeth),
+                    gear::bevel_gear(&g, partner, 0.0),
+                    DQuat::IDENTITY,
+                    at,
+                ));
+                if mate >= 6 {
+                    let (turn, offset, own) = gear::bevel_mate_place(g.teeth, mate, g.module);
+                    parts.push((
+                        label("Bevel gear", mate),
+                        gear::bevel_gear(&gear::GearParams { teeth: mate, ..g }, g.teeth, own),
+                        turn,
+                        at + offset,
+                    ));
+                }
+            }
+            // A worm along X, and the wheel of `teeth` it drives.
+            4 => {
+                let w = gear::WormParams {
+                    module: g.module,
+                    starts: params.starts.clamp(1, 6),
+                    diameter_factor: params.diameter_factor.clamp(4.0, 25.0),
+                    length: (11.0 + 0.06 * g.teeth as f64) * g.module,
+                    pressure_angle: g.pressure_angle,
+                    bore: g.bore,
+                    backlash: g.backlash,
+                };
+                let length = w.length;
+                // Its own Z along the world's X, its groove (its X) facing +Y.
+                let along_x =
+                    DQuat::from_mat3(&kreate_math::DMat3::from_cols(DVec3::Y, DVec3::Z, DVec3::X));
+                parts.push((
+                    // i18n-exempt: a part's designation
+                    format!("Worm m{m_mm} n{}", w.starts),
+                    gear::worm(&w),
+                    along_x,
+                    at,
+                ));
+                let wheel = gear::worm_wheel_params(&w, g.teeth, g.width, g.bore);
+                let info = gear::gear_info(&wheel);
+                let centre = (w.pitch_diameter() + info.pitch) * 0.5;
+                // A tooth facing the worm at the wheel's middle height.
+                let twist = wheel.width * wheel.helix.tan() / (info.pitch * 0.5);
+                let turn = -std::f64::consts::FRAC_PI_2 - twist * 0.5;
+                parts.push((
+                    label("Worm wheel", g.teeth),
+                    gear::gear(&wheel, turn),
+                    DQuat::IDENTITY,
+                    at + DVec3::new(length * 0.5, centre, -wheel.width * 0.5),
+                ));
+            }
+            // A spur or helical gear, and its mate beside it.
+            _ => {
+                parts.push((
+                    label("Gear", g.teeth),
+                    gear::gear(&g, 0.0),
+                    DQuat::IDENTITY,
+                    at,
+                ));
+                if mate >= 6 {
+                    let other = gear::GearParams {
+                        teeth: mate,
+                        helix: -g.helix,
+                        ..g
+                    };
+                    parts.push((
+                        label("Gear", mate),
+                        gear::gear(&other, gear::mate_turn(mate)),
+                        DQuat::IDENTITY,
+                        at + DVec3::X * gear::centre_distance(&g, &other),
+                    ));
+                }
+            }
+        }
+        for (name, mesh, _, _) in &parts {
+            let violations = mesh.validate();
+            if !violations.is_empty() {
+                return Err(OpError::Failed(format!(
+                    "{name} is invalid: {violations:?}"
+                )));
+            }
+        }
+        let d = doc.document_mut();
+        d.selection.clear();
+        let mut first = None;
+        for (name, mesh, turn, place) in parts {
+            let id = d.add_mesh_object(name, mesh);
+            let o = d.object_mut(id).expect("just added");
+            o.transform.translation = place;
+            o.transform.rotation = turn;
+            d.selection.add(id);
+            first.get_or_insert(id);
+        }
+        d.selection.active = first;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct AddCameraParams {
     /// Focal length in millimetres. What a lens is labelled with.
     ///
@@ -3591,6 +3925,7 @@ impl Operator for RenameMaterial {
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddPrimitive>();
+    registry.register::<AddGear>();
     registry.register::<AddCamera>();
     registry.register::<AddLight>();
     registry.register::<SetLight>();
@@ -4726,5 +5061,217 @@ mod tests {
         );
         let mesh = doc.object(a).and_then(|o| o.mesh()).unwrap();
         assert_eq!(doc.mesh(mesh).unwrap().num_faces(), 6, "the target grew");
+    }
+}
+
+#[cfg(test)]
+mod gear_tests {
+    use crate::history::History;
+    use crate::operator::{Context, Mode};
+    use crate::{OperatorRegistry, PropertyMap, PropertyValue};
+    use kreate_scene::Document;
+
+    #[test]
+    fn a_gear_and_its_mate_are_added_meshed_in_one_step() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        // Module 2 (the seventh of ISO 54's series), 20 teeth and a mate of 30.
+        p.set("module", PropertyValue::Enum(6));
+        p.set("teeth", PropertyValue::Int(20));
+        p.set("mate_teeth", PropertyValue::Int(30));
+        p.set("location", PropertyValue::Vec3([0.1, 0.0, 0.0]));
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context { mode: Mode::Object },
+            "object.add_gear",
+            &p,
+        )
+        .unwrap();
+        assert_eq!(h.entries().len(), 1, "one step");
+        let find = |name: &str| {
+            doc.objects()
+                .find(|(_, o)| o.name == name)
+                .map(|(id, _)| id)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        let (a, b) = (find("Gear m2 z20"), find("Gear m2 z30"));
+        // The centre distance: half of 40 + 60 mm.
+        let gap = doc.world_transform(b).translation - doc.world_transform(a).translation;
+        assert!((gap.x - 0.050).abs() < 1e-12, "{gap:?}");
+        assert_eq!(doc.selection.active, Some(a));
+        assert_eq!(doc.selection.objects.len(), 2);
+        // The outside diameter is what the blank is turned to: 44 mm.
+        let mesh = doc.mesh(doc.object(a).unwrap().mesh().unwrap()).unwrap();
+        let size = mesh.bounds().size();
+        assert!((size.x - 0.044).abs() < 1e-5, "{size:?}");
+        assert!((size.z - 0.010).abs() < 1e-6);
+        h.undo(&mut doc);
+        assert_eq!(doc.object_count(), 0);
+    }
+
+    fn add(kind: u32, pairs: &[(&'static str, PropertyValue)]) -> Document {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        p.set("kind", PropertyValue::Enum(kind));
+        for (k, v) in pairs {
+            p.set(k, v.clone());
+        }
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context { mode: Mode::Object },
+            "object.add_gear",
+            &p,
+        )
+        .unwrap();
+        doc
+    }
+
+    fn names(doc: &Document) -> Vec<String> {
+        let mut n: Vec<String> = doc.objects().map(|(_, o)| o.name.clone()).collect();
+        n.sort();
+        n
+    }
+
+    #[test]
+    fn every_kind_makes_its_parts_named_for_what_they_are() {
+        let mate = [("mate_teeth", PropertyValue::Int(20))];
+        let ring = add(1, &[("teeth", PropertyValue::Int(60)), mate[0].clone()]);
+        assert_eq!(names(&ring), vec!["Gear m2 z20", "Ring gear m2 z60"]);
+        let rack = add(2, &[("teeth", PropertyValue::Int(12)), mate[0].clone()]);
+        assert_eq!(names(&rack), vec!["Gear m2 z20", "Rack m2 12"]);
+        let bevel = add(
+            3,
+            &[
+                ("teeth", PropertyValue::Int(20)),
+                ("mate_teeth", PropertyValue::Int(30)),
+            ],
+        );
+        assert_eq!(
+            names(&bevel),
+            vec!["Bevel gear m2 z20", "Bevel gear m2 z30"]
+        );
+        let mitre = add(3, &[]);
+        assert_eq!(names(&mitre), vec!["Bevel gear m2 z20"]);
+        let worm = add(
+            4,
+            &[
+                ("teeth", PropertyValue::Int(30)),
+                ("starts", PropertyValue::Int(2)),
+            ],
+        );
+        assert_eq!(names(&worm), vec!["Worm m2 n2", "Worm wheel m2 z30"]);
+        // The wheel at the centre distance: (20 + 60) / 2 mm from the worm.
+        let wheel = worm
+            .objects()
+            .find(|(_, o)| o.name.starts_with("Worm wheel"))
+            .unwrap()
+            .0;
+        let y = worm.world_transform(wheel).translation.y;
+        assert!((y - 0.040).abs() < 1e-9, "{y}");
+    }
+
+    #[test]
+    fn a_bevel_face_too_wide_is_refused_with_the_most_it_can_be() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        p.set("kind", PropertyValue::Enum(3));
+        p.set("teeth", PropertyValue::Int(20));
+        p.set("mate_teeth", PropertyValue::Int(30));
+        // m 2, z 20 against 30: a cone distance of 36.06 mm, so at most 18.0.
+        p.set("width", PropertyValue::Float(0.018));
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context { mode: Mode::Object },
+            "object.add_gear",
+            &p,
+        )
+        .expect("just within");
+        p.set("width", PropertyValue::Float(0.025));
+        let refused = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context { mode: Mode::Object },
+                "object.add_gear",
+                &p,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("18 mm"), "{refused}");
+        // And a wider face, within the limit, is a different shape.
+        let small = kreate_mesh::gear::bevel_gear(
+            &kreate_mesh::gear::GearParams {
+                width: 0.006,
+                ..Default::default()
+            },
+            30,
+            0.0,
+        );
+        let wide = kreate_mesh::gear::bevel_gear(
+            &kreate_mesh::gear::GearParams {
+                width: 0.016,
+                ..Default::default()
+            },
+            30,
+            0.0,
+        );
+        assert!(wide.bounds().size().z > small.bounds().size().z + 0.005);
+    }
+
+    #[test]
+    fn a_bore_wider_than_the_root_is_refused() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        // m 2, 20 teeth: a 35 mm root, so a bore up to 31.5 mm.
+        p.set("bore", PropertyValue::Float(0.040));
+        let refused = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context { mode: Mode::Object },
+                "object.add_gear",
+                &p,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("31.5 mm"), "{refused}");
+        assert_eq!(doc.object_count(), 0);
+    }
+
+    #[test]
+    fn a_ring_too_small_for_its_pinion_is_refused() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        p.set("kind", PropertyValue::Enum(1));
+        p.set("teeth", PropertyValue::Int(25));
+        p.set("mate_teeth", PropertyValue::Int(20));
+        assert!(h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context { mode: Mode::Object },
+                "object.add_gear",
+                &p
+            )
+            .is_err());
+        assert_eq!(doc.object_count(), 0);
     }
 }

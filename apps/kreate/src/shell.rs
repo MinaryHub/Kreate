@@ -1585,6 +1585,8 @@ struct Labels {
     pose_clear_scale: String,
     /// One per entry of `ADD_SHAPES`.
     add_shapes: [String; 8],
+    /// Each kind of gear the Add menu makes, in `object.add_gear`'s order.
+    add_gears: [String; 5],
     shading_studio: String,
     shading_flat: String,
     shading_wireframe: String,
@@ -1949,6 +1951,13 @@ impl Labels {
                 t("menu-add-cylinder"),
                 t("menu-add-cone"),
                 t("menu-add-torus"),
+            ],
+            add_gears: [
+                t("menu-add-gear"),
+                t("menu-add-gear-internal"),
+                t("menu-add-gear-rack"),
+                t("menu-add-gear-bevel"),
+                t("menu-add-gear-worm"),
             ],
             shading_studio: t("shading-studio"),
             shading_flat: t("shading-flat"),
@@ -4489,7 +4498,7 @@ fn pose_nodes(l: &Labels) -> Vec<MenuNode> {
 /// The shape indices are `PRIMITIVES`' order, which a test holds the labels to.
 fn add_nodes(l: &Labels) -> Vec<MenuNode> {
     use kreate_reflect::PropertyValue as V;
-    let shapes = (0..ADD_SHAPES.len())
+    let shapes: Vec<MenuNode> = (0..ADD_SHAPES.len())
         .map(|shape| {
             let value = V::Enum(shape as u32);
             MenuNode::Entry(
@@ -4524,6 +4533,21 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
         )
     })
     .collect();
+    let mut shapes = shapes;
+    // Parts, not primitives: ISO gears of each kind, set up in the panel
+    // after.
+    shapes.push(MenuNode::Separator);
+    for (kind, label) in l.add_gears.iter().enumerate() {
+        let value = V::Enum(kind as u32);
+        shapes.push(MenuNode::Entry(
+            MenuEntry::new(
+                "object.add_gear",
+                label,
+                op("object.add_gear", &[("kind", value.clone())]),
+            )
+            .variant("kind", value),
+        ));
+    }
     vec![
         MenuNode::Sub(l.add_mesh.clone(), shapes),
         MenuNode::Sub(l.add_light.clone(), lights),
