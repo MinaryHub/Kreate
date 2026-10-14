@@ -88,6 +88,7 @@ pub struct ChatText {
     pub checking: String,
     pub signed_out: String,
     pub sign_in: String,
+    pub sign_out: String,
     /// Shown while the browser is open for signing in.
     pub signing_in: String,
     pub open_sign_in: String,
@@ -310,6 +311,14 @@ fn draw_account(
                 if !detail.is_empty() {
                     // i18n-exempt: the organisation and plan, as Claude names them
                     ui.label(egui::RichText::new(detail).small().color(theme.text_faint));
+                }
+                // A model on this computer has no account to leave.
+                if detail != "(local)" {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button(&text.sign_out).clicked() {
+                            queue.push(Command::ChatSignOut);
+                        }
+                    });
                 }
             });
         }

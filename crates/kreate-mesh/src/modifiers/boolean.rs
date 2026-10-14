@@ -127,42 +127,96 @@ const FRONT: u8 = 1;
 const BACK: u8 = 2;
 const SPANNING: u8 = 3;
 
-/// Sorts `polygon` against `plane` into the four lists.
+/// How long a boolean may run before it gives up. A BSP's work grows with
+/// the square of the faces on a rounded mesh — every face of a sphere lies
+/// behind every other's plane, so its tree is a chain as long as it has
+/// faces — and a boolean on a mesh of a hundred thousand faces ran for
+/// hours, on the thread that draws the window. A modelled M3 thread through
+/// a plate takes some seconds; past this, the answer is no answer.
+const TIME_LIMIT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// When to give up, looked at every few thousand plane tests.
+struct Budget {
+    deadline: std::time::Instant,
+    count: u32,
+    over: bool,
+}
+
+impl Budget {
+    fn new() -> Budget {
+        Budget {
+            deadline: std::time::Instant::now() + TIME_LIMIT,
+            count: 0,
+            over: false,
+        }
+    }
+
+    fn spent(&self) -> bool {
+        self.over
+    }
+
+    fn spend(&mut self, n: usize) {
+        self.count = self.count.wrapping_add(n as u32);
+        if self.count >= 1 << 16 {
+            self.count = 0;
+            self.over |= std::time::Instant::now() > self.deadline;
+        }
+    }
+}
+
+/// A boolean that would take too long: the meshes have too many faces for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooComplex;
+
+impl std::fmt::Display for TooComplex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("too many faces for a boolean: reduce them, or cut a simpler shape")
+    }
+}
+
+/// Sorts `polygon` against `plane` into the four lists. Moved, not copied:
+/// most polygons land whole on one side, and copying each at every level of
+/// the tree was most of a boolean's time.
 fn split(
     plane: &Plane,
-    polygon: &Polygon,
+    polygon: Polygon,
     coplanar_front: &mut Vec<Polygon>,
     coplanar_back: &mut Vec<Polygon>,
     front: &mut Vec<Polygon>,
     back: &mut Vec<Polygon>,
+    budget: &mut Budget,
 ) {
+    budget.spend(polygon.verts.len());
     let mut kind = 0u8;
-    let types: Vec<u8> = polygon
-        .verts
-        .iter()
-        .map(|v| {
-            let t = plane.normal.dot(*v) - plane.w;
-            let k = if t < -EPSILON {
-                BACK
-            } else if t > EPSILON {
-                FRONT
-            } else {
-                COPLANAR
-            };
-            kind |= k;
-            k
-        })
-        .collect();
+    let mut small = [0u8; 16];
+    let mut large = Vec::new();
+    let types: &mut [u8] = if polygon.verts.len() <= small.len() {
+        &mut small[..polygon.verts.len()]
+    } else {
+        large.resize(polygon.verts.len(), 0);
+        &mut large
+    };
+    for (k, v) in types.iter_mut().zip(&polygon.verts) {
+        let t = plane.normal.dot(*v) - plane.w;
+        *k = if t < -EPSILON {
+            BACK
+        } else if t > EPSILON {
+            FRONT
+        } else {
+            COPLANAR
+        };
+        kind |= *k;
+    }
     match kind {
         COPLANAR => {
             if plane.normal.dot(polygon.plane.normal) > 0.0 {
-                coplanar_front.push(polygon.clone());
+                coplanar_front.push(polygon);
             } else {
-                coplanar_back.push(polygon.clone());
+                coplanar_back.push(polygon);
             }
         }
-        FRONT => front.push(polygon.clone()),
-        BACK => back.push(polygon.clone()),
+        FRONT => front.push(polygon),
+        BACK => back.push(polygon),
         _ => {
             let (mut f, mut b) = (Vec::new(), Vec::new());
             let n = polygon.verts.len();
@@ -208,26 +262,58 @@ struct Tree {
     nodes: Vec<Node>,
 }
 
+/// The box round some points.
+fn bounds_of<'a>(points: impl Iterator<Item = &'a DVec3>) -> (DVec3, DVec3) {
+    points.fold(
+        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    )
+}
+
 #[derive(Default)]
 struct Node {
     plane: Option<Plane>,
     front: Option<usize>,
     back: Option<usize>,
     polygons: Vec<Polygon>,
+    /// The box round every polygon this node and those under it were built
+    /// with: the whole of the solid's surface inside this node's cell. Kept
+    /// as built — clipping takes polygons away later, but the planes, which
+    /// are what decide inside and outside, stay.
+    bounds: (DVec3, DVec3),
 }
 
 impl Tree {
-    fn new(polygons: Vec<Polygon>) -> Tree {
+    fn new(polygons: Vec<Polygon>, budget: &mut Budget) -> Result<Tree, TooComplex> {
         let mut tree = Tree {
             nodes: vec![Node::default()],
         };
-        tree.build(0, polygons);
-        tree
+        tree.build(0, polygons, budget)?;
+        // Children come after their parents in the arena, so from the end
+        // back each node's box takes in its children's.
+        for i in (0..tree.nodes.len()).rev() {
+            let node = &tree.nodes[i];
+            let mut b = bounds_of(node.polygons.iter().flat_map(|p| p.verts.iter()));
+            for c in [node.front, node.back].into_iter().flatten() {
+                let cb = tree.nodes[c].bounds;
+                b = (b.0.min(cb.0), b.1.max(cb.1));
+            }
+            tree.nodes[i].bounds = b;
+        }
+        Ok(tree)
     }
 
-    fn build(&mut self, root: usize, polygons: Vec<Polygon>) {
+    fn build(
+        &mut self,
+        root: usize,
+        polygons: Vec<Polygon>,
+        budget: &mut Budget,
+    ) -> Result<(), TooComplex> {
         let mut work = vec![(root, polygons)];
         while let Some((at, polygons)) = work.pop() {
+            if budget.spent() {
+                return Err(TooComplex);
+            }
             if polygons.is_empty() {
                 continue;
             }
@@ -238,18 +324,18 @@ impl Tree {
             // plane; sorted like the rest it went to a child as "in front",
             // became that child's plane, went in front of itself again — a
             // new node a turn, until the memory ran out.
-            let mut rest = polygons.iter();
+            let mut rest = polygons.into_iter();
             if self.nodes[at].polygons.is_empty() && cf.is_empty() {
                 if let Some(first) = rest.next() {
                     if first.plane.normal == plane.normal && first.plane.w == plane.w {
-                        cf.push(first.clone());
+                        cf.push(first);
                     } else {
-                        split(&plane, first, &mut cf, &mut cb, &mut f, &mut b);
+                        split(&plane, first, &mut cf, &mut cb, &mut f, &mut b, budget);
                     }
                 }
             }
             for p in rest {
-                split(&plane, p, &mut cf, &mut cb, &mut f, &mut b);
+                split(&plane, p, &mut cf, &mut cb, &mut f, &mut b, budget);
             }
             self.nodes[at].polygons.extend(cf);
             self.nodes[at].polygons.extend(cb);
@@ -262,6 +348,7 @@ impl Tree {
                 work.push((child, b));
             }
         }
+        Ok(())
     }
 
     fn child(&mut self, at: usize, front: bool) -> usize {
@@ -298,18 +385,55 @@ impl Tree {
     }
 
     /// What of `polygons` is outside this solid.
-    fn clip_polygons(&self, polygons: Vec<Polygon>) -> Vec<Polygon> {
+    fn clip_polygons(
+        &self,
+        polygons: Vec<Polygon>,
+        budget: &mut Budget,
+    ) -> Result<Vec<Polygon>, TooComplex> {
         let mut out = Vec::new();
+        let margin = DVec3::splat(EPSILON * 10.0);
         let mut work = vec![(0usize, polygons)];
         while let Some((at, polygons)) = work.pop() {
+            if budget.spent() {
+                return Err(TooComplex);
+            }
+            // Nothing to sort: not walked down the rest of the tree for it.
+            // Every node of one tree clipped against the other did, for
+            // each of its empty lists — a walk of the whole other tree per
+            // node, tens of thousands squared, and none of it counted.
+            if polygons.is_empty() {
+                continue;
+            }
+            budget.spend(1);
             let node = &self.nodes[at];
             let Some(plane) = node.plane else {
                 out.extend(polygons);
                 continue;
             };
+            // A polygon clear of every surface in this cell lies wholly
+            // inside the solid or wholly outside — its part in the cell is
+            // convex and meets no boundary — so one point of it says which,
+            // and it is not cut by every plane below. Cutting it was how a
+            // plate's face came back in thousands of pieces from a thread
+            // that never touched it.
+            let (lo, hi) = (node.bounds.0 - margin, node.bounds.1 + margin);
+            let (polygons, clear): (Vec<Polygon>, Vec<Polygon>) =
+                polygons.into_iter().partition(|p| {
+                    let (a, b) = bounds_of(p.verts.iter());
+                    a.cmple(hi).all() && b.cmpge(lo).all()
+                });
+            for p in clear {
+                let centre = p.verts.iter().fold(DVec3::ZERO, |s, v| s + *v) / p.verts.len() as f64;
+                if self.outside(at, centre) {
+                    out.push(p);
+                }
+            }
+            if polygons.is_empty() {
+                continue;
+            }
             let (mut cf, mut cb, mut f, mut b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for p in &polygons {
-                split(&plane, p, &mut cf, &mut cb, &mut f, &mut b);
+            for p in polygons {
+                split(&plane, p, &mut cf, &mut cb, &mut f, &mut b, budget);
             }
             f.extend(cf);
             b.extend(cb);
@@ -322,15 +446,37 @@ impl Tree {
                 work.push((c, b));
             }
         }
-        out
+        Ok(out)
+    }
+
+    /// Whether `point`, in the cell of node `at`, is outside the solid: down
+    /// the tree by the side of each plane it is on, to a leaf — off the
+    /// front is outside, off the back inside.
+    fn outside(&self, mut at: usize, point: DVec3) -> bool {
+        loop {
+            let node = &self.nodes[at];
+            let Some(plane) = node.plane else {
+                return true;
+            };
+            let front = plane.normal.dot(point) - plane.w >= 0.0;
+            match (front, node.front, node.back) {
+                (true, Some(c), _) | (false, _, Some(c)) => at = c,
+                (true, None, _) => return true,
+                (false, _, None) => return false,
+            }
+        }
     }
 
     /// Removes from this tree's polygons everything inside `other`.
-    fn clip_to(&mut self, other: &Tree) {
+    fn clip_to(&mut self, other: &Tree, budget: &mut Budget) -> Result<(), TooComplex> {
         for i in 0..self.nodes.len() {
+            if self.nodes[i].polygons.is_empty() {
+                continue;
+            }
             let polygons = std::mem::take(&mut self.nodes[i].polygons);
-            self.nodes[i].polygons = other.clip_polygons(polygons);
+            self.nodes[i].polygons = other.clip_polygons(polygons, budget)?;
         }
+        Ok(())
     }
 
     fn all_polygons(&self) -> Vec<Polygon> {
@@ -391,28 +537,124 @@ fn flat_and_convex(p: &Polygon) -> bool {
         })
 }
 
-/// `a` combined with `b`, both in the same space.
+/// `a` combined with `b`, both in the same space; `a` unchanged when the
+/// two are too complex to combine in reasonable time — see [`try_boolean`]
+/// to be told.
 pub fn boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> MeshData {
+    try_boolean(a, b, op).unwrap_or_else(|_| a.clone())
+}
+
+/// `a` combined with `b`, or [`TooComplex`] when that would take more than
+/// some seconds.
+///
+/// Worked at one size whatever the meshes' own: both scaled so their box is
+/// about a hundred across, and the answer scaled back. [`EPSILON`] and
+/// [`WELD`] are lengths, and lengths right for a part a metre across are
+/// coarse for one a few millimetres across — a modelled M3 thread through a
+/// 3 mm plate came back with its fine slivers welded shut and the plate
+/// open along every one, where the same shapes a thousand times larger came
+/// back closed.
+pub fn try_boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<MeshData, TooComplex> {
+    let (lo, hi) = a.positions().iter().chain(b.positions()).fold(
+        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
+    let size = (hi - lo).length();
+    if !(size.is_finite() && size > 0.0) {
+        return try_boolean_at_size(a, b, op);
+    }
+    let centre = (lo + hi) * 0.5;
+    let k = 100.0 / size;
+    let scaled = |m: &MeshData| {
+        let mut m = m.clone();
+        for p in m.positions_mut() {
+            *p = (*p - centre) * k;
+        }
+        m
+    };
+    let (sa, sb) = (scaled(a), scaled(b));
+    // A cutter whose corners fall exactly on the other mesh's planes — a
+    // thread's crest on a plate's face — can leave edges that are not one
+    // face each way. Tried again with the cutter moved a hair, a few
+    // hundred-millionths of the size, when that happens; the cleanest kept.
+    let mut out = try_boolean_at_size(&sa, &sb, op)?;
+    let mut flaws = unmatched_edges(&out);
+    for nudge in [Vec3::new(0.31, 0.57, 0.73), Vec3::new(-0.67, 0.29, -0.41)] {
+        if flaws == 0 {
+            break;
+        }
+        let mut moved = sb.clone();
+        for p in moved.positions_mut() {
+            *p += nudge * 3e-5;
+        }
+        let Ok(again) = try_boolean_at_size(&sa, &moved, op) else {
+            break;
+        };
+        let f = unmatched_edges(&again);
+        if f < flaws {
+            out = again;
+            flaws = f;
+        }
+    }
+    for p in out.positions_mut() {
+        *p = *p / k + centre;
+    }
+    Ok(out)
+}
+
+fn try_boolean_at_size(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<MeshData, TooComplex> {
     if a.is_empty() {
-        return match op {
+        return Ok(match op {
             BooleanOp::Union => b.clone(),
             _ => a.clone(),
-        };
+        });
     }
     if b.is_empty() {
-        return match op {
+        return Ok(match op {
             BooleanOp::Intersect => MeshData::from_faces(Vec::new(), &[]),
             _ => a.clone(),
-        };
+        });
     }
-    let mut ta = Tree::new(polygons_of(a, 0));
-    let mut tb = Tree::new(polygons_of(b, a.num_faces()));
+    // Each input face clear of the other mesh's box, as it is: see `assemble`.
+    let untouched: Vec<Option<Vec<DVec3>>> = {
+        let margin = Vec3::splat((WELD * 10.0) as f32);
+        let box_of = |m: &MeshData| {
+            m.positions().iter().fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+            )
+        };
+        let faces = |m: &MeshData, other: (Vec3, Vec3)| {
+            let (lo, hi) = (other.0 - margin, other.1 + margin);
+            (0..m.num_faces())
+                .map(|f| {
+                    let ring: Vec<Vec3> = m
+                        .face_verts(f)
+                        .iter()
+                        .map(|v| m.positions()[*v as usize])
+                        .collect();
+                    let (a, b) = ring.iter().fold(
+                        (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+                    );
+                    let near = a.cmple(hi).all() && b.cmpge(lo).all();
+                    (!near).then(|| ring.iter().map(|p| p.as_dvec3()).collect())
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut u = faces(a, box_of(b));
+        u.extend(faces(b, box_of(a)));
+        u
+    };
+    let budget = &mut Budget::new();
+    let mut ta = Tree::new(polygons_of(a, 0), budget)?;
+    let mut tb = Tree::new(polygons_of(b, a.num_faces()), budget)?;
     let polygons = match op {
         BooleanOp::Union => {
-            ta.clip_to(&tb);
-            tb.clip_to(&ta);
+            ta.clip_to(&tb, budget)?;
+            tb.clip_to(&ta, budget)?;
             tb.invert();
-            tb.clip_to(&ta);
+            tb.clip_to(&ta, budget)?;
             tb.invert();
             let mut all = ta.all_polygons();
             all.extend(tb.all_polygons());
@@ -420,31 +662,31 @@ pub fn boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> MeshData {
         }
         BooleanOp::Difference => {
             ta.invert();
-            ta.clip_to(&tb);
-            tb.clip_to(&ta);
+            ta.clip_to(&tb, budget)?;
+            tb.clip_to(&ta, budget)?;
             tb.invert();
-            tb.clip_to(&ta);
+            tb.clip_to(&ta, budget)?;
             tb.invert();
             let mut all = ta.all_polygons();
             all.extend(tb.all_polygons());
-            let mut result = Tree::new(all);
-            result.invert();
-            result.all_polygons()
+            // Turned back the right way out. `csg.js` builds a whole tree
+            // of them to do it, which only splits them for nothing.
+            all.iter_mut().for_each(Polygon::flip);
+            all
         }
         BooleanOp::Intersect => {
             ta.invert();
-            tb.clip_to(&ta);
+            tb.clip_to(&ta, budget)?;
             tb.invert();
-            ta.clip_to(&tb);
-            tb.clip_to(&ta);
+            ta.clip_to(&tb, budget)?;
+            tb.clip_to(&ta, budget)?;
             let mut all = ta.all_polygons();
             all.extend(tb.all_polygons());
-            let mut result = Tree::new(all);
-            result.invert();
-            result.all_polygons()
+            all.iter_mut().for_each(Polygon::flip);
+            all
         }
     };
-    assemble(polygons)
+    Ok(assemble(polygons, &untouched))
 }
 
 /// How close two points are to be the same point, and a point to lie on an
@@ -453,10 +695,30 @@ pub fn boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> MeshData {
 const WELD: f64 = 1e-5;
 
 /// The BSP's polygons to a closed mesh: see the module docs.
-fn assemble(polygons: Vec<Polygon>) -> MeshData {
+fn assemble(polygons: Vec<Polygon>, untouched: &[Option<Vec<DVec3>>]) -> MeshData {
     let mut welder = Welder::default();
     let mut pieces: Vec<(u32, Vec<u32>)> = Vec::with_capacity(polygons.len());
+    // A face the other mesh comes nowhere near goes back as it came, once,
+    // whatever its own tree cut it into: rebuilt from its pieces it came back
+    // a little different each time — a face a boolean had already left
+    // curved, cut into triangles and merged again, crossed itself — and a
+    // part with several holes, cut one after another, came back open round
+    // the first of them.
+    let mut whole: Vec<bool> = vec![false; untouched.len()];
     for p in &polygons {
+        if let Some(Some(ring)) = untouched.get(p.source as usize) {
+            if std::mem::replace(&mut whole[p.source as usize], true) {
+                continue;
+            }
+            // Facing as it did: a face clear of the other mesh is kept only
+            // where it is outside it — either input's in a union, the
+            // first's in a difference — and the outside keeps its way.
+            // (Asked of its pieces instead, a twisted quad of a thread got
+            // it wrong: its two triangles face apart.)
+            let ids: Vec<u32> = ring.iter().map(|v| welder.index(*v)).collect();
+            pieces.push((p.source, ids));
+            continue;
+        }
         let mut ring: Vec<u32> = Vec::with_capacity(p.verts.len());
         for v in &p.verts {
             let i = welder.index(*v);
@@ -472,7 +734,6 @@ fn assemble(polygons: Vec<Polygon>) -> MeshData {
         }
     }
     let positions = welder.positions;
-
     split_t_junctions(&positions, &mut pieces);
 
     // The pieces of each input face, merged back together.
@@ -492,6 +753,7 @@ fn assemble(polygons: Vec<Polygon>) -> MeshData {
     }
 
     dissolve_straight_vertices(&positions, &mut faces);
+    let mut faces = simple_loops(faces);
 
     // Only the vertices still in use, renumbered in the order faces meet them.
     let mut renumber = vec![u32::MAX; positions.len()];
@@ -512,8 +774,72 @@ fn assemble(polygons: Vec<Polygon>) -> MeshData {
     let mut bm = mesh.to_bmesh();
     match crate::edit::limited_dissolve(&mut bm, 1e-4) {
         Ok(0) | Err(_) => mesh,
-        Ok(_) => bm.to_mesh_data(),
+        Ok(_) => {
+            // Kept only if it opened nothing: merging faces across a fine
+            // cut has been seen to leave an edge with one face.
+            let tidied = bm.to_mesh_data();
+            if tidied.validate().is_empty() && unmatched_edges(&tidied) <= unmatched_edges(&mesh) {
+                tidied
+            } else {
+                mesh
+            }
+        }
     }
+}
+
+/// Edges that are not one face each way: holes, T-junctions, and edges
+/// three or more faces meet at.
+fn unmatched_edges(m: &MeshData) -> usize {
+    // Each edge once, by its two ends; on a closed manifold every edge has
+    // two faces, one each way.
+    let mut e: std::collections::HashMap<(u32, u32), (u32, i32)> = std::collections::HashMap::new();
+    for f in 0..m.num_faces() {
+        let r = m.face_verts(f);
+        for i in 0..r.len() {
+            let (a, b) = (r[i], r[(i + 1) % r.len()]);
+            let entry = e.entry((a.min(b), a.max(b))).or_default();
+            entry.0 += 1;
+            entry.1 += if a < b { 1 } else { -1 };
+        }
+    }
+    e.values().filter(|(n, d)| *n != 2 || *d != 0).count()
+}
+
+/// Faces that pass each corner once. Welding can bring two corners of one
+/// piece together — a sliver thinner than the weld distance — and merging
+/// pieces can walk a ring through a vertex twice where two pieces touch at a
+/// point. A face may not name a vertex twice, so a repeat right after itself
+/// is dropped, and a ring that comes back to a vertex further on is cut there
+/// into the two rings it is.
+fn simple_loops(faces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+    let mut out = Vec::with_capacity(faces.len());
+    let mut work = faces;
+    while let Some(mut ring) = work.pop() {
+        ring.dedup();
+        while ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        if ring.len() < 3 {
+            continue;
+        }
+        let repeat = (0..ring.len()).find_map(|i| {
+            ring[i + 1..]
+                .iter()
+                .position(|v| *v == ring[i])
+                .map(|d| (i, i + 1 + d))
+        });
+        match repeat {
+            None => out.push(ring),
+            Some((i, j)) => {
+                let inner = ring[i..j].to_vec();
+                let mut outer = ring[j..].to_vec();
+                outer.extend_from_slice(&ring[..i]);
+                work.push(inner);
+                work.push(outer);
+            }
+        }
+    }
+    out
 }
 
 /// Points to indices, a point within [`WELD`] of one already seen taking its
@@ -583,22 +909,24 @@ fn split_t_junctions(positions: &[DVec3], pieces: &mut [(u32, Vec<u32>)]) {
             if len2 <= WELD * WELD {
                 continue;
             }
-            let extent = d.abs();
-            let axis = if extent.x <= extent.y && extent.x <= extent.z {
-                0
-            } else if extent.y <= extent.z {
-                1
-            } else {
-                2
+            // Searched along whichever axis has the fewest points in the
+            // edge's span: the edge's shortest extent was the guess, and on
+            // a flat face every point has the same height, so an edge
+            // across a plate's top was searched against all of them.
+            let range = |axis: usize| {
+                let (lo, hi) = (pa[axis].min(pb[axis]) - WELD, pa[axis].max(pb[axis]) + WELD);
+                let list = &sorted[axis];
+                let from = list.partition_point(|i| positions[*i as usize][axis] < lo);
+                let to = list.partition_point(|i| positions[*i as usize][axis] <= hi);
+                (from, to.max(from))
             };
-            let (lo, hi) = (pa[axis].min(pb[axis]) - WELD, pa[axis].max(pb[axis]) + WELD);
+            let (axis, (from, to)) = (0..3)
+                .map(|axis| (axis, range(axis)))
+                .min_by_key(|(_, (from, to))| to - from)
+                .expect("three axes");
             let list = &sorted[axis];
-            let from = list.partition_point(|i| positions[*i as usize][axis] < lo);
             on_edge.clear();
-            for &v in list[from..]
-                .iter()
-                .take_while(|i| positions[**i as usize][axis] <= hi)
-            {
+            for &v in &list[from..to] {
                 if v == a || v == b {
                     continue;
                 }
@@ -624,23 +952,62 @@ fn split_t_junctions(positions: &[DVec3], pieces: &mut [(u32, Vec<u32>)]) {
 /// exactly when their union has no hole in it: a face with a hole through it
 /// cannot be one polygon, and stays as however many it takes. Untouched by
 /// the cut, the pieces come back together as the face they were.
-fn merge_pieces(mut rings: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-    let mut i = 0;
-    while i < rings.len() {
-        let mut j = i + 1;
-        while j < rings.len() {
-            if let Some(union) = merge_two(&rings[i], &rings[j]) {
-                rings[i] = union;
-                rings.swap_remove(j);
+/// The most corners [`merge_pieces`] grows a face to.
+const MAX_MERGED: usize = 256;
+
+fn merge_pieces(rings: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+    // Only pieces that share an edge can merge, so each is tried against
+    // those across its edges, found in a table of who owns which edge —
+    // trying every pair, again after every merge, was most of a boolean on
+    // a face a thread had cut into thousands of pieces.
+    let mut rings: Vec<Option<Vec<u32>>> = rings.into_iter().map(Some).collect();
+    let mut owner: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    let edges = |r: &[u32]| {
+        (0..r.len())
+            .map(|k| (r[k], r[(k + 1) % r.len()]))
+            .collect::<Vec<_>>()
+    };
+    for (i, r) in rings.iter().enumerate() {
+        for e in edges(r.as_ref().expect("all present")) {
+            owner.insert(e, i);
+        }
+    }
+    let mut work: Vec<usize> = (0..rings.len()).rev().collect();
+    while let Some(i) = work.pop() {
+        let Some(ring) = rings[i].clone() else {
+            continue;
+        };
+        let mut neighbours: Vec<usize> = edges(&ring)
+            .iter()
+            .filter_map(|(a, b)| owner.get(&(*b, *a)).copied())
+            .filter(|j| *j != i && rings[*j].is_some())
+            .collect();
+        neighbours.sort_unstable();
+        neighbours.dedup();
+        for j in neighbours {
+            let other = rings[j].clone().expect("checked");
+            // Not grown past a few hundred corners: merging one more piece
+            // into a ring looks at all of it, and a plate's face round many
+            // holes made that the square of thousands.
+            if ring.len() + other.len() > MAX_MERGED {
+                continue;
+            }
+            if let Some(union) = merge_two(&ring, &other) {
+                for e in edges(&ring).into_iter().chain(edges(&other)) {
+                    owner.remove(&e);
+                }
+                for e in edges(&union) {
+                    owner.insert(e, i);
+                }
+                rings[i] = Some(union);
+                rings[j] = None;
                 // Grown, it may now meet pieces it did not before.
-                j = i + 1;
-            } else {
-                j += 1;
+                work.push(i);
+                break;
             }
         }
-        i += 1;
     }
-    rings
+    rings.into_iter().flatten().collect()
 }
 
 /// `p` and `q` as one polygon, if they share one unbroken run of edges and
@@ -738,6 +1105,77 @@ fn dissolve_straight_vertices(positions: &[DVec3], faces: &mut [Vec<u32>]) {
 
 #[cfg(test)]
 mod tests {
+    /// A 3 mm plate cut by a modelled M3 thread, a plain hole and another
+    /// thread, one after another, as a part is made: closed, every edge one
+    /// face each way, after each. At this size the welding distance, as an
+    /// absolute length, once shut the thread's slivers and opened the plate
+    /// along them; and each later cut, rebuilding the faces round the
+    /// earlier holes from pieces, folded a few of them over.
+    #[test]
+    fn a_plate_cut_by_threads_one_after_another_stays_closed() {
+        let mut plate = crate::primitives::cube(1.0);
+        for p in plate.positions_mut() {
+            *p *= Vec3::new(0.06, 0.04, 0.003);
+        }
+        for (k, (x, y)) in [(0.015f32, 0.01f32), (-0.015, 0.01), (0.0, -0.01)]
+            .iter()
+            .enumerate()
+        {
+            let mut c = if k == 1 {
+                crate::primitives::cylinder(0.0017, 0.01, 24)
+            } else {
+                crate::mech::internal_thread_cutter(0.003, 0.0005, 0.01, 0.0)
+            };
+            for p in c.positions_mut() {
+                *p += Vec3::new(*x, *y, -0.005);
+            }
+            plate = try_boolean(&plate, &c, BooleanOp::Difference).expect("in time");
+            assert_eq!(unmatched_edges(&plate), 0, "after cut {k}");
+            assert!(plate.validate().is_empty(), "after cut {k}");
+        }
+    }
+
+    #[test]
+    fn a_ring_through_one_vertex_twice_becomes_two_faces() {
+        // A bow tie through vertex 0, and a doubled corner.
+        let mut loops = simple_loops(vec![vec![0, 1, 2, 0, 3, 4], vec![5, 6, 6, 7, 5]]);
+        for l in &mut loops {
+            let at = l.iter().position(|v| v == l.iter().min().unwrap()).unwrap();
+            l.rotate_left(at);
+        }
+        loops.sort();
+        assert_eq!(loops, vec![vec![0, 1, 2], vec![0, 3, 4], vec![5, 6, 7]]);
+    }
+
+    /// How long a boolean on a rounded mesh takes, and where the budget
+    /// stops it: run by hand, in release.
+    #[test]
+    #[ignore]
+    fn timing() {
+        for (seg, rings) in [(64, 32), (128, 64), (256, 128), (512, 256)] {
+            let s = crate::primitives::uv_sphere(1.0, seg, rings);
+            let c = crate::primitives::cube(1.0);
+            let t = std::time::Instant::now();
+            let r = try_boolean(&s, &c, BooleanOp::Difference);
+            println!(
+                "sphere {} faces: {:?} in {:?}",
+                s.num_faces(),
+                r.as_ref().map(|m| m.num_faces()),
+                t.elapsed()
+            );
+        }
+        let thread = crate::mech::internal_thread_cutter(0.003, 0.0005, 0.01, 0.0);
+        let plate = crate::primitives::cube(0.02);
+        let t = std::time::Instant::now();
+        let r = try_boolean(&plate, &thread, BooleanOp::Difference);
+        println!(
+            "M3 thread {} faces: {:?} in {:?}",
+            thread.num_faces(),
+            r.as_ref().map(|m| m.num_faces()),
+            t.elapsed()
+        );
+    }
+
     use super::*;
     use crate::primitives;
 

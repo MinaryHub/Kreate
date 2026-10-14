@@ -150,7 +150,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "list_operators",
-            "description": "The operators run_script can call, with their parameters: name, kind (bool, int, float, vec3, color, text, enum with its variants, ints, floats), limits and a description, and whether the operator can run right now. Filter by id, e.g. \"object.\", \"mesh.\", \"material.\", \"light.\".",
+            "description": "The operators run_script can call, with their parameters: name, kind (bool, int, float, vec3, color, text, enum with its variants, ints, floats), limits and a description, and whether the operator can run right now. Filter by id, e.g. \"object.\", \"mesh.\", \"material.\", \"light.\". More than 12 matches come back one line each (name: kind, enum choices a|b), without limits and descriptions; filter by an exact id for those.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

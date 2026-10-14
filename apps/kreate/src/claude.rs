@@ -191,6 +191,15 @@ pub struct Chat {
     models: Vec<crate::ollama::Model>,
     model: Option<usize>,
     local: Arc<std::sync::Mutex<Vec<Value>>>,
+    /// A message waiting on its YouTube links being read.
+    preparing: Option<Preparing>,
+}
+
+/// A message held while Kreate reads the videos it links to; sent with what
+/// was found when that arrives.
+struct Preparing {
+    words: Receiver<String>,
+    attachments: Vec<Attachment>,
 }
 
 /// A `claude auth login` in progress.
@@ -220,6 +229,7 @@ impl Chat {
             models: Vec::new(),
             model: None,
             local: Arc::default(),
+            preparing: None,
         }
     }
 
@@ -377,7 +387,53 @@ impl Chat {
 
     /// Whether the assistant is answering.
     pub fn busy(&self) -> bool {
-        self.turn.is_some()
+        self.turn.is_some() || self.preparing.is_some()
+    }
+
+    /// Signs the tool out of its account: `claude auth logout`, `codex
+    /// logout`, or for Gemini its saved Google sign-in removed. The account is
+    /// asked again after, and the conversation starts over — it was the old
+    /// account's.
+    pub fn sign_out(&mut self) -> Result<(), String> {
+        let provider = self.provider;
+        if provider == Provider::Ollama {
+            return Err("Ollama runs on this computer and has no account to sign out of.".into());
+        }
+        self.reset();
+        self.cancel_sign_in();
+        let (tx, wake) = (self.side.0.clone(), Arc::clone(&self.wake));
+        let tool = find_cli(provider);
+        std::thread::spawn(move || {
+            let failed = match provider {
+                Provider::Gemini => gemini_home()
+                    .map(|home| home.join("oauth_creds.json"))
+                    .filter(|f| f.is_file())
+                    .and_then(|f| std::fs::remove_file(f).err())
+                    .map(|e| format!("cannot sign Gemini out: {e}")),
+                _ => match tool {
+                    None => Some(provider.not_installed()),
+                    Some(tool) => {
+                        let mut command = quiet_command(tool);
+                        if provider == Provider::Claude {
+                            command.args(["auth", "logout"]);
+                        } else {
+                            command.arg("logout");
+                        }
+                        match command.output() {
+                            Ok(out) if out.status.success() => None,
+                            Ok(out) => Some(first_complaint(&String::from_utf8_lossy(&out.stderr))),
+                            Err(e) => Some(format!("cannot start {}: {e}", provider.name())),
+                        }
+                    }
+                },
+            };
+            if let Some(why) = failed {
+                let _ = tx.send(Event::Done(Some(why)));
+            }
+            let _ = tx.send(Event::Account(ask_account(provider)));
+            wake();
+        });
+        Ok(())
     }
 
     /// Says `text` to the assistant, with `attachments`. An error if its
@@ -389,9 +445,44 @@ impl Chat {
     /// neither, its file reading being among the tools it runs without. Text
     /// files are read into the words for every one of them.
     pub fn send(&mut self, text: &str, attachments: &[Attachment]) -> Result<(), String> {
-        if self.turn.is_some() {
+        if self.busy() {
             return Err(format!("{} is still answering", self.provider.name()));
         }
+        // YouTube links: read first, on a thread, and the message sent with
+        // what they lead to when that is done.
+        if !crate::youtube::video_ids(text).is_empty() {
+            let (tx, rx) = mpsc::channel();
+            let (side, wake) = (self.side.0.clone(), Arc::clone(&self.wake));
+            let text = text.to_string();
+            // Captions in the language the message is written in, first.
+            let korean = text.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c));
+            let languages: &[&str] = if korean { &["ko", "en"] } else { &["en", "ko"] };
+            let _ = side.send(Event::Tool {
+                name: "YouTube".into(),
+                detail: String::new(),
+            });
+            std::thread::spawn(move || {
+                let (words, notes) = crate::youtube::enrich(&text, languages);
+                for note in notes {
+                    let _ = side.send(Event::Tool {
+                        name: "YouTube".into(),
+                        detail: note,
+                    });
+                }
+                let _ = tx.send(words);
+                wake();
+            });
+            self.preparing = Some(Preparing {
+                words: rx,
+                attachments: attachments.to_vec(),
+            });
+            return Ok(());
+        }
+        self.start(text, attachments)
+    }
+
+    /// Starts the assistant's turn with `text`, as said.
+    fn start(&mut self, text: &str, attachments: &[Attachment]) -> Result<(), String> {
         let provider = self.provider;
         let has_pictures = attachments.iter().any(Attachment::is_image);
         let has_pdfs = attachments.iter().any(|a| a.kind == AttachKind::Pdf);
@@ -605,6 +696,10 @@ impl Chat {
 
     /// Stops the answer in progress. What was already done stays done.
     pub fn stop(&mut self) {
+        if self.preparing.take().is_some() {
+            let _ = self.side.0.send(Event::Done(Some("stopped".into())));
+            (self.wake)();
+        }
         if let Some(turn) = &mut self.turn {
             if let Some(child) = &mut turn.child {
                 let _ = child.kill();
@@ -658,6 +753,22 @@ impl Chat {
                 self.models = models.clone();
             }
             out.push(event);
+        }
+        // The videos read: the message goes now, with what they say.
+        if let Some(p) = &self.preparing {
+            match p.words.try_recv() {
+                Ok(words) => {
+                    let p = self.preparing.take().expect("checked");
+                    if let Err(why) = self.start(&words, &p.attachments) {
+                        out.push(Event::Done(Some(why)));
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.preparing = None;
+                    out.push(Event::Done(Some("the videos could not be read".into())));
+                }
+            }
         }
         out.extend(self.poll_turn());
         out

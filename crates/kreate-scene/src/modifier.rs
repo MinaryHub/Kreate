@@ -55,8 +55,8 @@ use std::sync::Arc;
 
 use kreate_math::SceneTime;
 use kreate_mesh::modifiers::{
-    array, bevel, boolean, mirror, solidify, subdivide, ArrayParams, BevelParams, BooleanOp,
-    MirrorParams, SolidifyParams, SubdivideParams,
+    array, bevel, mirror, solidify, subdivide, ArrayParams, BevelParams, BooleanOp, MirrorParams,
+    SolidifyParams, SubdivideParams,
 };
 use kreate_mesh::MeshData;
 use kreate_reflect::Uid;
@@ -207,7 +207,7 @@ impl ModifierKind {
                     for p in cutter.positions_mut() {
                         *p = operand.to_local.transform_point3(p.as_dvec3()).as_vec3();
                     }
-                    boolean(input, &cutter, b.op)
+                    boolean_or_input(input, &cutter, b.op)
                 }
                 // Nothing to combine with — no object picked yet, or it is
                 // gone: the input as it was, not nothing.
@@ -297,6 +297,46 @@ impl ModifierInstance {
         Self {
             kind,
             enabled: true,
+        }
+    }
+}
+
+/// The last boolean that gave up, by its two meshes' sizes: tried again
+/// only when either changes shape, not each frame a cutter is dragged —
+/// every try is seconds on the thread that draws.
+static GAVE_UP: std::sync::Mutex<Option<[u32; 4]>> = std::sync::Mutex::new(None);
+/// Whether a boolean gave up since the application last asked.
+static GAVE_UP_NEWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a boolean has given up — too many faces — since the last call:
+/// for the application to say so once.
+pub fn take_boolean_gave_up() -> bool {
+    GAVE_UP_NEWS.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A boolean, or its input unchanged when the meshes are too complex for one.
+fn boolean_or_input(
+    input: &MeshData,
+    cutter: &MeshData,
+    op: kreate_mesh::modifiers::BooleanOp,
+) -> MeshData {
+    let key = [
+        input.num_faces(),
+        input.num_verts(),
+        cutter.num_faces(),
+        cutter.num_verts(),
+    ];
+    if GAVE_UP.lock().ok().and_then(|g| *g) == Some(key) {
+        return input.clone();
+    }
+    match kreate_mesh::modifiers::boolean::try_boolean(input, cutter, op) {
+        Ok(m) => m,
+        Err(_) => {
+            if let Ok(mut g) = GAVE_UP.lock() {
+                *g = Some(key);
+            }
+            GAVE_UP_NEWS.store(true, std::sync::atomic::Ordering::Relaxed);
+            input.clone()
         }
     }
 }

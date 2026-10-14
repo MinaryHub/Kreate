@@ -1289,6 +1289,75 @@ impl App {
                 }));
             }
         }
-        json!({ "operators": ops })
+        if ops.len() <= FULL_LISTING {
+            return json!({ "operators": ops });
+        }
+        // Many: one line each, names and kinds without the descriptions — a
+        // whole family in full ran past what a reply holds, and was set aside
+        // in a file a session with no file tools cannot read.
+        let lines: Vec<String> = ops.iter().map(compact_operator).collect();
+        json!({
+            "operators": lines,
+            "note": "Short form: a filter matching a few operators (an exact id) lists limits and descriptions. * marks one that cannot run right now.",
+        })
+    }
+}
+
+/// How many operators a listing gives in full before it gives one line each.
+const FULL_LISTING: usize = 12;
+
+/// One operator as a line: `id(name: kind, choice: a|b|c, ...)`.
+fn compact_operator(op: &serde_json::Value) -> String {
+    let params: Vec<String> = op["params"]
+        .as_array()
+        .map(|ps| {
+            ps.iter()
+                .map(|p| {
+                    let name = p["name"].as_str().unwrap_or("");
+                    match p["variants"].as_array() {
+                        Some(v) if v.len() <= 12 => {
+                            let names: Vec<&str> = v.iter().filter_map(|x| x.as_str()).collect();
+                            format!("{name}: {}", names.join("|"))
+                        }
+                        Some(v) => format!("{name}: enum of {}", v.len()),
+                        None => match p["kind"].as_str() {
+                            Some(kind) => format!("{name}: {kind}"),
+                            None => name.to_string(),
+                        },
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let unavailable = if op["available_now"].as_bool() == Some(false) {
+        "*"
+    } else {
+        ""
+    };
+    format!(
+        "{}{unavailable}({})",
+        op["id"].as_str().unwrap_or(""),
+        params.join(", ")
+    )
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_listing_is_one_line_an_operator() {
+        let op = serde_json::json!({
+            "id": "object.add_gear",
+            "available_now": false,
+            "params": [
+                { "name": "kind", "kind": "enum", "variants": ["spur", "rack"], "doc": "long words" },
+                { "name": "teeth", "kind": "int", "doc": "more words" },
+            ],
+        });
+        assert_eq!(
+            compact_operator(&op),
+            "object.add_gear*(kind: spur|rack, teeth: int)"
+        );
     }
 }

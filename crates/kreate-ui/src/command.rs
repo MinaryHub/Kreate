@@ -210,6 +210,8 @@ pub enum Command {
     },
     /// From the Claude panel: give up on signing in.
     ChatSignInCancel,
+    /// Signs the chat's assistant out of its account.
+    ChatSignOut,
     /// File ▸ Shared Session.
     OpenCollab,
     /// From the session window: host a session on this machine.

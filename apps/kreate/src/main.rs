@@ -5576,6 +5576,20 @@ impl App {
                         chat.sign_in_code(&code);
                     }
                 }
+                Command::ChatSignOut => {
+                    if let Some(chat) = &mut self.chat {
+                        match chat.sign_out() {
+                            Ok(()) => {
+                                self.ui.chat_log.clear();
+                                self.ui.chat_busy = false;
+                                self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
+                            }
+                            Err(e) => {
+                                self.ui.chat_account = kreate_ui::chat::ChatAccount::Unavailable(e)
+                            }
+                        }
+                    }
+                }
                 Command::ChatSignInCancel => {
                     if let Some(chat) = &mut self.chat {
                         chat.cancel_sign_in();
@@ -7152,6 +7166,11 @@ impl App {
 
     fn evaluate_scene(&mut self) {
         self.evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
+        // A boolean too big to finish leaves its input as it was; said once.
+        if kreate_scene::modifier::take_boolean_gave_up() {
+            let message = self.ui.catalog.get("boolean-too-complex");
+            self.status(&message);
+        }
         // What `H` hid is hidden in edit mode only: every other object, and
         // every object outside edit mode, is drawn whole. A copy without the
         // hide layers, kept per input so an unchanged mesh is not copied again.

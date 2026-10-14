@@ -253,7 +253,17 @@ impl History {
         let result = registry.execute(op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
 
-        debug_assert_meshes_valid(doc, op_id);
+        // A finished operator that broke a mesh is turned back and reported,
+        // not let into the document — nor allowed to end the application,
+        // which is what an assertion here did to anyone running a build with
+        // the checks in.
+        let result = match (result, mesh_problems(doc, op_id)) {
+            (Ok(OpResult::Finished), Some(problem)) => {
+                tracing::error!("{problem}");
+                Err(OpError::Failed(problem))
+            }
+            (result, _) => result,
+        };
 
         match result {
             Ok(OpResult::Finished) => {
@@ -446,7 +456,9 @@ impl History {
         };
         entry.payload.restore(doc);
         self.cursor = index;
-        debug_assert_meshes_valid(doc, "<undo>");
+        if let Some(problem) = mesh_problems(doc, "<undo>") {
+            tracing::error!("{problem}");
+        }
         true
     }
 
@@ -566,25 +578,28 @@ impl History {
 /// scan, which is nothing beside an operator but is not free on a 10 M-vertex
 /// mesh at interactive rates.
 #[inline]
-fn debug_assert_meshes_valid(doc: &Document, op_id: &str) {
+fn mesh_problems(doc: &Document, op_id: &str) -> Option<String> {
     #[cfg(debug_assertions)]
     for (id, mesh) in doc.meshes() {
         let violations = mesh.validate();
-        assert!(
-            violations.is_empty(),
-            "`{op_id}` left {id:?} invalid ({} problem(s)):\n{}",
-            violations.len(),
-            violations
-                .iter()
-                .map(|v| format!("  - {v:?}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        if !violations.is_empty() {
+            return Some(format!(
+                "`{op_id}` left {id:?} invalid ({} problem(s)), so it was undone:\n{}",
+                violations.len(),
+                violations
+                    .iter()
+                    .take(8)
+                    .map(|v| format!("  - {v:?}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
     }
     #[cfg(not(debug_assertions))]
     {
         let _ = (doc, op_id);
     }
+    None
 }
 
 #[cfg(test)]
@@ -1214,11 +1229,11 @@ mod tests {
         not(debug_assertions),
         ignore = "the validation hook is compiled out of release builds"
     )]
-    #[should_panic(expected = "test.corrupt_mesh")]
     fn the_dispatcher_catches_an_operator_that_corrupts_a_mesh() {
         // The plan's first-listed risk, made observable: an operator leaves bad
         // data, and the failure names *that* operator rather than surfacing three
-        // operations later as an unattributable crash.
+        // operations later as an unattributable crash — and is turned back,
+        // rather than ending the application.
         let mut registry = OperatorRegistry::new();
         registry.register::<AddCube>();
         registry.register::<CorruptMesh>();
@@ -1232,12 +1247,18 @@ mod tests {
             .dispatch(&registry, &mut doc, &ctx, "object.add_cube", &size)
             .unwrap();
 
-        let _ = history.dispatch(
-            &registry,
-            &mut doc,
-            &ctx,
-            "test.corrupt_mesh",
-            &PropertyMap::new(),
-        );
+        let steps = history.cursor();
+        let err = history
+            .dispatch(
+                &registry,
+                &mut doc,
+                &ctx,
+                "test.corrupt_mesh",
+                &PropertyMap::new(),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("test.corrupt_mesh"), "{err}");
+        assert_eq!(history.cursor(), steps, "no step for what was undone");
+        assert!(doc.meshes().all(|(_, m)| m.validate().is_empty()));
     }
 }
