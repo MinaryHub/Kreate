@@ -1602,3 +1602,6 @@ op-object-add-sheet-metal-rotation = Rotation
 auto-merge = Auto Merge
 auto-merge-hint = A vertex moved, rotated or scaled onto another merges with it, in the same step.
 boolean-too-complex = A boolean has too many faces to finish, and is shown without its cut: reduce the faces (fewer segments, no subdivision before it), or cut a simpler shape.
+sketch-plane-face = On a Face (click it)
+sketch-pick-face = Click a flat face to sketch on it. Right-click to cancel.
+sketch-no-face = No part under the pointer: click a flat face of one.

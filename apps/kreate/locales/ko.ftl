@@ -1608,3 +1608,6 @@ op-object-add-sheet-metal-rotation = 회전
 auto-merge = 자동 병합
 auto-merge-hint = 이동·회전·크기 조절로 다른 정점과 같은 자리에 놓인 정점은 그 정점과 합쳐집니다. 되돌리기 한 번에 함께 돌아갑니다.
 boolean-too-complex = 불리언의 면이 너무 많아 끝낼 수 없어 자르지 않은 모양으로 보여 줍니다. 면 수를 줄이거나(분할 수를 낮추고, 앞의 세분화를 끄기) 더 단순한 모양으로 자르세요.
+sketch-plane-face = 면 위에 (클릭해서 고르기)
+sketch-pick-face = 스케치할 평평한 면을 클릭하세요. 오른쪽 클릭은 취소입니다.
+sketch-no-face = 포인터 아래에 부품이 없습니다. 부품의 평평한 면을 클릭하세요.

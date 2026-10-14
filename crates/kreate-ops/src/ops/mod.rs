@@ -27,6 +27,7 @@ pub mod sculpt;
 pub mod shape;
 pub mod sketch;
 pub mod sketch_draw;
+pub mod sketch_face;
 pub mod sketch_trim;
 pub mod texture;
 pub mod uv;

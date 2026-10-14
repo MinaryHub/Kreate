@@ -144,12 +144,81 @@ fn need_sketch(doc: &Document) -> Result<ObjectId, OpError> {
 
 // --- a new sketch ------------------------------------------------------------
 
-#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+#[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct NewSketchParams {
-    /// Which plane: the ground (XY), the front (XZ), the side (YZ), or the
-    /// work plane at the 3D cursor — a face, when the cursor was put on one.
-    #[param(variants("xy", "xz", "yz", "cursor"))]
+    /// Which plane: the ground (XY), the front (XZ), the side (YZ), the
+    /// work plane at the 3D cursor, or a flat face of a part.
+    #[param(variants("xy", "xz", "yz", "cursor", "face"))]
     pub plane: u32,
+    /// For a face: the part, by name; empty for the active object.
+    pub object: String,
+    /// For a face: its index in the part's mesh, as get_mesh(faces=true)
+    /// lists them; −1 to find it by `at`.
+    #[param(min = -1.0)]
+    pub face: i64,
+    /// For a face: a point on it, in the world — where the sketch's origin
+    /// goes, and, without `face`, how the face is found.
+    #[param(unit = "length")]
+    pub at: [f64; 3],
+}
+
+impl Default for NewSketchParams {
+    fn default() -> Self {
+        Self {
+            plane: 0,
+            object: String::new(),
+            face: -1,
+            at: [0.0; 3],
+        }
+    }
+}
+
+/// A sketch's plane on a part's face, from the parameters: its origin, its
+/// turn, and the face's outlines in the sketch's plane.
+fn face_plane(
+    doc: &Document,
+    params: &NewSketchParams,
+) -> Result<crate::ops::sketch_face::FaceFrame, OpError> {
+    use crate::ops::sketch_face::{face_at, face_frame};
+    let id = if params.object.trim().is_empty() {
+        doc.selection.active
+    } else {
+        doc.objects()
+            .find(|(_, o)| o.name == params.object)
+            .map(|(id, _)| id)
+    }
+    .filter(|id| {
+        doc.object(*id)
+            .is_some_and(|o| o.mesh().is_some() && o.sketch.is_empty())
+    })
+    .ok_or_else(|| OpError::Failed("name the part to sketch on, or make it active".into()))?;
+    let world = doc.world_transform(id);
+    let at = DVec3::from_array(params.at);
+    let found = if params.face >= 0 {
+        // The part's own faces, as get_mesh numbers them.
+        let mesh = doc
+            .object(id)
+            .and_then(|o| o.mesh())
+            .and_then(|m| doc.mesh(m))
+            .expect("a mesh")
+            .clone();
+        let given = (params.at != [0.0; 3]).then_some(at);
+        face_frame(&mesh, world, params.face as u32, given)
+    } else {
+        // What is drawn — a body's features, a boolean's cut — under `at`.
+        let mut cache = kreate_scene::modifier::ModifierCache::new();
+        let mesh = cache
+            .evaluated(doc, id, &kreate_scene::modifier::EvalCtx::still())
+            .ok_or_else(|| OpError::Failed("the part has no surface".into()))?;
+        let face = face_at(&mesh, world, at).ok_or_else(|| {
+            OpError::Failed(format!(
+                "no face of the part at ({:.4}, {:.4}, {:.4}): give a point on its surface, or `face`",
+                at.x, at.y, at.z
+            ))
+        })?;
+        face_frame(&mesh, world, face, Some(at))
+    };
+    found.map_err(OpError::Failed)
 }
 
 /// Starts a sketch on a plane: an object whose point 0 is its origin, held.
@@ -168,6 +237,9 @@ impl Operator for NewSketch {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
+        // A face's outlines, to draw against: put in fixed, as Fusion
+        // projects a face's edges into a sketch made on it.
+        let mut outlines: Vec<Vec<DVec2>> = Vec::new();
         let (location, rotation) = match params.plane {
             // Front: the sketch's Y up the world's Z, its X along the world's.
             1 => (
@@ -183,18 +255,40 @@ impl Operator for NewSketch {
                 let d = doc.document();
                 (d.cursor, d.cursor_rotation)
             }
+            4 => {
+                let frame = face_plane(doc.document(), params)?;
+                outlines = frame.loops;
+                (frame.origin, frame.rotation)
+            }
             _ => (DVec3::ZERO, DQuat::IDENTITY),
         };
         let d = doc.document_mut();
-        let mesh = d.add_mesh(MeshData::from_faces(vec![Vec3::ZERO], &[]));
+        let mut points = vec![Vec3::ZERO];
+        let mut lines: Vec<[u32; 2]> = Vec::new();
+        let mut fixed = vec![Constraint::Fixed {
+            a: 0,
+            at: [0.0, 0.0],
+        }];
+        for ring in &outlines {
+            let first = points.len() as u32;
+            for (k, p) in ring.iter().enumerate() {
+                let i = points.len() as u32;
+                points.push(Vec3::new(p.x as f32, p.y as f32, 0.0));
+                fixed.push(Constraint::Fixed {
+                    a: i,
+                    at: [p.x, p.y],
+                });
+                let next = if k + 1 == ring.len() { first } else { i + 1 };
+                lines.push([i, next]);
+            }
+        }
+        let mesh = d.add_mesh(MeshData::from_faces(points, &[]));
         let name = d.unique_object_name("Sketch");
         let mut object = Object::new(name, ObjectData::Mesh(mesh));
         object.transform.translation = location;
         object.transform.rotation = rotation;
-        object.sketch.push(Constraint::Fixed {
-            a: 0,
-            at: [0.0, 0.0],
-        });
+        object.sketch.extend(fixed);
+        object.sketch_lines = lines;
         let id = d.add_object(object);
         d.selection.clear();
         d.selection.add(id);
@@ -1040,6 +1134,64 @@ mod tests {
         let mut registry = OperatorRegistry::new();
         crate::register_builtin(&mut registry);
         (registry, History::new(), Document::new())
+    }
+
+    /// A sketch on a box's top: in the face's plane at the point given, the
+    /// top's square in it, held; by the face's number, the same plane; and
+    /// a point off the part, refused.
+    #[test]
+    fn a_sketch_on_a_face_lies_on_it_with_its_outline() {
+        let (r, mut h, mut doc) = setup();
+        let part = doc.add_mesh_object("Part", kreate_mesh::primitives::cube(0.04));
+        doc.object_mut(part).unwrap().transform.translation = DVec3::new(0.1, 0.0, 0.0);
+        doc.selection.add(part);
+        doc.selection.active = Some(part);
+        let at = [0.105, 0.003, 0.02];
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[
+                ("plane", PropertyValue::Enum(4)),
+                ("at", PropertyValue::Vec3(at)),
+            ],
+        )
+        .unwrap();
+        let s = doc.selection.active.unwrap();
+        assert_ne!(s, part);
+        let o = doc.object(s).unwrap();
+        assert!(o.transform.translation.distance(DVec3::from_array(at)) < 1e-9);
+        assert!((o.transform.rotation * DVec3::Z - DVec3::Z).length() < 1e-9);
+        assert_eq!(o.sketch_lines.len(), 4, "the top's square");
+        assert_eq!(o.sketch.len(), 5, "the origin and four corners, held");
+        // The square's corners are the top's, in the world.
+        let world = doc.world_transform(s);
+        let corners: Vec<DVec3> = points(&doc, s)[1..]
+            .iter()
+            .map(|p| world.transform_point3(DVec3::new(p.x, p.y, 0.0)))
+            .collect();
+        for c in &corners {
+            assert!(
+                (c.z - 0.02).abs() < 1e-9 && ((c.x - 0.1).abs() - 0.02).abs() < 1e-6,
+                "{c}"
+            );
+        }
+        // Off the part: said, nothing made.
+        doc.selection.active = Some(part);
+        let err = run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[
+                ("plane", PropertyValue::Enum(4)),
+                ("object", PropertyValue::Text("Part".into())),
+                ("at", PropertyValue::Vec3([1.0, 1.0, 1.0])),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no face"), "{err}");
     }
 
     #[test]

@@ -186,7 +186,10 @@ fn the_shaded_object_sits_where_its_own_outline_is() {
         eprintln!("no GPU adapter; skipping");
         return;
     };
-    let frame = shoot(&gpu, ShadingMode::Rendered, true);
+    // In the material preview: the rendered view's own lit passes, with the
+    // wire overlay still drawn over them. The rendered view itself draws no
+    // wire, being the picture as a render makes it.
+    let frame = shoot(&gpu, ShadingMode::Material, true);
     let surface = bbox(&frame, is_grey_surface).expect("a shaded cube");
     let outline = bbox(&frame, is_accent).expect("an orange outline");
     let off = |a: u32, b: u32| (a as i32 - b as i32).abs();

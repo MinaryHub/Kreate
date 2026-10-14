@@ -956,6 +956,8 @@ struct App {
     /// Sketch mode was asked for with no sketch to draw in: the plane menu
     /// is open, and choosing a plane starts one and enters.
     sketch_waiting: bool,
+    /// Waiting for a click on a flat face, to start a sketch on it.
+    sketch_face_pick: bool,
     /// The sketch the camera was last turned to face, so entering turns it
     /// once and leaves the user's own orbit alone after.
     sketch_faced: Option<kreate_scene::Uid>,
@@ -1167,6 +1169,7 @@ impl App {
             knife: None,
             sketching: Default::default(),
             sketch_waiting: false,
+            sketch_face_pick: false,
             sketch_faced: None,
             sketch_pinned: (0, Vec::new()),
             measure: None,
@@ -2055,6 +2058,7 @@ impl App {
                         plane(self, "sketch-plane-xz", 1),
                         plane(self, "sketch-plane-yz", 2),
                         plane(self, "sketch-plane-cursor", 3),
+                        row(self, t("sketch-plane-face"), "app.sketch_on_face", &[]),
                     ],
                 }]
             }
@@ -3108,6 +3112,38 @@ impl App {
                 .active
                 .map(|a| self.doc.world_transform(a).translation),
             _ => None,
+        }
+    }
+
+    /// A sketch on the flat face under the pointer: its plane, the face's
+    /// outline in it. Said, and nothing made, off every part or on a
+    /// curved face.
+    fn sketch_on_face_under_cursor(&mut self) {
+        self.sketch_face_pick = false;
+        let Some(ndc) = self.cursor_ndc() else { return };
+        let aspect = self.viewport_aspect();
+        self.evaluate_scene();
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+        let Some(hit) = hit else {
+            self.sketch_waiting = false;
+            let message = self.ui.catalog.get("sketch-no-face");
+            self.status(&message);
+            return;
+        };
+        let name = self
+            .doc
+            .object(hit.object)
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
+        let mut params = PropertyMap::new();
+        params.set("plane", PropertyValue::Enum(4));
+        params.set("object", PropertyValue::Text(name));
+        params.set("at", PropertyValue::Vec3(hit.point.to_array()));
+        self.run_op("sketch.new", params);
+        if kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_none() {
+            self.sketch_waiting = false;
         }
     }
 
@@ -4816,7 +4852,7 @@ impl App {
             if kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_some() {
                 self.sketch_waiting = false;
                 self.set_mode(OpMode::Sketch);
-            } else if self.ui.context_menu.groups.is_empty() {
+            } else if self.ui.context_menu.groups.is_empty() && !self.sketch_face_pick {
                 self.sketch_waiting = false;
             }
         }
@@ -11186,6 +11222,13 @@ impl App {
             // face to give a direction, move freely.
             // Alt+E's rows: the same gesture, along the region's normal or
             // each face's own.
+            // A sketch on a face: the next click picks the face.
+            "app.sketch_on_face" => {
+                self.sketch_face_pick = true;
+                self.sketch_waiting = true;
+                let message = self.ui.catalog.get("sketch-pick-face");
+                self.status(&message);
+            }
             "app.extrude" if self.op_ctx.mode.edits_elements() => {
                 let along = matches!(
                     action.params.get("along_normals"),
@@ -12268,6 +12311,23 @@ impl ApplicationHandler for App {
                         // The middle button pans the UV view, which is allowed
                         // during a transform for the same reason orbiting is:
                         // looking at what you are doing is not a conflict.
+                        _ => {}
+                    }
+                }
+                // Picking a face to sketch on: left takes the face under
+                // the pointer, right gives up.
+                if self.sketch_face_pick && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.sketch_on_face_under_cursor();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.sketch_face_pick = false;
+                            self.sketch_waiting = false;
+                            self.status("");
+                            return;
+                        }
                         _ => {}
                     }
                 }
@@ -15232,6 +15292,36 @@ kreate.ops.object.add_primitive()",
     fn with_viewport(app: &mut App) {
         app.viewport_px = Some((100.0, 50.0, 800.0, 600.0));
         app.input.cursor = Some((500.0, 350.0));
+    }
+
+    /// Picking "on a face" and clicking a part: a sketch on the face under
+    /// the pointer, its outline in it; clicking nothing makes nothing.
+    #[test]
+    fn a_click_on_a_face_starts_a_sketch_on_it() {
+        let mut app = app();
+        with_viewport(&mut app);
+        let part = app
+            .doc
+            .add_mesh_object("Part", kreate_mesh::primitives::cube(2.0));
+        app.doc.selection.add(part);
+        app.doc.selection.active = Some(part);
+        app.camera = kreate::startup::starting_camera();
+        app.sketch_face_pick = true;
+        app.sketch_on_face_under_cursor();
+        let s = kreate_ops::ops::sketch_draw::active_sketch(&app.doc).expect("a sketch");
+        assert_ne!(s, part);
+        let o = app.doc.object(s).unwrap();
+        assert_eq!(o.sketch_lines.len(), 4, "the face's square");
+        // On the face: the sketch's origin is on the cube's surface.
+        let at = o.transform.translation;
+        assert!((at.abs().max_element() - 1.0).abs() < 1e-6, "{at}");
+        assert!(!app.sketch_face_pick);
+        // Off every part: nothing.
+        let before = app.doc.objects().count();
+        app.input.cursor = Some((110.0, 60.0));
+        app.sketch_face_pick = true;
+        app.sketch_on_face_under_cursor();
+        assert_eq!(app.doc.objects().count(), before);
     }
 
     #[test]
