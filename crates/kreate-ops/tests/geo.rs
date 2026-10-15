@@ -93,7 +93,10 @@ fn every_kind_on_the_add_menu_is_the_one_added() {
     // clamped to the last it knew, and a field node came in as a profile.
     let mut registry = OperatorRegistry::new();
     kreate_ops::register_builtin(&mut registry);
-    for (i, tag) in kreate_scene::geonodes::GeoNodeKind::ADDABLE.iter().enumerate() {
+    for (i, tag) in kreate_scene::geonodes::GeoNodeKind::ADDABLE
+        .iter()
+        .enumerate()
+    {
         let mut history = History::new();
         let mut doc = Document::new();
         let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));

@@ -181,7 +181,8 @@ pub struct AddGearParams {
     #[param(variants("20", "14.5", "25"))]
     pub pressure_angle: u32,
     /// The helix angle; zero for a spur gear. The mate is wound the other
-    /// way, as a pair on parallel shafts must be.
+    /// way, as a pair on parallel shafts must be. On a bevel gear, the
+    /// spiral angle at the middle of the face: a spiral bevel pair.
     #[param(min = -0.79, max = 0.79, unit = "angle")]
     pub helix: f64,
     /// The profile shift, in modules: positive for fewer than 17 teeth,
@@ -430,7 +431,12 @@ impl Operator for AddGear {
                     parts.push((
                         label("Bevel gear", mate),
                         gear::bevel_gear_at(
-                            &gear::GearParams { teeth: mate, ..g },
+                            // A spiral pair is wound in opposite hands.
+                            &gear::GearParams {
+                                teeth: mate,
+                                helix: -g.helix,
+                                ..g
+                            },
                             g.teeth,
                             shaft,
                             own,
@@ -5335,6 +5341,41 @@ mod gear_tests {
         assert!(h
             .dispatch(&r, &mut doc, &Context::default(), "object.add_gear", &crown)
             .is_err());
+    }
+
+    /// A spiral bevel pair from the operator: the mate wound the other way,
+    /// so the two placed gears barely touch.
+    #[test]
+    fn a_spiral_bevel_pair_is_placed_to_mesh() {
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        p.set("kind", PropertyValue::Enum(3));
+        p.set("teeth", PropertyValue::Int(20));
+        p.set("mate_teeth", PropertyValue::Int(30));
+        p.set("width", PropertyValue::Float(0.006));
+        p.set("bore", PropertyValue::Float(0.0));
+        p.set("helix", PropertyValue::Float(30f64.to_radians()));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.add_gear", &p)
+            .unwrap();
+        let gears: Vec<_> = doc.objects().map(|(id, _)| id).collect();
+        assert_eq!(gears.len(), 2);
+        let mesh = |id| {
+            doc.mesh(doc.object(id).unwrap().mesh().unwrap())
+                .unwrap()
+                .clone()
+        };
+        let (v, _) = kreate_mesh::intersect::shared_volume(
+            &mesh(gears[0]),
+            doc.world_transform(gears[0]),
+            &mesh(gears[1]),
+            doc.world_transform(gears[1]),
+        )
+        .expect("both solid");
+        // Next to a tooth's own bulk (m 2, a 6 mm face): a scrape at most.
+        assert!(v < 0.002 * 0.002 * 0.006 * 0.05, "{v}");
     }
 
     #[test]

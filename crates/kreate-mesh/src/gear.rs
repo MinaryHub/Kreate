@@ -537,10 +537,28 @@ pub fn bevel_gear_at(p: &GearParams, mate: u32, shaft: f64, turn: f64) -> MeshDa
     if large.len() > 1 && large[0].distance(*large.last().unwrap()) < 1e-12 {
         large.pop();
     }
-    let k = (cone - face) / cone;
-    let small: Vec<DVec3> = large.iter().map(|q| apex + (*q - apex) * k).collect();
     let bore_r = (p.bore * 0.5).clamp(0.0, bevel_bore_limit(p, mate) * 0.5);
-    loft(&large, &small, bore_r)
+    // A spiral bevel: the helix is the spiral angle at the middle of the
+    // face. On the pitch cone rolled out flat each tooth is a logarithmic
+    // spiral — the same angle to every radius — so a section at cone
+    // distance s is turned tan β · ln(s / mid) on the flat, over sin δ
+    // round the gear's own axis. Turned nowhere at the middle, a pair meets
+    // there as a straight pair does, and the mate's is the other hand.
+    let spiral = p.helix.clamp(-0.79, 0.79);
+    let steps = if spiral.abs() < 1e-9 { 1 } else { 12 };
+    let mid = cone - face * 0.5;
+    let sections: Vec<Vec<DVec3>> = (0..=steps)
+        .map(|i| {
+            let s = cone - face * i as f64 / steps as f64;
+            let k = s / cone;
+            let twist = DQuat::from_rotation_z(spiral.tan() * (s / mid).ln() / delta.sin());
+            large
+                .iter()
+                .map(|q| twist * (apex + (*q - apex) * k))
+                .collect()
+        })
+        .collect();
+    loft_sections(&sections, bore_r)
 }
 
 /// A bevel gear's cone distance: from the apex to the large end's pitch
@@ -596,10 +614,11 @@ pub fn worm_bore_limit(w: &WormParams) -> f64 {
     (w.pitch_diameter() - 2.5 * w.module) * 0.8
 }
 
-/// A solid between two closed outlines of as many points, one above the
-/// other, with a bore of `bore_r` through both along Z: the large end's
-/// outline at the bottom.
-fn loft(bottom: &[DVec3], top: &[DVec3], bore_r: f64) -> MeshData {
+/// A solid through closed outlines of as many points, each above the last,
+/// with a bore of `bore_r` straight through along Z: the large end's outline
+/// at the bottom.
+fn loft_sections(sections: &[Vec<DVec3>], bore_r: f64) -> MeshData {
+    let (bottom, top) = (&sections[0], &sections[sections.len() - 1]);
     let n = bottom.len();
     let hole = if bore_r > 0.0 { 48 } else { 0 };
     let mut positions: Vec<Vec3> = Vec::with_capacity(2 * (n + hole));
@@ -644,9 +663,27 @@ fn loft(bottom: &[DVec3], top: &[DVec3], bore_r: f64) -> MeshData {
         faces.push(vec![a, c, b]);
         faces.push(vec![a + per, b + per, c + per]);
     }
-    for i in 0..n as u32 {
-        let j = (i + 1) % n as u32;
-        faces.push(vec![i, j, j + per, i + per]);
+    // The sections between, after both ends: their points only.
+    let inner = 2 * per;
+    for s in &sections[1..sections.len() - 1] {
+        positions.extend(s.iter().map(|q| q.as_vec3()));
+    }
+    // The ring each section's outline is, bottom to top.
+    let ring = |k: usize| -> u32 {
+        if k == 0 {
+            0
+        } else if k == sections.len() - 1 {
+            per
+        } else {
+            inner + (k as u32 - 1) * n as u32
+        }
+    };
+    for k in 0..sections.len() - 1 {
+        let (lo, hi) = (ring(k), ring(k + 1));
+        for i in 0..n as u32 {
+            let j = (i + 1) % n as u32;
+            faces.push(vec![lo + i, lo + j, hi + j, hi + i]);
+        }
     }
     for i in 0..hole as u32 {
         let (a, b) = (n as u32 + i, n as u32 + (i + 1) % hole as u32);
@@ -1174,6 +1211,55 @@ mod tests {
         assert!(
             touch.distance(DVec3::new(0.020, 0.0, 0.0)) < 1e-9,
             "{touch:?}"
+        );
+    }
+
+    /// A spiral bevel pair: each solid, its teeth turned along the face, and
+    /// the mate wound the other way — the same hand on both would make the
+    /// teeth run into each other.
+    #[test]
+    fn a_spiral_bevel_pair_winds_opposite_hands_and_meshes() {
+        let p = GearParams {
+            teeth: 20,
+            width: 0.006,
+            helix: 35f64.to_radians(),
+            backlash: 0.00005,
+            ..Default::default()
+        };
+        let g = bevel_gear(&p, 30, 0.0);
+        solid(&g);
+        // The large end and the small end are turned apart about the axis.
+        let straight = bevel_gear(&GearParams { helix: 0.0, ..p }, 30, 0.0);
+        assert!(g.num_faces() > straight.num_faces(), "more sections");
+        let (turn, at, own) = bevel_mate_place(20, 30, 0.002);
+        use kreate_math::DAffine3;
+        let place = DAffine3::from_rotation_translation(turn, at);
+        let mate = |helix: f64| {
+            bevel_gear(
+                &GearParams {
+                    teeth: 30,
+                    helix,
+                    ..p
+                },
+                20,
+                own,
+            )
+        };
+        let right = mate(-p.helix);
+        solid(&right);
+        let overlap = |m: &MeshData| {
+            crate::intersect::shared_volume(&g, DAffine3::IDENTITY, m, place)
+                .map_or(0.0, |(v, _)| v)
+        };
+        let (good, bad) = (overlap(&right), overlap(&mate(p.helix)));
+        let tooth = gear_info(&p).pitch * 0.002 * 0.006;
+        assert!(
+            good < tooth * 0.05,
+            "opposite hands barely touch: {good} against {tooth}"
+        );
+        assert!(
+            bad > good * 10.0 + tooth * 0.05,
+            "the same hand runs into itself: {bad}"
         );
     }
 
