@@ -1340,7 +1340,17 @@ impl ShaderGraph {
                 links.push(*l);
             }
         }
-        self.links = links;
+        // One wire into a socket, the last: what `link` keeps. Without it a
+        // port naming one socket over and over, in a group inside a group,
+        // multiplies the wires at every level it is opened.
+        let mut seen = std::collections::HashSet::new();
+        let mut kept: Vec<Link> = links
+            .into_iter()
+            .rev()
+            .filter(|l| seen.insert((l.to_node, l.to_socket)))
+            .collect();
+        kept.reverse();
+        self.links = kept;
         let count = group.nodes.len();
         // The group goes; everything after it moves down one.
         self.remove_node(node);
@@ -1590,6 +1600,28 @@ mod tests {
         assert_eq!(flat.nodes.len(), 4);
         assert_eq!(flat.links.len(), 4);
         assert_eq!(flat.images(), Vec::<ImageId>::new());
+    }
+
+    /// A port that names one inner socket over and over, inside another
+    /// group: opening it leaves one wire per socket, not one per naming.
+    #[test]
+    fn a_repeated_port_does_not_multiply_wires() {
+        let mut g = chain();
+        let at = g.group(&[1, 2], "Inner").unwrap();
+        let NodeKind::Group(group) = &mut g.nodes[at].kind else {
+            panic!("a group")
+        };
+        let first = group.inputs[0].inner[0];
+        group.inputs[0].inner = vec![first; 64];
+        let coord = g.nodes.iter().position(|n| n.name == "Coord").unwrap();
+        g.group(&[at, coord], "Wrap").unwrap();
+        let flat = g.flattened();
+        let mut sockets = std::collections::HashSet::new();
+        assert!(flat
+            .links
+            .iter()
+            .all(|l| sockets.insert((l.to_node, l.to_socket))));
+        assert_eq!(flat.links.len(), chain().links.len());
     }
 
     #[test]

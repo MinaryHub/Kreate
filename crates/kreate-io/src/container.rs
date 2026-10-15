@@ -1133,6 +1133,9 @@ fn geo_from_record(record: &GeoGraphRecord) -> Option<kreate_scene::geonodes::Ge
 }
 
 /// A graph as its record.
+/// How deep groups may nest in a file.
+const MAX_GROUP_DEPTH: usize = 16;
+
 fn graph_record(graph: &kreate_scene::shader::ShaderGraph, document: &Document) -> GraphRecord {
     nodes_record(&graph.nodes, &graph.links, document)
 }
@@ -1192,7 +1195,7 @@ fn graph_from_record(
     record: &GraphRecord,
     document: &Document,
 ) -> Option<kreate_scene::shader::ShaderGraph> {
-    let graph = nodes_from_record(record, document)?;
+    let graph = nodes_from_record(record, document, 0)?;
     graph.output()?;
     Some(graph)
 }
@@ -1202,7 +1205,13 @@ fn graph_from_record(
 fn nodes_from_record(
     record: &GraphRecord,
     document: &Document,
+    depth: usize,
 ) -> Option<kreate_scene::shader::ShaderGraph> {
+    // Groups inside groups, this deep and no deeper: a file can nest them
+    // without end, and every level is a call.
+    if depth > MAX_GROUP_DEPTH {
+        return None;
+    }
     use kreate_scene::shader::{GroupPort, Link, Node, NodeGroup, NodeKind, ShaderGraph, Socket};
     let mut graph = ShaderGraph {
         name: String::new(),
@@ -1214,7 +1223,7 @@ fn nodes_from_record(
     for node in &record.nodes {
         let kind = match (&node.group, node.kind.as_str()) {
             (Some(g), "group") => {
-                let inner = nodes_from_record(&g.graph, document)?;
+                let inner = nodes_from_record(&g.graph, document, depth + 1)?;
                 // A port is kept only where its socket is there and of its
                 // type: the file can say anything.
                 let ports = |ports: &[PortRecord], outputs: bool| -> Option<Vec<GroupPort>> {
@@ -1222,7 +1231,7 @@ fn nodes_from_record(
                         .iter()
                         .map(|p| {
                             let socket = Socket::from_tag(&p.socket)?;
-                            let inner = p
+                            let mut inner: Vec<(usize, usize)> = p
                                 .inner
                                 .iter()
                                 .filter(|[n, s]| {
@@ -1237,6 +1246,13 @@ fn nodes_from_record(
                                 })
                                 .map(|[n, s]| (*n, *s))
                                 .collect();
+                            // Each inner socket once: a port naming one over
+                            // and over is the same port.
+                            inner.sort_unstable();
+                            inner.dedup();
+                            if outputs {
+                                inner.truncate(1);
+                            }
                             Some(GroupPort {
                                 name: p.name.clone(),
                                 socket,
