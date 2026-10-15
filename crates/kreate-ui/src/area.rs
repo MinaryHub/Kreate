@@ -107,6 +107,8 @@ impl EditorId {
     pub const GRAPH: Self = Self::known("graph");
     /// The drivers of the selected objects: expressions and their variables.
     pub const DRIVERS: Self = Self::known("drivers");
+    /// Each object's action strips, laid over time.
+    pub const NLA: Self = Self::known("nla");
     /// Models, materials and environments to add, local or online.
     pub const ASSETS: Self = Self::known("assets");
 
@@ -180,6 +182,7 @@ impl EditorRegistry {
             (EditorId::DOPE_SHEET, "editor-dope-sheet", true),
             (EditorId::GRAPH, "editor-graph", true),
             (EditorId::DRIVERS, "editor-drivers", true),
+            (EditorId::NLA, "editor-nla", true),
         ] {
             registry.register(EditorInfo {
                 id,

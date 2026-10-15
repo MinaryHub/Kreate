@@ -333,6 +333,7 @@ pub struct ShellState {
         std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::timeline::TimelineState>,
     /// Each dope sheet's zoom and drag, per area.
     sheet_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::dope_sheet::SheetState>,
+    nla_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::nla_editor::NlaState>,
     /// Each graph editor's view and drag, per area.
     graph_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::graph_editor::GraphState>,
     /// The weight-paint brush: what it paints towards, how wide, how hard.
@@ -594,6 +595,8 @@ impl ShellState {
                 over(self.node_views.get(&id).and_then(|s| s.rect))
             } else if kind == kreate_ui::EditorId::DOPE_SHEET {
                 over(self.sheet_views.get(&id).and_then(|s| s.rect))
+            } else if kind == kreate_ui::EditorId::NLA {
+                over(self.nla_views.get(&id).and_then(|s| s.rect))
             } else if kind == kreate_ui::EditorId::GRAPH {
                 over(self.graph_views.get(&id).and_then(|s| s.rect))
             } else {
@@ -643,6 +646,7 @@ impl ShellState {
                         self.node_views.remove(&area);
                         self.timeline_views.remove(&area);
                         self.sheet_views.remove(&area);
+                        self.nla_views.remove(&area);
                         self.graph_views.remove(&area);
                         self.driver_views.remove(&area);
                     }
@@ -744,6 +748,7 @@ impl Default for ShellState {
             node_views: std::collections::BTreeMap::new(),
             timeline_views: std::collections::BTreeMap::new(),
             sheet_views: std::collections::BTreeMap::new(),
+            nla_views: std::collections::BTreeMap::new(),
             graph_views: std::collections::BTreeMap::new(),
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
@@ -3247,6 +3252,9 @@ fn draw_area(
                 }
                 "dope_sheet" => {
                     draw_dope_sheet(ui, state, doc, area.id, l);
+                }
+                "nla" => {
+                    draw_nla_editor(ui, state, doc, area.id);
                 }
                 "graph" => {
                     draw_graph_editor(ui, state, doc, area.id, l);
@@ -8055,6 +8063,134 @@ fn draw_dope_sheet(
                 state.queue.run("anim.keys_interpolation", p);
             }
             E::SetFrame(frame) => {
+                p.set("frame", V::Float(frame));
+                state.queue.dispatch("time.set_frame", p);
+            }
+        }
+    }
+}
+
+/// The NLA editor, for the selected objects' strips.
+fn draw_nla_editor(ui: &mut Ui, state: &mut ShellState, doc: &Document, area: kreate_ui::AreaId) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_ui::nla_editor::{NlaEdit as E, NlaStripView, NlaTrack};
+    // The frames an action's keys span.
+    let span = |a| -> Option<(f64, f64)> {
+        let action = doc.action(a)?;
+        let frames = action
+            .curves
+            .iter()
+            .flat_map(|c| c.keys.iter().map(|k| k.frame));
+        let (lo, hi) = frames.fold((f64::MAX, f64::MIN), |(lo, hi), f| (lo.min(f), hi.max(f)));
+        (lo <= hi).then_some((lo, hi.max(lo + 1.0)))
+    };
+    let tracks: Vec<NlaTrack> = doc
+        .selection
+        .objects
+        .iter()
+        .filter_map(|id| doc.object(*id))
+        .filter(|o| o.action.is_some() || !o.nla.is_empty())
+        .map(|o| NlaTrack {
+            // i18n-exempt: an object's name is the user's own text
+            object: o.name.clone(),
+            action: o.action.and_then(|a| {
+                let (lo, hi) = span(a)?;
+                Some((doc.action(a)?.name.clone(), lo, hi))
+            }),
+            strips: o
+                .nla
+                .iter()
+                .enumerate()
+                .map(|(index, s)| NlaStripView {
+                    index,
+                    // i18n-exempt: a strip's name is its action's, the user's own text
+                    label: s.name.clone(),
+                    start: s.start,
+                    end: s.end(),
+                    mute: s.mute,
+                })
+                .collect(),
+        })
+        .collect();
+    let view = kreate_ui::nla_editor::NlaView {
+        tracks,
+        frame: doc.playback.frame,
+        start: doc.playback.start,
+        end: doc.playback.end,
+    };
+    let text = kreate_ui::nla_editor::NlaText {
+        empty: state.catalog.get("nla-empty"),
+        push_down: state.catalog.get("op-anim-nla-push-down"),
+    };
+    let mut panel = state.nla_views.remove(&area).unwrap_or_default();
+    let edits = kreate_ui::nla_editor::nla_editor(ui, &view, &mut panel, &text);
+    state.nla_views.insert(area, panel);
+    // The operators act on the active object: the strip's object is made it
+    // first when it is not.
+    let mut active = doc
+        .selection
+        .active
+        .and_then(|id| doc.object(id))
+        .map(|o| o.name.clone());
+    let mut activate = |state: &mut ShellState, object: &str| {
+        if active.as_deref() != Some(object) {
+            let mut p = PropertyMap::new();
+            p.set("name", V::Text(object.to_string()));
+            p.set("extend", V::Bool(true));
+            state.queue.run("object.select", p);
+            active = Some(object.to_string());
+        }
+    };
+    let strip_of = |object: &str, index: usize| {
+        doc.objects()
+            .find(|(_, o)| o.name == object)
+            .and_then(|(_, o)| o.nla.get(index))
+    };
+    for edit in edits {
+        match edit {
+            E::Select { object, .. } => activate(state, &object),
+            E::Move {
+                object,
+                index,
+                start,
+            } => {
+                if let Some(s) = strip_of(&object, index) {
+                    activate(state, &object);
+                    let mut params = kreate_ops::ops::anim::nla_strip_params(index, s);
+                    params.start = start;
+                    state.queue.run(
+                        "anim.nla_strip_set",
+                        kreate_reflect::OpParams::to_map(&params),
+                    );
+                }
+            }
+            E::Mute {
+                object,
+                index,
+                mute,
+            } => {
+                if let Some(s) = strip_of(&object, index) {
+                    activate(state, &object);
+                    let mut params = kreate_ops::ops::anim::nla_strip_params(index, s);
+                    params.mute = mute;
+                    state.queue.run(
+                        "anim.nla_strip_set",
+                        kreate_reflect::OpParams::to_map(&params),
+                    );
+                }
+            }
+            E::Remove { object, index } => {
+                activate(state, &object);
+                let mut p = PropertyMap::new();
+                p.set("index", V::Int(index as i64));
+                state.queue.run("anim.nla_strip_remove", p);
+            }
+            E::PushDown { object } => {
+                activate(state, &object);
+                state.queue.run("anim.nla_push_down", PropertyMap::new());
+            }
+            E::SetFrame(frame) => {
+                let mut p = PropertyMap::new();
                 p.set("frame", V::Float(frame));
                 state.queue.dispatch("time.set_frame", p);
             }

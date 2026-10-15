@@ -1626,3 +1626,5 @@ op-object-add-bearing-shields = 실드
 op-object-add-gear-shaft-angle = 축 사이 각 (베벨)
 op-anim-nla-strip-set-blend = 섞기 방식
 op-uv-unwrap-method = 방식
+editor-nla = 비선형 애니메이션
+nla-empty = 액션이나 스트립이 있는 오브젝트를 선택하면 여기에 보입니다.

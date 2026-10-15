@@ -25,6 +25,7 @@ pub mod icons;
 pub mod keymap_editor;
 pub mod modifier_stack;
 pub mod nav_gizmo;
+pub mod nla_editor;
 pub mod node_editor;
 pub mod object_glyph;
 pub mod outliner;
