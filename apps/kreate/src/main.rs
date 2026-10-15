@@ -1409,7 +1409,7 @@ impl App {
         //
         // A sketch is held as a mesh of points and lines, and editing it is
         // the sketch tools, not its vertices: Tab on one goes into it.
-        if self.op_ctx.mode == OpMode::Object
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects
             && kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_some()
         {
             self.set_mode(OpMode::Sketch);
