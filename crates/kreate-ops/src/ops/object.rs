@@ -2200,6 +2200,7 @@ impl Operator for Duplicate {
         }
         let d = doc.document_mut();
         let mut copies = Vec::with_capacity(targets.len());
+        let mut copied: Vec<(ObjectId, ObjectId)> = Vec::new();
         for id in targets {
             let copy = if params.linked {
                 d.duplicate_linked(id)
@@ -2208,10 +2209,25 @@ impl Operator for Duplicate {
             };
             if let Some(c) = copy {
                 copies.push(c);
+                copied.push((id, c));
             }
         }
         if copies.is_empty() {
             return Ok(OpResult::Cancelled);
+        }
+        // A copied child of a copied parent hangs from the copy, as in
+        // Blender: a rig duplicated whole is a second rig, not legs hung
+        // from the first one's hips. The copied parent stands where the
+        // original did, so the child's place is kept as it is.
+        for (original, copy) in &copied {
+            let Some(parent) = d.object(*original).and_then(|o| o.parent) else {
+                continue;
+            };
+            if let Some((_, new_parent)) = copied.iter().find(|(o, _)| *o == parent) {
+                if let Some(c) = d.object_mut(*copy) {
+                    c.parent = Some(*new_parent);
+                }
+            }
         }
         // The copies become the selection, so a duplicate-then-move macro moves
         // the new objects rather than the originals.
@@ -3124,10 +3140,14 @@ impl Operator for Rename {
         }
         let taken = |name: &str| d.objects().any(|(other, o)| other != id && o.name == name);
         let name = if taken(base) {
-            (1..)
+            let numbered = (1..)
                 .map(|i| format!("{base}.{i:03}"))
                 .find(|n| !taken(n))
-                .expect("names run out after integers")
+                .expect("names run out after integers");
+            crate::report::say(format!(
+                "{base:?} is another object's name: this one is {numbered:?}"
+            ));
+            numbered
         } else {
             base.to_string()
         };
@@ -4339,6 +4359,59 @@ mod tests {
             .is_err());
     }
 
+    /// A hierarchy duplicated whole hangs together: the copied child hangs
+    /// from the copied parent, in the same place, and moving the copied
+    /// parent moves it and not the original child.
+    #[test]
+    fn a_duplicated_hierarchy_hangs_from_its_own_copy() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let parent = doc.add_object(Object::new("Hip", ObjectData::Empty));
+        let child = doc.add_mesh_object("Leg", kreate_mesh::primitives::cube(1.0));
+        doc.object_mut(parent).unwrap().transform.translation = DVec3::new(1.0, 0.0, 0.0);
+        doc.object_mut(child).unwrap().transform.translation = DVec3::new(0.0, 0.0, -2.0);
+        doc.set_parent(child, Some(parent)).unwrap();
+        let before = doc.world_transform(child).translation;
+        doc.selection.add(parent);
+        doc.selection.add(child);
+        let mut h = History::new();
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "object.duplicate",
+            &crate::PropertyMap::new(),
+        )
+        .unwrap();
+        let copy_of = |doc: &Document, name: &str| {
+            doc.objects()
+                .find(|(_, o)| o.name == name)
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        let (hip2, leg2) = (copy_of(&doc, "Hip.001"), copy_of(&doc, "Leg.001"));
+        assert_eq!(doc.object(leg2).unwrap().parent, Some(hip2));
+        assert!((doc.world_transform(leg2).translation - before).length() < 1e-9);
+        doc.object_mut(hip2).unwrap().transform.translation = DVec3::new(5.0, 0.0, 0.0);
+        assert!((doc.world_transform(leg2).translation.x - 4.0).abs() < 1e-9);
+        assert!((doc.world_transform(child).translation - before).length() < 1e-9);
+        // A child copied without its parent still hangs from the original.
+        doc.selection.clear();
+        doc.selection.add(child);
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "object.duplicate",
+            &crate::PropertyMap::new(),
+        )
+        .unwrap();
+        let leg3 = copy_of(&doc, "Leg.002");
+        assert_eq!(doc.object(leg3).unwrap().parent, Some(parent));
+    }
+
     #[test]
     fn rename_names_the_active_object_and_numbers_a_taken_name() {
         let mut r = OperatorRegistry::new();
@@ -4354,6 +4427,9 @@ mod tests {
         h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p)
             .unwrap();
         assert_eq!(doc.object(b).unwrap().name, "Lamp.001");
+        // Said, so a script that named it hears the name it got.
+        let said = crate::report::take().unwrap_or_default();
+        assert!(said.contains("Lamp.001"), "{said}");
         p.set("name", crate::PropertyValue::Text("  Box ".into()));
         h.dispatch(&r, &mut doc, &Context::default(), "object.rename", &p)
             .unwrap();

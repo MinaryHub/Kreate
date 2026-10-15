@@ -3523,9 +3523,15 @@ impl Operator for SelectWhere {
                 .fold(0.0, f64::max);
             size * 1e-4
         };
+        // Either corner may be given first: a box is its two corners,
+        // whichever way round, and one typed back to front caught nothing.
+        let (a, b) = (
+            glam::DVec3::from_array(params.min),
+            glam::DVec3::from_array(params.max),
+        );
         let (lo, hi) = (
-            glam::DVec3::from_array(params.min) - glam::DVec3::splat(margin),
-            glam::DVec3::from_array(params.max) + glam::DVec3::splat(margin),
+            a.min(b) - glam::DVec3::splat(margin),
+            a.max(b) + glam::DVec3::splat(margin),
         );
         // The nearest tested point outside the box, for saying where things
         // are when nothing was caught.
@@ -4408,8 +4414,10 @@ mod tests {
         let at = |z: f64| {
             vec![
                 ("mode", PropertyValue::Enum(2)),
-                ("min", PropertyValue::Vec3([-1.0, -1.0, z])),
-                ("max", PropertyValue::Vec3([1.0, 1.0, z])),
+                // The corners back to front on purpose: a box is its two
+                // corners, whichever is given first.
+                ("min", PropertyValue::Vec3([1.0, 1.0, z])),
+                ("max", PropertyValue::Vec3([-1.0, -1.0, z])),
             ]
         };
         // The top's centre is at 0.02; a micrometre off is caught.
