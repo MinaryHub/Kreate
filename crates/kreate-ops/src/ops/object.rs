@@ -470,7 +470,7 @@ impl Operator for AddGear {
                 let turn = -std::f64::consts::FRAC_PI_2 - twist * 0.5;
                 parts.push((
                     label("Worm wheel", g.teeth),
-                    gear::gear(&wheel, turn),
+                    gear::worm_wheel(&w, g.teeth, g.width, g.bore, turn),
                     DQuat::IDENTITY,
                     at + DVec3::new(length * 0.5, centre, -wheel.width * 0.5),
                 ));

@@ -734,6 +734,55 @@ pub fn worm_wheel_params(worm: &WormParams, teeth: u32, width: f64, bore: f64) -
     }
 }
 
+/// The wheel a worm drives, throated as worm wheels are: its tips not a
+/// cylinder but hollowed round the worm, the surface its root sweeps as the
+/// wheel turns — a torus about the wheel's axis — so the worm sits in the
+/// wheel along the whole of its teeth rather than touching them at their
+/// middles. The teeth themselves are the helical gear's at the worm's lead
+/// angle, cut a little taller at the faces for the throat to trim.
+///
+/// Placed as [`gear`] places a gear: axis Z, from 0 to `width`.
+pub fn worm_wheel(worm: &WormParams, teeth: u32, width: f64, bore: f64, turn: f64) -> MeshData {
+    let p = worm_wheel_params(worm, teeth, width, bore);
+    let info = gear_info(&p);
+    let rw = worm.pitch_diameter() * 0.5;
+    let centre = rw + info.pitch * 0.5;
+    // The worm's root less a quarter module: what the wheel's tips clear.
+    let throat = rw - worm.module;
+    let half = (width * 0.5).min(throat * 0.95);
+    let rise = throat - (throat * throat - half * half).sqrt();
+    let (mt, at) = transverse(&p);
+    let s = mt * (PI / 2.0 + 2.0 * p.shift * at.tan()) - p.backlash;
+    let outline = profile(
+        &p,
+        turn,
+        info.tip * 0.5 + rise * 1.05,
+        info.root * 0.5,
+        s,
+        true,
+    );
+    let (twist, layers) = winding(&p);
+    let bore_r = (p.bore * 0.5).clamp(0.0, bore_limit(&p) * 0.5);
+    let hole = if bore_r > 0.0 {
+        circle(bore_r, 48)
+    } else {
+        Vec::new()
+    };
+    let blank = sweep(
+        &outline,
+        &hole,
+        p.width.max(1e-6),
+        layers,
+        |q, t| turned(q, twist * t),
+        |q, _| q,
+    );
+    let mut torus = crate::primitives::torus(centre as f32, throat as f32, 192, 48);
+    for q in torus.positions_mut() {
+        q.z += (width * 0.5) as f32;
+    }
+    crate::modifiers::boolean::boolean(&blank, &torus, crate::modifiers::BooleanOp::Difference)
+}
+
 /// A worm, its axis along Z from 0 to its length: the basic rack wound round
 /// it, `starts` times, a groove facing +X half way along.
 pub fn worm(w: &WormParams) -> MeshData {
@@ -762,6 +811,40 @@ pub fn worm(w: &WormParams) -> MeshData {
 
 #[cfg(test)]
 mod tests {
+    /// A throated wheel: closed, its tips lowest at the middle of the face,
+    /// where the worm's root passes nearest, and higher at the faces.
+    #[test]
+    fn a_worm_wheel_is_throated_round_its_worm() {
+        let w = WormParams {
+            module: 0.002,
+            starts: 1,
+            diameter_factor: 10.0,
+            length: 0.04,
+            pressure_angle: 20f64.to_radians(),
+            bore: 0.0,
+            backlash: 0.0,
+        };
+        let width = 0.012;
+        let wheel = worm_wheel(&w, 30, width, 0.0, 0.0);
+        assert!(wheel.validate().is_empty());
+        assert!(crate::measure::is_closed(&wheel), "closed");
+        let reach = |lo: f32, hi: f32| {
+            wheel
+                .positions()
+                .iter()
+                .filter(|q| q.z >= lo && q.z <= hi)
+                .map(|q| q.truncate().length())
+                .fold(0.0f32, f32::max)
+        };
+        let w32 = width as f32;
+        let middle = reach(w32 * 0.45, w32 * 0.55);
+        let edge = reach(0.0, w32 * 0.05);
+        let p = worm_wheel_params(&w, 30, width, 0.0);
+        let tip = gear_info(&p).tip as f32 * 0.5;
+        assert!((middle - tip).abs() < 0.0002, "{middle} against {tip}");
+        assert!(edge > middle + 0.0003, "{edge} not above {middle}");
+    }
+
     /// At a right angle the general bevel is the right-angled one; at
     /// another, the two cones' angles add to the shaft angle, and both
     /// gears' apexes are one point.
