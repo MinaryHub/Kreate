@@ -1257,9 +1257,12 @@ impl Operator for Draft {
     }
 }
 
-/// The largest region of a sketch, in its own plane: what a sweep carries
-/// or a loft passes through. `None` for an object with no closed region.
-fn sketch_outline(doc: &Document, id: ObjectId) -> Option<Vec<kreate_math::Vec2>> {
+/// The largest region of a sketch, in its own plane — its outline and its
+/// holes: what a sweep carries or a loft passes through. `None` for an
+/// object with no closed region.
+type Region2 = (Vec<kreate_math::Vec2>, Vec<Vec<kreate_math::Vec2>>);
+
+fn sketch_region(doc: &Document, id: ObjectId) -> Option<Region2> {
     kreate_scene::feature::sketch_regions(doc, id)
         .into_iter()
         .max_by(|a, b| {
@@ -1268,7 +1271,23 @@ fn sketch_outline(doc: &Document, id: ObjectId) -> Option<Vec<kreate_math::Vec2>
                 .partial_cmp(&b.area().abs())
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .map(|r| r.outline)
+        .map(|r| (r.outline, r.holes))
+}
+
+/// `solid` with each of `holes` taken out of it.
+fn cut_out(
+    mut solid: kreate_mesh::MeshData,
+    holes: Vec<kreate_mesh::MeshData>,
+) -> Result<kreate_mesh::MeshData, OpError> {
+    for hole in holes {
+        solid = kreate_mesh::modifiers::boolean::try_boolean(
+            &solid,
+            &hole,
+            kreate_mesh::modifiers::BooleanOp::Difference,
+        )
+        .map_err(|e| OpError::Failed(e.to_string()))?;
+    }
+    Ok(solid)
 }
 
 /// An object's lines as one path, in the world: a sketch's lines, or a
@@ -1341,32 +1360,45 @@ impl Operator for SweepAlong {
         let (path, closed) = object_path(d, path_id).ok_or_else(|| {
             OpError::Failed("the active object has no lines to sweep along".into())
         })?;
-        let profile = match d
+        let (profile, holes) = match d
             .selection
             .objects
             .iter()
             .copied()
             .filter(|id| *id != path_id)
-            .find_map(|id| sketch_outline(d, id))
+            .find_map(|id| sketch_region(d, id))
         {
-            Some(outline) => outline,
-            None => kreate_mesh::primitives::circle_profile(params.radius as f32, params.segments),
+            Some(region) => region,
+            None => (
+                kreate_mesh::primitives::circle_profile(params.radius as f32, params.segments),
+                Vec::new(),
+            ),
         };
         let start = path[0];
         let local: Vec<kreate_math::Vec3> = path.iter().map(|p| (*p - start).as_vec3()).collect();
-        let mesh = kreate_mesh::primitives::sweep(&kreate_mesh::primitives::Sweep {
-            path: &local,
-            profile: &profile,
-            resolution: 1,
-            closed,
-            scale: (1.0, params.scale_end as f32),
-            caps: params.caps,
-        });
+        let swept = |profile: &[kreate_math::Vec2]| {
+            kreate_mesh::primitives::sweep(&kreate_mesh::primitives::Sweep {
+                path: &local,
+                profile,
+                resolution: 1,
+                closed,
+                scale: (1.0, params.scale_end as f32),
+                caps: params.caps,
+            })
+        };
+        let mesh = swept(&profile);
         if mesh.num_faces() == 0 || !mesh.validate().is_empty() {
             return Err(OpError::Failed(
                 "the profile cannot be swept along this path".into(),
             ));
         }
+        // A profile with holes — a tube, a channel with slots — has each
+        // hole swept the same way and taken out: hollow all along.
+        let mesh = if holes.is_empty() || !params.caps && !closed {
+            mesh
+        } else {
+            cut_out(mesh, holes.iter().map(|h| swept(h)).collect())?
+        };
         add_part(doc, "Sweep".into(), mesh, start, DQuat::IDENTITY);
         Ok(OpResult::Finished)
     }
@@ -1394,15 +1426,17 @@ impl Operator for Loft {
     ) -> Result<OpResult, OpError> {
         let d = doc.document();
         let mut sections: Vec<Vec<DVec3>> = Vec::new();
+        let mut section_holes: Vec<Vec<Vec<DVec3>>> = Vec::new();
         for id in d.selection.objects.iter().copied() {
-            if let Some(outline) = sketch_outline(d, id) {
+            if let Some((outline, holes)) = sketch_region(d, id) {
                 let world = d.world_transform(id);
-                sections.push(
-                    outline
-                        .iter()
+                let place = |ring: &[kreate_math::Vec2]| -> Vec<DVec3> {
+                    ring.iter()
                         .map(|p| world.transform_point3(DVec3::new(p.x as f64, p.y as f64, 0.0)))
-                        .collect(),
-                );
+                        .collect()
+                };
+                sections.push(place(&outline));
+                section_holes.push(holes.iter().map(|h| place(h)).collect());
             }
         }
         if sections.len() < 2 {
@@ -1422,6 +1456,7 @@ impl Operator for Loft {
             })
             .unwrap_or(0);
         let mut order = vec![sections.swap_remove(first)];
+        let mut order_holes = vec![section_holes.swap_remove(first)];
         while !sections.is_empty() {
             let here = centre(order.last().expect("one"));
             let next = (0..sections.len())
@@ -1433,6 +1468,7 @@ impl Operator for Loft {
                 })
                 .expect("one left");
             order.push(sections.swap_remove(next));
+            order_holes.push(section_holes.swap_remove(next));
         }
         let start = centre(&order[0]);
         let local: Vec<Vec<kreate_math::Vec3>> = order
@@ -1443,6 +1479,38 @@ impl Operator for Loft {
         if mesh.num_faces() == 0 || !mesh.validate().is_empty() {
             return Err(OpError::Failed("these outlines cannot be lofted".into()));
         }
+        // Holes, when every section has as many: each lofted through the
+        // sections — matched by where they sit in their section — and taken
+        // out. A hole in some sections and not others has nothing to run to.
+        let k = order_holes[0].len();
+        let mesh = if k == 0 || order_holes.iter().any(|h| h.len() != k) {
+            mesh
+        } else {
+            let mut chains: Vec<Vec<Vec<kreate_math::Vec3>>> = Vec::new();
+            for i in 0..k {
+                let mut chain = vec![order_holes[0][i].clone()];
+                for (s, holes) in order_holes.iter().enumerate().skip(1) {
+                    let prev = chain.last().expect("one");
+                    let want = centre(prev) - centre(&order[s - 1]);
+                    let pick = holes
+                        .iter()
+                        .min_by(|a, b| {
+                            let da = (centre(a) - centre(&order[s])).distance(want);
+                            let db = (centre(b) - centre(&order[s])).distance(want);
+                            da.total_cmp(&db)
+                        })
+                        .expect("as many holes");
+                    chain.push(pick.clone());
+                }
+                chains.push(
+                    chain
+                        .iter()
+                        .map(|ring| ring.iter().map(|p| (*p - start).as_vec3()).collect())
+                        .collect(),
+                );
+            }
+            cut_out(mesh, chains.iter().map(|c| mech::loft(c)).collect())?
+        };
         add_part(doc, "Loft".into(), mesh, start, DQuat::IDENTITY);
         Ok(OpResult::Finished)
     }
@@ -1766,6 +1834,67 @@ mod tests {
             "{}",
             doc.object(id).unwrap().name
         );
+    }
+
+    /// A profile with a hole in it swept: a hollow tube, the hole all the
+    /// way along. Two holed sections lofted: hollow too.
+    #[test]
+    fn holes_in_a_profile_are_swept_and_lofted_through() {
+        use kreate_math::Vec3;
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        // A 10 mm square with a 4 mm square hole, about the sketch's origin.
+        let holed = |doc: &mut Document, z: f64, outer: f32, inner: f32| {
+            let sq = |s: f32| -> Vec<Vec3> {
+                [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                    .iter()
+                    .map(|(x, y)| Vec3::new(x * s, y * s, 0.0))
+                    .collect()
+            };
+            let mut pts = sq(outer);
+            pts.extend(sq(inner));
+            let id = doc.add_mesh_object("Sketch", kreate_mesh::MeshData::from_faces(pts, &[]));
+            let o = doc.object_mut(id).unwrap();
+            o.sketch_lines = vec![
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],
+                [4, 5],
+                [5, 6],
+                [6, 7],
+                [7, 4],
+            ];
+            o.transform.translation = DVec3::new(0.0, 0.0, z);
+            id
+        };
+        let path = doc.add_mesh_object(
+            "Path",
+            kreate_mesh::MeshData::from_faces(vec![Vec3::ZERO, Vec3::new(0.1, 0.0, 0.0)], &[]),
+        );
+        doc.object_mut(path).unwrap().sketch_lines = vec![[0, 1]];
+        let profile = holed(&mut doc, 0.0, 0.005, 0.002);
+        doc.selection.clear();
+        doc.selection.add(profile);
+        doc.selection.add(path);
+        doc.selection.active = Some(path);
+        run(&r, &mut h, &mut doc, "object.sweep_along", &[]).unwrap();
+        let v = volume(&doc, doc.selection.active.unwrap());
+        let want = (0.01 * 0.01 - 0.004 * 0.004) * 0.1;
+        assert!((v - want).abs() < want * 1e-6, "{v} against {want}");
+        // Lofted: two holed squares 20 mm apart, the same: a hollow block.
+        let a = holed(&mut doc, 0.0, 0.005, 0.002);
+        let b = holed(&mut doc, 0.02, 0.005, 0.002);
+        doc.selection.clear();
+        doc.selection.add(b);
+        doc.selection.add(a);
+        doc.selection.active = Some(a);
+        run(&r, &mut h, &mut doc, "object.loft", &[]).unwrap();
+        let v = volume(&doc, doc.selection.active.unwrap());
+        let want = (0.01 * 0.01 - 0.004 * 0.004) * 0.02;
+        assert!((v - want).abs() < want * 1e-3, "{v} against {want}");
     }
 
     #[test]
