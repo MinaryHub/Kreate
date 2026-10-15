@@ -1962,14 +1962,24 @@ mod tests {
             (b.max.z - 0.006).abs() < 1e-6 && (b.min.z + 0.02).abs() < 1e-6,
             "{b:?}"
         );
-        // A nut: 10 across its flats, 5.2 high, and closed.
+        // A nut: 10 across its flats, 5.2 high, and closed; its thread cut
+        // in, so it holds less than a hex with a bore at the thread's minor
+        // diameter and more than one bored at its major — the grooves take
+        // about half the difference.
         let nut = fastener(FastenerKind::Nut, m6, 0.0, true);
         let v = solid(&nut);
         let hex = 3f64.sqrt() / 2.0 * 0.010f64.powi(2);
         let minor = (6.0 - 1.0825) * 0.0005;
         let prism = 48.0 / std::f64::consts::TAU * (std::f64::consts::TAU / 48.0).sin();
-        let want = (hex - PI * minor * minor * prism) * 0.0052;
-        assert!((v - want).abs() < want * 0.01, "{v} against {want}");
+        let bored_minor = (hex - PI * minor * minor * prism) * 0.0052;
+        let bored_major = (hex - PI * 0.003f64.powi(2)) * 0.0052;
+        let middle = (bored_minor + bored_major) * 0.5;
+        assert!(
+            v < bored_minor
+                && v > bored_major
+                && (v - middle).abs() < (bored_minor - bored_major) * 0.25,
+            "{v} between {bored_major} and {bored_minor}"
+        );
         assert!((nut.bounds().size().y - 0.010).abs() < 1e-6);
         // A washer.
         let w = solid(&fastener(FastenerKind::Washer, m6, 0.0, true));
