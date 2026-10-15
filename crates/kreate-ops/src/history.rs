@@ -251,7 +251,24 @@ impl History {
 
         let began = std::time::Instant::now();
         let mut edit = DocMut::with_sessions(doc, sessions);
-        let result = registry.execute(op_id, &full, &mut edit, ctx);
+        // An operator that panics is a bug, and it is turned into an error
+        // here rather than let end the application: what it wrote is turned
+        // back below with any other failure's, and a script or the connector
+        // that ran it hears why. The panic hook has written its report.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.execute(op_id, &full, &mut edit, ctx)
+        }))
+        .unwrap_or_else(|panic| {
+            let why = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic".into());
+            tracing::error!("operator {op_id} panicked: {why}");
+            Err(OpError::Failed(format!(
+                "{op_id} hit an internal error and was undone ({why}); nothing was changed"
+            )))
+        });
         let payload = edit.finish();
         // Every operator into the log, with how long it took and how it
         // went; a slow one said as such — what a frozen window is traced by.
@@ -743,6 +760,69 @@ mod tests {
         ) -> Result<OpResult, OpError> {
             Err(OpError::Failed("nope".into()))
         }
+    }
+
+    struct Panics;
+
+    impl Operator for Panics {
+        type Params = AddCubeParams;
+        fn id() -> &'static str {
+            "test.panic"
+        }
+        fn label() -> &'static str {
+            "Panics"
+        }
+        fn execute(
+            _params: &Self::Params,
+            doc: &mut DocMut<'_>,
+            _ctx: &Context,
+        ) -> Result<OpResult, OpError> {
+            // Half way through an edit, as the boolean's apply was.
+            doc.document_mut()
+                .add_mesh_object("Half", kreate_mesh::primitives::cube(1.0));
+            if doc.document().objects().count() > 0 {
+                panic!("attempt to subtract with overflow");
+            }
+            Ok(OpResult::Finished)
+        }
+    }
+
+    /// A panic inside an operator is an error, not the end of the program,
+    /// and what it did before is turned back.
+    #[test]
+    fn an_operator_that_panics_fails_and_changes_nothing() {
+        let mut r = registry();
+        r.register::<Panics>();
+        let mut doc = doc_with_selection();
+        let before = doc.objects().count();
+        let mut h = History::new();
+        let out = h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "test.panic",
+            &PropertyMap::new(),
+        );
+        assert!(
+            matches!(out, Err(OpError::Failed(ref m)) if m.contains("internal error")),
+            "{out:?}"
+        );
+        assert_eq!(
+            doc.objects().count(),
+            before,
+            "the half-made object is gone"
+        );
+        assert!(h.entries().is_empty());
+        // And the history goes on working.
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "object.add_cube",
+            &PropertyMap::new(),
+        )
+        .unwrap();
+        assert_eq!(doc.objects().count(), before + 1);
     }
 
     fn first_mesh(doc: &Document) -> Option<MeshId> {
