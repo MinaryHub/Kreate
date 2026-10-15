@@ -1618,3 +1618,4 @@ op-sketch-reattach-desc = Puts a sketch made on a part's face back on that face 
 op-sketch-reattach-outline = Project the outline again
 op-object-add-bearing-shields = Shields
 op-object-add-gear-shaft-angle = Shaft angle (bevel)
+op-anim-nla-strip-set-blend = Blend

@@ -908,6 +908,9 @@ pub struct NlaStripParams {
     #[param(variants("nothing", "hold_forward", "hold"))]
     pub extend: u32,
     pub mute: bool,
+    /// How its values meet what is under it.
+    #[param(variants("replace", "add", "subtract", "multiply"))]
+    pub blend: u32,
 }
 
 impl Default for NlaStripParams {
@@ -920,6 +923,7 @@ impl Default for NlaStripParams {
             influence: 1.0,
             extend: 1,
             mute: false,
+            blend: 0,
         }
     }
 }
@@ -934,6 +938,7 @@ pub fn nla_strip_params(index: usize, s: &kreate_scene::nla::NlaStrip) -> NlaStr
         influence: s.influence,
         extend: s.extend.index(),
         mute: s.mute,
+        blend: s.blend.index(),
     }
 }
 
@@ -976,6 +981,10 @@ impl Operator for NlaStripSet {
                 .copied()
                 .unwrap_or_default(),
             mute: params.mute,
+            blend: kreate_scene::nla::NlaBlend::ALL
+                .get(params.blend as usize)
+                .copied()
+                .unwrap_or_default(),
             ..s.clone()
         };
         if *s == wanted {

@@ -6,9 +6,11 @@
 //! Blender does. A walk keyed once becomes a walk for as long as the shot by
 //! repeating its strip; two takes become one by laying them end to end.
 //!
-//! Strips replace what is under them by their influence — a straight line
-//! from below to theirs, the turn by the shorter arc. Blender's Add, Subtract
-//! and Multiply blends are not here yet.
+//! A strip replaces what is under it by its influence — a straight line from
+//! below to its own, the turn by the shorter arc — or adds its values to it,
+//! takes them away, or multiplies by them: Blender's Add, Subtract and
+//! Multiply, channel by channel, for an object's place and its shape keys.
+//! A pose's bones take a strip's values by replacing alone, for now.
 
 use crate::document::ActionId;
 use kreate_math::{DQuat, DTransform};
@@ -47,6 +49,53 @@ impl NlaExtend {
     }
 }
 
+/// How a strip's values meet what is under it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NlaBlend {
+    /// From what is under towards the strip's, by the influence.
+    #[default]
+    Replace,
+    /// What is under, plus the strip's times the influence: a sway laid on
+    /// a walk.
+    Add,
+    /// What is under, less the strip's times the influence.
+    Subtract,
+    /// What is under, times the strip's — scaled toward one by the
+    /// influence.
+    Multiply,
+}
+
+impl NlaBlend {
+    pub const ALL: [Self; 4] = [Self::Replace, Self::Add, Self::Subtract, Self::Multiply];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Multiply => "multiply",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.tag() == tag)
+    }
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|e| *e == self).unwrap_or(0) as u32
+    }
+
+    /// `under` and a strip's `value` met by this blend at influence `t`.
+    pub fn mix(self, under: f64, value: f64, t: f64) -> f64 {
+        match self {
+            Self::Replace => under + (value - under) * t,
+            Self::Add => under + value * t,
+            Self::Subtract => under - value * t,
+            Self::Multiply => under * (1.0 + (value - 1.0) * t),
+        }
+    }
+}
+
 /// One action, placed on the timeline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NlaStrip {
@@ -65,6 +114,8 @@ pub struct NlaStrip {
     pub influence: f64,
     pub extend: NlaExtend,
     pub mute: bool,
+    /// How its values meet what is under it.
+    pub blend: NlaBlend,
 }
 
 impl NlaStrip {
@@ -80,6 +131,7 @@ impl NlaStrip {
             influence: 1.0,
             extend: NlaExtend::HoldForward,
             mute: false,
+            blend: NlaBlend::Replace,
         }
     }
 
@@ -148,6 +200,62 @@ pub fn mix_transform(a: DTransform, b: DTransform, t: f64) -> DTransform {
 
 #[cfg(test)]
 mod tests {
+    /// An Add strip lays its values on what is under it; Subtract takes them
+    /// off; Multiply scales; channels it does not key are left alone.
+    #[test]
+    fn add_subtract_and_multiply_strips_meet_what_is_under_them() {
+        use crate::animation::{Action, FCurve, Interpolation};
+        use kreate_math::DVec3;
+        let mut doc = crate::Document::new();
+        let id = doc.add_mesh_object("Box", kreate_mesh::primitives::cube(1.0));
+        let key = |prop: &str, i: u8, v: f64| {
+            let mut c = FCurve::new(kreate_reflect::PropertyPath {
+                kind: kreate_reflect::DatablockKind::Object,
+                target: kreate_reflect::Uid::NONE,
+                property: prop.into(),
+                index: Some(i),
+                hint: None,
+            });
+            c.insert(1.0, v, Interpolation::Constant);
+            c.insert(100.0, v, Interpolation::Constant);
+            c
+        };
+        let mut base = Action::new("Base");
+        base.curves.push(key("location", 0, 2.0));
+        base.curves.push(key("scale", 2, 2.0));
+        let mut sway = Action::new("Sway");
+        sway.curves.push(key("location", 0, 0.5));
+        sway.curves.push(key("scale", 2, 3.0));
+        let (b, s) = (doc.add_action(base), doc.add_action(sway));
+        let o = doc.object_mut(id).unwrap();
+        o.nla.push(NlaStrip::new("Base", b, 1.0, (1.0, 100.0)));
+        let mut over = NlaStrip::new("Sway", s, 1.0, (1.0, 100.0));
+        over.influence = 0.5;
+        for (blend, x, z) in [
+            (NlaBlend::Add, 2.25, 3.5),
+            (NlaBlend::Subtract, 1.75, 0.5),
+            (NlaBlend::Multiply, 2.0 * 0.75, 2.0 * 2.0),
+            (NlaBlend::Replace, 1.25, 2.5),
+        ] {
+            over.blend = blend;
+            let o = doc.object_mut(id).unwrap();
+            o.nla.truncate(1);
+            o.nla.push(over.clone());
+            o.transform.translation = DVec3::ZERO;
+            o.transform.scale = DVec3::ONE;
+            doc.animate(10.0);
+            let t = doc.object(id).unwrap().transform;
+            assert!(
+                (t.translation.x - x).abs() < 1e-9,
+                "{blend:?}: x {}",
+                t.translation.x
+            );
+            assert!((t.scale.z - z).abs() < 1e-9, "{blend:?}: z {}", t.scale.z);
+            // Not keyed by either: left as it was.
+            assert!((t.scale.x - 1.0).abs() < 1e-12);
+        }
+    }
+
     use super::*;
 
     fn strip() -> NlaStrip {

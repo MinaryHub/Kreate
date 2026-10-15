@@ -1813,9 +1813,41 @@ impl Document {
                 if t <= 0.0 {
                     continue;
                 }
-                let mut transform = o.transform;
-                crate::animation::apply_to_object(played, local, &mut transform);
-                o.transform = crate::nla::mix_transform(o.transform, transform, t);
+                if strip.blend == crate::nla::NlaBlend::Replace {
+                    let mut transform = o.transform;
+                    crate::animation::apply_to_object(played, local, &mut transform);
+                    o.transform = crate::nla::mix_transform(o.transform, transform, t);
+                } else {
+                    // Channel by channel: only what the strip keys is met.
+                    let mut euler = crate::animation::to_euler(o.transform.rotation);
+                    let mut turned = false;
+                    for curve in &played.curves {
+                        let (Some(i), Some(value)) = (curve.path.index, curve.evaluate(local))
+                        else {
+                            continue;
+                        };
+                        let i = i as usize;
+                        if i > 2 {
+                            continue;
+                        }
+                        let b = strip.blend;
+                        match curve.path.property.as_ref() {
+                            "location" => {
+                                o.transform.translation[i] =
+                                    b.mix(o.transform.translation[i], value, t)
+                            }
+                            "scale" => o.transform.scale[i] = b.mix(o.transform.scale[i], value, t),
+                            "rotation_euler" => {
+                                euler[i] = b.mix(euler[i], value, t);
+                                turned = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if turned {
+                        o.transform.rotation = crate::animation::from_euler(euler);
+                    }
+                }
                 let mut pose = o.pose.clone();
                 crate::animation::apply_to_pose(played, local, &mut pose);
                 for bone in &pose.bones {
@@ -1826,7 +1858,9 @@ impl Document {
                 let mut keys = o.shape_keys.clone();
                 crate::animation::apply_to_shapes(played, local, &mut keys);
                 for (k, new) in o.shape_keys.iter_mut().zip(keys) {
-                    k.value += (new.value - k.value) * t as f32;
+                    if new.value != k.value || strip.blend == crate::nla::NlaBlend::Replace {
+                        k.value = strip.blend.mix(k.value as f64, new.value as f64, t) as f32;
+                    }
                 }
             }
             if let Some(action) = &action {

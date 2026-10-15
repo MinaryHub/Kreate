@@ -732,6 +732,9 @@ pub struct NlaStripRecord {
     pub extend: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mute: bool,
+    /// Replace when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<String>,
 }
 
 /// One bone constraint: its kind by name, so a reader that does not know a
@@ -1968,6 +1971,8 @@ pub fn write(
                             extend: (s.extend != kreate_scene::nla::NlaExtend::HoldForward)
                                 .then(|| s.extend.tag().to_string()),
                             mute: s.mute,
+                            blend: (s.blend != kreate_scene::nla::NlaBlend::Replace)
+                                .then(|| s.blend.tag().to_string()),
                         })
                     })
                     .collect(),
@@ -2532,6 +2537,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                         .and_then(kreate_scene::nla::NlaExtend::from_tag)
                         .unwrap_or_default(),
                     mute: r.mute,
+                    blend: r
+                        .blend
+                        .as_deref()
+                        .and_then(kreate_scene::nla::NlaBlend::from_tag)
+                        .unwrap_or_default(),
                 })
             })
             .collect();

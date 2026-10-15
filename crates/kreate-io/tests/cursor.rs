@@ -231,6 +231,7 @@ fn nla_strips_are_saved_with_their_object() {
         influence: 0.75,
         extend: NlaExtend::Nothing,
         mute: true,
+        blend: kreate_scene::nla::NlaBlend::Multiply,
     };
     doc.object_mut(id).unwrap().nla.push(strip.clone());
     let back = round_trip(&doc);
