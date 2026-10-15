@@ -43,6 +43,9 @@ pub enum Shape {
         planes: Vec<(DVec3, f64)>,
         /// Half the box round it.
         half: DVec3,
+        /// Its edges, end to end, where they are known — a box's — for the
+        /// contact two edges make crossing with no corner inside either.
+        edges: Vec<[DVec3; 2]>,
     },
     /// Triangles in the world. Passive only.
     Mesh(Box<Collider>),
@@ -100,7 +103,7 @@ impl Body {
             }
         }
         // The edges' middles: a box landing on an edge.
-        for (a, b) in [
+        let pairs = [
             (0, 1),
             (2, 3),
             (4, 5),
@@ -113,7 +116,12 @@ impl Body {
             (1, 5),
             (2, 6),
             (3, 7),
-        ] {
+        ];
+        let edges: Vec<[DVec3; 2]> = pairs
+            .iter()
+            .map(|(a, b)| [points[*a], points[*b]])
+            .collect();
+        for (a, b) in pairs {
             points.push((points[a] + points[b]) * 0.5);
         }
         let planes = vec![
@@ -131,6 +139,7 @@ impl Body {
                 points,
                 planes,
                 half: h,
+                edges,
             },
             mass,
         )
@@ -199,6 +208,7 @@ impl Body {
                 points: extremes,
                 planes,
                 half,
+                edges: Vec::new(),
             },
             mass,
         )
@@ -367,14 +377,36 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
             Shape::Hull {
                 points: pa,
                 planes: qa,
+                edges: ea,
                 ..
             },
             Shape::Hull {
                 points: pb,
                 planes: qb,
+                edges: eb,
                 ..
             },
         ) => {
+            let world_edges = |b: &Body, e: &[[DVec3; 2]]| -> Vec<[DVec3; 2]> {
+                e.iter()
+                    .map(|[p, q]| [b.pos + b.rot * *p, b.pos + b.rot * *q])
+                    .collect()
+            };
+            let (wea, web) = (world_edges(ba, ea), world_edges(bb, eb));
+            // Edge against edge: their directions' crosses are axes too, and
+            // the one that separates two crossed bars.
+            let mut cross_axes: Vec<DVec3> = Vec::new();
+            for [p, q] in &wea {
+                for [r, s] in &web {
+                    let c = (*q - *p).cross(*s - *r);
+                    if c.length_squared() > 1e-18 {
+                        let c = c.normalize();
+                        if !cross_axes.iter().any(|x| x.dot(c).abs() > 1.0 - 1e-9) {
+                            cross_axes.push(c);
+                        }
+                    }
+                }
+            }
             let wa: Vec<DVec3> = pa.iter().map(|p| ba.pos + ba.rot * *p).collect();
             let wb: Vec<DVec3> = pb.iter().map(|p| bb.pos + bb.rot * *p).collect();
             // One normal for the pair: the face direction, of either body,
@@ -389,10 +421,12 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
                 })
             };
             let mut best: Option<(DVec3, f64)> = None;
-            for n in qa
+            let mut edge_axis = false;
+            for (n, from_edges) in qa
                 .iter()
-                .map(|(n, _)| ba.rot * *n)
-                .chain(qb.iter().map(|(n, _)| bb.rot * *n))
+                .map(|(n, _)| (ba.rot * *n, false))
+                .chain(qb.iter().map(|(n, _)| (bb.rot * *n, false)))
+                .chain(cross_axes.iter().map(|n| (*n, true)))
             {
                 let (alo, ahi) = along(&wa, n);
                 let (blo, bhi) = along(&wb, n);
@@ -408,19 +442,42 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
                 };
                 if best.is_none_or(|(_, o)| overlap < o - 1e-9) {
                     best = Some((n, overlap));
+                    edge_axis = from_edges;
                 }
             }
-            let Some((n, _)) = best else { return };
+            let Some((n, overlap)) = best else { return };
             let (_, b_top) = along(&wb, n);
             let (a_bottom, _) = along(&wa, n);
-            for w in &wa {
-                if inside_hull(bb, qb, *w).is_some() {
-                    push(*w, n, (b_top - w.dot(n)).max(0.0));
+            let mut found = false;
+            if !edge_axis {
+                for w in &wa {
+                    if inside_hull(bb, qb, *w).is_some() {
+                        push(*w, n, (b_top - w.dot(n)).max(0.0));
+                        found = true;
+                    }
+                }
+                for w in &wb {
+                    if inside_hull(ba, qa, *w).is_some() {
+                        push(*w, n, (w.dot(n) - a_bottom).max(0.0));
+                        found = true;
+                    }
                 }
             }
-            for w in &wb {
-                if inside_hull(ba, qa, *w).is_some() {
-                    push(*w, n, (w.dot(n) - a_bottom).max(0.0));
+            // No corner in either, or the overlap is least across two
+            // edges: the edges' nearest points, the contact half way between.
+            if !found {
+                let mut nearest: Option<(f64, DVec3)> = None;
+                for [p, q] in &wea {
+                    for [r, s] in &web {
+                        let (x, y) = closest_on_segments(*p, *q, *r, *s);
+                        let d = x.distance(y);
+                        if d <= overlap + 1e-6 && nearest.is_none_or(|(b, _)| d < b) {
+                            nearest = Some((d, (x + y) * 0.5));
+                        }
+                    }
+                }
+                if let Some((_, at)) = nearest {
+                    push(at, n, overlap);
                 }
             }
         }
@@ -472,6 +529,36 @@ fn contacts_between(bodies: &[Body], a: usize, b: usize, out: &mut Vec<Contact>)
         }
         (Shape::Mesh(_), Shape::Mesh(_)) => {}
     }
+}
+
+/// The nearest points of segments `pq` and `rs`.
+fn closest_on_segments(p: DVec3, q: DVec3, r: DVec3, s: DVec3) -> (DVec3, DVec3) {
+    let (d1, d2, w) = (q - p, s - r, p - r);
+    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(w));
+    let (b, c) = (d1.dot(d2), d1.dot(w));
+    let denom = a * e - b * b;
+    let mut sc = if denom > 1e-18 {
+        ((b * f - c * e) / denom).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut tc = if e > 1e-18 { (b * sc + f) / e } else { 0.0 };
+    if tc < 0.0 {
+        tc = 0.0;
+        sc = if a > 1e-18 {
+            (-c / a).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    } else if tc > 1.0 {
+        tc = 1.0;
+        sc = if a > 1e-18 {
+            ((b - c) / a).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+    (p + d1 * sc, r + d2 * tc)
 }
 
 /// The bodies, and what pulls them.
@@ -621,6 +708,31 @@ fn overlaps_box(m: &Collider, centre: DVec3, reach: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Two bars crossed, each turned on its length to stand on an edge: they
+    /// meet edge to edge, no corner of either inside the other. The upper
+    /// one comes to rest on the lower's edge rather than falling through.
+    #[test]
+    fn crossed_bars_meet_edge_to_edge() {
+        let mut w = world();
+        let turn = |axis: DVec3| DQuat::from_axis_angle(axis, std::f64::consts::FRAC_PI_4);
+        let half = 0.1 * std::f64::consts::SQRT_2;
+        w.bodies.push(
+            Body::cuboid(DVec3::ZERO, turn(DVec3::X), DVec3::new(1.0, 0.1, 0.1), 0.0).fixed(),
+        );
+        // The upper bar along Y, its lower edge a little above the lower's top.
+        let mut upper = Body::cuboid(
+            DVec3::new(0.0, 0.0, 2.0 * half + 0.02),
+            turn(DVec3::Y),
+            DVec3::new(0.1, 1.0, 0.1),
+            1.0,
+        );
+        upper.angular_damping = 5.0;
+        w.bodies.push(upper);
+        run(&mut w, 0.6);
+        let z = w.bodies[1].pos.z;
+        assert!(z > 2.0 * half - 0.03, "fell through: {z}");
+    }
+
     use super::*;
     use kreate_math::DAffine3;
 
