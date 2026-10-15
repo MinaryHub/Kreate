@@ -1684,3 +1684,5 @@ view-extra-front = 앞
 view-extra-right = 오른쪽
 view-extra-projection = 원근/직교
 view-extra-hint = 가운데 버튼으로 회전, 휠로 확대 · 편집은 첫 번째 뷰포트에서
+modifier-apply-button = 적용
+modifier-remove-button = 제거

@@ -53,6 +53,10 @@ pub struct ModifierText {
     pub move_down: String,
     pub enabled: String,
     pub apply: String,
+    /// The two buttons' own words: the font has no tick or cross to tell
+    /// them apart by.
+    pub apply_label: String,
+    pub remove_label: String,
     /// One entry per addable kind, in the order the operator expects.
     pub kinds: Vec<String>,
 }
@@ -69,6 +73,8 @@ impl ModifierText {
             move_down: catalog.format("modifier-move-down", TextKind::Tooltip, &[]),
             enabled: catalog.format("modifier-enabled", TextKind::Tooltip, &[]),
             apply: catalog.format("modifier-apply", TextKind::Tooltip, &[]),
+            apply_label: ui("modifier-apply-button"),
+            remove_label: ui("modifier-remove-button"),
             kinds: kind_keys.iter().map(|k| ui(k)).collect(),
         }
     }
@@ -136,18 +142,16 @@ fn header(
         // Right-aligned, so the buttons line up down the panel however long the
         // names are.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // i18n-exempt: geometric glyphs standing in for icons
             if ui
-                .small_button("\u{2715}")
+                .small_button(&text.remove_label)
                 .on_hover_text(&text.remove)
                 .clicked()
             {
                 queue.run("object.modifier_remove", index_params(row.index));
             }
             // Apply: baked into the mesh, off the stack.
-            // i18n-exempt: geometric glyphs standing in for icons
             if ui
-                .small_button("\u{2713}")
+                .small_button(&text.apply_label)
                 .on_hover_text(&text.apply)
                 .clicked()
             {

@@ -11638,7 +11638,7 @@ fn draw_constraint_fields(
             ui.checkbox(&mut enabled, "");
             ui.strong(state.catalog.get(kinds[c.kind.index() as usize]));
             if ui
-                .small_button("\u{2715}")
+                .small_button(state.catalog.get("modifier-remove-button"))
                 .on_hover_text(state.catalog.get("op-pose-constraint-remove"))
                 .clicked()
             {
@@ -11718,7 +11718,7 @@ fn draw_ik_fields(
     ui.horizontal(|ui| {
         ui.checkbox(&mut enabled, state.catalog.get("ik-enabled"));
         if ui
-            .small_button("\u{2715}")
+            .small_button(state.catalog.get("modifier-remove-button"))
             .on_hover_text(state.catalog.get("op-pose-ik-remove"))
             .clicked()
         {

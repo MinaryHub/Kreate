@@ -1678,3 +1678,5 @@ view-extra-front = Front
 view-extra-right = Right
 view-extra-projection = Persp/Ortho
 view-extra-hint = Middle mouse to turn, wheel to zoom; edit in the first viewport
+modifier-apply-button = Apply
+modifier-remove-button = Remove
