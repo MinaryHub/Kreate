@@ -1612,3 +1612,7 @@ chat-nothing-to-export = Nothing said yet to save.
 help-logs = Open Log Folder
 op-help-logs = Open Log Folder
 op-help-logs-desc = Opens the folder of the application's logs, a file a day for the last week: what was run, what was slow, warnings and errors.
+sketch-reattach = Reattach to Face
+op-sketch-reattach = Reattach Sketch to Face
+op-sketch-reattach-desc = Puts a sketch made on a part's face back on that face after the part changed: what was drawn keeps its place, and the face's outline is projected again.
+op-sketch-reattach-outline = Project the outline again

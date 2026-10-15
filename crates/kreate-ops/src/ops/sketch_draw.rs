@@ -21,6 +21,7 @@ use crate::OpParams;
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<NewSketch>();
+    registry.register::<Reattach>();
     registry.register::<Line>();
     registry.register::<Rectangle>();
     registry.register::<Circle>();
@@ -216,9 +217,29 @@ fn face_plane(
                 at.x, at.y, at.z
             ))
         })?;
-        face_frame(&mesh, world, face, Some(at))
+        match face_frame(&mesh, world, face, Some(at)) {
+            // A curved surface: the plane that touches it at the point, as
+            // Fusion offers a tangent plane. No outline to project.
+            Err(why) if why.contains("curved") => {
+                let n = crate::ops::sketch_face::facet_normal(&mesh, world, face);
+                crate::report::say("a curved face: sketched on its tangent plane at the point");
+                Ok(crate::ops::sketch_face::tangent_frame(at, n))
+            }
+            other => other,
+        }
     };
     found.map_err(OpError::Failed)
+}
+
+/// The part a sketch on a face was made on: the object `face_plane` reads.
+fn face_host(doc: &Document, params: &NewSketchParams) -> Option<ObjectId> {
+    if params.object.trim().is_empty() {
+        doc.selection.active
+    } else {
+        doc.objects()
+            .find(|(_, o)| o.name == params.object)
+            .map(|(id, _)| id)
+    }
 }
 
 /// Starts a sketch on a plane: an object whose point 0 is its origin, held.
@@ -240,6 +261,7 @@ impl Operator for NewSketch {
         // A face's outlines, to draw against: put in fixed, as Fusion
         // projects a face's edges into a sketch made on it.
         let mut outlines: Vec<Vec<DVec2>> = Vec::new();
+        let mut host: Option<ObjectId> = None;
         let (location, rotation) = match params.plane {
             // Front: the sketch's Y up the world's Z, its X along the world's.
             1 => (
@@ -257,6 +279,7 @@ impl Operator for NewSketch {
             }
             4 => {
                 let frame = face_plane(doc.document(), params)?;
+                host = face_host(doc.document(), params);
                 outlines = frame.loops;
                 (frame.origin, frame.rotation)
             }
@@ -290,9 +313,178 @@ impl Operator for NewSketch {
         object.sketch.extend(fixed);
         object.sketch_lines = lines;
         let id = d.add_object(object);
+        // On a part's face: a child of the part, so it goes where the part
+        // goes, staying where it is now.
+        if let Some(h) = host {
+            let _ = d.set_parent(id, Some(h));
+        }
         d.selection.clear();
         d.selection.add(id);
         d.selection.active = Some(id);
+        Ok(OpResult::Finished)
+    }
+}
+
+// --- back onto its face --------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct ReattachParams {
+    /// Put in the face's outline as it is now, in place of the one projected
+    /// before.
+    pub outline: bool,
+}
+
+impl Default for ReattachParams {
+    fn default() -> Self {
+        Self { outline: true }
+    }
+}
+
+/// A sketch on a face put back on it after the part changed — its top
+/// pushed up, a pocket made deeper: the face of the part along the sketch's
+/// normal, the nearest that faces the same way. What was drawn keeps its
+/// place across the plane and its turn; the projected outline is the face's
+/// again.
+pub struct Reattach;
+
+impl Operator for Reattach {
+    type Params = ReattachParams;
+    fn id() -> &'static str {
+        "sketch.reattach"
+    }
+    fn label() -> &'static str {
+        "Reattach Sketch to Face"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some_and(|id| doc.object(id).is_some_and(|o| o.parent.is_some()))
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use crate::ops::sketch_face::{face_at, face_frame};
+        let id = need_sketch(doc.document())?;
+        let d = doc.document();
+        let host = d
+            .object(id)
+            .and_then(|o| o.parent)
+            .filter(|h| d.object(*h).is_some_and(|o| o.mesh().is_some()))
+            .ok_or_else(|| OpError::Failed("the sketch was not made on a part's face".into()))?;
+        let world = d.world_transform(id);
+        let origin = world.translation;
+        let (_, turn, _) = world.to_scale_rotation_translation();
+        let normal = (turn * DVec3::Z).normalize();
+        let old_x = (turn * DVec3::X).normalize();
+        let mut cache = kreate_scene::modifier::ModifierCache::new();
+        let mesh = cache
+            .evaluated(d, host, &kreate_scene::modifier::EvalCtx::still())
+            .ok_or_else(|| OpError::Failed("the part has no surface".into()))?;
+        let host_world = d.world_transform(host);
+        // Along the normal, both ways, the nearest face facing the same way.
+        let positions: Vec<DVec3> = mesh
+            .positions()
+            .iter()
+            .map(|p| host_world.transform_point3(p.as_dvec3()))
+            .collect();
+        let mut best: Option<(f64, u32, DVec3)> = None;
+        for f in 0..mesh.num_faces() {
+            let ring = mesh.face_verts(f);
+            let mut n = DVec3::ZERO;
+            for i in 0..ring.len() {
+                n += positions[ring[i] as usize]
+                    .cross(positions[ring[(i + 1) % ring.len()] as usize]);
+            }
+            let n = n.normalize_or_zero();
+            if n.dot(normal) < 0.999 {
+                continue;
+            }
+            let t = (positions[ring[0] as usize] - origin).dot(n) / normal.dot(n);
+            if best.is_some_and(|(b, _, _)| b <= t.abs()) {
+                continue;
+            }
+            let hit = origin + normal * t;
+            if face_at(&mesh, host_world, hit) == Some(f) {
+                best = Some((t.abs(), f, hit));
+            }
+        }
+        let Some((_, face, hit)) = best else {
+            return Err(OpError::Failed(
+                "no face of the part faces the sketch along its normal any more".into(),
+            ));
+        };
+        let frame = face_frame(&mesh, host_world, face, Some(hit)).map_err(OpError::Failed)?;
+        // The sketch's own turn kept: its X laid onto the new plane.
+        let n = frame.rotation * DVec3::Z;
+        let x = (old_x - n * old_x.dot(n)).normalize_or(frame.rotation * DVec3::X);
+        let rotation = DQuat::from_mat3(&DMat3::from_cols(x, n.cross(x), n)).normalize();
+        let new_world = kreate_math::DAffine3::from_rotation_translation(rotation, frame.origin);
+        let local = d.above(id).inverse() * new_world;
+        let (_, local_turn, local_at) = local.to_scale_rotation_translation();
+        // The old projected outline out, the face's as it is now in.
+        let mut pts = points(d, id);
+        let object = d.object(id).expect("the sketch");
+        let mut lines = object.sketch_lines.clone();
+        let mut constraints = object.sketch.clone();
+        if params.outline {
+            let fixed: Vec<bool> = (0..pts.len())
+                .map(|v| {
+                    v != 0
+                        && constraints
+                            .iter()
+                            .any(|c| matches!(c, Constraint::Fixed { a, .. } if *a as usize == v))
+                })
+                .collect();
+            let mut map = vec![u32::MAX; pts.len()];
+            let mut kept = Vec::new();
+            for (i, p) in pts.iter().enumerate() {
+                if !fixed[i] {
+                    map[i] = kept.len() as u32;
+                    kept.push(*p);
+                }
+            }
+            lines = lines
+                .iter()
+                .filter(|l| !fixed[l[0] as usize] && !fixed[l[1] as usize])
+                .map(|l| [map[l[0] as usize], map[l[1] as usize]])
+                .collect();
+            constraints = constraints
+                .iter()
+                .filter(|c| {
+                    c.points()
+                        .iter()
+                        .all(|v| !fixed.get(*v as usize).copied().unwrap_or(true))
+                })
+                .map(|c| c.remapped(&|v| map[v as usize]))
+                .collect();
+            pts = kept;
+            // The new outline, in the sketch's own axes.
+            let to_local = |p: DVec2| {
+                let w = frame.origin + frame.rotation * DVec3::new(p.x, p.y, 0.0);
+                let d = w - frame.origin;
+                DVec2::new(d.dot(x), d.dot(n.cross(x)))
+            };
+            for ring in &frame.loops {
+                let first = pts.len() as u32;
+                for (k, p) in ring.iter().enumerate() {
+                    let q = to_local(*p);
+                    let i = pts.len() as u32;
+                    pts.push(q);
+                    constraints.push(Constraint::Fixed {
+                        a: i,
+                        at: [q.x, q.y],
+                    });
+                    lines.push([i, if k + 1 == ring.len() { first } else { i + 1 }]);
+                }
+            }
+        }
+        set_points(doc, id, &pts).ok_or_else(|| OpError::Failed("no sketch".into()))?;
+        let o = doc.document_mut().object_mut(id).expect("the sketch");
+        o.transform.translation = local_at;
+        o.transform.rotation = local_turn;
+        o.sketch_lines = lines;
+        o.sketch = constraints;
+        solve(doc, id);
         Ok(OpResult::Finished)
     }
 }
@@ -1161,8 +1353,10 @@ mod tests {
         let s = doc.selection.active.unwrap();
         assert_ne!(s, part);
         let o = doc.object(s).unwrap();
-        assert!(o.transform.translation.distance(DVec3::from_array(at)) < 1e-9);
-        assert!((o.transform.rotation * DVec3::Z - DVec3::Z).length() < 1e-9);
+        let w = doc.world_transform(s);
+        assert!(w.translation.distance(DVec3::from_array(at)) < 1e-9);
+        assert!((w.transform_vector3(DVec3::Z) - DVec3::Z).length() < 1e-9);
+        assert_eq!(o.parent, Some(part), "a child of the part");
         assert_eq!(o.sketch_lines.len(), 4, "the top's square");
         assert_eq!(o.sketch.len(), 5, "the origin and four corners, held");
         // The square's corners are the top's, in the world.
@@ -1192,6 +1386,94 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("no face"), "{err}");
+    }
+
+    /// A sketch on a face goes with the part; after the part's top is
+    /// pushed up, Reattach puts it back on the top, what was drawn kept and
+    /// the outline the top's again.
+    #[test]
+    fn a_sketch_on_a_face_follows_the_part_and_is_put_back_on_it() {
+        let (r, mut h, mut doc) = setup();
+        let part = doc.add_mesh_object("Part", kreate_mesh::primitives::cube(0.04));
+        doc.selection.add(part);
+        doc.selection.active = Some(part);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[
+                ("plane", PropertyValue::Enum(4)),
+                ("at", PropertyValue::Vec3([0.0, 0.0, 0.02])),
+            ],
+        )
+        .unwrap();
+        let s = doc.selection.active.unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.circle",
+            &[
+                ("centre", PropertyValue::Vec3([0.005, 0.0, 0.0])),
+                ("radius", PropertyValue::Float(0.003)),
+            ],
+        )
+        .ok();
+        let drawn = points(&doc, s).len();
+        // The part moved: the sketch with it.
+        doc.object_mut(part).unwrap().transform.translation = DVec3::new(0.1, 0.0, 0.0);
+        assert!((doc.world_transform(s).translation - DVec3::new(0.1, 0.0, 0.02)).length() < 1e-9);
+        // Its top pushed up 10 mm: back onto it.
+        let m = doc.object(part).unwrap().mesh().unwrap();
+        for p in doc.mesh_mut(m).unwrap().positions_mut() {
+            if p.z > 0.0 {
+                p.z += 0.01;
+            }
+        }
+        run(&r, &mut h, &mut doc, "sketch.reattach", &[]).unwrap();
+        let w = doc.world_transform(s);
+        assert!(
+            (w.translation - DVec3::new(0.1, 0.0, 0.03)).length() < 1e-9,
+            "{}",
+            w.translation
+        );
+        assert_eq!(
+            points(&doc, s).len(),
+            drawn,
+            "the same points: the outline swapped, the rest kept"
+        );
+        for p in points(&doc, s).iter().skip(1) {
+            let at = w.transform_point3(DVec3::new(p.x, p.y, 0.0));
+            assert!((at.z - 0.03).abs() < 1e-9, "{at}");
+        }
+    }
+
+    /// A round wall is sketched on where it was clicked, on the plane that
+    /// touches it there.
+    #[test]
+    fn a_click_on_a_curved_face_sketches_on_its_tangent_plane() {
+        let (r, mut h, mut doc) = setup();
+        let post = doc.add_mesh_object("Post", kreate_mesh::primitives::cylinder(0.02, 0.05, 32));
+        doc.selection.add(post);
+        doc.selection.active = Some(post);
+        crate::report::take();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[
+                ("plane", PropertyValue::Enum(4)),
+                ("at", PropertyValue::Vec3([0.02, 0.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let s = doc.selection.active.unwrap();
+        let n = doc.world_transform(s).transform_vector3(DVec3::Z);
+        assert!(n.dot(DVec3::X) > 0.99, "{n}");
+        assert!(doc.object(s).unwrap().sketch_lines.is_empty());
+        assert!(crate::report::take().unwrap().contains("tangent"));
     }
 
     #[test]

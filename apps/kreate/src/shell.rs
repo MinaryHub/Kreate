@@ -11135,6 +11135,16 @@ fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene:
                 p.set("kind", V::Enum(1));
                 state.queue.run("sketch.make_solid", p);
             }
+            // A sketch made on a part's face: back onto the face after the
+            // part changed.
+            if object.parent.is_some()
+                && ui
+                    .button(state.catalog.get("sketch-reattach"))
+                    .on_hover_text(state.catalog.get("op-sketch-reattach-desc"))
+                    .clicked()
+            {
+                state.queue.run("sketch.reattach", PropertyMap::new());
+            }
         });
     });
 }

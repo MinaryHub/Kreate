@@ -59,7 +59,7 @@ material with material.set_image(slot=..., map=..., uid=...); unwrap or project 
 Light is physical: a sun is tens of thousands of lux, and a world background's strength is \
 in nits, so beside a sun a daylight sky needs strength in the thousands (3000 to 10000) or \
 it renders black; indoors with lamps only, a few nits is right.\n\
-Sketches: kreate.ops.sketch.new(plane=\"face\", object=\"Part\", at=(x, y, z)) starts a sketch on the flat face of Part at that world point, with the face's outline already in it, fixed. Shapes: object.add_lathe turns a radius, height profile into a vase, cup or bottle \
+Sketches: kreate.ops.sketch.new(plane=\"face\", object=\"Part\", at=(x, y, z)) starts a sketch on the flat face of Part at that world point, with the face's outline already in it, fixed, as a child of Part (on a curved face, the tangent plane at the point); after Part changes, kreate.ops.sketch.reattach() puts the active sketch back on its face. Shapes: object.add_lathe turns a radius, height profile into a vase, cup or bottle \
 (resolution=6 curves it through the points); \
 object.add_sweep carries a circle or a profile of your own along a path of points — a \
 handle, a spout (scale_end narrows it), a pipe, a cable, a frame (closed=true). \

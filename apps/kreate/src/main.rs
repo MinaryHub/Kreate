@@ -15526,7 +15526,8 @@ kreate.ops.object.add_primitive()",
         let o = app.doc.object(s).unwrap();
         assert_eq!(o.sketch_lines.len(), 4, "the face's square");
         // On the face: the sketch's origin is on the cube's surface.
-        let at = o.transform.translation;
+        let at = app.doc.world_transform(s).translation;
+        assert_eq!(o.parent, Some(part));
         assert!((at.abs().max_element() - 1.0).abs() < 1e-6, "{at}");
         assert!(!app.sketch_face_pick);
         // Off every part: nothing.

@@ -1618,3 +1618,7 @@ chat-nothing-to-export = 아직 저장할 대화가 없습니다.
 help-logs = 로그 폴더 열기
 op-help-logs = 로그 폴더 열기
 op-help-logs-desc = 앱 로그 폴더를 엽니다. 최근 일주일치가 하루 한 파일로 있습니다: 실행한 작업, 오래 걸린 작업, 경고와 오류.
+sketch-reattach = 면에 다시 붙이기
+op-sketch-reattach = 스케치를 면에 다시 붙이기
+op-sketch-reattach-desc = 부품의 면 위에 만든 스케치를, 부품이 바뀐 뒤 그 면에 다시 맞춥니다. 그린 것은 그대로 두고 면의 윤곽은 새로 투영합니다.
+op-sketch-reattach-outline = 윤곽 다시 투영

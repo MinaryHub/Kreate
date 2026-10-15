@@ -197,6 +197,37 @@ pub fn face_frame(
     })
 }
 
+/// One polygon's own normal, in the world.
+pub fn facet_normal(mesh: &MeshData, to_world: DAffine3, face: u32) -> DVec3 {
+    let ring = mesh.face_verts(face);
+    let w: Vec<DVec3> = ring
+        .iter()
+        .map(|v| to_world.transform_point3(mesh.positions()[*v as usize].as_dvec3()))
+        .collect();
+    let mut n = DVec3::ZERO;
+    for i in 0..w.len() {
+        n += w[i].cross(w[(i + 1) % w.len()]);
+    }
+    n.normalize_or(DVec3::Z)
+}
+
+/// The plane touching a surface at `at`, facing `normal`: its X level where
+/// the normal allows, as a work plane on a wall reads.
+pub fn tangent_frame(at: DVec3, normal: DVec3) -> FaceFrame {
+    let n = normal.normalize_or(DVec3::Z);
+    let x = DVec3::Z.cross(n);
+    let x = if x.length() < 1e-6 {
+        DVec3::X
+    } else {
+        x.normalize()
+    };
+    FaceFrame {
+        origin: at,
+        rotation: DQuat::from_mat3(&DMat3::from_cols(x, n.cross(x), n)).normalize(),
+        loops: Vec::new(),
+    }
+}
+
 /// The face of `mesh` (in the world by `to_world`) that `point` lies on: in
 /// its plane and inside its outline. The nearest such face, when the point
 /// is near an edge two share.
