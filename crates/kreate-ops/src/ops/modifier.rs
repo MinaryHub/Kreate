@@ -1077,8 +1077,20 @@ pub(crate) fn bake_last(
     }
     let _ = kreate_scene::modifier::take_boolean_gave_up();
     let mut work = d.clone();
+    // Where the new ones start. Each is taken off once baked, so the next
+    // is at the same place: worked out again from the shrinking list it
+    // pointed one earlier each time, and past the start with two or more.
+    let Some(first) = work
+        .object(id)
+        .expect("target")
+        .modifiers
+        .len()
+        .checked_sub(count)
+    else {
+        return Err(OpError::Failed("nothing to apply".into()));
+    };
     for _ in 0..count {
-        let last = work.object(id).expect("target").modifiers.len() - count;
+        let last = first;
         let baked = kreate_scene::modifier::apply_one(&work, id, last)
             .ok_or_else(|| OpError::Failed("nothing to apply".into()))?;
         if kreate_scene::modifier::take_boolean_gave_up() {
@@ -1092,8 +1104,7 @@ pub(crate) fn bake_last(
     let d = doc.document_mut();
     *d.mesh_mut(mesh).expect("checked") = work.mesh(mesh).expect("checked").clone();
     let o = d.object_mut(id).expect("target");
-    let keep = o.modifiers.len() - count;
-    o.modifiers.truncate(keep);
+    o.modifiers.truncate(first);
     for uid in remove {
         if let Some(c) = d.object_by_uid(*uid) {
             d.remove_object(c);
@@ -1498,6 +1509,44 @@ mod tests {
         assert!((v - (8.0 - 0.5)).abs() < 1e-3, "{v}");
         assert!(h.undo(&mut d));
         assert_eq!(d.objects().count(), before);
+    }
+
+    /// Two cutters applied at once, on an object that already has a
+    /// modifier of its own: both cut, its own stays. Each baked boolean was
+    /// looked for one place earlier than the last, and the second went past
+    /// the start of the stack and brought the program down.
+    #[test]
+    fn two_cutters_applied_at_once_both_cut_and_the_stack_before_them_stays() {
+        let (r, mut h, mut d, id, c) = setup();
+        d.object_mut(id)
+            .unwrap()
+            .modifiers
+            .push(ModifierInstance::new(ModifierKind::Mirror(
+                Default::default(),
+            )));
+        let cutter = |d: &mut Document, name: &str, x: f32| {
+            let mut small = kreate_mesh::primitives::cube(1.0);
+            for p in small.positions_mut() {
+                *p += kreate_math::Vec3::new(x, 0.0, 0.0);
+            }
+            d.add_mesh_object(name, small)
+        };
+        let (a, b) = (cutter(&mut d, "A", 1.0), cutter(&mut d, "B", -1.0));
+        d.selection.clear();
+        d.selection.add(a);
+        d.selection.add(b);
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        let mut p = PropertyMap::new();
+        p.set("apply", PropertyValue::Bool(true));
+        h.dispatch(&r, &mut d, &c, "object.boolean", &p).unwrap();
+        let o = d.object(id).unwrap();
+        assert_eq!(o.modifiers.len(), 1, "its own mirror is left");
+        assert!(matches!(o.modifiers[0].kind, ModifierKind::Mirror(_)));
+        let mesh = d.mesh(o.mesh().unwrap()).unwrap();
+        let v = kreate_mesh::measure::mass_properties(mesh, |q| q).volume;
+        assert!((v - (8.0 - 0.5 - 0.5)).abs() < 1e-3, "both cut: {v}");
+        assert!(d.object(a).is_none() && d.object(b).is_none());
     }
 
     #[test]
