@@ -1579,6 +1579,7 @@ struct Labels {
     menu_constrain: String,
     menu_solid: String,
     finish_sketch: String,
+    sketch_free: String,
     /// Each sketch tool's name, by the name the keys use.
     sketch_tools: Vec<(&'static str, String)>,
     new_texture: String,
@@ -1939,6 +1940,7 @@ impl Labels {
             menu_constrain: t("menu-constrain"),
             menu_solid: t("menu-solid"),
             finish_sketch: t("sketch-finish"),
+            sketch_free: t("sketch-free"),
             sketch_tools: SKETCH_TOOLS
                 .iter()
                 .map(|n| (*n, t(&format!("sketch-tool-{n}"))))
@@ -4246,7 +4248,17 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "concentric",
                         "fixed",
                     ],
-                ),
+                )
+                .into_iter()
+                .chain([
+                    MenuNode::Separator,
+                    MenuNode::Entry(MenuEntry::new(
+                        "app.sketch_free",
+                        &l.sketch_free,
+                        Run::Dispatch("app.sketch_free", PropertyMap::new()),
+                    )),
+                ])
+                .collect(),
             }),
             kreate_ops::mode::Menu::Solid => out.push(TopMenu {
                 label: l.menu_solid.clone(),
@@ -11343,7 +11355,11 @@ fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene:
                     _ => {}
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(REMOVE_GLYPH).clicked() {
+                    if ui
+                        .small_button(state.catalog.get("modifier-remove-button"))
+                        .on_hover_text(state.catalog.get("op-sketch-constraint-remove"))
+                        .clicked()
+                    {
                         let mut p = PropertyMap::new();
                         p.set("index", V::Int(i as i64));
                         state.queue.run("sketch.constraint_remove", p);

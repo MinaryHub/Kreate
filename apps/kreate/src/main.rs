@@ -11708,6 +11708,29 @@ impl App {
                     self.redraw.set(RedrawReason::UI);
                 }
             }
+            "app.sketch_free" => {
+                // The selected points, and the ends of the selected lines.
+                let mut points = self.sketching.points.clone();
+                if let Some(o) = kreate_ops::ops::sketch_draw::active_sketch(&self.doc)
+                    .and_then(|id| self.doc.object(id))
+                {
+                    for line in &self.sketching.lines {
+                        if let Some([a, b]) = o.sketch_lines.get(*line as usize) {
+                            points.extend([*a, *b]);
+                        }
+                    }
+                }
+                points.sort_unstable();
+                points.dedup();
+                if points.is_empty() {
+                    self.status(&self.ui.catalog.get("sketch-free-nothing"));
+                } else {
+                    self.run_op_with(
+                        "sketch.constraint_free",
+                        &[("points", PropertyValue::Ints(points))],
+                    );
+                }
+            }
             "app.sketch_delete" if self.op_ctx.mode == OpMode::Sketch => {
                 let (points, lines) = (self.sketching.points.clone(), self.sketching.lines.clone());
                 if !points.is_empty() || !lines.is_empty() {

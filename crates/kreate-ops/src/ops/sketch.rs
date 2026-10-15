@@ -25,6 +25,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<ConstraintAdd>();
     registry.register::<ConstraintSet>();
     registry.register::<ConstraintRemove>();
+    registry.register::<ConstraintFree>();
     registry.register::<Solve>();
     registry.register::<MakeSolid>();
 }
@@ -258,6 +259,53 @@ impl Operator for ConstraintRemove {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ConstraintFreeParams {
+    /// The points freed, by index.
+    pub points: Vec<u32>,
+}
+
+/// Takes off every constraint on the given points: what they were held by
+/// goes, and they stay where they are. A circle's or an arc's own shape is
+/// kept — it is what makes the points round one.
+pub struct ConstraintFree;
+
+impl Operator for ConstraintFree {
+    type Params = ConstraintFreeParams;
+    fn id() -> &'static str {
+        "sketch.constraint_free"
+    }
+    fn label() -> &'static str {
+        "Remove Constraints"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        sketch_object(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = sketch_object(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let list = &mut doc.document_mut().object_mut(id).expect("active").sketch;
+        let before = list.len();
+        list.retain(|c| {
+            matches!(
+                c,
+                kreate_scene::sketch::Constraint::Circle { .. }
+                    | kreate_scene::sketch::Constraint::Arc { .. }
+            ) || !c.points().iter().any(|p| params.points.contains(p))
+        });
+        Ok(if list.len() < before {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct SolveParams {}
 
 /// Puts the sketch's points back where its constraints say — after the
@@ -372,6 +420,57 @@ impl Operator for MakeSolid {
 
 #[cfg(test)]
 mod tests {
+
+    /// Freeing points takes off what holds them and nothing else: a
+    /// constraint on other points stays, and so does a circle's shape.
+    #[test]
+    fn freeing_points_removes_only_their_constraints() {
+        use kreate_scene::sketch::Constraint as C;
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let mut history = History::new();
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::MeshData::from_faces(
+            vec![kreate_math::Vec3::ZERO; 8],
+            &[],
+        ));
+        let mut o = Object::new("Sketch", ObjectData::Mesh(mesh));
+        o.sketch = vec![
+            C::Horizontal { a: 0, b: 1 },
+            C::Distance {
+                a: 1,
+                b: 2,
+                value: 1.0,
+            },
+            C::Vertical { a: 3, b: 4 },
+            C::Circle {
+                centre: 5,
+                ring: vec![1, 6, 7],
+            },
+        ];
+        let id = doc.add_object(o);
+        doc.selection.add(id);
+        run(
+            &registry,
+            &mut history,
+            &mut doc,
+            &Context::default(),
+            "sketch.constraint_free",
+            &[("points", PropertyValue::Ints(vec![1]))],
+        )
+        .unwrap();
+        let left: Vec<&str> = doc
+            .object(id)
+            .unwrap()
+            .sketch
+            .iter()
+            .map(|c| c.tag())
+            .collect();
+        assert_eq!(left, vec!["vertical", "circle"]);
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.object(id).unwrap().sketch.len(), 4);
+    }
+
     use super::*;
     use crate::history::History;
     use crate::operator::Mode;
