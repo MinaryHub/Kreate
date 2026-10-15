@@ -7116,6 +7116,11 @@ impl App {
         if !self.file.is_modified(&self.doc) {
             return true;
         }
+        // A scene with no objects in it has nothing to lose: closing it, or
+        // opening another over it, goes ahead without asking.
+        if self.doc.object_count() == 0 {
+            return true;
+        }
         if self.asking {
             return false;
         }
@@ -14687,6 +14692,22 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty scene, changed or not, is left without the save question:
+    /// there is nothing in it to keep.
+    #[test]
+    fn an_empty_scene_is_left_without_asking() {
+        let mut app = app();
+        let cube = app
+            .doc
+            .add_mesh_object("Cube", kreate_mesh::primitives::cube(1.0));
+        app.doc.remove_object(cube);
+        assert!(app.file.is_modified(&app.doc));
+        assert_eq!(app.doc.object_count(), 0);
+        // Would block on a dialog if it asked.
+        assert!(app.confirm_discarding_changes("unsaved-what-quit"));
+        assert!(app.confirm_discarding_changes("unsaved-what-open"));
     }
 
     /// While the save question is on screen, a second request to leave —
