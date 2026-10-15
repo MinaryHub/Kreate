@@ -3026,7 +3026,7 @@ impl Viewport {
                 (camera.distance * 2.0).max(1e-3) as f32,
             );
         }
-        if self.shading.lit() && self.show_bloom {
+        if self.blooming() {
             // Over white once exposed: the picture's own exposure, so what
             // glows is what the display cannot show.
             self.bloom.prepare(
@@ -3621,7 +3621,16 @@ impl Viewport {
             view_proj: self.shading_view_proj,
             flags: [
                 if self.contact_applies() { 1.0 } else { 0.0 },
-                0.0,
+                // The preview shows a glow as its colour, no brighter than a
+                // white surface under the preview's own light: its nits are
+                // the scene's, and against a light that is not the scene's
+                // they wash out everything near them.
+                if self.shading == ShadingMode::Material {
+                    let w = self.world;
+                    ((0.2126 * w[0] + 0.7152 * w[1] + 0.0722 * w[2]) * 1.5).max(1e-3)
+                } else {
+                    0.0
+                },
                 0.0,
                 0.0,
             ],
@@ -4729,6 +4738,12 @@ impl Viewport {
 
     /// Starts the mean again: something the signature cannot see changed —
     /// a mesh rewritten in place, a light, a material.
+    /// Bloom is the rendered view's: a lens's flare is part of the picture,
+    /// not of a preview made to tell parts apart.
+    fn blooming(&self) -> bool {
+        self.show_bloom && self.shading == ShadingMode::Rendered
+    }
+
     pub fn restart_accumulation(&mut self) {
         self.accum_samples = 0;
         self.pathtracer.forget_history();
@@ -5229,7 +5244,7 @@ impl Viewport {
                         self.render_size,
                     );
                 }
-                if self.show_bloom {
+                if self.blooming() {
                     self.bloom.apply(encoder, self.hdr.view());
                 }
             }
@@ -5250,7 +5265,7 @@ impl Viewport {
                 self.ao
                     .apply_linear(encoder, self.hdr.view(), self.render_size);
             }
-            if self.show_bloom {
+            if self.blooming() {
                 self.bloom.apply(encoder, self.hdr.view());
             }
             match self.frame_sample.filter(|_| self.accum_applies) {

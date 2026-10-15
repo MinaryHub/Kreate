@@ -52,8 +52,19 @@ struct Shading {
     /// The camera, eye-relative and nudged as this frame's sample is: where a
     /// point lands in the depth contact shadows march through.
     view_proj: mat4x4<f32>,
-    /// x: nonzero when contact shadows are on.
+    /// x: nonzero when contact shadows are on. y: the brightest a glow is
+    /// shown, zero for as bright as it is (see `shown_glow`).
     flags: vec4<f32>,
+}
+
+/// A glow as it is shown: as it is, or in the preview held to `flags.y`.
+fn shown_glow(e: vec3<f32>) -> vec3<f32> {
+    let cap = shading.flags.y;
+    let l = dot(e, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if (cap <= 0.0 || l <= cap) {
+        return e;
+    }
+    return e * (cap / l);
 }
 
 @group(2) @binding(2) var<uniform> shading: Shading;

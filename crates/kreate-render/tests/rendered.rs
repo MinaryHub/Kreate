@@ -115,6 +115,7 @@ fn shoot_graph(
     };
 
     graph_material(gpu, &mut viewport, graph);
+    viewport.set_world(SHOOT_WORLD.with(|w| w.get()));
     let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
     viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), lights);
     viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
@@ -2538,6 +2539,57 @@ fn a_glowing_surface_is_seen_in_the_dark() {
     // Its colour, not a grey: red over green over blue.
     let warm = shot.iter().filter(|p| p[0] > p[1] && p[1] > p[2]).count();
     assert!(warm > 400, "only {warm} pixels have the glow's colour");
+}
+
+thread_local! {
+    /// The flat world `shoot_graph` lights its cube with.
+    static SHOOT_WORLD: std::cell::Cell<[f32; 3]> = const { std::cell::Cell::new([0.0; 3]) };
+}
+
+/// The preview shows a glow as its colour, no brighter than a white surface
+/// under the preview's light: the scene's nits against a light that is not
+/// the scene's washed the part and everything near it to white. The rendered
+/// view keeps the glow as bright as it is.
+#[test]
+fn the_preview_shows_a_glow_as_its_colour() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut graph = kreate_scene::shader::ShaderGraph::standard(
+        "glow",
+        kreate_math::SceneRgb::new(0.1, 0.1, 0.1),
+        0.0,
+        0.5,
+    );
+    if let kreate_scene::shader::NodeKind::Surface { emission, .. } = &mut graph.nodes[0].kind {
+        *emission = kreate_math::SceneRgb::new(500.0, 250.0, 50.0);
+    }
+    let display = Display {
+        view: kreate_math::ViewTransform::AgX,
+        exposure: 0.0,
+    };
+    SHOOT_WORLD.with(|w| w.set([0.42, 0.42, 0.44]));
+    let preview = shoot_graph(&gpu, ShadingMode::Material, &graph, &[], display);
+    let rendered = shoot_graph(&gpu, ShadingMode::Rendered, &graph, &[], display);
+    SHOOT_WORLD.with(|w| w.set([0.0; 3]));
+    let white = |shot: &[[f32; 4]]| {
+        shot.iter()
+            .filter(|p| p[0] > 0.97 && p[1] > 0.97 && p[2] > 0.97)
+            .count()
+    };
+    let warm = |shot: &[[f32; 4]]| {
+        shot.iter()
+            .filter(|p| p[0] > p[1] + 0.05 && p[1] > p[2] + 0.05)
+            .count()
+    };
+    assert!(
+        white(&rendered) > 400,
+        "the rendered glow is as bright as it is"
+    );
+    assert_eq!(white(&preview), 0, "nothing washed to white in the preview");
+    assert!(
+        warm(&preview) > 400,
+        "the preview keeps its colour: {}",
+        warm(&preview)
+    );
 }
 
 /// The path tracer adds a glowing surface's light where a path meets it.

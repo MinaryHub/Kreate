@@ -193,7 +193,7 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // is decides which lights this fragment sees.
     // What the surface emits, added to what it reflects: a glow is light the
     // surface makes, so no light, shadow or occlusion has a say in it.
-    var lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy)) + sample.emission;
+    var lit = shade_point(surface, in.world, normal, view, vec2<u32>(in.clip.xy)) + shown_glow(sample.emission);
     // An occlusion map shades only the light from the surroundings — what
     // the environment pours in from every side and a crease cannot see —
     // not a lamp's, which shadows already decide.
@@ -257,7 +257,7 @@ fn through_glass(
     // for the dielectric the clear surface is.
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     let f = DIELECTRIC_F0 + (1.0 - DIELECTRIC_F0) * pow(1.0 - nov, 5.0);
-    return reflected + (1.0 - f) * surface.base_color * seen + sample.emission;
+    return reflected + (1.0 - f) * surface.base_color * seen + shown_glow(sample.emission);
 }
 
 // Tilts `n` by a tangent-space normal, with the tangent frame taken from the
