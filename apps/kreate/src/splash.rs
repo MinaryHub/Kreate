@@ -43,7 +43,7 @@ fn solids() -> [Solid; 3] {
             }
         }
     }
-    let g = 1.618_034_f32;
+    let g = (1.0 + 5.0f32.sqrt()) * 0.5;
     let n = (1.0 + g * g).sqrt();
     let mut ico_v = Vec::new();
     for (x, y) in [(1.0, g), (-1.0, g), (1.0, -g), (-1.0, -g)] {
