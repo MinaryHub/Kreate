@@ -5982,7 +5982,7 @@ impl App {
                 }
                 Command::SetShading(mode) => {
                     if let Some(gfx) = self.gfx.as_mut() {
-                        gfx.viewport.shading = mode;
+                        gfx.viewport.shading = offered(mode);
                         self.redraw.set(RedrawReason::SETTINGS);
                     }
                 }
@@ -12071,26 +12071,15 @@ impl App {
             }
             "view.cycle_shading" => {
                 if let Some(gfx) = self.gfx.as_mut() {
-                    // Blender's four, in its order: wireframe, solid, material
-                    // preview, rendered. Rendered last because it is the one
-                    // that needs a scene with lights in it. Flat is a way of
-                    // lighting the solid view, and goes on to the preview.
+                    // The three, in order: wireframe, preview, rendered.
+                    // Rendered last because it is the one that needs a
+                    // scene with lights in it.
                     gfx.viewport.shading = match gfx.viewport.shading {
-                        ShadingMode::Wireframe => ShadingMode::Studio,
-                        ShadingMode::Studio | ShadingMode::Flat => ShadingMode::Material,
-                        ShadingMode::Material => ShadingMode::Rendered,
+                        ShadingMode::Wireframe => ShadingMode::Material,
+                        ShadingMode::Studio | ShadingMode::Flat | ShadingMode::Material => {
+                            ShadingMode::Rendered
+                        }
                         ShadingMode::Rendered => ShadingMode::Wireframe,
-                    };
-                    self.redraw.set(RedrawReason::SETTINGS);
-                }
-            }
-            "view.toggle_flat" => {
-                // The solid view's lighting, studio or none; from another
-                // view, into the solid view lit flat.
-                if let Some(gfx) = self.gfx.as_mut() {
-                    gfx.viewport.shading = match gfx.viewport.shading {
-                        ShadingMode::Flat => ShadingMode::Studio,
-                        _ => ShadingMode::Flat,
                     };
                     self.redraw.set(RedrawReason::SETTINGS);
                 }
@@ -12566,6 +12555,8 @@ impl ApplicationHandler for App {
             // A moving view smoothed as a still one is: see
             // `Viewport::temporal_aa`.
             viewport.temporal_aa = true;
+            // The preview: the materials under a light of their own.
+            viewport.shading = ShadingMode::Material;
             // Pay for shader compilation now, while the window is still coming
             // up, rather than on the frame where the user first presses Tab or
             // moves the mouse over the scene. Creating a pipeline and compiling
@@ -13964,6 +13955,15 @@ fn segment_distance(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
         0.0
     };
     (a + ab * t).distance(p)
+}
+
+/// The viewing modes offered: wireframe, the preview, rendered. The solid
+/// view's studio and flat lights are the preview now.
+fn offered(mode: ShadingMode) -> ShadingMode {
+    match mode {
+        ShadingMode::Studio | ShadingMode::Flat => ShadingMode::Material,
+        m => m,
+    }
 }
 
 #[cfg(test)]

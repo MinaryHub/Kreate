@@ -1217,7 +1217,7 @@ pub struct Overlays {
 impl Default for ViewStatus {
     fn default() -> Self {
         Self {
-            shading: kreate_render::ShadingMode::Studio,
+            shading: kreate_render::ShadingMode::Material,
             exposure: 0.0,
             metered: false,
             orthographic: false,
@@ -1625,7 +1625,6 @@ struct Labels {
     shading_wireframe: String,
     shading_rendered: String,
     shading_material: String,
-    overlay_flat: String,
     shading_hint: String,
     exposure: String,
     exposure_metered: String,
@@ -2002,7 +2001,6 @@ impl Labels {
             shading_wireframe: t("shading-wireframe"),
             shading_rendered: t("shading-rendered"),
             shading_material: t("shading-material"),
-            overlay_flat: t("overlay-flat"),
             shading_hint: t("shading-hint"),
             exposure: t("exposure"),
             exposure_metered: t("exposure-metered"),
@@ -2477,8 +2475,8 @@ fn pie_entries(
         )
     };
     Some(match name {
-        // Blender's Z: wireframe left, rendered right, solid below, the
-        // material preview above.
+        // Three ways to look: wireframe left, rendered right, the preview
+        // below.
         "shading" => (
             l.pie_shading.clone(),
             vec![
@@ -2491,11 +2489,6 @@ fn pie_entries(
                     "view.shading_rendered",
                     &l.shading_rendered,
                     ShadingMode::Rendered,
-                ),
-                shade(
-                    "view.shading_studio",
-                    &l.shading_studio,
-                    ShadingMode::Studio,
                 ),
                 shade(
                     "view.shading_material",
@@ -5002,18 +4995,14 @@ fn draw_shading_pills(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     let current = state.view_status.shading;
     let spacing = ui.spacing().item_spacing.x;
     ui.spacing_mut().item_spacing.x = 2.0;
-    // Right-to-left layout, so the list is reversed to read as Blender's
-    // does from left to right: wireframe, solid, material preview, rendered.
-    // Flat lighting is the solid view's, so the solid button is lit for it.
+    // Right-to-left layout, so the list is reversed to read from left to
+    // right: wireframe, preview, rendered.
     for mode in [
         kreate_render::ShadingMode::Rendered,
         kreate_render::ShadingMode::Material,
-        kreate_render::ShadingMode::Studio,
         kreate_render::ShadingMode::Wireframe,
     ] {
-        let on = mode == current
-            || (mode == kreate_render::ShadingMode::Studio
-                && current == kreate_render::ShadingMode::Flat);
+        let on = mode == current;
         // i18n-exempt: a translated name and a translated hint
         let tip = format!("{}\n{}", shading_label(mode, l), l.shading_hint);
         if kreate_ui::view_icons::shading_button(ui, mode, on)
@@ -5052,7 +5041,6 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 &l.overlay_dimensions,
                 on.dimensions,
             ),
-            ("view.toggle_flat", &l.overlay_flat, on.flat),
             ("view.toggle_ao", &l.overlay_ao, on.ambient_occlusion),
             ("view.toggle_xray", &l.overlay_xray, on.xray),
             ("view.toggle_outline", &l.overlay_outline, on.outline),
