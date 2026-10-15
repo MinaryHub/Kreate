@@ -334,6 +334,16 @@ pub struct ShellState {
     /// Each dope sheet's zoom and drag, per area.
     sheet_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::dope_sheet::SheetState>,
     nla_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::nla_editor::NlaState>,
+    /// The 3D viewports after the first, and where each was drawn this
+    /// frame, in points. The application renders each from its own camera.
+    pub extra_views: Vec<(kreate_ui::AreaId, egui::Rect)>,
+    /// Each extra viewport's picture, from the application.
+    pub extra_images: std::collections::BTreeMap<kreate_ui::AreaId, ViewportImage>,
+    /// Asked of an extra viewport's buttons: look from the top (0), the
+    /// front (1), the right (2), or switch perspective and orthographic (3).
+    pub extra_view_commands: Vec<(kreate_ui::AreaId, u32)>,
+    /// The first 3D viewport: the one that is edited in.
+    primary_viewport: Option<kreate_ui::AreaId>,
     /// Each graph editor's view and drag, per area.
     graph_views: std::collections::BTreeMap<kreate_ui::AreaId, kreate_ui::graph_editor::GraphState>,
     /// The weight-paint brush: what it paints towards, how wide, how hard.
@@ -749,6 +759,10 @@ impl Default for ShellState {
             timeline_views: std::collections::BTreeMap::new(),
             sheet_views: std::collections::BTreeMap::new(),
             nla_views: std::collections::BTreeMap::new(),
+            extra_views: Vec::new(),
+            extra_images: std::collections::BTreeMap::new(),
+            extra_view_commands: Vec::new(),
+            primary_viewport: None,
             graph_views: std::collections::BTreeMap::new(),
             driver_views: std::collections::BTreeMap::new(),
             paint: PaintSettings::default(),
@@ -2384,22 +2398,28 @@ pub fn draw(
             let layout = state.screen().layout(screen);
             drag_handles(ui, state, &layout);
 
-            // Only the first viewport area gets the rendered image. Several
-            // viewports means several cameras and several render targets, which
-            // is a real feature and a later one; until then the honest thing is
-            // for the extra ones to say nothing rather than to show a stale
-            // copy of the first one's picture.
+            // The first viewport area is the one edited in; each one after it
+            // shows the scene from a camera of its own, rendered by the
+            // application into a picture of its own.
             let first_viewport = layout
                 .areas
                 .iter()
                 .find(|a| a.editor == kreate_ui::EditorId::VIEWPORT)
                 .map(|a| a.id);
+            state.primary_viewport = first_viewport;
+            state.extra_views.clear();
 
             let mut texture = viewport_texture;
             for area in &layout.areas {
-                let image = (Some(area.id) == first_viewport)
-                    .then(|| texture.take())
-                    .flatten();
+                let extra =
+                    area.editor == kreate_ui::EditorId::VIEWPORT && Some(area.id) != first_viewport;
+                let image = if extra {
+                    state.extra_images.get(&area.id).copied()
+                } else {
+                    (Some(area.id) == first_viewport)
+                        .then(|| texture.take())
+                        .flatten()
+                };
                 let rect = draw_area(
                     ui,
                     state,
@@ -2419,6 +2439,8 @@ pub fn draw(
                 );
                 if Some(area.id) == first_viewport {
                     viewport_rect = rect;
+                } else if extra {
+                    state.extra_views.push((area.id, rect));
                 }
             }
         });
@@ -2904,6 +2926,9 @@ fn draw_area(
         |ui| {
             ui.set_clip_rect(inner);
             match area.editor.as_str() {
+                "viewport" if state.primary_viewport.is_some_and(|p| p != area.id) => {
+                    draw_extra_view(ui, state, area.id, inner, image);
+                }
                 "viewport" => {
                     let sidebar = state.sidebar_open(area.id);
                     draw_viewport(ui, state, doc, mode, l, inner, image, sidebar);
@@ -5064,6 +5089,49 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 state.queue.dispatch(op, PropertyMap::new());
             }
         }
+    });
+}
+
+/// A viewport after the first: the scene from its own camera. Navigated
+/// with the middle mouse button and the wheel, and turned to the top, the
+/// front or the right by its buttons; selecting and editing happen in the
+/// first viewport.
+fn draw_extra_view(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    area: kreate_ui::AreaId,
+    rect: egui::Rect,
+    image: Option<ViewportImage>,
+) {
+    if let Some(image) = image {
+        ui.painter().image(
+            image.texture,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(image.uv.0, image.uv.1)),
+            egui::Color32::WHITE,
+        );
+    }
+    let row = egui::Rect::from_min_size(
+        rect.min + egui::vec2(6.0, 6.0),
+        egui::vec2((rect.width() - 12.0).max(0.0), 22.0),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(row), |ui| {
+        ui.horizontal(|ui| {
+            for (i, key) in [
+                "view-extra-top",
+                "view-extra-front",
+                "view-extra-right",
+                "view-extra-projection",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if ui.small_button(state.catalog.get(key)).clicked() {
+                    state.extra_view_commands.push((area, i as u32));
+                }
+            }
+            ui.weak(state.catalog.get("view-extra-hint"));
+        });
     });
 }
 

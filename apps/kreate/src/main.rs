@@ -573,6 +573,24 @@ struct Gfx {
 
     egui_renderer: egui_wgpu::Renderer,
     target: ViewportTarget,
+    /// The 3D viewports after the first, by their area: each a renderer, a
+    /// picture and a camera of its own.
+    extra: std::collections::BTreeMap<kreate_ui::AreaId, ExtraView>,
+}
+
+/// A viewport after the first. It draws the same scene through its own
+/// camera; selecting and editing happen in the first one.
+struct ExtraView {
+    viewport: Viewport,
+    target: ViewportTarget,
+    camera: kreate_render::Camera,
+    /// Where it is on the window, in physical pixels: x, y, width, height.
+    rect_px: (f32, f32, f32, f32),
+    /// The picture's size wanted, in pixels.
+    size: (u32, u32),
+    /// Made since the scene's sky, materials and traced scene were last
+    /// handed over: they are handed to it whole on the next lit frame.
+    fresh: bool,
 }
 
 impl Gfx {
@@ -844,6 +862,8 @@ struct App {
     /// How far each button has dragged since it went down, in pixels: an
     /// Alt+click that did not move is a loop select, not an orbit.
     drag_travel: [f64; 3],
+    /// The extra viewport a navigation in progress turns, if it is one.
+    nav_view: Option<kreate_ui::AreaId>,
     /// Where the camera is going. `camera` follows it.
     motion: kreate_render::CameraMotion,
     /// When the last frame was, for frame-rate-independent easing.
@@ -1125,6 +1145,7 @@ impl App {
             buttons: [false; 3],
             drag_ops: [const { None }; 3],
             drag_travel: [0.0; 3],
+            nav_view: None,
             viewport_px: None,
             ui: ShellState::with_catalog(shell::load_catalog(locale)),
             wanted_viewport: (0, 0),
@@ -7958,6 +7979,94 @@ impl App {
     /// question about the layout, not about the renderer, and tying the two
     /// together makes it untestable and answers `false` before the first frame
     /// for a reason that has nothing to do with the layout.
+    /// The extra viewport under the pointer, if there is one.
+    fn extra_view_at_cursor(&self) -> Option<kreate_ui::AreaId> {
+        let (x, y) = self.input.cursor?;
+        let (x, y) = (x as f32, y as f32);
+        self.gfx.as_ref()?.extra.iter().find_map(|(id, v)| {
+            let (rx, ry, w, h) = v.rect_px;
+            (x >= rx && x <= rx + w && y >= ry && y <= ry + h).then_some(*id)
+        })
+    }
+
+    /// The extra viewports as the interface laid them out this frame: made
+    /// when an area becomes one, sized to it, forgotten when it goes; and
+    /// what their buttons asked.
+    fn settle_extra_views(&mut self, pixels_per_point: f32, scale: f32) {
+        let rects = self.ui.extra_views.clone();
+        let commands = std::mem::take(&mut self.ui.extra_view_commands);
+        let main_camera = self.camera;
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        gfx.extra.retain(|id, _| rects.iter().any(|(r, _)| r == id));
+        let mut changed = false;
+        for (id, rect) in rects {
+            let size = (
+                ((rect.width() * pixels_per_point * scale) as u32).max(1),
+                ((rect.height() * pixels_per_point * scale) as u32).max(1),
+            );
+            let view = gfx.extra.entry(id).or_insert_with(|| {
+                changed = true;
+                let target =
+                    ViewportTarget::new(&gfx.gpu.device, &mut gfx.egui_renderer, size.0, size.1);
+                let viewport = Viewport::new(
+                    &gfx.gpu.device,
+                    ViewportTarget::FORMAT,
+                    target.size.0,
+                    target.size.1,
+                );
+                ExtraView {
+                    viewport,
+                    target,
+                    // The first viewport's view, to start from.
+                    camera: main_camera,
+                    rect_px: (0.0, 0.0, 0.0, 0.0),
+                    size,
+                    fresh: true,
+                }
+            });
+            view.rect_px = (
+                rect.min.x * pixels_per_point,
+                rect.min.y * pixels_per_point,
+                rect.width() * pixels_per_point,
+                rect.height() * pixels_per_point,
+            );
+            if view.size != size {
+                view.size = size;
+                changed = true;
+            }
+            if view
+                .target
+                .resize(&gfx.gpu.device, &mut gfx.egui_renderer, size.0, size.1)
+            {
+                view.viewport
+                    .resize(&gfx.gpu.device, view.target.size.0, view.target.size.1);
+                changed = true;
+            }
+        }
+        for (id, command) in commands {
+            let Some(view) = gfx.extra.get_mut(&id) else {
+                continue;
+            };
+            use kreate_render::camera::{Projection, ViewAxis};
+            view.camera = match command {
+                0 => view.camera.looking_along(ViewAxis::PosZ),
+                1 => view.camera.looking_along(ViewAxis::NegY),
+                2 => view.camera.looking_along(ViewAxis::PosX),
+                _ => kreate_render::Camera {
+                    projection: match view.camera.projection {
+                        Projection::Perspective => Projection::Orthographic,
+                        Projection::Orthographic => Projection::Perspective,
+                    },
+                    ..view.camera
+                },
+            };
+            changed = true;
+        }
+        if changed {
+            self.redraw.set(RedrawReason::CAMERA_MOVED);
+        }
+    }
+
     fn cursor_in_viewport(&self) -> bool {
         let (Some((x, y)), Some((rx, ry, w, h))) = (self.input.cursor, self.viewport_px) else {
             return false;
@@ -9748,6 +9857,30 @@ impl App {
         // Taking hold of the view also cancels any framing move in flight — a
         // camera that keeps drifting after the user grabs it is one fighting
         // them.
+        if let Some(id) = self.nav_view {
+            let input = &mut self.input;
+            if let Some(view) = self.gfx.as_mut().and_then(|g| g.extra.get_mut(&id)) {
+                let h = (view.rect_px.3 as f64).max(1.0);
+                let (dx, dy) = std::mem::take(&mut input.orbit_delta);
+                if (dx, dy) != (0.0, 0.0) {
+                    let scale = std::f64::consts::TAU / (2.0 * h);
+                    view.camera.orbit(-dx * scale, -dy * scale);
+                }
+                let (dx, dy) = std::mem::take(&mut input.pan_delta);
+                if (dx, dy) != (0.0, 0.0) {
+                    view.camera.pan(dx / h, dy / h);
+                }
+                let scroll = std::mem::take(&mut input.scroll);
+                if scroll != 0.0 {
+                    view.camera.dolly(scroll);
+                }
+                self.redraw.set(RedrawReason::CAMERA_MOVED);
+            }
+            if self.drag_ops.iter().all(Option::is_none) {
+                self.nav_view = None;
+            }
+            return;
+        }
         if self.input.has_pending() {
             self.motion.interrupt(&self.camera);
         }
@@ -9957,6 +10090,24 @@ impl App {
             texture: g.target.id,
             uv: g.viewport.uv_extent(),
         });
+        self.ui.extra_images = self
+            .gfx
+            .as_ref()
+            .map(|g| {
+                g.extra
+                    .iter()
+                    .map(|(id, v)| {
+                        (
+                            *id,
+                            shell::ViewportImage {
+                                texture: v.target.id,
+                                uv: v.viewport.uv_extent(),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // What the interface needs of the camera this frame: the gizmo's
         // rotation, and enough to project a lamp's position onto the picture.
         // From last frame's viewport rectangle, which is the one the glyphs
@@ -10084,6 +10235,7 @@ impl App {
             self.wanted_viewport = wanted;
             self.redraw.set(RedrawReason::RESIZE);
         }
+        self.settle_extra_views(pixels_per_point, scale);
         // Kept in physical pixels because that is what the cursor arrives in.
         // Converting the cursor to logical units instead would go wrong on a
         // fractional scale factor, and the error is a ray that misses by a few
@@ -10456,39 +10608,61 @@ impl App {
         let preview = (gfx.viewport.shading == kreate_render::ShadingMode::Material)
             .then(|| scenelights::material_preview(self.camera.rotation));
         if gfx.viewport.shading.lit() {
+            // The extra viewports are lit as this one is: each setting below
+            // goes to them too, and one made since the last lit frame is
+            // handed the sky, the materials and the traced scene whole.
+            let fresh = gfx.extra.values().any(|v| v.fresh);
             // The material preview's own light: an even pale sky and one
             // soft key from over the viewer's left shoulder, turning with the
             // view as Blender's preview light does — the scene's lamps and
             // sky are the rendered view's.
             if let Some(preview) = &preview {
                 gfx.viewport.set_world(preview.world);
-                if self.environment.take().is_some() {
+                let had = self.environment.take().is_some();
+                if had {
                     gfx.viewport
                         .clear_environment(&gfx.gpu.device, &gfx.gpu.queue);
                 }
+                for v in gfx.extra.values_mut() {
+                    v.viewport.set_world(preview.world);
+                    if had || v.fresh {
+                        v.viewport
+                            .clear_environment(&gfx.gpu.device, &gfx.gpu.queue);
+                    }
+                }
             } else {
-                gfx.viewport
-                    .set_world(scenelights::world_radiance(&self.doc));
+                let world = scenelights::world_radiance(&self.doc);
+                gfx.viewport.set_world(world);
+                for v in gfx.extra.values_mut() {
+                    v.viewport.set_world(world);
+                }
             }
             // The environment, rebuilt only when it is a different one. Six
             // faces and their mips is not a per-frame cost, and the key is what
             // tells "the same sky again" from "a sky that finished loading".
             let want = kreate::environment::key_of(&self.doc);
-            if preview.is_none() && want != self.environment {
+            if preview.is_none() && (want != self.environment || fresh) {
+                let (device, queue) = (&gfx.gpu.device, &gfx.gpu.queue);
+                let viewports = std::iter::once(&mut gfx.viewport)
+                    .chain(gfx.extra.values_mut().map(|v| &mut v.viewport));
                 match kreate::environment::background_image(&self.doc) {
                     Some(image) => {
                         let pixels = kreate::environment::pixels_of(image);
-                        gfx.viewport.set_environment(
-                            &gfx.gpu.device,
-                            &gfx.gpu.queue,
-                            image.width(),
-                            image.height(),
-                            &pixels,
-                        );
+                        for v in viewports {
+                            v.set_environment(
+                                device,
+                                queue,
+                                image.width(),
+                                image.height(),
+                                &pixels,
+                            );
+                        }
                     }
-                    None => gfx
-                        .viewport
-                        .clear_environment(&gfx.gpu.device, &gfx.gpu.queue),
+                    None => {
+                        for v in viewports {
+                            v.clear_environment(device, queue);
+                        }
+                    }
                 }
                 self.environment = want;
             }
@@ -10503,6 +10677,10 @@ impl App {
                 .unwrap_or((0.0, 1.0));
             gfx.viewport
                 .set_world_shape(&gfx.gpu.queue, rotation, strength);
+            for v in gfx.extra.values_mut() {
+                v.viewport
+                    .set_world_shape(&gfx.gpu.queue, rotation, strength);
+            }
 
             // The materials. Compiled every frame because it is string
             // building; uploaded only when the *code* changed, because that is
@@ -10516,11 +10694,14 @@ impl App {
                 .map(|c| c.transmission())
                 .collect();
             gfx.viewport.set_transmissive(&transmissive);
+            for v in gfx.extra.values_mut() {
+                v.viewport.set_transmissive(&transmissive);
+            }
             let same = self
                 .materials
                 .as_ref()
                 .is_some_and(|held| held.same_code_as(&materials));
-            if same {
+            if same && !fresh {
                 for (i, compiled) in materials.compiled.iter().enumerate() {
                     gfx.viewport.set_material_constants(
                         &gfx.gpu.queue,
@@ -10528,6 +10709,14 @@ impl App {
                         &compiled.constants,
                         &compiled.image_slots,
                     );
+                    for v in gfx.extra.values_mut() {
+                        v.viewport.set_material_constants(
+                            &gfx.gpu.queue,
+                            i,
+                            &compiled.constants,
+                            &compiled.image_slots,
+                        );
+                    }
                 }
             } else {
                 // The pixels first and the borrows after, because a material
@@ -10556,6 +10745,10 @@ impl App {
                     .collect();
                 gfx.viewport
                     .set_materials(&gfx.gpu.device, &gfx.gpu.queue, &sources);
+                for v in gfx.extra.values_mut() {
+                    v.viewport
+                        .set_materials(&gfx.gpu.device, &gfx.gpu.queue, &sources);
+                }
             }
             self.materials = Some(materials);
             // Through a camera with an aperture, the path tracer is that lens.
@@ -10624,7 +10817,7 @@ impl App {
                         image.pixels.iter().step_by(97).for_each(|b| b.hash(&mut h));
                     }
                     let key = h.finish();
-                    if self.path_trace_key != Some(key) {
+                    if self.path_trace_key != Some(key) || fresh {
                         self.path_trace_key = Some(key);
                         let mut extracted: Vec<_> = traced()
                             .map(|(id, mesh)| {
@@ -10705,6 +10898,16 @@ impl App {
                             &pt_images,
                             &traced_materials.materials(),
                         );
+                        for v in gfx.extra.values_mut() {
+                            v.viewport.set_path_trace_scene(
+                                &gfx.gpu.device,
+                                &gfx.gpu.queue,
+                                &meshes,
+                                &surfaces,
+                                &pt_images,
+                                &traced_materials.materials(),
+                            );
+                        }
                     }
                 }
             }
@@ -10716,6 +10919,10 @@ impl App {
             };
             gfx.viewport
                 .set_lights(&gfx.gpu.device, &gfx.gpu.queue, self.camera.eye(), &lights);
+            for v in gfx.extra.values_mut() {
+                v.viewport
+                    .set_lights(&gfx.gpu.device, &gfx.gpu.queue, v.camera.eye(), &lights);
+            }
             // The bridge between §2.2's photometric lights and §2.1's display
             // transform: without it a sunlit scene saturates every pixel. The
             // scene camera's, not the viewport camera's — the exposure is a
@@ -10728,13 +10935,15 @@ impl App {
             let exposure = preview
                 .as_ref()
                 .map_or(shot.exposure as f32, |p| p.exposure);
-            gfx.viewport.set_display(
-                &gfx.gpu.queue,
-                kreate_render::display::Display {
-                    view: kreate_math::ViewTransform::AgX,
-                    exposure,
-                },
-            );
+            let display = kreate_render::display::Display {
+                view: kreate_math::ViewTransform::AgX,
+                exposure,
+            };
+            gfx.viewport.set_display(&gfx.gpu.queue, display);
+            for v in gfx.extra.values_mut() {
+                v.viewport.set_display(&gfx.gpu.queue, display);
+                v.fresh = false;
+            }
             // What the header reports, from the same answer the picture was
             // made with.
             self.ui.view_status = kreate::shell::ViewStatus {
@@ -10871,6 +11080,32 @@ impl App {
                     collect,
                 );
             }
+        }
+
+        // The extra viewports: the same scene through their own cameras.
+        // After the first's passes, whose picking and outlines read the
+        // draws as that camera left them.
+        for view in gfx.extra.values_mut() {
+            let v = &mut view.viewport;
+            let main = &gfx.viewport;
+            // Shaded as the first one is, and lit by what it was handed above.
+            v.shading = main.shading;
+            v.path_trace = main.path_trace;
+            v.path_trace_denoise = main.path_trace_denoise;
+            v.path_trace_noise_threshold = main.path_trace_noise_threshold;
+            v.show_bloom = main.show_bloom;
+            v.show_reflections = main.show_reflections;
+            v.contact_shadows = main.contact_shadows;
+            v.ambient_occlusion = main.ambient_occlusion;
+            v.show_grid = main.show_grid;
+            v.show_wireframe = main.show_wireframe;
+            v.show_elements = main.show_elements;
+            v.show_outline = main.show_outline;
+            v.xray = main.xray;
+            v.face_orientation = main.face_orientation;
+            v.set_render_size(view.size.0, view.size.1);
+            v.prepare(&gfx.gpu.device, &gfx.gpu.queue, &view.camera, &mut draws);
+            v.render(&mut encoder, &view.target.view, &draws);
         }
 
         // ...then the interface over the surface, with the target as an image.
@@ -12381,6 +12616,7 @@ impl ApplicationHandler for App {
             sculpt_view: None,
             egui_renderer,
             target,
+            extra: std::collections::BTreeMap::new(),
         });
         self.window = Some(window);
         // A document opened at launch keeps the view it was saved with; a
@@ -12656,6 +12892,16 @@ impl ApplicationHandler for App {
                         // ask again and cannot change its mind halfway through.
                         if self.press_belongs_to_viewport() {
                             self.begin_mouse_drag(slot, mapped);
+                        } else if let Some(view) = self.extra_view_at_cursor() {
+                            // Only navigation: picking and editing are the
+                            // first viewport's.
+                            if let Some(action) = self.drag_action(mapped).filter(|a| {
+                                matches!(a.op_id.as_str(), "view.orbit" | "view.pan" | "view.dolly")
+                            }) {
+                                self.drag_travel[slot] = 0.0;
+                                self.drag_ops[slot] = Some(action.op_id);
+                                self.nav_view = Some(view);
+                            }
                         }
                     } else if !pressed && self.buttons[slot] {
                         self.end_mouse_drag(slot);
@@ -12733,6 +12979,17 @@ impl ApplicationHandler for App {
             // so the wheel was being dropped exactly where zooming is wanted.
             // Over a panel the cursor is outside the viewport and the interface
             // keeps its own scrolling.
+            WindowEvent::MouseWheel { delta, .. }
+                if !self.cursor_in_viewport() && self.extra_view_at_cursor().is_some() =>
+            {
+                let y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as f64,
+                    MouseScrollDelta::PixelDelta(p) => p.y / 60.0,
+                };
+                self.nav_view = self.extra_view_at_cursor();
+                self.input.note_event();
+                self.input.scroll += y;
+            }
             WindowEvent::MouseWheel { delta, .. } if self.cursor_in_viewport() => {
                 let (x, y) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
