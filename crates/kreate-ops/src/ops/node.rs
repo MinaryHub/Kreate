@@ -45,6 +45,112 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetNodeValue>();
     registry.register::<SetNodeImage>();
     registry.register::<DuplicateNodes>();
+    registry.register::<GroupNodes>();
+    registry.register::<UngroupNodes>();
+}
+
+// --- groups -------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct GroupNodesParams {
+    #[param(min = 0.0)]
+    pub slot: u32,
+    /// The nodes, by index.
+    pub nodes: Vec<u32>,
+    /// What the group is called.
+    pub name: String,
+}
+
+impl Default for GroupNodesParams {
+    fn default() -> Self {
+        Self {
+            slot: 0,
+            nodes: Vec::new(),
+            name: "NodeGroup".into(),
+        }
+    }
+}
+
+/// Folds nodes into one group node: Blender's Ctrl+G. Wires from outside
+/// become its inputs, wires to outside its outputs; the shader is the same.
+pub struct GroupNodes;
+
+impl Operator for GroupNodes {
+    type Params = GroupNodesParams;
+    fn id() -> &'static str {
+        "node.group"
+    }
+    fn label() -> &'static str {
+        "Make Group"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_graph(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(graph) = graph_in(doc, params.slot) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let nodes: Vec<usize> = params.nodes.iter().map(|n| *n as usize).collect();
+        let name = if params.name.trim().is_empty() {
+            "NodeGroup"
+        } else {
+            params.name.trim()
+        };
+        Ok(match graph.group(&nodes, name) {
+            Some(_) => OpResult::Finished,
+            None => OpResult::Cancelled,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct UngroupNodesParams {
+    #[param(min = 0.0)]
+    pub slot: u32,
+    /// The group nodes, by index; others are left alone.
+    pub nodes: Vec<u32>,
+}
+
+/// Opens group nodes back into the nodes they hold: Blender's Alt+G.
+pub struct UngroupNodes;
+
+impl Operator for UngroupNodes {
+    type Params = UngroupNodesParams;
+    fn id() -> &'static str {
+        "node.ungroup"
+    }
+    fn label() -> &'static str {
+        "Ungroup"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_graph(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(graph) = graph_in(doc, params.slot) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mut nodes: Vec<usize> = params.nodes.iter().map(|n| *n as usize).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        // Highest first: opening one moves only the nodes after it.
+        let mut any = false;
+        for n in nodes.into_iter().rev() {
+            any |= graph.ungroup(n).is_some();
+        }
+        Ok(if any {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
 }
 
 // --- duplicate and paste -----------------------------------------------------
@@ -316,6 +422,7 @@ pub fn default_name(kind: &NodeKind) -> &'static str {
         NodeKind::TexCoord => "Texture Coordinate",
         NodeKind::Mapping { .. } => "Mapping",
         NodeKind::Surface { .. } => "Principled BSDF",
+        NodeKind::Group(_) => "Group",
     }
 }
 

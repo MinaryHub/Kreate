@@ -931,6 +931,37 @@ fn a_materials_node_graph_survives_a_save() {
 }
 
 #[test]
+fn a_node_group_survives_a_save() {
+    // A group, its insides, its sockets and the wires through it: the same
+    // graph back, and its texture still found.
+    let mut doc = Document::new();
+    let image = doc.add_image(kreate_scene::Image::new(
+        "Bricks",
+        4,
+        4,
+        kreate_scene::PixelFormat::Rgba8,
+    ));
+    let mut material = kreate_scene::Material {
+        name: "Grouped".into(),
+        base_color_image: Some(image),
+        normal_image: Some(image),
+        ..Default::default()
+    };
+    let mut graph = material.shading_graph();
+    let all: Vec<usize> = (0..graph.nodes.len()).collect();
+    graph.group(&all, "Bricks").expect("grouped");
+    assert!(graph.has_groups());
+    material.graph = Some(graph.clone());
+    doc.add_material(material);
+    let after = round_trip(&doc).document;
+    let (_, m) = after.materials().next().expect("the material came back");
+    let back = m.graph.clone().expect("the graph came back");
+    assert_eq!(back.nodes, graph.nodes);
+    assert_eq!(back.links, graph.links);
+    assert_eq!(back.images().len(), 2);
+}
+
+#[test]
 fn a_graph_with_a_node_this_build_does_not_know_falls_back_to_the_flat_material() {
     // All or nothing: a graph with the unknown node dropped would be a
     // different material with nothing saying so.

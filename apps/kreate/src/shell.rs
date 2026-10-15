@@ -8504,6 +8504,14 @@ fn apply_node_edits(
                     state.node_clipboard = Some((name.clone(), nodes, corner));
                 }
             }
+            E::Group { nodes } => {
+                p.set("nodes", V::Ints(nodes));
+                state.queue.run("node.group", p);
+            }
+            E::Ungroup { nodes } => {
+                p.set("nodes", V::Ints(nodes));
+                state.queue.run("node.ungroup", p);
+            }
             E::Paste { x, y } => {
                 if let Some((source, nodes, corner)) = state.node_clipboard.clone() {
                     p.set("source", V::Text(source));
@@ -8533,7 +8541,6 @@ fn graph_view(
         // when it is made, not by its colour.
         Socket::Vector | Socket::Coordinate => SocketType::Vector,
     };
-    let socket_label = |name: &str| t(&format!("node-socket-{}", slug(name)));
     let swatch = |c: kreate_math::SceneRgb| {
         let s = c.as_swatch();
         [s.r, s.g, s.b]
@@ -8544,12 +8551,20 @@ fn graph_view(
         .enumerate()
         .map(|(n, node)| {
             let kind = &node.kind;
+            // A group's sockets are named by the user; the rest are ours.
+            let socket_label = |name: &str| {
+                if matches!(kind, NodeKind::Group(_)) {
+                    name.to_string()
+                } else {
+                    t(&format!("node-socket-{}", slug(name)))
+                }
+            };
             let outputs = kind
                 .outputs()
                 .iter()
                 .zip(kind.output_names())
                 .map(|(s, name)| SocketView {
-                    label: socket_label(name),
+                    label: socket_label(&name),
                     ty: ty(*s),
                     connected: false,
                     default: None,
@@ -8561,7 +8576,7 @@ fn graph_view(
                     .zip(kind.input_names())
                     .enumerate()
                     .map(|(i, (s, name))| SocketView {
-                        label: socket_label(name),
+                        label: socket_label(&name),
                         ty: ty(*s),
                         connected: graph.incoming(n, i).is_some(),
                         default: match (kind, i) {
@@ -8822,6 +8837,7 @@ fn graph_view(
                     | NodeKind::Bump { .. }
                     | NodeKind::Mapping { .. } => Family::Vector,
                     NodeKind::Surface { .. } => Family::Shader,
+                    NodeKind::Group(_) => Family::Group,
                 },
             }
         })

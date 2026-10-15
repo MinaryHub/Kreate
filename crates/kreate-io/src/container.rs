@@ -1063,6 +1063,28 @@ pub struct NodeRecord {
     pub values: Vec<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_uid: Option<u64>,
+    /// What a group node holds; absent for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<Box<GroupRecord>>,
+}
+
+/// A node group's insides.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupRecord {
+    pub name: String,
+    pub graph: GraphRecord,
+    pub inputs: Vec<PortRecord>,
+    pub outputs: Vec<PortRecord>,
+}
+
+/// One of a group's sockets.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortRecord {
+    pub name: String,
+    /// `color`, `scalar`, `vector` or `coordinate`.
+    pub socket: String,
+    /// `[node, socket]` inside the group.
+    pub inner: Vec<[usize; 2]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1104,7 @@ fn geo_record(graph: &kreate_scene::geonodes::GeoGraph) -> GeoGraphRecord {
                 position: n.position,
                 values: n.kind.values(),
                 image_uid: None,
+                group: None,
             })
             .collect(),
         links: graph
@@ -1111,9 +1134,22 @@ fn geo_from_record(record: &GeoGraphRecord) -> Option<kreate_scene::geonodes::Ge
 
 /// A graph as its record.
 fn graph_record(graph: &kreate_scene::shader::ShaderGraph, document: &Document) -> GraphRecord {
+    nodes_record(&graph.nodes, &graph.links, document)
+}
+
+fn nodes_record(
+    nodes: &[kreate_scene::shader::Node],
+    links: &[kreate_scene::shader::Link],
+    document: &Document,
+) -> GraphRecord {
+    use kreate_scene::shader::NodeKind;
+    let port = |p: &kreate_scene::shader::GroupPort| PortRecord {
+        name: p.name.clone(),
+        socket: p.socket.tag().to_string(),
+        inner: p.inner.iter().map(|(n, s)| [*n, *s]).collect(),
+    };
     GraphRecord {
-        nodes: graph
-            .nodes
+        nodes: nodes
             .iter()
             .map(|node| NodeRecord {
                 name: node.name.clone(),
@@ -1121,15 +1157,23 @@ fn graph_record(graph: &kreate_scene::shader::ShaderGraph, document: &Document) 
                 position: node.position,
                 values: node.kind.values(),
                 image_uid: match node.kind {
-                    kreate_scene::shader::NodeKind::Image { image, .. } => image
+                    NodeKind::Image { image, .. } => image
                         .and_then(|id| document.image_uid(id))
                         .map(|uid| uid.raw()),
                     _ => None,
                 },
+                group: match &node.kind {
+                    NodeKind::Group(g) => Some(Box::new(GroupRecord {
+                        name: g.name.clone(),
+                        graph: nodes_record(&g.nodes, &g.links, document),
+                        inputs: g.inputs.iter().map(port).collect(),
+                        outputs: g.outputs.iter().map(port).collect(),
+                    })),
+                    _ => None,
+                },
             })
             .collect(),
-        links: graph
-            .links
+        links: links
             .iter()
             .map(|l| [l.from_node, l.from_socket, l.to_node, l.to_socket])
             .collect(),
@@ -1148,7 +1192,18 @@ fn graph_from_record(
     record: &GraphRecord,
     document: &Document,
 ) -> Option<kreate_scene::shader::ShaderGraph> {
-    use kreate_scene::shader::{Link, Node, NodeKind, ShaderGraph};
+    let graph = nodes_from_record(record, document)?;
+    graph.output()?;
+    Some(graph)
+}
+
+/// A record's nodes and wires, as a graph that may have no surface — a
+/// group's insides. All or nothing, as [`graph_from_record`].
+fn nodes_from_record(
+    record: &GraphRecord,
+    document: &Document,
+) -> Option<kreate_scene::shader::ShaderGraph> {
+    use kreate_scene::shader::{GroupPort, Link, Node, NodeGroup, NodeKind, ShaderGraph, Socket};
     let mut graph = ShaderGraph {
         name: String::new(),
         linkage: Linkage::Local,
@@ -1157,15 +1212,58 @@ fn graph_from_record(
         links: Vec::new(),
     };
     for node in &record.nodes {
-        let image = node
-            .image_uid
-            .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw)));
-        let kind = NodeKind::from_parts(&node.kind, &node.values, image)?;
+        let kind = match (&node.group, node.kind.as_str()) {
+            (Some(g), "group") => {
+                let inner = nodes_from_record(&g.graph, document)?;
+                // A port is kept only where its socket is there and of its
+                // type: the file can say anything.
+                let ports = |ports: &[PortRecord], outputs: bool| -> Option<Vec<GroupPort>> {
+                    ports
+                        .iter()
+                        .map(|p| {
+                            let socket = Socket::from_tag(&p.socket)?;
+                            let inner = p
+                                .inner
+                                .iter()
+                                .filter(|[n, s]| {
+                                    inner.nodes.get(*n).is_some_and(|node| {
+                                        let types = if outputs {
+                                            node.kind.outputs()
+                                        } else {
+                                            node.kind.inputs()
+                                        };
+                                        types.get(*s) == Some(&socket)
+                                    })
+                                })
+                                .map(|[n, s]| (*n, *s))
+                                .collect();
+                            Some(GroupPort {
+                                name: p.name.clone(),
+                                socket,
+                                inner,
+                            })
+                        })
+                        .collect()
+                };
+                NodeKind::Group(Box::new(NodeGroup {
+                    name: g.name.clone(),
+                    inputs: ports(&g.inputs, false)?,
+                    outputs: ports(&g.outputs, true)?,
+                    nodes: inner.nodes,
+                    links: inner.links,
+                }))
+            }
+            _ => {
+                let image = node
+                    .image_uid
+                    .and_then(|raw| document.image_by_uid(kreate_scene::Uid::from_raw(raw)));
+                NodeKind::from_parts(&node.kind, &node.values, image)?
+            }
+        };
         let mut made = Node::new(node.name.clone(), kind);
         made.position = node.position;
         graph.add_node(made)?;
     }
-    graph.output()?;
     for [from_node, from_socket, to_node, to_socket] in &record.links {
         let _ = graph.link(Link {
             from_node: *from_node,

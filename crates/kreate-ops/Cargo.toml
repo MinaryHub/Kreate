@@ -21,3 +21,7 @@ kreate-ops-derive.workspace = true
 kreate-reflect.workspace = true
 glam.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# A grouped graph is checked to compile to the shader it was.
+kreate-shader.workspace = true

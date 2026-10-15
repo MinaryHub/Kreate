@@ -166,6 +166,14 @@ pub fn compile_with(
     graph: &ShaderGraph,
     space_of: impl Fn(ImageId) -> ColorSpace,
 ) -> Result<Compiled, CompileError> {
+    // Groups opened up: the shader is the same folded or not.
+    let flat;
+    let graph = if graph.has_groups() {
+        flat = graph.flattened();
+        &flat
+    } else {
+        graph
+    };
     let output = graph.output().ok_or(CompileError::NoSurface)?;
     let mut out = Emitter {
         graph,
@@ -382,6 +390,9 @@ impl Emitter<'_> {
         let slot = self.constants.len();
         let name = self.graph.nodes[node].name.clone();
         match self.graph.nodes[node].kind {
+            // Opened before compiling; one still here came round some other
+            // way and is not something to guess about.
+            NodeKind::Group(_) => return Err(CompileError::BrokenLink),
             NodeKind::Color(c) => {
                 self.constants.push([c.r, c.g, c.b, 0.0]);
                 let _ = writeln!(self.body, "    let n{node} = material.values[{slot}].rgb;");

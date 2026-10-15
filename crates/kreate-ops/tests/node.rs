@@ -581,3 +581,62 @@ fn duplicating_copies_the_nodes_and_their_own_wires_and_never_the_surface() {
     assert!(history.undo(&mut doc));
     assert_eq!(graph(&doc, material).nodes.len(), after.nodes.len());
 }
+
+#[test]
+fn grouping_folds_nodes_into_one_that_compiles_the_same_and_ungrouping_opens_it() {
+    let (registry, mut history, mut doc, ctx) = wired();
+    let (material, _) = textured_cube(&mut doc);
+    run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "material.use_nodes",
+        &[],
+    );
+    let before = graph(&doc, material);
+    let shader = |g: &kreate_scene::shader::ShaderGraph| kreate_shader::compile(g).unwrap().wgsl;
+    let all: Vec<u32> = (0..before.nodes.len() as u32).collect();
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.group",
+        &[
+            ("nodes", PropertyValue::Ints(all)),
+            ("name", PropertyValue::Text("Brickwork".into())),
+        ]
+    ));
+    let grouped = graph(&doc, material);
+    assert_eq!(grouped.nodes.len(), 2, "the surface and the group");
+    let at = grouped
+        .nodes
+        .iter()
+        .position(|n| matches!(n.kind, NodeKind::Group(_)))
+        .unwrap();
+    assert_eq!(grouped.nodes[at].name, "Brickwork");
+    assert_eq!(shader(&grouped), shader(&before), "the same shader, folded");
+    assert_eq!(
+        grouped.images(),
+        before.images(),
+        "its texture still asked for"
+    );
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.ungroup",
+        &[("nodes", PropertyValue::Ints(vec![at as u32]))]
+    ));
+    let opened = graph(&doc, material);
+    assert_eq!(opened.nodes.len(), before.nodes.len());
+    assert_eq!(opened.links.len(), before.links.len());
+    assert_eq!(shader(&opened), shader(&before));
+    // Each step undoes.
+    assert!(history.undo(&mut doc));
+    assert_eq!(graph(&doc, material), grouped);
+    assert!(history.undo(&mut doc));
+    assert_eq!(graph(&doc, material), before);
+}

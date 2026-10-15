@@ -69,6 +69,53 @@ pub enum Socket {
     Coordinate,
 }
 
+impl Socket {
+    pub const ALL: [Self; 4] = [Self::Color, Self::Scalar, Self::Vector, Self::Coordinate];
+
+    /// A stable name for files.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Color => "color",
+            Self::Scalar => "scalar",
+            Self::Vector => "vector",
+            Self::Coordinate => "coordinate",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.tag() == tag)
+    }
+}
+
+/// One of a group's sockets: what it is called, what flows through it, and
+/// where inside the group it goes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupPort {
+    pub name: String,
+    pub socket: Socket,
+    /// For an input, every inner socket it feeds, as (node, input); for an
+    /// output, the one inner socket it reads, as (node, output).
+    pub inner: Vec<(usize, usize)>,
+}
+
+/// Nodes folded into one: Blender's node group, carried by the node that
+/// stands for it.
+///
+/// Its nodes keep their own wires and positions — relative to the group's
+/// middle, so they come back round the node when it is ungrouped. A wire into
+/// one of the group's inputs feeds every inner socket the input names; an
+/// inner socket nothing outside feeds keeps its own value. The group is
+/// opened up again before compiling, so the shader is the same whether the
+/// nodes are folded or not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeGroup {
+    pub name: String,
+    pub nodes: Vec<Node>,
+    pub links: Vec<Link>,
+    pub inputs: Vec<GroupPort>,
+    pub outputs: Vec<GroupPort>,
+}
+
 /// Most stops a Color Ramp holds.
 pub const RAMP_STOPS: usize = 8;
 
@@ -143,6 +190,8 @@ pub enum NodeKind {
     },
     /// Where a surface point is, several ways: Blender's Texture Coordinate.
     TexCoord,
+    /// Nodes folded into one. See [`NodeGroup`].
+    Group(Box<NodeGroup>),
     /// A coordinate scaled, then rotated (in degrees, X then Y then Z), then
     /// moved: Blender's Mapping, as a point.
     Mapping {
@@ -345,8 +394,16 @@ impl NodeKind {
     }
 
     /// The types of this node's inputs, in order.
-    pub fn inputs(&self) -> &'static [Socket] {
+    pub fn inputs(&self) -> std::borrow::Cow<'static, [Socket]> {
+        if let NodeKind::Group(g) = self {
+            return g.inputs.iter().map(|p| p.socket).collect();
+        }
+        std::borrow::Cow::Borrowed(self.fixed_inputs())
+    }
+
+    fn fixed_inputs(&self) -> &'static [Socket] {
         match self {
+            NodeKind::Group(_) => &[],
             NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
             NodeKind::Multiply => &[Socket::Color, Socket::Color],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } => &[Socket::Color],
@@ -394,8 +451,16 @@ impl NodeKind {
     }
 
     /// The types of this node's outputs, in order.
-    pub fn outputs(&self) -> &'static [Socket] {
+    pub fn outputs(&self) -> std::borrow::Cow<'static, [Socket]> {
+        if let NodeKind::Group(g) = self {
+            return g.outputs.iter().map(|p| p.socket).collect();
+        }
+        std::borrow::Cow::Borrowed(self.fixed_outputs())
+    }
+
+    fn fixed_outputs(&self) -> &'static [Socket] {
         match self {
+            NodeKind::Group(_) => &[],
             NodeKind::Color(_) => &[Socket::Color],
             NodeKind::Value(_) => &[Socket::Scalar],
             // Colour and alpha. Two outputs rather than four channels, because
@@ -446,6 +511,7 @@ impl NodeKind {
             NodeKind::TexCoord => "tex_coord",
             NodeKind::Mapping { .. } => "mapping",
             NodeKind::Surface { .. } => "surface",
+            NodeKind::Group(_) => "group",
         }
     }
 
@@ -544,7 +610,8 @@ impl NodeKind {
             | NodeKind::TexCoord
             | NodeKind::SeparateRgb
             | NodeKind::MultiplyValue
-            | NodeKind::Invert => Vec::new(),
+            | NodeKind::Invert
+            | NodeKind::Group(_) => Vec::new(),
         }
     }
 
@@ -677,8 +744,20 @@ impl NodeKind {
     ];
 
     /// What each input is called, for a person.
-    pub fn input_names(&self) -> &'static [&'static str] {
+    pub fn input_names(&self) -> Vec<std::borrow::Cow<'static, str>> {
         match self {
+            NodeKind::Group(g) => g.inputs.iter().map(|p| p.name.clone().into()).collect(),
+            _ => self
+                .fixed_input_names()
+                .iter()
+                .map(|n| (*n).into())
+                .collect(),
+        }
+    }
+
+    fn fixed_input_names(&self) -> &'static [&'static str] {
+        match self {
+            NodeKind::Group(_) => &[],
             NodeKind::Multiply | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["A", "B"],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } | NodeKind::Invert => &["Color"],
             NodeKind::MixColor { .. } => &["Factor", "A", "B"],
@@ -704,8 +783,20 @@ impl NodeKind {
     }
 
     /// What each output is called.
-    pub fn output_names(&self) -> &'static [&'static str] {
+    pub fn output_names(&self) -> Vec<std::borrow::Cow<'static, str>> {
         match self {
+            NodeKind::Group(g) => g.outputs.iter().map(|p| p.name.clone().into()).collect(),
+            _ => self
+                .fixed_output_names()
+                .iter()
+                .map(|n| (*n).into())
+                .collect(),
+        }
+    }
+
+    fn fixed_output_names(&self) -> &'static [&'static str] {
+        match self {
+            NodeKind::Group(_) => &[],
             NodeKind::Color(_)
             | NodeKind::Multiply
             | NodeKind::MixColor { .. }
@@ -1154,18 +1245,363 @@ impl ShaderGraph {
     /// What a renderer has to have uploaded before it can draw this material,
     /// and what a file has to carry with it.
     pub fn images(&self) -> Vec<ImageId> {
+        fn walk(nodes: &[Node], out: &mut Vec<ImageId>) {
+            for n in nodes {
+                match &n.kind {
+                    NodeKind::Image {
+                        image: Some(image), ..
+                    } => out.push(*image),
+                    NodeKind::Group(g) => walk(&g.nodes, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.nodes, &mut out);
+        out
+    }
+
+    /// Whether any node here is a group.
+    pub fn has_groups(&self) -> bool {
         self.nodes
             .iter()
-            .filter_map(|n| match n.kind {
-                NodeKind::Image { image, .. } => image,
-                _ => None,
+            .any(|n| matches!(n.kind, NodeKind::Group(_)))
+    }
+
+    /// The graph with every group opened up, however deep: what the compiler
+    /// reads. Positions are where ungrouping would put the nodes.
+    pub fn flattened(&self) -> ShaderGraph {
+        let mut g = self.clone();
+        // Each pass opens the first group; a group's own groups come out as
+        // nodes of this graph and are opened in a later pass.
+        while let Some(n) = g
+            .nodes
+            .iter()
+            .position(|n| matches!(n.kind, NodeKind::Group(_)))
+        {
+            g.ungroup(n);
+        }
+        g
+    }
+
+    /// Opens the group at `node`: its nodes become this graph's, wired as
+    /// the group wired them, round where the group stood. Returns the
+    /// indices the inner nodes landed at, or `None` when `node` is not a
+    /// group.
+    pub fn ungroup(&mut self, node: usize) -> Option<std::ops::Range<usize>> {
+        let NodeKind::Group(group) = self.nodes.get(node)?.kind.clone() else {
+            return None;
+        };
+        let at = self.nodes[node].position;
+        let offset = self.nodes.len();
+        for inner in &group.nodes {
+            let mut inner = inner.clone();
+            inner.position = [inner.position[0] + at[0], inner.position[1] + at[1]];
+            self.nodes.push(inner);
+        }
+        let mut links: Vec<Link> = group
+            .links
+            .iter()
+            .map(|l| Link {
+                from_node: l.from_node + offset,
+                from_socket: l.from_socket,
+                to_node: l.to_node + offset,
+                to_socket: l.to_socket,
             })
-            .collect()
+            .collect();
+        for l in &self.links {
+            if l.to_node == node {
+                // Into the group: to every inner socket the input feeds.
+                if let Some(port) = group.inputs.get(l.to_socket) {
+                    for (n, s) in &port.inner {
+                        links.push(Link {
+                            from_node: l.from_node,
+                            from_socket: l.from_socket,
+                            to_node: n + offset,
+                            to_socket: *s,
+                        });
+                    }
+                }
+            } else if l.from_node == node {
+                // Out of it: from the inner socket the output reads.
+                if let Some((n, s)) = group
+                    .outputs
+                    .get(l.from_socket)
+                    .and_then(|p| p.inner.first())
+                {
+                    links.push(Link {
+                        from_node: n + offset,
+                        from_socket: *s,
+                        to_node: l.to_node,
+                        to_socket: l.to_socket,
+                    });
+                }
+            } else {
+                links.push(*l);
+            }
+        }
+        self.links = links;
+        let count = group.nodes.len();
+        // The group goes; everything after it moves down one.
+        self.remove_node(node);
+        Some(offset - 1..offset - 1 + count)
+    }
+
+    /// Folds `picked` into one group node, called `name`, and returns where
+    /// it landed. A wire from outside into the picked nodes becomes one of
+    /// the group's inputs — one per outside socket, feeding everything it
+    /// fed; a wire from them to outside becomes an output. The surface
+    /// cannot be grouped; `None` when nothing else is picked.
+    pub fn group(&mut self, picked: &[usize], name: &str) -> Option<usize> {
+        let mut picked: Vec<usize> = picked
+            .iter()
+            .copied()
+            .filter(|n| {
+                self.nodes
+                    .get(*n)
+                    .is_some_and(|node| !matches!(node.kind, NodeKind::Surface { .. }))
+            })
+            .collect();
+        picked.sort_unstable();
+        picked.dedup();
+        if picked.is_empty() {
+            return None;
+        }
+        let inside = |n: usize| picked.binary_search(&n).ok();
+        let middle = picked.iter().fold([0.0f32; 2], |m, n| {
+            let p = self.nodes[*n].position;
+            [m[0] + p[0], m[1] + p[1]]
+        });
+        let middle = [
+            middle[0] / picked.len() as f32,
+            middle[1] / picked.len() as f32,
+        ];
+        let nodes: Vec<Node> = picked
+            .iter()
+            .map(|n| {
+                let mut node = self.nodes[*n].clone();
+                node.position = [node.position[0] - middle[0], node.position[1] - middle[1]];
+                node
+            })
+            .collect();
+        let mut group = NodeGroup {
+            name: name.to_string(),
+            nodes,
+            links: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        // Outside wires, kept to be re-made once the group stands.
+        let mut feeds: Vec<(usize, usize, usize)> = Vec::new(); // (from node, from socket, port)
+        let mut reads: Vec<(usize, usize, usize)> = Vec::new(); // (port, to node, to socket)
+        for l in &self.links {
+            match (inside(l.from_node), inside(l.to_node)) {
+                (Some(a), Some(b)) => group.links.push(Link {
+                    from_node: a,
+                    from_socket: l.from_socket,
+                    to_node: b,
+                    to_socket: l.to_socket,
+                }),
+                (None, Some(b)) => {
+                    let port = match feeds
+                        .iter()
+                        .find(|(n, s, _)| *n == l.from_node && *s == l.from_socket)
+                    {
+                        Some((_, _, port)) => *port,
+                        None => {
+                            let node = &self.nodes[l.to_node];
+                            group.inputs.push(GroupPort {
+                                name: node
+                                    .kind
+                                    .input_names()
+                                    .get(l.to_socket)
+                                    .map_or_else(String::new, |n| n.to_string()),
+                                socket: node.kind.inputs()[l.to_socket],
+                                inner: Vec::new(),
+                            });
+                            feeds.push((l.from_node, l.from_socket, group.inputs.len() - 1));
+                            group.inputs.len() - 1
+                        }
+                    };
+                    group.inputs[port].inner.push((b, l.to_socket));
+                }
+                (Some(a), None) => {
+                    let port = match group
+                        .outputs
+                        .iter()
+                        .position(|p| p.inner.first() == Some(&(a, l.from_socket)))
+                    {
+                        Some(port) => port,
+                        None => {
+                            let node = &self.nodes[l.from_node];
+                            group.outputs.push(GroupPort {
+                                name: node
+                                    .kind
+                                    .output_names()
+                                    .get(l.from_socket)
+                                    .map_or_else(String::new, |n| n.to_string()),
+                                socket: node.kind.outputs()[l.from_socket],
+                                inner: vec![(a, l.from_socket)],
+                            });
+                            group.outputs.len() - 1
+                        }
+                    };
+                    reads.push((port, l.to_node, l.to_socket));
+                }
+                (None, None) => {}
+            }
+        }
+        // What is left, renumbered, and the group last.
+        let keep: Vec<usize> = (0..self.nodes.len())
+            .filter(|n| inside(*n).is_none())
+            .collect();
+        let renumber = |n: usize| keep.binary_search(&n).ok();
+        let mut graph_nodes: Vec<Node> = keep.iter().map(|n| self.nodes[*n].clone()).collect();
+        let at = graph_nodes.len();
+        let mut node = Node::new(name, NodeKind::Group(Box::new(group)));
+        node.position = middle;
+        graph_nodes.push(node);
+        let mut links: Vec<Link> = self
+            .links
+            .iter()
+            .filter_map(|l| {
+                Some(Link {
+                    from_node: renumber(l.from_node)?,
+                    from_socket: l.from_socket,
+                    to_node: renumber(l.to_node)?,
+                    to_socket: l.to_socket,
+                })
+            })
+            .collect();
+        for (from, socket, port) in feeds {
+            if let Some(from) = renumber(from) {
+                links.push(Link {
+                    from_node: from,
+                    from_socket: socket,
+                    to_node: at,
+                    to_socket: port,
+                });
+            }
+        }
+        for (port, to, socket) in reads {
+            if let Some(to) = renumber(to) {
+                links.push(Link {
+                    from_node: at,
+                    from_socket: port,
+                    to_node: to,
+                    to_socket: socket,
+                });
+            }
+        }
+        self.nodes = graph_nodes;
+        self.links = links;
+        Some(at)
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// A small chain: noise into a ramp into the surface's colour, and the
+    /// noise's number also into the roughness.
+    fn chain() -> ShaderGraph {
+        let mut g = graph();
+        let noise = g
+            .add_node(Node::new("Noise", NodeKind::new_of("noise").unwrap()))
+            .unwrap();
+        let ramp = g
+            .add_node(Node::new("Ramp", NodeKind::new_of("color_ramp").unwrap()))
+            .unwrap();
+        let coord = g.add_node(Node::new("Coord", NodeKind::TexCoord)).unwrap();
+        let out = g.output().unwrap();
+        for (a, s, b, t) in [
+            (coord, 1, noise, 4),
+            (noise, 0, ramp, 0),
+            (ramp, 0, out, 0),
+            (noise, 0, out, 2),
+        ] {
+            g.link(Link {
+                from_node: a,
+                from_socket: s,
+                to_node: b,
+                to_socket: t,
+            })
+            .unwrap();
+        }
+        g
+    }
+
+    /// Folding nodes into a group and opening it again gives back the same
+    /// nodes and wires; the flattened group is the graph it was.
+    #[test]
+    fn a_group_opens_back_into_the_nodes_it_folded() {
+        let g = chain();
+        let mut grouped = g.clone();
+        // The noise and the ramp, not the coordinate or the surface.
+        let at = grouped.group(&[1, 2], "Pattern").unwrap();
+        assert_eq!(grouped.nodes.len(), 3, "surface, coordinate, group");
+        let NodeKind::Group(group) = &grouped.nodes[at].kind else {
+            panic!("a group")
+        };
+        assert_eq!(group.inputs.len(), 1, "the coordinate, once");
+        assert_eq!(
+            group.outputs.len(),
+            2,
+            "the ramp's colour and the noise's number"
+        );
+        assert_eq!(&*grouped.nodes[at].kind.inputs(), &[Socket::Coordinate]);
+        // Opened, it is the same graph up to the order of nodes and wires.
+        let flat = grouped.flattened();
+        assert!(!flat.has_groups());
+        let shape = |g: &ShaderGraph| {
+            let name = |n: usize| g.nodes[n].name.clone();
+            let mut links: Vec<_> = g
+                .links
+                .iter()
+                .map(|l| {
+                    (
+                        name(l.from_node),
+                        l.from_socket,
+                        name(l.to_node),
+                        l.to_socket,
+                    )
+                })
+                .collect();
+            links.sort();
+            let mut nodes: Vec<_> = g
+                .nodes
+                .iter()
+                .map(|n| (n.name.clone(), n.kind.clone(), n.position))
+                .collect();
+            nodes.sort_by(|a, b| a.0.cmp(&b.0));
+            (nodes, links)
+        };
+        assert_eq!(shape(&flat), shape(&g));
+    }
+
+    #[test]
+    fn a_group_inside_a_group_opens_all_the_way() {
+        let mut g = chain();
+        let inner = g.group(&[1, 2], "Inner").unwrap();
+        let coord = g.nodes.iter().position(|n| n.name == "Coord").unwrap();
+        g.group(&[inner, coord], "Outer").unwrap();
+        assert_eq!(g.nodes.len(), 2);
+        let flat = g.flattened();
+        assert_eq!(flat.nodes.len(), 4);
+        assert_eq!(flat.links.len(), 4);
+        assert_eq!(flat.images(), Vec::<ImageId>::new());
+    }
+
+    #[test]
+    fn the_surface_is_never_grouped() {
+        let mut g = chain();
+        let out = g.output().unwrap();
+        assert_eq!(g.group(&[out], "Nothing"), None);
+        let at = g.group(&[out, 1], "Noise only").unwrap();
+        assert!(g.output().is_some());
+        assert!(matches!(g.nodes[at].kind, NodeKind::Group(_)));
+    }
+
     use super::*;
 
     fn graph() -> ShaderGraph {

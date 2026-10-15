@@ -115,6 +115,8 @@ pub enum Family {
     Vector,
     Shader,
     Geometry,
+    /// Nodes folded into one.
+    Group,
 }
 
 impl Family {
@@ -126,6 +128,7 @@ impl Family {
             Family::Vector => Color32::from_rgb(0x3c, 0x3c, 0x83),
             Family::Shader => Color32::from_rgb(0x2b, 0x65, 0x2b),
             Family::Geometry => Color32::from_rgb(0x1e, 0x6e, 0x5a),
+            Family::Group => Color32::from_rgb(0x3b, 0x55, 0x2e),
         }
     }
 }
@@ -207,6 +210,14 @@ pub enum NodeEdit {
     Paste {
         x: f32,
         y: f32,
+    },
+    /// Fold these nodes into a group: Ctrl+G.
+    Group {
+        nodes: Vec<u32>,
+    },
+    /// Open these group nodes back up: Alt+G.
+    Ungroup {
+        nodes: Vec<u32>,
     },
 }
 
@@ -707,6 +718,8 @@ pub fn node_editor(
         let all = pressed_with(egui::Key::A, |m| !m.shift && !m.alt && !m.command);
         let none = pressed_with(egui::Key::A, |m| m.alt);
         let duplicate = pressed_with(egui::Key::D, |m| m.shift);
+        let group = pressed_with(egui::Key::G, |m| m.command && !m.alt);
+        let ungroup = pressed_with(egui::Key::G, |m| m.alt && !m.command);
         // Copy and paste arrive as events of their own, not as key presses.
         let (copy, paste) = ui.input(|i| {
             (
@@ -733,6 +746,18 @@ pub fn node_editor(
             let count = view.nodes.len();
             let made = state.selected.len();
             state.selected = (count..count + made).collect();
+        }
+        if group && !state.selected.is_empty() {
+            out.push(NodeEdit::Group {
+                nodes: sorted(state),
+            });
+            state.selected.clear();
+        }
+        if ungroup && !state.selected.is_empty() {
+            out.push(NodeEdit::Ungroup {
+                nodes: sorted(state),
+            });
+            state.selected.clear();
         }
         if copy && !state.selected.is_empty() {
             out.push(NodeEdit::Copy {
@@ -1472,6 +1497,41 @@ mod tests {
         assert_eq!(edits, vec![NodeEdit::Duplicate { nodes: vec![1] }]);
         // The copy is the next node, once the operator has made it.
         assert_eq!(rig.state.selected, vec![2]);
+    }
+
+    #[test]
+    fn ctrl_g_groups_the_selection_and_alt_g_ungroups_it() {
+        let mut rig = Rig::new(two());
+        let body = rig.camera().body_of(1);
+        let key = |modifiers| egui::Event::Key {
+            key: egui::Key::G,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        rig.drag(body, body);
+        let edits = rig.frame(vec![
+            egui::Event::PointerMoved(body),
+            key(egui::Modifiers::COMMAND),
+        ]);
+        assert_eq!(edits, vec![NodeEdit::Group { nodes: vec![1] }]);
+        assert!(rig.state.selected.is_empty());
+        rig.drag(body, body);
+        let edits = rig.frame(vec![
+            egui::Event::PointerMoved(body),
+            key(egui::Modifiers::ALT),
+        ]);
+        assert_eq!(edits, vec![NodeEdit::Ungroup { nodes: vec![1] }]);
+        // A plain G is neither.
+        rig.drag(body, body);
+        let edits = rig.frame(vec![
+            egui::Event::PointerMoved(body),
+            key(egui::Modifiers::NONE),
+        ]);
+        assert!(!edits
+            .iter()
+            .any(|e| matches!(e, NodeEdit::Group { .. } | NodeEdit::Ungroup { .. })));
     }
 
     #[test]

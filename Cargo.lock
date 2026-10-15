@@ -1729,6 +1729,7 @@ dependencies = [
  "kreate-ops-derive",
  "kreate-reflect",
  "kreate-scene",
+ "kreate-shader",
  "thiserror 2.0.20",
  "tracing",
 ]
