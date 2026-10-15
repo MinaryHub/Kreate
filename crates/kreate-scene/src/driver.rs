@@ -141,11 +141,27 @@ impl Document {
                 .ok_or_else(|| DriverError::NoTarget {
                     variable: v.name.clone(),
                 })?;
-            let value = crate::animation::read_object(&source.transform, &v.property)
-                .and_then(|x| (v.index < 3).then(|| x[v.index as usize]))
-                .ok_or_else(|| DriverError::BadProperty {
-                    variable: v.name.clone(),
-                })?;
+            // An animated property read off its curve: the value the curve
+            // means, not the turn it ends up as. Read back from the turn, a
+            // gear keyed through two revolutions came back wrapped into a
+            // half turn either way, and the rack it drove ran back.
+            let keyed = source
+                .action
+                .and_then(|a| self.action(a))
+                .and_then(|action| {
+                    action.curves.iter().find(|c| {
+                        *c.path.property == *v.property && c.path.index == Some(v.index)
+                    })
+                })
+                .and_then(|c| c.evaluate(self.playback.frame));
+            let value = match keyed {
+                Some(value) => value,
+                None => crate::animation::read_object(&source.transform, &v.property)
+                    .and_then(|x| (v.index < 3).then(|| x[v.index as usize]))
+                    .ok_or_else(|| DriverError::BadProperty {
+                        variable: v.name.clone(),
+                    })?,
+            };
             values.push((v.name.as_str(), value));
         }
         let frame = self.playback.frame;

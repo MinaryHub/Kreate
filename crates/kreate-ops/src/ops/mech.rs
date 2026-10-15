@@ -2013,6 +2013,28 @@ mod tests {
         assert!((angle(big) + quarter / 2.0).abs() < 1e-9, "{}", angle(big));
         let x = doc.object(rack).unwrap().transform.translation.x;
         assert!((x - 0.02 * quarter).abs() < 1e-9, "{x}");
+        // Keyed through two whole turns: at a turn and a half the rack is a
+        // turn and a half along, not wrapped back to half a turn the other way.
+        use kreate_scene::animation::{Action, FCurve, Interpolation};
+        let mut curve = FCurve::new(kreate_scene::PropertyPath {
+            kind: kreate_scene::DatablockKind::Object,
+            target: kreate_scene::Uid::NONE,
+            property: "rotation_euler".into(),
+            index: Some(2),
+            hint: None,
+        });
+        curve.insert(1.0, 0.0, Interpolation::Linear);
+        curve.insert(101.0, 2.0 * std::f64::consts::TAU, Interpolation::Linear);
+        let mut action = Action::new("Spin");
+        action.curves.push(curve);
+        let spin = doc.add_action(action);
+        doc.object_mut(small).unwrap().action = Some(spin);
+        doc.playback.frame = 76.0;
+        doc.animate(76.0);
+        doc.drive();
+        let turned = 1.5 * std::f64::consts::TAU;
+        let x = doc.object(rack).unwrap().transform.translation.x;
+        assert!((x - 0.02 * turned).abs() < 1e-9, "{x}");
     }
 
     #[test]
