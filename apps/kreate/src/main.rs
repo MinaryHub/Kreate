@@ -14275,7 +14275,7 @@ mod tests {
         };
         let wanted = [0.3, -0.7, 1.2];
         set(&mut app, wanted);
-        let scene = app.scene_json();
+        let scene = app.scene_json_with(&connector::SceneFilter::default());
         assert_eq!(scene["units"]["angle"], "rad");
         assert_eq!(scene["units"]["length"], "m");
         let read: Vec<f64> = scene["objects"][0]["rotation"]
@@ -14317,7 +14317,7 @@ mod tests {
         // And a bracket that really runs 5 mm into the cradle's side.
         let bracket = app.doc.add_mesh_object("Bracket", cube(0.02));
         app.doc.object_mut(bracket).unwrap().transform.translation = DVec3::new(-0.015, 0.0, 0.0);
-        let out = app.overlaps_json(0.001, true);
+        let out = app.overlaps_json(0.001, true, None, std::time::Duration::from_secs(60));
         let names = |key: &str| -> Vec<String> {
             out[key]
                 .as_array()
@@ -14858,6 +14858,73 @@ kreate.ops.object.add_primitive()",
         assert!(why.contains("mode_set"), "the fix is named: {why}");
         assert!(report[1].result.as_ref().unwrap_err().contains("skipped"));
         assert_eq!(app.doc.objects().count(), 0, "the second line did not run");
+    }
+
+    /// The scene listed in part: by name, by prefix, by selection, a few,
+    /// and in short past a size — each said with how many there are.
+    #[test]
+    fn the_scene_is_listed_in_part_when_asked_and_in_short_when_big() {
+        let mut app = app();
+        for _ in 0..3 {
+            app.run_op("object.add_primitive", PropertyMap::new());
+        }
+        let scene =
+            |app: &mut App, params: serde_json::Value| app.bridge_call("scene", &params).unwrap();
+        let all = scene(&mut app, serde_json::json!({}));
+        assert_eq!(all["object_count"], 3);
+        assert_eq!(all["objects"].as_array().unwrap().len(), 3);
+        assert!(all["objects"][0].get("rotation").is_some(), "full detail");
+        assert!(all["note"].is_null());
+        let some = scene(&mut app, serde_json::json!({ "prefix": "Cube.0" }));
+        assert_eq!(some["objects"].as_array().unwrap().len(), 2);
+        assert_eq!(some["object_count"], 3);
+        let named = scene(&mut app, serde_json::json!({ "objects": ["Cube.002"] }));
+        assert_eq!(named["objects"][0]["name"], "Cube.002");
+        let chosen = scene(&mut app, serde_json::json!({ "selected": true }));
+        assert_eq!(chosen["objects"].as_array().unwrap().len(), 1);
+        let few = scene(&mut app, serde_json::json!({ "limit": 1 }));
+        assert_eq!(few["objects_listed"], 1);
+        assert!(few["note"].as_str().unwrap().contains("1 of 3"));
+        let short = scene(&mut app, serde_json::json!({ "compact": true }));
+        assert!(short["objects"][0].get("rotation").is_none());
+        assert!(short["objects"][0].get("dimensions").is_some());
+        // Past the size, short by itself.
+        for _ in 0..connector::SceneFilter::COMPACT_FROM {
+            app.run_op("object.add_empty", PropertyMap::new());
+        }
+        let big = scene(&mut app, serde_json::json!({}));
+        assert!(
+            big["objects"][0].get("rotation").is_none(),
+            "{}",
+            big["note"]
+        );
+        assert!(big["note"].as_str().unwrap().contains("in short"));
+    }
+
+    /// Overlaps asked about some objects are tested among those alone.
+    #[test]
+    fn overlaps_are_checked_among_the_objects_named() {
+        let mut app = app();
+        app.run_script_reporting(
+            "kreate.ops.object.add_primitive()
+kreate.ops.object.add_primitive(location=(1, 0, 0))
+kreate.ops.object.add_primitive(location=(0, 1, 0))",
+        );
+        let all = app.bridge_call("overlaps", &serde_json::json!({})).unwrap();
+        assert_eq!(all["overlapping"].as_array().unwrap().len(), 3);
+        assert_eq!(all["pairs_tested"], 3);
+        let two = app
+            .bridge_call(
+                "overlaps",
+                &serde_json::json!({ "objects": ["Cube", "Cube.002"] }),
+            )
+            .unwrap();
+        assert_eq!(two["overlapping"].as_array().unwrap().len(), 1);
+        assert_eq!(two["checked"], 2);
+        let err = app
+            .bridge_call("overlaps", &serde_json::json!({ "objects": ["Nobody"] }))
+            .unwrap_err();
+        assert!(err.contains("Nobody"));
     }
 
     /// A line names its object with `object=` and is run on it; a mesh line

@@ -81,7 +81,33 @@ impl App {
                 .map(str::to_string)
         };
         match method {
-            "scene" => Ok(self.scene_json()),
+            "scene" => {
+                let names = |key: &str| -> Vec<String> {
+                    params
+                        .get(key)
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let filter = SceneFilter {
+                    names: names("objects"),
+                    prefix: text("prefix").filter(|p| !p.is_empty()),
+                    selected: params
+                        .get("selected")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    limit: params
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize),
+                    compact: params.get("compact").and_then(|v| v.as_bool()),
+                };
+                Ok(self.scene_json_with(&filter))
+            }
             // The clock and what moves: read it, move it, play or stop it,
             // and switch a take on or off — a strip changed with its other
             // settings kept, which a script line naming only `mute` would
@@ -173,7 +199,46 @@ impl App {
                     .get("exact")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                Ok(self.overlaps_json(tolerance, exact))
+                // Only some of the objects, when asked: a big assembly's
+                // every pair took longer than the bridge waits.
+                let named: Vec<String> = params
+                    .get("objects")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let selected = params
+                    .get("selected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let scope: Option<Vec<kreate_scene::ObjectId>> = if !named.is_empty() {
+                    let mut ids = Vec::new();
+                    for name in &named {
+                        let id = self
+                            .doc
+                            .objects()
+                            .find(|(_, o)| o.name == *name)
+                            .map(|(id, _)| id)
+                            .ok_or_else(|| format!("no object called {name:?}"))?;
+                        ids.push(id);
+                    }
+                    Some(ids)
+                } else if selected {
+                    Some(self.doc.selection.objects.to_vec())
+                } else {
+                    None
+                };
+                let limit = std::time::Duration::from_secs(
+                    params
+                        .get("time_limit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(60)
+                        .clamp(1, 110),
+                );
+                Ok(self.overlaps_json(tolerance, exact, scope.as_deref(), limit))
             }
             "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
             "run" => {
@@ -757,12 +822,7 @@ impl App {
         }
         let was_saved = !self.file.is_modified(&self.doc);
         let hidden: Vec<kreate_scene::ObjectId> = match &only {
-            Some(only) => self
-                .doc
-                .objects()
-                .filter(|(_, o)| o.visible && !only.contains(&o.name))
-                .map(|(id, _)| id)
-                .collect(),
+            Some(only) => hidden_for_only(&self.doc, only),
             None => Vec::new(),
         };
         for id in &hidden {
@@ -1068,12 +1128,24 @@ impl App {
     /// triangles (see `kreate_mesh::intersect`): kept only if the surfaces
     /// cross or one is inside the other, and said which. Without it, boxes
     /// alone — quick, and a pair can be reported that only comes close.
-    pub(super) fn overlaps_json(&self, tolerance: f64, exact: bool) -> serde_json::Value {
+    ///
+    /// `scope` limits it to those objects, and the pairs are tested biggest
+    /// box overlap first, so what `limit` cuts off is the least of them —
+    /// said as `unchecked_pairs`. Every pair of a large assembly took longer
+    /// than the bridge waits, and the caller heard nothing at all.
+    pub(super) fn overlaps_json(
+        &self,
+        tolerance: f64,
+        exact: bool,
+        scope: Option<&[kreate_scene::ObjectId]>,
+        limit: std::time::Duration,
+    ) -> serde_json::Value {
         use serde_json::json;
         let doc = &self.doc;
+        let started = std::time::Instant::now();
         let boxes: Vec<_> = doc
             .objects()
-            .filter(|(id, _)| doc.is_shown(*id))
+            .filter(|(id, _)| doc.is_shown(*id) && scope.is_none_or(|s| s.contains(id)))
             .filter_map(|(id, o)| Some((id, o.name.clone(), doc.object_world_bounds(id)?)))
             .collect();
         let related = |a, b| {
@@ -1088,13 +1160,34 @@ impl App {
         };
         let mut pairs = Vec::new();
         let mut touching = Vec::new();
-        for (i, (a, an, (alo, ahi))) in boxes.iter().enumerate() {
-            for (b, bn, (blo, bhi)) in &boxes[i + 1..] {
+        // The pairs whose boxes overlap, biggest overlap first.
+        let mut candidates: Vec<(usize, usize, kreate_math::DVec3)> = Vec::new();
+        for (i, (a, _, (alo, ahi))) in boxes.iter().enumerate() {
+            for (j, (b, _, (blo, bhi))) in boxes.iter().enumerate().skip(i + 1) {
                 let depth = ahi.min(*bhi) - alo.max(*blo);
                 if depth.min_element() > tolerance && !related(*a, *b) && !related(*b, *a) {
+                    candidates.push((i, j, depth));
+                }
+            }
+        }
+        candidates.sort_by(|x, y| {
+            let (vx, vy) = (x.2.element_product(), y.2.element_product());
+            vy.partial_cmp(&vx).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut unchecked = 0usize;
+        for (k, (i, j, depth)) in candidates.iter().enumerate() {
+            let (a, an, _) = &boxes[*i];
+            let (b, bn, _) = &boxes[*j];
+            let depth = *depth;
+            {
+                {
                     if !exact {
                         pairs.push(json!({ "a": an, "b": bn, "overlap": depth.to_array() }));
                         continue;
+                    }
+                    if started.elapsed() > limit {
+                        unchecked = candidates.len() - k;
+                        break;
                     }
                     let mesh = |id| {
                         doc.object(id)
@@ -1161,13 +1254,48 @@ impl App {
                 }
             }
         }
-        json!({ "checked": boxes.len(), "overlapping": pairs, "touching": touching })
+        let mut out = json!({
+            "checked": boxes.len(),
+            "pairs_tested": candidates.len() - unchecked,
+            "overlapping": pairs,
+            "touching": touching,
+        });
+        if unchecked > 0 {
+            out["unchecked_pairs"] = json!(unchecked);
+            out["note"] = json!(format!(
+                "the time limit ran out with {unchecked} pair(s) of overlapping boxes untested, the smallest overlaps; \
+                 ask again with objects=[...] or selected=true, a longer time_limit, or exact=false"
+            ));
+        }
+        out
     }
 
-    pub(super) fn scene_json(&self) -> serde_json::Value {
+    /// The document, the objects as `filter` picks them: all of it when
+    /// nothing is asked, and a short line each past `COMPACT_FROM` objects
+    /// — a big assembly listed in full was more than the caller could read,
+    /// and it read the saved file's tail instead.
+    pub(super) fn scene_json_with(&self, filter: &SceneFilter) -> serde_json::Value {
         use kreate_scene::document::ObjectData;
         use serde_json::json;
         let doc = &self.doc;
+        let total = doc.objects().count();
+        let picked: Vec<_> = doc
+            .objects()
+            .filter(|(id, o)| {
+                (filter.names.is_empty() || filter.names.contains(&o.name))
+                    && filter
+                        .prefix
+                        .as_ref()
+                        .is_none_or(|p| o.name.starts_with(p.as_str()))
+                    && (!filter.selected || doc.selection.contains(*id))
+            })
+            .collect();
+        let matched = picked.len();
+        let unfiltered = filter.names.is_empty() && filter.prefix.is_none() && !filter.selected;
+        let compact = filter
+            .compact
+            .unwrap_or(unfiltered && matched > SceneFilter::COMPACT_FROM);
+        let listed = picked.len().min(filter.limit.unwrap_or(usize::MAX));
         // Colours as the set_* operators take them — sRGB swatches, as a
         // colour picker holds them — so a value read here can be written back
         // unchanged. The linear numbers the renderer uses are not what a
@@ -1176,8 +1304,9 @@ impl App {
             let s = c.as_swatch();
             [s.r, s.g, s.b]
         };
-        let objects: Vec<_> = doc
-            .objects()
+        let objects: Vec<_> = picked
+            .into_iter()
+            .take(listed)
             .map(|(id, o)| {
                 let t = &o.transform;
                 let r = kreate_scene::animation::to_euler(t.rotation);
@@ -1188,6 +1317,27 @@ impl App {
                     ObjectData::Light(_) => "light",
                     ObjectData::Armature(_) => "armature",
                 };
+                if compact {
+                    let mut v = json!({
+                        "name": o.name,
+                        "type": kind,
+                        "location": t.translation.to_array(),
+                        "visible": doc.is_shown(id),
+                        "selected": doc.selection.contains(id),
+                        "parent": o.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone()),
+                    });
+                    if let Some(m) = o.mesh().and_then(|m| doc.mesh(m)) {
+                        let local = m.bounds();
+                        if local.min.x <= local.max.x {
+                            let size = (local.max - local.min).as_dvec3() * t.scale;
+                            v["dimensions"] = json!(size.abs().to_array());
+                        }
+                        if self.modifiers.boolean_failed(id) {
+                            v["boolean_failed"] = json!(true);
+                        }
+                    }
+                    return v;
+                }
                 let mut v = json!({
                     "name": o.name,
                     "type": kind,
@@ -1296,7 +1446,18 @@ impl App {
             "mode": self.op_ctx.mode.tag(),
             "frame": doc.playback.frame,
             "cursor": doc.cursor.to_array(),
+            "object_count": total,
+            "objects_listed": objects.len(),
             "objects": objects,
+            "note": if compact || objects.len() < matched {
+                Some(format!(
+                    "{} of {total} objects listed{}: ask with objects=[names], prefix=\"...\" or selected=true for the full detail of some, limit=n for fewer, compact=false for all of it",
+                    objects.len(),
+                    if compact { ", in short" } else { "" }
+                ))
+            } else {
+                None
+            },
             "materials": materials,
             "images": doc
                 .images()
@@ -1432,9 +1593,69 @@ fn compact_operator(op: &serde_json::Value) -> String {
     )
 }
 
+/// The objects to hide so that only `only` shows: every visible one that is
+/// neither named nor an ancestor of one named. A hidden parent hides its
+/// children, so hiding the empty a rig hangs from left the pictures blank.
+fn hidden_for_only(doc: &Document, only: &[String]) -> Vec<kreate_scene::ObjectId> {
+    let mut keep: Vec<kreate_scene::ObjectId> = Vec::new();
+    for (id, o) in doc.objects() {
+        if !only.contains(&o.name) {
+            continue;
+        }
+        let mut at = Some(id);
+        while let Some(here) = at {
+            if keep.contains(&here) {
+                break;
+            }
+            keep.push(here);
+            at = doc.object(here).and_then(|o| o.parent);
+        }
+    }
+    doc.objects()
+        .filter(|(id, o)| o.visible && !keep.contains(id))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Which objects `get_scene` lists, and how much of each.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SceneFilter {
+    /// Only these, by name; empty for all.
+    pub names: Vec<String>,
+    /// Only names starting so.
+    pub prefix: Option<String>,
+    /// Only the selected.
+    pub selected: bool,
+    /// At most this many.
+    pub limit: Option<usize>,
+    /// A short line each; `None` decides by how many there are.
+    pub compact: Option<bool>,
+}
+
+impl SceneFilter {
+    /// Past this many objects, an unfiltered listing is the short kind.
+    pub const COMPACT_FROM: usize = 120;
+}
+
 #[cfg(test)]
 mod listing_tests {
     use super::*;
+
+    /// Showing one object alone keeps what it hangs from: an empty hidden
+    /// takes its children with it.
+    #[test]
+    fn showing_an_object_alone_keeps_its_ancestors() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut doc = Document::new();
+        let root = doc.add_object(Object::new("Root", ObjectData::Empty));
+        let hip = doc.add_object(Object::new("Hip", ObjectData::Empty));
+        let leg = doc.add_mesh_object("Leg", kreate_mesh::primitives::cube(1.0));
+        let other = doc.add_mesh_object("Other", kreate_mesh::primitives::cube(1.0));
+        doc.set_parent(hip, Some(root)).unwrap();
+        doc.set_parent(leg, Some(hip)).unwrap();
+        let hidden = hidden_for_only(&doc, &["Leg".to_string()]);
+        assert_eq!(hidden, vec![other]);
+    }
 
     #[test]
     fn a_long_listing_is_one_line_an_operator() {

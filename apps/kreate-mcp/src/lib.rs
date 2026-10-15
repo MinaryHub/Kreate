@@ -145,8 +145,17 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "get_scene",
-            "description": "What the open document holds: the units (lengths in metres, angles in radians, and the unit the user's screen shows lengths in); every object (name, uid, type, location, rotation as XYZ Euler in radians — as operators take it — and in degrees, scale, visibility, selection, parent; for meshes vertex and face counts, dimensions in metres, world-space bounds and the materials in its slots with their uids; kind, colour and intensity for lights; lens and exposure settings for cameras), every material (uid, how many objects use it, base colour, metallic, roughness, emission, transmission, IOR; colours are sRGB, as material.set_properties takes them), every image (name, uid, size), the editing mode, the view's exposure in stops and whether the meter set it, the 3D cursor, the current frame and the document's file.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": "What the open document holds (object_count says how many objects there are, objects_listed how many came back; past 120 objects an unfiltered call lists each in short — name, type, location, dimensions, parent — and says so in note; objects=[names], prefix=\"...\" or selected=true give the full detail of some, limit=n fewer, compact=false forces all of it): the units (lengths in metres, angles in radians, and the unit the user's screen shows lengths in); every object (name, uid, type, location, rotation as XYZ Euler in radians — as operators take it — and in degrees, scale, visibility, selection, parent; for meshes vertex and face counts, dimensions in metres, world-space bounds and the materials in its slots with their uids; kind, colour and intensity for lights; lens and exposure settings for cameras), every material (uid, how many objects use it, base colour, metallic, roughness, emission, transmission, IOR; colours are sRGB, as material.set_properties takes them), every image (name, uid, size), the editing mode, the view's exposure in stops and whether the meter set it, the 3D cursor, the current frame and the document's file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": { "type": "string" }, "description": "Only these objects, by name." },
+                    "prefix": { "type": "string", "description": "Only objects whose name starts with this." },
+                    "selected": { "type": "boolean", "description": "Only the selected objects." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "At most this many objects." },
+                    "compact": { "type": "boolean", "description": "A short line per object (true) or everything (false); left out, short past 120 objects." }
+                }
+            },
             "annotations": { "readOnlyHint": true }
         },
         {
@@ -204,12 +213,15 @@ pub fn tools() -> Value {
         },
         {
             "name": "check_overlaps",
-            "description": "Which visible mesh objects run into each other. Pairs whose bounding boxes overlap by more than the tolerance are tested on their actual surfaces: reported with contact \"crossing\" when they share volume — with that volume in cubic metres and its average depth in metres — or \"X inside Y\" when one is wholly within the other, and the box overlap in metres. Parts whose surfaces only meet or scrape (sharing less than a tenth of the tolerance in depth) are listed apart under \"touching\", not as overlaps; a shape and its own parent or child are not reported. exact=false skips the surface test and reports every box overlap, which is quicker and cruder.",
+            "description": "Which visible mesh objects run into each other. Pairs whose bounding boxes overlap by more than the tolerance are tested on their actual surfaces: reported with contact \"crossing\" when they share volume — with that volume in cubic metres and its average depth in metres — or \"X inside Y\" when one is wholly within the other, and the box overlap in metres. Parts whose surfaces only meet or scrape (sharing less than a tenth of the tolerance in depth) are listed apart under \"touching\", not as overlaps; a shape and its own parent or child are not reported. exact=false skips the surface test and reports every box overlap, which is quicker and cruder. Pairs are tested biggest box overlap first within time_limit seconds; unchecked_pairs says how many were left, so for a big assembly ask about some objects (objects=[...] or selected=true) rather than all.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tolerance": { "type": "number", "minimum": 0, "default": 0.001, "description": "Metres of box overlap to ignore." },
-                    "exact": { "type": "boolean", "default": true }
+                    "exact": { "type": "boolean", "default": true },
+                    "objects": { "type": "array", "items": { "type": "string" }, "description": "Only pairs among these objects, by name." },
+                    "selected": { "type": "boolean", "description": "Only pairs among the selected objects." },
+                    "time_limit": { "type": "integer", "minimum": 1, "maximum": 110, "default": 60, "description": "Seconds to spend on the surface tests." }
                 }
             },
             "annotations": { "readOnlyHint": true }
