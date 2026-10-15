@@ -1619,3 +1619,4 @@ op-sketch-reattach-outline = Project the outline again
 op-object-add-bearing-shields = Shields
 op-object-add-gear-shaft-angle = Shaft angle (bevel)
 op-anim-nla-strip-set-blend = Blend
+op-uv-unwrap-method = Method

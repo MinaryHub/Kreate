@@ -575,11 +575,16 @@ pub struct UnwrapParams {
     pub margin: f64,
     /// Which UV set to write. Empty means the default set.
     pub layer: String,
+    /// Conformal keeps angles and lets areas go; low stretch relaxes that
+    /// toward each face's own shape, so areas stay near too.
+    #[param(variants("conformal", "low_stretch"))]
+    pub method: u32,
 }
 
 impl Default for UnwrapParams {
     fn default() -> Self {
         Self {
+            method: 1,
             margin: f64::from(uv_pack::DEFAULT_MARGIN),
             layer: String::new(),
         }
@@ -616,8 +621,13 @@ impl Operator for Unwrap {
             if faces.is_empty() {
                 faces = bm.face_ids().collect::<Vec<FaceId>>();
             }
-            Ok(kreate_mesh::edit::uv_unwrap::unwrap(
-                bm, &faces, &layer, margin,
+            let method = if params.method == 0 {
+                kreate_mesh::edit::uv_unwrap::Method::Conformal
+            } else {
+                kreate_mesh::edit::uv_unwrap::Method::LowStretch
+            };
+            Ok(kreate_mesh::edit::uv_unwrap::unwrap_by(
+                bm, &faces, &layer, margin, method,
             ))
         })?;
         Ok(if written == 0 {

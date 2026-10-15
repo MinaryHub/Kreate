@@ -1625,3 +1625,4 @@ op-sketch-reattach-outline = 윤곽 다시 투영
 op-object-add-bearing-shields = 실드
 op-object-add-gear-shaft-angle = 축 사이 각 (베벨)
 op-anim-nla-strip-set-blend = 섞기 방식
+op-uv-unwrap-method = 방식

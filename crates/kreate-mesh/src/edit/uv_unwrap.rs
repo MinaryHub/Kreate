@@ -12,6 +12,16 @@
 //! conjugate gradients on its normal equations: no dense matrix, no external
 //! solver, linear memory.
 //!
+//! # Less stretch
+//!
+//! A conformal map keeps angles and lets areas go: a hemisphere comes out
+//! with its rim's faces several times the size of its pole's. With
+//! [`Method::LowStretch`] the conformal map is the start of Liu et al.'s
+//! as-rigid-as-possible parameterisation: each triangle's nearest turn of
+//! its own shape found, then every corner solved again to fit them all,
+//! a number of times over. Angles and areas both come out near their own —
+//! what Blender's Angle Based unwrap is reached for to give.
+//!
 //! # Islands
 //!
 //! Faces are joined across every edge that is not a seam and whose other face
@@ -34,9 +44,31 @@ use crate::attribute::{names, AttrType, Domain};
 use crate::bmesh::BMesh;
 use crate::edit::uv_pack;
 
+/// How an island is laid flat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Method {
+    /// Least squares conformal: angles kept, areas let go.
+    Conformal,
+    /// The conformal map relaxed toward each triangle's own shape: angles
+    /// and areas both near their own.
+    #[default]
+    LowStretch,
+}
+
 /// Unwraps `faces` into `layer`, packing the pieces with `margin` between
 /// them. Returns how many corners were written.
 pub fn unwrap(mesh: &mut BMesh, faces: &[FaceId], layer: &str, margin: f32) -> usize {
+    unwrap_by(mesh, faces, layer, margin, Method::default())
+}
+
+/// [`unwrap`], laid flat the way asked.
+pub fn unwrap_by(
+    mesh: &mut BMesh,
+    faces: &[FaceId],
+    layer: &str,
+    margin: f32,
+    method: Method,
+) -> usize {
     let islands = islands(mesh, faces);
     let mut written: Vec<(LoopId, Vec2)> = Vec::new();
     let mut packed: Vec<Vec<LoopId>> = Vec::new();
@@ -56,7 +88,7 @@ pub fn unwrap(mesh: &mut BMesh, faces: &[FaceId], layer: &str, margin: f32) -> u
         .map(|s| s.to_vec())
         .unwrap_or_default();
     for island in &islands {
-        let Some((uvs, pinned)) = flatten(mesh, island, &seams, &pins, &current) else {
+        let Some((uvs, pinned)) = flatten(mesh, island, &seams, &pins, &current, method) else {
             continue;
         };
         let mut corners = Vec::new();
@@ -133,6 +165,7 @@ fn flatten(
     seams: &[bool],
     pins: &[bool],
     current: &[Vec2],
+    method: Method,
 ) -> Option<(Vec<(LoopId, Vec2)>, bool)> {
     let in_island: std::collections::HashSet<FaceId> = island.iter().copied().collect();
     let mut parent: HashMap<LoopId, LoopId> = HashMap::new();
@@ -247,6 +280,8 @@ fn flatten(
     }
     let mut rows: Vec<Row> = Vec::with_capacity(triangles.len() * 2);
     let mut area3d = 0.0f64;
+    // Each triangle laid in its own plane, for the relaxation after.
+    let mut shapes: Vec<([usize; 3], [kreate_math::DVec2; 3])> = Vec::new();
     for t in &triangles {
         let (a, b, c) = (p[t[0]].as_dvec3(), p[t[1]].as_dvec3(), p[t[2]].as_dvec3());
         let e1 = b - a;
@@ -259,6 +294,7 @@ fn flatten(
         area3d += cross * 0.5;
         let x = e1 / len1;
         let local = [(0.0, 0.0), (len1, 0.0), (e2.dot(x), cross / len1)];
+        shapes.push((*t, local.map(|(a, b)| kreate_math::DVec2::new(a, b))));
         let scale = 1.0 / (cross * 0.5).sqrt();
         // W_j = (x_l - x_k) + i (y_l - y_k) for (j, k, l) in cyclic order.
         let mut re: Vec<(usize, f64)> = Vec::new();
@@ -407,6 +443,9 @@ fn flatten(
             *p *= s;
         }
     }
+    if method == Method::LowStretch {
+        uv = relax(&shapes, uv, 12);
+    }
     // One pin: the island keeps its shape and moves so that corner stays.
     let one_pin = user_pins.first().copied();
     if let Some(k) = one_pin {
@@ -422,6 +461,130 @@ fn flatten(
         corner_of.into_iter().map(|(l, k)| (l, uv[k])).collect(),
         one_pin.is_some(),
     ))
+}
+
+/// As-rigid-as-possible: `uv` relaxed `rounds` times toward each triangle's
+/// own shape — its best turn found (local), then all the corners solved to
+/// fit those turns by cotangent-weighted least squares (global, conjugate
+/// gradients, the first corner held where it is).
+fn relax(
+    shapes: &[([usize; 3], [kreate_math::DVec2; 3])],
+    uv: Vec<Vec2>,
+    rounds: usize,
+) -> Vec<Vec2> {
+    use kreate_math::DVec2;
+    let n = uv.len();
+    if n < 3 || shapes.is_empty() {
+        return uv;
+    }
+    let mut u: Vec<DVec2> = uv.iter().map(|p| p.as_dvec2()).collect();
+    // Cotangent weights per triangle edge (j, k), opposite corner i;
+    // kept positive, so the system stays one a gradient can solve.
+    let cot = |a: DVec2, b: DVec2, c: DVec2| {
+        let (e1, e2) = (b - a, c - a);
+        (e1.dot(e2) / e1.perp_dot(e2).abs().max(1e-18)).max(1e-3)
+    };
+    let edges: Vec<[(usize, usize, f64); 3]> = shapes
+        .iter()
+        .map(|(_, x)| {
+            [0, 1, 2].map(|i| {
+                let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+                (j, k, cot(x[i], x[j], x[k]) * 0.5)
+            })
+        })
+        .collect();
+    let mut diag = vec![0.0f64; n];
+    for ((t, _), e) in shapes.iter().zip(&edges) {
+        for (j, k, w) in e {
+            diag[t[*j]] += w;
+            diag[t[*k]] += w;
+        }
+    }
+    let held = 0usize;
+    for _ in 0..rounds {
+        // Local: the turn nearest each triangle's current map.
+        let turns: Vec<(f64, f64)> = shapes
+            .iter()
+            .zip(&edges)
+            .map(|((t, x), e)| {
+                let (mut a, mut b) = (0.0, 0.0);
+                for (j, k, w) in e {
+                    let du = u[t[*j]] - u[t[*k]];
+                    let dx = x[*j] - x[*k];
+                    // The 2x2 covariance's rotation part.
+                    a += w * (du.x * dx.x + du.y * dx.y);
+                    b += w * (du.y * dx.x - du.x * dx.y);
+                }
+                let r = (a * a + b * b).sqrt().max(1e-300);
+                (a / r, b / r)
+            })
+            .collect();
+        // Global: L u = b, each axis.
+        let mut rhs = vec![DVec2::ZERO; n];
+        for (((t, x), e), (c, s)) in shapes.iter().zip(&edges).zip(&turns) {
+            for (j, k, w) in e {
+                let dx = x[*j] - x[*k];
+                let r = DVec2::new(c * dx.x - s * dx.y, s * dx.x + c * dx.y);
+                rhs[t[*j]] += r * *w;
+                rhs[t[*k]] -= r * *w;
+            }
+        }
+        let apply = |v: &[DVec2]| -> Vec<DVec2> {
+            let mut out: Vec<DVec2> = (0..n).map(|i| v[i] * diag[i]).collect();
+            for ((t, _), e) in shapes.iter().zip(&edges) {
+                for (j, k, w) in e {
+                    let (a, b) = (t[*j], t[*k]);
+                    out[a] -= v[b] * *w;
+                    out[b] -= v[a] * *w;
+                }
+            }
+            out[held] = v[held];
+            out
+        };
+        // CG from the current map, the held corner fixed.
+        let mut x = u.clone();
+        let ax = apply(&x);
+        let mut r: Vec<DVec2> = (0..n)
+            .map(|i| {
+                if i == held {
+                    DVec2::ZERO
+                } else {
+                    rhs[i] - ax[i]
+                }
+            })
+            .collect();
+        let mut d = r.clone();
+        let dot = |a: &[DVec2], b: &[DVec2]| a.iter().zip(b).map(|(p, q)| p.dot(*q)).sum::<f64>();
+        let mut rr = dot(&r, &r);
+        let stop = rr.max(1e-30) * 1e-16;
+        for _ in 0..(2 * n).max(50) {
+            if rr <= stop {
+                break;
+            }
+            let mut ad = apply(&d);
+            ad[held] = DVec2::ZERO;
+            let dad = dot(&d, &ad);
+            if dad.abs() < 1e-300 {
+                break;
+            }
+            let alpha = rr / dad;
+            for i in 0..n {
+                x[i] += d[i] * alpha;
+                r[i] -= ad[i] * alpha;
+            }
+            let next = dot(&r, &r);
+            let beta = next / rr;
+            rr = next;
+            for i in 0..n {
+                d[i] = r[i] + d[i] * beta;
+            }
+        }
+        if !x.iter().all(|p| p.is_finite()) {
+            break;
+        }
+        u = x;
+    }
+    u.iter().map(|p| p.as_vec2()).collect()
 }
 
 #[cfg(test)]
@@ -451,6 +614,40 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A hemisphere laid flat: the conformal map lets its faces' sizes run
+    /// far apart, rim to pole; the low-stretch one keeps them near.
+    #[test]
+    fn low_stretch_keeps_areas_nearer_than_conformal() {
+        let spread = |method: Method| {
+            let sphere = primitives::uv_sphere(1.0, 32, 16);
+            let mut mesh = sphere.to_bmesh();
+            // The top half only.
+            let lower: Vec<FaceId> = mesh
+                .face_ids()
+                .filter(|f| {
+                    let ls = mesh.face_loops(*f);
+                    ls.iter()
+                        .any(|l| mesh.position(mesh.loop_vert(*l).unwrap()).unwrap().z < -1e-4)
+                })
+                .collect();
+            for f in lower {
+                mesh.remove_face(f);
+            }
+            let faces: Vec<FaceId> = mesh.face_ids().collect();
+            unwrap_by(&mut mesh, &faces, LAYER, 0.0, method);
+            let s = stretch(&mesh);
+            let (lo, hi) = s
+                .iter()
+                .fold((f32::MAX, 0.0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+            hi / lo.max(1e-12)
+        };
+        let (conformal, low) = (spread(Method::Conformal), spread(Method::LowStretch));
+        assert!(
+            low < conformal * 0.6,
+            "low stretch {low} against conformal {conformal}"
+        );
     }
 
     #[test]
