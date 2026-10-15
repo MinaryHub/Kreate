@@ -296,8 +296,9 @@ pub struct AddFastenerParams {
     /// A screw's length under its head.
     #[param(min = 0.001, soft_max = 0.2, unit = "length")]
     pub length: f64,
-    /// The thread modelled to ISO 68-1, for printing or close looks; plain
-    /// at its major diameter otherwise, which is lighter.
+    /// The thread modelled to ISO 68-1 — a screw's on its shank, a nut's cut
+    /// into its bore — for printing or close looks; plain otherwise (a
+    /// screw at its major diameter, a nut at its minor), which is lighter.
     pub thread: bool,
     /// At the 3D cursor, sitting on it; otherwise at `location`.
     pub at_cursor: bool,
@@ -522,6 +523,9 @@ pub struct AddBearingParams {
         "6208", "6209", "6210", "6300", "6301"
     ))]
     pub size: u32,
+    /// Open, a shield on one face (Z), or on both (2Z).
+    #[param(variants("open", "z", "2z"))]
+    pub shields: u32,
     /// At the 3D cursor, standing on it; otherwise at `location`.
     pub at_cursor: bool,
     pub location: [f64; 3],
@@ -532,6 +536,7 @@ pub struct AddBearingParams {
 impl Default for AddBearingParams {
     fn default() -> Self {
         Self {
+            shields: 0,
             size: 18,
             at_cursor: true,
             location: [0.0; 3],
@@ -565,8 +570,9 @@ impl Operator for AddBearing {
             params.rotation,
         );
         // i18n-exempt: a designation and its size
-        let name = format!("Bearing {} ({}x{}x{})", b.name, b.bore, b.outside, b.width);
-        add_part(doc, name, mech::bearing(&b), at, turn);
+        let suffix = ["", "-Z", "-2Z"][params.shields.min(2) as usize];
+        let name = format!("Bearing {}{suffix} ({}x{}x{})", b.name, b.bore, b.outside, b.width);
+        add_part(doc, name, mech::bearing_shielded(&b, params.shields), at, turn);
         Ok(OpResult::Finished)
     }
 }

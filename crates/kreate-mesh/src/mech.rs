@@ -556,11 +556,23 @@ pub fn fastener(kind: FastenerKind, size: usize, length: f64, thread: bool) -> M
         ]),
         FastenerKind::Nut => {
             let minor = (s.d - 1.0825 * s.pitch) * mm;
-            prism(
-                &hexagon(f.across_flats * mm),
-                &round(minor * 0.5, 48),
-                0.0,
-                f.nut_height * mm,
+            let height = f.nut_height * mm;
+            let body = prism(&hexagon(f.across_flats * mm), &round(minor * 0.5, 48), 0.0, height);
+            if !thread {
+                return body;
+            }
+            // The thread cut into the bore: the screw's own, a pitch longer
+            // each end so it runs out through both faces, with a twentieth
+            // of a millimetre of play for a printed nut to take its screw.
+            let p = s.pitch * mm;
+            let mut cutter = internal_thread_cutter(d, p, height + 2.0 * p, 0.00005);
+            for q in cutter.positions_mut() {
+                q.z -= p as f32;
+            }
+            crate::modifiers::boolean::boolean(
+                &body,
+                &cutter,
+                crate::modifiers::BooleanOp::Difference,
             )
         }
         FastenerKind::Washer => prism(
@@ -629,6 +641,13 @@ pub const BEARINGS: [BearingSize; 27] = [
 /// three solids touching nothing. The rings are what a drawing and a fit
 /// need; the balls are there to be seen.
 pub fn bearing(size: &BearingSize) -> MeshData {
+    bearing_shielded(size, 0)
+}
+
+/// [`bearing`] with `shields` metal shields over the balls: 0 open, 1 on
+/// the top face (a "Z"), 2 on both ("2Z"). Each a thin ring set just in from
+/// the face, held by the outer ring and clear of the inner.
+pub fn bearing_shielded(size: &BearingSize, shields: u32) -> MeshData {
     let mm = 0.001;
     let (d, big, w) = (size.bore * mm, size.outside * mm, size.width * mm);
     let ball = 0.3 * (big - d);
@@ -682,6 +701,24 @@ pub fn bearing(size: &BearingSize) -> MeshData {
             p.z += (w * 0.5) as f32;
         }
         parts.push(s);
+    }
+    let thick = (w * 0.04).max(0.0002);
+    let recess = (w * 0.03).max(0.0001);
+    let clear = (ball * 0.04).max(0.00005);
+    for k in 0..shields.min(2) {
+        // Top first; the second at the bottom.
+        let (z0, z1) = if k == 0 {
+            (w - recess - thick, w - recess)
+        } else {
+            (recess, recess + thick)
+        };
+        let section = [
+            ((inner_out + clear) as f32, z0 as f32),
+            (outer_in as f32, z0 as f32),
+            (outer_in as f32, z1 as f32),
+            ((inner_out + clear) as f32, z1 as f32),
+        ];
+        parts.push(ring_of(&section, 96));
     }
     together(&parts)
 }
@@ -1667,6 +1704,28 @@ mod tests {
         assert!(blind.bounds().min.z < -0.0101);
     }
 
+    /// A threaded nut is the plain one with the thread cut into its bore:
+    /// closed, as tall, and lighter.
+    #[test]
+    fn a_threaded_nut_has_its_thread_cut_in() {
+        let m6 = 5;
+        let plain = fastener(FastenerKind::Nut, m6, 0.0, false);
+        let threaded = fastener(FastenerKind::Nut, m6, 0.0, true);
+        assert!(threaded.validate().is_empty());
+        assert!(is_closed(&threaded), "closed");
+        assert!((threaded.bounds().size().z - plain.bounds().size().z).abs() < 1e-6);
+        let (vp, vt) = (solid(&plain), solid(&threaded));
+        assert!(vt < vp * 0.99 && vt > vp * 0.8, "{vt} against {vp}");
+        // The bore now reaches out to the thread's root, near the major size.
+        let widest = threaded
+            .positions()
+            .iter()
+            .filter(|q| q.truncate().length() < 0.004)
+            .map(|q| q.truncate().length())
+            .fold(0.0f32, f32::max);
+        assert!(widest > 0.0029, "{widest}");
+    }
+
     #[test]
     fn a_bearing_is_its_bore_outside_and_width() {
         let b6204 = BEARINGS.iter().find(|b| b.name == "6204").unwrap();
@@ -1684,6 +1743,20 @@ mod tests {
             .fold(f32::MAX, f32::min);
         assert!((nearest as f64 - 0.010).abs() < 1e-6, "{nearest}");
         assert!(mass_properties(&m, |q| q).volume > 0.0);
+        // Shielded: each shield a closed ring, inside the width, more metal.
+        let open = mass_properties(&m, |q| q).volume;
+        let one = bearing_shielded(b6204, 1);
+        let two = bearing_shielded(b6204, 2);
+        for s in [&one, &two] {
+            assert!(s.validate().is_empty());
+            assert!(is_closed(s));
+            assert!((s.bounds().size().z as f64 - 0.014).abs() < 1e-6);
+        }
+        let (v1, v2) = (
+            mass_properties(&one, |q| q).volume,
+            mass_properties(&two, |q| q).volume,
+        );
+        assert!(v1 > open && (v2 - open - 2.0 * (v1 - open)).abs() < 1e-12, "{open} {v1} {v2}");
     }
 
     #[test]
