@@ -5001,7 +5001,7 @@ impl App {
         let active = (self.op_ctx.mode == OpMode::Sketch)
             .then(|| self.sketch_target().map(|t| t.0))
             .flatten();
-        self.ui.sketch_lines = kreate::sketching::other_lines(&self.doc, active);
+        self.ui.sketch_lines = kreate::sketching::other_lines_marked(&self.doc, active);
         self.ui.length_unit = self.doc.design.length_unit.metres();
         self.ui.features = kreate::sketching::feature_rows(&self.doc, &self.ui.catalog);
 

@@ -568,6 +568,43 @@ fn segment_distance(at: egui::Pos2, p: egui::Pos2, q: egui::Pos2) -> f32 {
     (p + d * t).distance(at)
 }
 
+/// [`other_lines`], each with how it is selected: 0 not, 1 its sketch is
+/// selected, 2 its sketch is the active object — for the overlay to draw a
+/// selected sketch as a selected object is drawn.
+pub fn other_lines_marked(
+    doc: &kreate_scene::Document,
+    active: Option<kreate_scene::document::ObjectId>,
+) -> Vec<([kreate_math::DVec3; 2], u8)> {
+    use kreate_math::DVec3;
+    let mut out = Vec::new();
+    for (id, o) in doc.objects() {
+        if o.sketch_lines.is_empty() || Some(id) == active || !doc.is_shown(id) {
+            continue;
+        }
+        let mark = if doc.selection.active == Some(id) && doc.selection.contains(id) {
+            2
+        } else if doc.selection.contains(id) {
+            1
+        } else {
+            0
+        };
+        let world = doc.world_transform(id);
+        let pts = kreate_ops::ops::sketch_draw::points(doc, id);
+        for [a, b] in &o.sketch_lines {
+            if let (Some(p), Some(q)) = (pts.get(*a as usize), pts.get(*b as usize)) {
+                out.push((
+                    [
+                        world.transform_point3(DVec3::new(p.x, p.y, 0.0)),
+                        world.transform_point3(DVec3::new(q.x, q.y, 0.0)),
+                    ],
+                    mark,
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The other sketches' points a drawing can start from, in the world: their
 /// ends and corners, lone points and the centres of their circles and arcs
 /// — not the points round a circle, which are only how it is drawn, nor any
@@ -1023,6 +1060,33 @@ fn crossing(p0: DVec2, p1: DVec2, q0: DVec2, q1: DVec2) -> Option<DVec2> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_selected_sketchs_lines_are_marked_so_and_the_active_ones_more() {
+        let mut doc = kreate_scene::Document::new();
+        let mut add = |name: &str| {
+            let m = doc.add_mesh(kreate_mesh::MeshData::from_faces(
+                vec![kreate_math::Vec3::ZERO, kreate_math::Vec3::X],
+                &[],
+            ));
+            let mut o = kreate_scene::document::Object::new(
+                name,
+                kreate_scene::document::ObjectData::Mesh(m),
+            );
+            o.sketch_lines = vec![[0, 1]];
+            doc.add_object(o)
+        };
+        let (a, b, c) = (add("A"), add("B"), add("C"));
+        doc.selection.add(a);
+        doc.selection.add(b);
+        doc.selection.active = Some(b);
+        let marks: Vec<u8> = other_lines_marked(&doc, None)
+            .iter()
+            .map(|(_, m)| *m)
+            .collect();
+        assert_eq!(marks, vec![1, 2, 0]);
+        let _ = c;
+    }
 
     #[test]
     fn a_click_near_a_sketchs_line_finds_the_sketch() {

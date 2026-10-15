@@ -292,6 +292,7 @@ const APP_ACTIONS: &[&str] = &[
     // what it draws goes through the sketch operators on the clicks after.
     "app.sketch_tool",
     "app.sketch_delete",
+    "app.sketch_free",
     "app.finish_sketch",
     // F / Shift+F: the brush's size and strength, which live in the
     // interface, not the document.

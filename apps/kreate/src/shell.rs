@@ -367,7 +367,9 @@ pub struct ShellState {
     pub length_unit: f64,
     /// Every other sketch's lines, drawn thin wherever they are: a sketch
     /// has no faces for the renderer to draw.
-    pub sketch_lines: Vec<[kreate_math::DVec3; 2]>,
+    /// Every other sketch's lines, and how each is selected: 0 not, 1
+    /// selected, 2 the active object.
+    pub sketch_lines: Vec<([kreate_math::DVec3; 2], u8)>,
     /// A dimension being typed into: its constraint's index and the text.
     pub sketch_dim_edit: Option<(usize, String)>,
     /// The extrude and revolve dialog's settings, kept between uses.
@@ -13188,9 +13190,23 @@ fn draw_sketches(
     let theme = kreate_ui::theme::from_ui(ui).over_viewport();
     let blue = egui::Color32::from_rgb(0x4d, 0x9b, 0xf0);
     let pinned_ink = theme.text;
-    for [a, b] in &state.sketch_lines {
+    // A selected sketch in the selection's colour, as a selected object's
+    // outline is — the active one at full strength — and thicker, over a
+    // dark edge so it reads on a pale body.
+    for ([a, b], mark) in &state.sketch_lines {
         if let (Some(p), Some(q)) = (projector.project(*a), projector.project(*b)) {
-            painter.line_segment([p, q], egui::Stroke::new(1.0, theme.text_dim));
+            let (width, ink) = match mark {
+                2 => (2.0, theme.accent),
+                1 => (2.0, theme.accent.gamma_multiply(0.65)),
+                _ => (1.0, theme.text_dim),
+            };
+            if *mark > 0 {
+                painter.line_segment(
+                    [p, q],
+                    egui::Stroke::new(width + 2.0, egui::Color32::from_black_alpha(140)),
+                );
+            }
+            painter.line_segment([p, q], egui::Stroke::new(width, ink));
         }
     }
     let Some(view) = state.sketch_view.clone() else {
