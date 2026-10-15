@@ -78,6 +78,8 @@ pub struct DynCache {
     alive: Vec<bool>,
     /// The triangles at each vertex.
     vtris: Vec<Vec<u32>>,
+    /// The triangles splits have changed or made since it was last taken.
+    changed: Vec<u32>,
 }
 
 impl DynCache {
@@ -101,6 +103,7 @@ impl DynCache {
             alive: vec![true; t.len()],
             tris: t.to_vec(),
             vtris,
+            changed: Vec::new(),
         }
     }
 
@@ -171,6 +174,7 @@ impl DynCache {
             self.vtris[b as usize].retain(|x| *x != t);
             self.vtris[m as usize].push(t);
             let new = self.tris.len() as u32;
+            self.changed.extend([t, new]);
             self.tris.push(second);
             self.alive.push(true);
             for v in second {
@@ -281,31 +285,38 @@ impl DynCache {
         out
     }
 
-    /// The corners of every triangle that comes within `radius` of
-    /// `centre`.
-    fn touched(&self, centre: Vec3, radius: f32) -> Vec<u32> {
-        let mut out: Vec<u32> = Vec::new();
-        for (t, tri) in self.tris.iter().enumerate() {
-            if !self.alive[t] {
-                continue;
+    /// The living triangles that come within `radius` of `centre`: a box
+    /// test first, the exact distance only for what it lets through.
+    fn reaching(&self, tris: impl Iterator<Item = u32>, centre: Vec3, radius: f32) -> Vec<u32> {
+        tris.filter(|t| {
+            if !self.alive[*t as usize] {
+                return false;
             }
-            let [a, b, c] = tri.map(|v| self.pos[v as usize]);
-            if triangle_distance(a, b, c, centre) < radius {
-                out.extend_from_slice(tri);
-            }
-        }
+            let [a, b, c] = self.tris[*t as usize].map(|v| self.pos[v as usize]);
+            let (lo, hi) = (a.min(b).min(c), a.max(b).max(c));
+            centre.clamp(lo, hi).distance_squared(centre) < radius * radius
+                && triangle_distance(a, b, c, centre) < radius
+        })
+        .collect()
+    }
+
+    /// The corners of `tris`, once each, in order.
+    fn corners_of(&self, tris: &[u32]) -> Vec<u32> {
+        let mut out: Vec<u32> = tris
+            .iter()
+            .filter(|t| self.alive[**t as usize])
+            .flat_map(|t| self.tris[*t as usize])
+            .collect();
         out.sort_unstable();
         out.dedup();
         out
     }
 
-    fn within(&self, centre: Vec3, radius: f32) -> Vec<u32> {
-        (0..self.pos.len() as u32)
-            .filter(|v| {
-                !self.vtris[*v as usize].is_empty()
-                    && self.pos[*v as usize].distance(centre) < radius
-            })
-            .collect()
+    /// The vertices of `tris` within `radius` of `centre`.
+    fn within(&self, tris: &[u32], centre: Vec3, radius: f32) -> Vec<u32> {
+        let mut out = self.corners_of(tris);
+        out.retain(|v| self.pos[*v as usize].distance(centre) < radius);
+        out
     }
 
     fn dab(&mut self, dab: Dab, from: Option<Vec3>, stroke: &Stroke, detail: f32) -> bool {
@@ -313,12 +324,23 @@ impl DynCache {
         // rounds over; then short ones collapsed.
         let reach = dab.radius * 1.1;
         let made = self.pos.len();
+        // The whole surface is looked through once a dab. Nothing outside
+        // the brush's reach comes into it while cutting: a split leaves
+        // the parts of a far triangle inside the triangle, as far, and the
+        // new ones are looked at as they come. Every later look is over
+        // those alone — on a dense surface it was all of a frame's cost.
+        let first = self.tris.len() as u32;
+        let mut nearby = self.reaching(0..first, dab.centre, reach);
+        // A round splits every long edge in reach, so the next has only
+        // the triangles those splits changed to look at.
+        let mut look = nearby.clone();
+        self.changed.clear();
         for _ in 0..6 {
             // The triangles the brush touches, not only those with a corner
             // inside it: on a coarse mesh — a cube, a few big faces — the
             // brush lands in the middle of a face with no corner near, and
             // went on without cutting anything.
-            let near = self.touched(dab.centre, reach);
+            let near = self.corners_of(&look);
             let mut long: Vec<(f32, u32, u32)> = self
                 .edges_near(&near)
                 .into_iter()
@@ -342,8 +364,20 @@ impl DynCache {
                     self.split(a, b);
                 }
             }
+            let mut changed = std::mem::take(&mut self.changed);
+            changed.sort_unstable();
+            changed.dedup();
+            look = self.reaching(changed.into_iter(), dab.centre, reach);
         }
-        let near = self.within(dab.centre, dab.radius);
+        nearby.retain(|t| self.alive[*t as usize]);
+        // Collapsing moves only corners inside the brush, onto the middle
+        // of an edge inside it.
+        let fresh: Vec<u32> = nearby
+            .iter()
+            .copied()
+            .chain(first..self.tris.len() as u32)
+            .collect();
+        let near = self.within(&fresh, dab.centre, dab.radius);
         for (a, b) in self.edges_near(&near) {
             if self.vtris[a as usize].is_empty() || self.vtris[b as usize].is_empty() {
                 continue;
@@ -358,7 +392,12 @@ impl DynCache {
                 .filter(|v| !self.vtris[*v as usize].is_empty())
                 .collect()
         } else {
-            self.within(dab.centre, dab.radius)
+            let fresh: Vec<u32> = fresh
+                .iter()
+                .copied()
+                .chain(first..self.tris.len() as u32)
+                .collect();
+            self.within(&fresh, dab.centre, dab.radius)
         };
         let under: Vec<(usize, f32)> = near
             .iter()
