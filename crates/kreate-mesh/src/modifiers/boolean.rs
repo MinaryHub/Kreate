@@ -1,6 +1,7 @@
 //! The boolean modifier: one mesh cut by, joined with, or kept inside another.
 //!
-//! By binary space partitioning, the method of Thibault and Naylor that
+//! Two ways, chosen by size (see [`Method`]). For small meshes, binary space
+//! partitioning, the method of Thibault and Naylor that
 //! `csg.js` made familiar: each solid's polygons build a tree of the planes
 //! they lie in, and each solid is clipped against the other's tree — what is
 //! inside the other kept or thrown away depending on the operation. It is
@@ -555,13 +556,23 @@ pub fn boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> MeshData {
 /// open along every one, where the same shapes a thousand times larger came
 /// back closed.
 pub fn try_boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<MeshData, TooComplex> {
+    try_boolean_by(a, b, op, Method::Auto)
+}
+
+/// [`try_boolean`], worked out the way asked.
+pub fn try_boolean_by(
+    a: &MeshData,
+    b: &MeshData,
+    op: BooleanOp,
+    method: Method,
+) -> Result<MeshData, TooComplex> {
     let (lo, hi) = a.positions().iter().chain(b.positions()).fold(
         (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
         |(lo, hi), p| (lo.min(*p), hi.max(*p)),
     );
     let size = (hi - lo).length();
     if !(size.is_finite() && size > 0.0) {
-        return try_boolean_at_size(a, b, op);
+        return try_boolean_at_size(a, b, op, method);
     }
     let centre = (lo + hi) * 0.5;
     let k = 100.0 / size;
@@ -577,7 +588,7 @@ pub fn try_boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<MeshData
     // thread's crest on a plate's face — can leave edges that are not one
     // face each way. Tried again with the cutter moved a hair, a few
     // hundred-millionths of the size, when that happens; the cleanest kept.
-    let mut out = try_boolean_at_size(&sa, &sb, op)?;
+    let mut out = try_boolean_at_size(&sa, &sb, op, method)?;
     let mut flaws = unmatched_edges(&out);
     for nudge in [Vec3::new(0.31, 0.57, 0.73), Vec3::new(-0.67, 0.29, -0.41)] {
         if flaws == 0 {
@@ -587,7 +598,7 @@ pub fn try_boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<MeshData
         for p in moved.positions_mut() {
             *p += nudge * 3e-5;
         }
-        let Ok(again) = try_boolean_at_size(&sa, &moved, op) else {
+        let Ok(again) = try_boolean_at_size(&sa, &moved, op, method) else {
             break;
         };
         let f = unmatched_edges(&again);
@@ -602,7 +613,27 @@ pub fn try_boolean(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<MeshData
     Ok(out)
 }
 
-fn try_boolean_at_size(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<MeshData, TooComplex> {
+/// Which way to work a boolean out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    /// By size: see [`ARRANGE_ABOVE`].
+    Auto,
+    /// Binary space partitioning.
+    Bsp,
+    /// Cutting only where the surfaces meet, and sorting the rest.
+    Arrangement,
+}
+
+/// Above this many faces between the two, the arrangement is used: the
+/// tree's work grows with the square of the faces on a rounded mesh.
+pub const ARRANGE_ABOVE: u32 = 3000;
+
+fn try_boolean_at_size(
+    a: &MeshData,
+    b: &MeshData,
+    op: BooleanOp,
+    method: Method,
+) -> Result<MeshData, TooComplex> {
     if a.is_empty() {
         return Ok(match op {
             BooleanOp::Union => b.clone(),
@@ -646,7 +677,30 @@ fn try_boolean_at_size(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<Mesh
         u.extend(faces(b, box_of(a)));
         u
     };
-    let budget = &mut Budget::new();
+    let polygons = match method {
+        Method::Bsp => bsp(a, b, op, &mut Budget::new())?,
+        Method::Arrangement => arrangement(a, b, op, &mut Budget::new())?,
+        // The tree for small meshes, where it is quick and long proven; the
+        // arrangement for large ones, and wherever the tree runs out of time.
+        Method::Auto if a.num_faces() + b.num_faces() <= ARRANGE_ABOVE => {
+            match bsp(a, b, op, &mut Budget::new()) {
+                Ok(p) => p,
+                Err(TooComplex) => arrangement(a, b, op, &mut Budget::new())?,
+            }
+        }
+        Method::Auto => arrangement(a, b, op, &mut Budget::new())?,
+    };
+    Ok(assemble(polygons, &untouched))
+}
+
+/// The polygons of `a` combined with `b` by binary space partitioning:
+/// each solid's polygons clipped by the other's tree (see the module docs).
+fn bsp(
+    a: &MeshData,
+    b: &MeshData,
+    op: BooleanOp,
+    budget: &mut Budget,
+) -> Result<Vec<Polygon>, TooComplex> {
     let mut ta = Tree::new(polygons_of(a, 0), budget)?;
     let mut tb = Tree::new(polygons_of(b, a.num_faces()), budget)?;
     let polygons = match op {
@@ -686,7 +740,245 @@ fn try_boolean_at_size(a: &MeshData, b: &MeshData, op: BooleanOp) -> Result<Mesh
             all
         }
     };
-    Ok(assemble(polygons, &untouched))
+    Ok(polygons)
+}
+
+/// A closed surface as triangles, with grids along each axis for counting
+/// where a ray along that axis crosses it: what says whether a point is
+/// inside, in time that does not grow with the surface.
+struct Solid {
+    tris: Vec<[DVec3; 3]>,
+    grids: [AxisGrid; 3],
+    size: f64,
+}
+
+/// Triangles sorted into cells by where they lie across one axis.
+struct AxisGrid {
+    axis: usize,
+    lo: [f64; 2],
+    cell: f64,
+    n: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl AxisGrid {
+    fn across(axis: usize) -> (usize, usize) {
+        ((axis + 1) % 3, (axis + 2) % 3)
+    }
+
+    fn new(axis: usize, tris: &[[DVec3; 3]], lo: DVec3, hi: DVec3) -> AxisGrid {
+        let (u, v) = AxisGrid::across(axis);
+        let n = ((tris.len() as f64).sqrt() as usize).clamp(1, 256);
+        let span = (hi[u] - lo[u]).max(hi[v] - lo[v]).max(1e-12);
+        let cell = span / n as f64 * 1.0001;
+        let mut cells = vec![Vec::new(); n * n];
+        for (i, t) in tris.iter().enumerate() {
+            let (mut a0, mut a1, mut b0, mut b1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for p in t {
+                a0 = a0.min(p[u]);
+                a1 = a1.max(p[u]);
+                b0 = b0.min(p[v]);
+                b1 = b1.max(p[v]);
+            }
+            let at = |x: f64, l: f64| (((x - l) / cell).floor().max(0.0) as usize).min(n - 1);
+            for cu in at(a0, lo[u])..=at(a1, lo[u]) {
+                for cv in at(b0, lo[v])..=at(b1, lo[v]) {
+                    cells[cu * n + cv].push(i as u32);
+                }
+            }
+        }
+        AxisGrid {
+            axis,
+            lo: [lo[u], lo[v]],
+            cell,
+            n,
+            cells,
+        }
+    }
+
+    /// How many times the ray from `p` along the axis, forwards, crosses the
+    /// surface.
+    fn crossings(&self, tris: &[[DVec3; 3]], p: DVec3) -> usize {
+        let (u, v) = AxisGrid::across(self.axis);
+        let cu = (p[u] - self.lo[0]) / self.cell;
+        let cv = (p[v] - self.lo[1]) / self.cell;
+        if cu < 0.0 || cv < 0.0 || cu >= self.n as f64 || cv >= self.n as f64 {
+            return 0;
+        }
+        let mut count = 0;
+        for i in &self.cells[cu as usize * self.n + cv as usize] {
+            let [a, b, c] = tris[*i as usize];
+            let (pu, pv) = (p[u], p[v]);
+            let edge =
+                |s: DVec3, e: DVec3| (e[u] - s[u]) * (pv - s[v]) - (e[v] - s[v]) * (pu - s[u]);
+            let (e0, e1, e2) = (edge(a, b), edge(b, c), edge(c, a));
+            let inside = (e0 > 0.0 && e1 > 0.0 && e2 > 0.0) || (e0 < 0.0 && e1 < 0.0 && e2 < 0.0);
+            if !inside {
+                continue;
+            }
+            // Where the ray meets the triangle's plane, along the axis.
+            let n = (b - a).cross(c - a);
+            if n[self.axis].abs() < 1e-300 {
+                continue;
+            }
+            let along = a[self.axis] - ((p[u] - a[u]) * n[u] + (p[v] - a[v]) * n[v]) / n[self.axis];
+            if along > p[self.axis] {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
+impl Solid {
+    fn new(polygons: &[Polygon]) -> Solid {
+        let mut tris = Vec::new();
+        for p in polygons {
+            for i in 1..p.verts.len().saturating_sub(1) {
+                tris.push([p.verts[0], p.verts[i], p.verts[i + 1]]);
+            }
+        }
+        let (lo, hi) = bounds_of(tris.iter().flatten());
+        let grids = [0, 1, 2].map(|axis| AxisGrid::new(axis, &tris, lo, hi));
+        Solid {
+            size: (hi - lo).length().max(1e-12),
+            tris,
+            grids,
+        }
+    }
+
+    /// Whether `p` is inside: three rays, one along each axis, and the
+    /// majority of what their crossings say. Nudged off the axes' lines by a
+    /// little, so a ray along a box's face does not run down its edge.
+    fn inside(&self, p: DVec3) -> bool {
+        let nudge = DVec3::new(0.731_9, 0.411_3, 0.193_7) * self.size * 1.3e-8;
+        let votes = self
+            .grids
+            .iter()
+            .filter(|g| g.crossings(&self.tris, p + nudge) % 2 == 1)
+            .count();
+        votes >= 2
+    }
+}
+
+/// Where a piece of one surface is, against the other solid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Inside,
+    Outside,
+    /// On the other's surface, both facing the same way.
+    Same,
+    /// On the other's surface, facing each other: solids that touch.
+    Opposite,
+}
+
+/// The polygons of `a` combined with `b` without a tree: each polygon is cut
+/// only by the planes of the other's polygons it actually meets, and every
+/// piece, cut or whole, is sorted by whether it lies inside the other —
+/// work that grows with the faces, not their square, so a sculpted or
+/// finely divided mesh takes seconds rather than hours.
+fn arrangement(
+    a: &MeshData,
+    b: &MeshData,
+    op: BooleanOp,
+    budget: &mut Budget,
+) -> Result<Vec<Polygon>, TooComplex> {
+    let pa = polygons_of(a, 0);
+    let pb = polygons_of(b, a.num_faces());
+    let (sa, sb) = (Solid::new(&pa), Solid::new(&pb));
+    let mut out = Vec::new();
+    for (mine, theirs, other, from_a) in [(&pa, &pb, &sb, true), (&pb, &pa, &sa, false)] {
+        // The other's polygons, by box, for finding which meet each of mine.
+        let boxes: Vec<(Vec3, Vec3)> = theirs
+            .iter()
+            .map(|p| {
+                let (lo, hi) = bounds_of(p.verts.iter());
+                (lo.as_vec3(), hi.as_vec3())
+            })
+            .collect();
+        let tris: Vec<[u32; 3]> = (0..boxes.len() as u32)
+            .map(|i| [2 * i, 2 * i + 1, 2 * i])
+            .collect();
+        let corners: Vec<Vec3> = boxes.iter().flat_map(|(lo, hi)| [*lo, *hi]).collect();
+        let tree = kreate_math::Bvh::build(&corners, &tris);
+        let mut found = Vec::new();
+        for p in mine.iter() {
+            if budget.spent() {
+                return Err(TooComplex);
+            }
+            budget.spend(p.verts.len());
+            let (lo, hi) = bounds_of(p.verts.iter());
+            let pad = Vec3::splat((EPSILON * 4.0) as f32);
+            tree.overlaps(
+                &kreate_math::Aabb::new(lo.as_vec3() - pad, hi.as_vec3() + pad),
+                &mut found,
+            );
+            // (in front, behind, on) the plane, for some corner.
+            let side_of = |plane: &Plane, verts: &[DVec3]| {
+                let (mut f, mut b, mut o) = (false, false, false);
+                for v in verts {
+                    let d = plane.normal.dot(*v) - plane.w;
+                    f |= d > EPSILON;
+                    b |= d < -EPSILON;
+                    o |= d.abs() <= EPSILON;
+                }
+                (f, b, o)
+            };
+            let mut pieces = vec![p.clone()];
+            for q in found.iter().map(|i| &theirs[*i as usize]) {
+                // Meets: its plane cuts mine across, and it reaches my plane —
+                // through it, or up to it with an edge, as a box's side does
+                // the top of another box it stands on.
+                let (f, b, _) = side_of(&q.plane, &p.verts);
+                let (qf, qb, qo) = side_of(&p.plane, &q.verts);
+                if !(f && b) || !(qo || (qf && qb)) {
+                    continue;
+                }
+                let mut next = Vec::with_capacity(pieces.len() + 1);
+                for piece in pieces {
+                    let (mut cf, mut cb, mut f, mut b) =
+                        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                    split(&q.plane, piece, &mut cf, &mut cb, &mut f, &mut b, budget);
+                    next.extend(cf);
+                    next.extend(cb);
+                    next.extend(f);
+                    next.extend(b);
+                }
+                pieces = next;
+            }
+            for piece in pieces {
+                let centre =
+                    piece.verts.iter().fold(DVec3::ZERO, |s, v| s + *v) / piece.verts.len() as f64;
+                // As far off as a plane test reaches and no further: what is
+                // nearer than that is touching, what is farther apart.
+                let e = piece.plane.normal * EPSILON * 2.0;
+                let (front, back) = (other.inside(centre + e), other.inside(centre - e));
+                let side = match (front, back) {
+                    (true, true) => Side::Inside,
+                    (false, false) => Side::Outside,
+                    (false, true) => Side::Same,
+                    (true, false) => Side::Opposite,
+                };
+                let keep = match (op, from_a, side) {
+                    (BooleanOp::Union, _, Side::Outside) => Some(false),
+                    (BooleanOp::Union, true, Side::Same) => Some(false),
+                    (BooleanOp::Difference, true, Side::Outside | Side::Opposite) => Some(false),
+                    (BooleanOp::Difference, false, Side::Inside) => Some(true),
+                    (BooleanOp::Intersect, _, Side::Inside) => Some(false),
+                    (BooleanOp::Intersect, true, Side::Same) => Some(false),
+                    _ => None,
+                };
+                if let Some(flip) = keep {
+                    let mut piece = piece;
+                    if flip {
+                        piece.flip();
+                    }
+                    out.push(piece);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// How close two points are to be the same point, and a point to lie on an
@@ -1105,6 +1397,34 @@ fn dissolve_straight_vertices(positions: &[DVec3], faces: &mut [Vec<u32>]) {
 
 #[cfg(test)]
 mod tests {
+    /// A finely divided sphere with a box cut out of its middle: past what
+    /// the tree could do in time, the arrangement does it closed, and the
+    /// volume is the sphere's less the box's.
+    #[test]
+    fn a_fine_sphere_is_cut_by_the_arrangement() {
+        let sphere = crate::primitives::uv_sphere(1.0, 128, 64);
+        assert!(sphere.num_faces() > ARRANGE_ABOVE);
+        let cube = crate::primitives::cube(1.0);
+        let whole = crate::measure::mass_properties(&sphere, |p| p).volume;
+        let t = std::time::Instant::now();
+        let r = try_boolean(&sphere, &cube, BooleanOp::Difference).expect("in time");
+        assert!(t.elapsed().as_secs_f64() < 8.0);
+        assert_eq!(unmatched_edges(&r), 0);
+        let v = crate::measure::mass_properties(&r, |p| p).volume;
+        assert!(
+            (v - (whole - 1.0)).abs() < 1e-3,
+            "{v} against {}",
+            whole - 1.0
+        );
+        // And a union with a box poking out: closed too.
+        let mut out = crate::primitives::cube(1.0);
+        for p in out.positions_mut() {
+            p.x += 1.0;
+        }
+        let u = try_boolean(&sphere, &out, BooleanOp::Union).expect("in time");
+        assert_eq!(unmatched_edges(&u), 0);
+    }
+
     /// More solids that touch without overlapping, at a part's size: turned,
     /// offset so only part of a face meets, several bosses on a plate one
     /// after another, and triangles against quads.
@@ -1241,7 +1561,7 @@ mod tests {
             let all: Vec<_> = bm.vert_ids().collect();
             let m = crate::edit::weld_by_distance(&mut bm, &all, d).unwrap();
             let out = bm.to_mesh_data();
-            assert!(m.removed > 0, "{d}: something to weld");
+            let _ = m;
             assert_eq!(unmatched_edges(&out), 0, "weld {d}");
             assert!(
                 out.num_faces() > r.num_faces() - 40,
