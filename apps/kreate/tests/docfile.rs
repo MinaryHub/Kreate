@@ -670,8 +670,13 @@ fn pruning_clears_what_nobody_wants_and_keeps_what_someone_might() {
         return;
     };
     let month_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
-    let _ = std::fs::File::open(&stale)
-        .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(month_ago)));
+    // Opened for writing: Windows will not change the times of a file
+    // opened only to read, and the refusal, ignored, left it looking fresh.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&stale)
+        .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(month_ago)))
+        .expect("age the stale autosave");
     // A session that ended with nothing in it: cleared.
     let empty = root.join("session-4294967288");
     std::fs::create_dir_all(&empty).expect("create");
