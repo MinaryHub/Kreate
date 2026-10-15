@@ -14860,6 +14860,96 @@ kreate.ops.object.add_primitive()",
         assert_eq!(app.doc.objects().count(), 0, "the second line did not run");
     }
 
+    /// A sketch read back by the indices its operators take: a rectangle is
+    /// four points, four lines and one region of its area.
+    #[test]
+    fn a_sketch_is_read_out_with_its_points_lines_and_regions() {
+        let mut app = app();
+        app.run_script_reporting(
+            "kreate.ops.sketch.new()
+kreate.ops.sketch.rectangle(a=(0, 0, 0), b=(0.02, 0.01, 0))",
+        );
+        let out = app.bridge_call("sketch", &serde_json::json!({})).unwrap();
+        // The sketch's origin point, and the rectangle's four.
+        assert_eq!(out["points"].as_array().unwrap().len(), 5);
+        assert_eq!(out["lines"].as_array().unwrap().len(), 4);
+        let regions = out["regions"].as_array().unwrap();
+        assert_eq!(regions.len(), 1);
+        assert!((regions[0]["area"].as_f64().unwrap() - 0.0002).abs() < 1e-7);
+        assert_eq!(out["plane"]["normal"][2], 1.0);
+        let err = app
+            .bridge_call("sketch", &serde_json::json!({ "object": "Nobody" }))
+            .unwrap_err();
+        assert!(err.contains("Nobody"));
+    }
+
+    /// Two cubes measured: each its volume and mass, and between them the
+    /// gap their surfaces leave — none where they touch.
+    #[test]
+    fn two_objects_are_measured_and_the_gap_between_them() {
+        let mut app = app();
+        app.run_script_reporting(
+            "kreate.ops.object.add_primitive()
+kreate.ops.object.add_primitive(location=(2.5, 0, 0))",
+        );
+        let out = app
+            .bridge_call(
+                "measure",
+                &serde_json::json!({ "objects": ["Cube", "Cube.001"], "density": 1000.0 }),
+            )
+            .unwrap();
+        let a = &out["objects"][0];
+        assert_eq!(a["closed"], true);
+        assert!((a["volume_m3"].as_f64().unwrap() - 8.0).abs() < 1e-6);
+        assert!((a["mass_kg"].as_f64().unwrap() - 8000.0).abs() < 1e-3);
+        let between = &out["between"];
+        assert!(
+            (between["surface_gap_m"].as_f64().unwrap() - 0.5).abs() < 1e-5,
+            "{between}"
+        );
+        assert_eq!(between["overlapping"], false);
+        assert!((between["box_gap"][0].as_f64().unwrap() - 0.5).abs() < 1e-9);
+        // Pushed together: no gap, and said to overlap.
+        app.run_script_reporting(
+            "kreate.ops.object.set_transform(object=\"Cube.001\", location=(1.5, 0, 0))",
+        );
+        let out = app
+            .bridge_call(
+                "measure",
+                &serde_json::json!({ "objects": ["Cube", "Cube.001"] }),
+            )
+            .unwrap();
+        assert_eq!(out["between"]["overlapping"], true);
+        assert_eq!(out["between"]["surface_gap_m"], 0.0);
+        assert!((out["density_kg_m3"].as_f64().unwrap() - app.doc.design.density).abs() < 1e-9);
+    }
+
+    /// The history read out: the steps as the lines they were, and what
+    /// was undone.
+    #[test]
+    fn the_history_is_read_out_as_its_lines() {
+        let mut app = app();
+        app.run_script_reporting(
+            "kreate.ops.object.add_primitive()
+kreate.ops.object.set_transform(location=(1, 0, 0))",
+        );
+        app.undo();
+        let out = app
+            .bridge_call("history", &serde_json::json!({ "limit": 10 }))
+            .unwrap();
+        assert_eq!(out["steps"], 2);
+        assert_eq!(out["cursor"], 1);
+        assert_eq!(out["can_redo"], true);
+        assert!(out["done"][0]["line"]
+            .as_str()
+            .unwrap()
+            .contains("add_primitive"));
+        assert!(out["undone"][0]["line"]
+            .as_str()
+            .unwrap()
+            .contains("set_transform"));
+    }
+
     /// The scene listed in part: by name, by prefix, by selection, a few,
     /// and in short past a size — each said with how many there are.
     #[test]

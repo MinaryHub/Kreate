@@ -241,6 +241,28 @@ impl App {
                 Ok(self.overlaps_json(tolerance, exact, scope.as_deref(), limit))
             }
             "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
+            "sketch" => self.sketch_json(text("object").as_deref()),
+            "measure" => {
+                let names: Vec<String> = params
+                    .get("objects")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let density = params.get("density").and_then(|v| v.as_f64());
+                self.measure_json(&names, density)
+            }
+            "history" => {
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20)
+                    .clamp(1, 500) as usize;
+                Ok(self.history_json(limit))
+            }
             "run" => {
                 let script = text("script").ok_or("`script` is required")?;
                 // Said, so a person reading the console knows whose lines
@@ -1270,6 +1292,214 @@ impl App {
         out
     }
 
+    /// A sketch read out: its plane, points, lines, constraints and regions,
+    /// by the indices the sketch operators take.
+    pub(super) fn sketch_json(&self, name: Option<&str>) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let doc = &self.doc;
+        let id = match name {
+            Some(name) => doc
+                .objects()
+                .find(|(_, o)| o.name == name)
+                .map(|(id, _)| id)
+                .ok_or_else(|| format!("no object called {name:?}"))?,
+            None => kreate_ops::ops::sketch_draw::active_sketch(doc)
+                .ok_or("no sketch is active: name one with object=, or select it")?,
+        };
+        let o = doc.object(id).ok_or("no such object")?;
+        if o.sketch_lines.is_empty() && o.sketch.is_empty() {
+            return Err(format!("{:?} is not a sketch", o.name));
+        }
+        let world = doc.world_transform(id);
+        let on_plane = |p: &kreate_math::DVec2| {
+            world
+                .transform_point3(kreate_math::DVec3::new(p.x, p.y, 0.0))
+                .to_array()
+        };
+        let pts = kreate_ops::ops::sketch_draw::points(doc, id);
+        let points: Vec<_> = pts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| json!({ "index": i, "x": p.x, "y": p.y, "world": on_plane(p) }))
+            .collect();
+        let lines: Vec<_> = o
+            .sketch_lines
+            .iter()
+            .enumerate()
+            .map(|(i, [a, b])| json!({ "index": i, "a": a, "b": b }))
+            .collect();
+        let constraints: Vec<_> = o
+            .sketch
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut v = json!({ "index": i, "kind": c.tag(), "points": c.points() });
+                if let Some(value) = c.value() {
+                    v["value"] = json!(value);
+                }
+                v
+            })
+            .collect();
+        let regions: Vec<_> = kreate_scene::feature::sketch_regions(doc, id)
+            .iter()
+            .map(|r| {
+                json!({
+                    "area": r.area().abs(),
+                    "outline": r.outline.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+                    "holes": r.holes.len(),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "object": o.name,
+            "parent": o.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone()),
+            "plane": {
+                "origin": world.translation.to_array(),
+                "x_axis": world.transform_vector3(kreate_math::DVec3::X).normalize_or_zero().to_array(),
+                "y_axis": world.transform_vector3(kreate_math::DVec3::Y).normalize_or_zero().to_array(),
+                "normal": world.transform_vector3(kreate_math::DVec3::Z).normalize_or_zero().to_array(),
+            },
+            "points": points,
+            "lines": lines,
+            "constraints": constraints,
+            "regions": regions,
+            "made_solid": o.geometry_nodes.is_some(),
+        }))
+    }
+
+    /// One or two objects measured in the world; two, how far apart.
+    pub(super) fn measure_json(
+        &self,
+        names: &[String],
+        density: Option<f64>,
+    ) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let doc = &self.doc;
+        let ids: Vec<kreate_scene::ObjectId> = if names.is_empty() {
+            doc.selection.objects.iter().copied().take(2).collect()
+        } else {
+            names
+                .iter()
+                .map(|name| {
+                    doc.objects()
+                        .find(|(_, o)| o.name == *name)
+                        .map(|(id, _)| id)
+                        .ok_or_else(|| format!("no object called {name:?}"))
+                })
+                .collect::<Result<_, _>>()?
+        };
+        if ids.is_empty() || ids.len() > 2 {
+            return Err("name one or two objects, or select them".into());
+        }
+        let density = density.unwrap_or(doc.design.density);
+        let mut measured = Vec::new();
+        let mut meshes = Vec::new();
+        for id in &ids {
+            let o = doc.object(*id).ok_or("no such object")?;
+            let mesh = o
+                .mesh()
+                .and_then(|m| doc.mesh(m))
+                .ok_or_else(|| format!("{:?} has no mesh to measure", o.name))?;
+            let world = doc.world_transform(*id);
+            let m = kreate_mesh::measure::mass_properties(mesh, |p| world.transform_point3(p));
+            let mut v = json!({
+                "object": o.name,
+                "closed": m.closed,
+                "area_m2": m.area,
+                "centroid": m.centroid.to_array(),
+            });
+            if m.closed {
+                v["volume_m3"] = json!(m.volume.abs());
+                v["mass_kg"] = json!(m.volume.abs() * density);
+            } else {
+                v["note"] = json!("the surface is open, so it holds no volume and has no mass");
+            }
+            if let Some((lo, hi)) = doc.object_world_bounds(*id) {
+                v["bounds"] = json!({ "min": lo.to_array(), "max": hi.to_array() });
+                v["dimensions"] = json!((hi - lo).to_array());
+            }
+            measured.push(v);
+            meshes.push((mesh, world));
+        }
+        let mut out = json!({ "density_kg_m3": density, "objects": measured });
+        if let [(ma, wa), (mb, wb)] = meshes.as_slice() {
+            let ta = kreate_mesh::intersect::world_triangles(ma, *wa);
+            let tb = kreate_mesh::intersect::world_triangles(mb, *wb);
+            let va: Vec<kreate_math::Vec3> = ma
+                .positions()
+                .iter()
+                .map(|p| wa.transform_point3(p.as_dvec3()).as_vec3())
+                .collect();
+            let vb: Vec<kreate_math::Vec3> = mb
+                .positions()
+                .iter()
+                .map(|p| wb.transform_point3(p.as_dvec3()).as_vec3())
+                .collect();
+            let (gap, how) = surface_gap(&va, &ta, &vb, &tb);
+            let overlapping = matches!(
+                kreate_mesh::intersect::contact(&ta, &tb),
+                kreate_mesh::intersect::Contact::Crossing
+                    | kreate_mesh::intersect::Contact::Inside { .. }
+            );
+            let (ca, cb) = (
+                measured[0]["centroid"].clone(),
+                measured[1]["centroid"].clone(),
+            );
+            let centre = |v: &serde_json::Value| {
+                kreate_math::DVec3::new(
+                    v[0].as_f64().unwrap_or(0.0),
+                    v[1].as_f64().unwrap_or(0.0),
+                    v[2].as_f64().unwrap_or(0.0),
+                )
+            };
+            let box_gap = match (
+                doc.object_world_bounds(ids[0]),
+                doc.object_world_bounds(ids[1]),
+            ) {
+                (Some((alo, ahi)), Some((blo, bhi))) => {
+                    Some((alo.max(blo) - ahi.min(bhi)).to_array())
+                }
+                _ => None,
+            };
+            out["between"] = json!({
+                "surface_gap_m": if overlapping { 0.0 } else { gap },
+                "overlapping": overlapping,
+                "measured": how,
+                "centre_distance_m": centre(&ca).distance(centre(&cb)),
+                "box_gap": box_gap,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The undo history: how far it goes, where it stands, and the last
+    /// `limit` steps as script lines.
+    pub(super) fn history_json(&self, limit: usize) -> serde_json::Value {
+        use serde_json::json;
+        let h = &self.history;
+        let entries = h.entries();
+        let cursor = h.cursor();
+        let first = cursor.saturating_sub(limit);
+        let done: Vec<_> = entries[first..cursor]
+            .iter()
+            .enumerate()
+            .map(|(i, e)| json!({ "step": first + i + 1, "label": e.label, "line": e.to_script_call() }))
+            .collect();
+        let undone: Vec<_> = entries[cursor..]
+            .iter()
+            .map(|e| json!({ "label": e.label, "line": e.to_script_call() }))
+            .collect();
+        json!({
+            "steps": entries.len(),
+            "cursor": cursor,
+            "evicted": h.evicted(),
+            "can_undo": h.can_undo(),
+            "can_redo": h.can_redo(),
+            "done": done,
+            "undone": undone,
+        })
+    }
+
     /// The document, the objects as `filter` picks them: all of it when
     /// nothing is asked, and a short line each past `COMPACT_FROM` objects
     /// — a big assembly listed in full was more than the caller could read,
@@ -1591,6 +1821,38 @@ fn compact_operator(op: &serde_json::Value) -> String {
         op["id"].as_str().unwrap_or(""),
         params.join(", ")
     )
+}
+
+/// How far apart two surfaces are: each vertex of one to the nearest
+/// triangle of the other, both ways, the least of it. Vertex to vertex when
+/// the meshes are too big to afford that, and said so.
+fn surface_gap(
+    va: &[kreate_math::Vec3],
+    ta: &[kreate_mesh::intersect::Triangle],
+    vb: &[kreate_math::Vec3],
+    tb: &[kreate_mesh::intersect::Triangle],
+) -> (f64, &'static str) {
+    use kreate_scene::physics::collide::closest_on_triangle;
+    let work = va.len() * tb.len() + vb.len() * ta.len();
+    let mut best = f32::MAX;
+    if work <= 20_000_000 {
+        for (verts, tris) in [(va, tb), (vb, ta)] {
+            for p in verts {
+                for t in tris {
+                    let d = closest_on_triangle(*p, t[0], t[1], t[2]).distance(*p);
+                    best = best.min(d);
+                }
+            }
+        }
+        (best as f64, "vertex to surface")
+    } else {
+        for p in va {
+            for q in vb {
+                best = best.min(p.distance(*q));
+            }
+        }
+        (best as f64, "vertex to vertex (the meshes are large)")
+    }
 }
 
 /// The objects to hide so that only `only` shows: every visible one that is

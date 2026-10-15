@@ -72,6 +72,7 @@ object. Placement: object.place_on(target=...) stands the active object on anoth
 object.align lines up sides of bounding boxes; check_overlaps finds parts that run into \
 each other. mesh.select_where selects elements by a world-space box, a face direction or a \
 material slot instead of by index. data.purge removes unused meshes, materials and images.\n\
+Reading: get_sketch gives a sketch's points, lines, constraints and regions by index; measure gives volume, mass, area, bounds and the gap between two parts; get_history the steps done so far. \
 Looking: get_context says what the user has selected and where they look — read it when they \
 say \"this\" or \"here\". capture_viewport(views=[\"front\",\"right\",\"top\"]) shows a shape \
 from three sides at once; only=[...] shows some objects alone.\n\
@@ -412,6 +413,40 @@ pub fn tools() -> Value {
             }
         },
         {
+            "name": "get_sketch",
+            "description": "A sketch read out: its plane in the world (origin, X and Y axes, normal), its points (index, x and y on the plane in metres, and the world position), its lines (index, the two point indices), its constraints (index, kind, the points, and the value of a distance in metres or an angle in radians) and the closed regions its lines make (area in square metres, the outline's points, how many holes). The point and line indices are what sketch.move, sketch.delete, sketch.constrain and sketch.constraint_remove take.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "The sketch object's name; left out, the active sketch." }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "measure",
+            "description": "Measures one or two mesh objects in the world: for each its volume in cubic metres and mass in kilograms (at the scene's density, or `density` kg/m3) when its surface is closed, surface area, centre of mass, bounds and dimensions. For two, how far apart their surfaces are (zero when they touch or overlap), the distance between their centres, and the gap between their bounding boxes on each axis (negative where the boxes overlap). What a part's weight, a clearance or a wall's thickness is asked by.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 2, "description": "One or two object names; left out, the selected objects (up to two)." },
+                    "density": { "type": "number", "minimum": 0, "description": "Kilograms per cubic metre for the mass; default the scene's (PLA 1240, aluminium 2700, steel 7850)." }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "get_history",
+            "description": "The document's undo history: how many steps there are, where the cursor is, whether undo and redo are possible, the last `limit` steps as the script lines they were (oldest first, the most recent last) and any steps undone and waiting for redo. What to read to see what was done, or before undoing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "default": 20, "description": "How many of the latest steps to list." }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "export_file",
             "description": "Writes the scene to another format, chosen by the extension: .glb or .gltf (meshes, materials, lights, cameras, hierarchy, animation), .usda (with its pictures beside it) or .usdz (one file), .urdf (a robot: links, joints with their limits, inertia, visual and collision meshes written beside it as STL), .3mf, .step, .obj or .stl (geometry only). The document keeps its own file.",
             "inputSchema": {
@@ -508,59 +543,62 @@ pub fn handle(message: &Value, app: &mut dyn App) -> Option<Value> {
 /// A tool call's result. A tool that ran and failed is a result with
 /// `isError`, so the model reads why; only a tool that does not exist is a
 /// protocol error.
+/// The request each tool becomes.
+fn method_of(tool: &str) -> Option<&'static str> {
+    Some(match tool {
+        "get_scene" => "scene",
+        "list_operators" => "operators",
+        "run_script" => "run",
+        "capture_viewport" => "capture",
+        "get_context" => "context",
+        "check_overlaps" => "overlaps",
+        "get_mesh" => "mesh",
+        "render_image" => "render",
+        "timeline" => "timeline",
+        "undo" => "undo",
+        "redo" => "redo",
+        "open_file" => "open",
+        "import_file" => "import",
+        "search_assets" => "assets",
+        "add_asset" => "add_asset",
+        "save_file" => "save",
+        "export_file" => "export",
+        "get_sketch" => "sketch",
+        "measure" => "measure",
+        "get_history" => "history",
+        // Offered for weeks and never reachable: the list stopped at
+        // export_file, and each of these was "no tool called".
+        "check_proportions" => "proportions",
+        "compare_silhouette" => "silhouette",
+        "analyze_mesh" => "analyze_mesh",
+        "generate_height_map" => "height_map",
+        "check_rig" => "rig_check",
+        "generate_model" => "generate",
+        _ => return None,
+    })
+}
+
 fn call_tool(name: &str, args: &Value, app: &mut dyn App) -> Result<Value, (i64, String)> {
-    let pick = |names: &[&str]| -> Value {
-        let mut out = serde_json::Map::new();
-        for n in names {
-            if let Some(v) = args.get(*n) {
-                out.insert((*n).to_string(), v.clone());
+    let Some(method) = method_of(name) else {
+        return Err((-32602, format!("no tool called `{name}`")));
+    };
+    // The arguments the tool's own schema names, and no other: read off the
+    // schema rather than a list kept beside it, which was what left a new
+    // parameter behind.
+    let mut params = serde_json::Map::new();
+    if let Some(tool) = tools()
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["name"] == name))
+    {
+        if let Some(properties) = tool["inputSchema"]["properties"].as_object() {
+            for key in properties.keys() {
+                if let Some(v) = args.get(key) {
+                    params.insert(key.clone(), v.clone());
+                }
             }
         }
-        Value::Object(out)
-    };
-    let (method, params) = match name {
-        "get_scene" => ("scene", json!({})),
-        "list_operators" => ("operators", pick(&["filter"])),
-        "run_script" => ("run", pick(&["script"])),
-        "capture_viewport" => ("capture", pick(&["camera", "path", "views", "only"])),
-        "get_context" => ("context", json!({})),
-        "check_overlaps" => ("overlaps", pick(&["tolerance", "exact"])),
-        "get_mesh" => (
-            "mesh",
-            pick(&["object", "space", "faces", "selected", "limit"]),
-        ),
-        "render_image" => (
-            "render",
-            pick(&["path", "camera", "width", "height", "samples", "time_limit"]),
-        ),
-        "timeline" => (
-            "timeline",
-            pick(&["frame", "play", "object", "strip", "mute"]),
-        ),
-        "undo" => ("undo", pick(&["steps"])),
-        "redo" => ("redo", pick(&["steps"])),
-        "open_file" => ("open", pick(&["path"])),
-        "import_file" => ("import", pick(&["path"])),
-        "search_assets" => (
-            "assets",
-            pick(&["query", "kind", "source", "animated", "thumbnails", "limit"]),
-        ),
-        "add_asset" => (
-            "add_asset",
-            pick(&[
-                "id",
-                "kind",
-                "source",
-                "resolution",
-                "location",
-                "height",
-                "wait",
-            ]),
-        ),
-        "save_file" => ("save", pick(&["path"])),
-        "export_file" => ("export", pick(&["path"])),
-        other => return Err((-32602, format!("no tool called `{other}`"))),
-    };
+    }
+    let params = Value::Object(params);
     let answer = app.call(method, params);
     Ok(match answer {
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
@@ -849,6 +887,33 @@ mod tests {
         );
         assert_eq!(reply["result"]["content"][0]["type"], "text");
         assert_eq!(reply["result"]["isError"], false);
+    }
+
+    /// Every argument a tool's schema names reaches the app, and one it
+    /// does not name does not: the list is the schema, not one kept beside it.
+    #[test]
+    fn every_schema_argument_is_forwarded_and_nothing_else() {
+        for tool in tools().as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            let mut args = serde_json::Map::new();
+            let keys: Vec<String> = tool["inputSchema"]["properties"]
+                .as_object()
+                .map(|p| p.keys().cloned().collect())
+                .unwrap_or_default();
+            for key in &keys {
+                args.insert(key.clone(), json!(1));
+            }
+            args.insert("stray".into(), json!(1));
+            let mut app = fake(Ok(json!({})));
+            call_tool(name, &Value::Object(args), &mut app).unwrap();
+            let sent = app.asked[0].1.as_object().unwrap();
+            let mut got: Vec<&String> = sent.keys().collect();
+            got.sort();
+            let mut want: Vec<&String> = keys.iter().collect();
+            want.sort();
+            assert_eq!(got, want, "{name}");
+            assert_eq!(app.asked[0].0, method_of(name).unwrap());
+        }
     }
 
     #[test]
