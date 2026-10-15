@@ -1800,6 +1800,7 @@ impl Operator for LinkMaterial {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let Some(mesh) = active_mesh(doc.document()) else {
+            crate::report::say("the active object is not a mesh");
             return Ok(OpResult::Cancelled);
         };
         let uid = params.uid.trim();
@@ -1825,6 +1826,7 @@ impl Operator for LinkMaterial {
             )));
         }
         if slots.get(slot) == Some(&Some(material)) {
+            crate::report::say(format!("slot {slot} already holds that material"));
             return Ok(OpResult::Cancelled);
         }
         doc.document_mut().set_mesh_slot(mesh, slot, Some(material));
@@ -2589,6 +2591,7 @@ impl Operator for SetTransform {
         // scene — and this one runs on every keystroke in a coordinate field,
         // where the value is usually the one already there.
         if object.transform == wanted {
+            crate::report::say("the object is already at that transform");
             return Ok(OpResult::Cancelled);
         }
         object.transform = wanted;
@@ -2938,9 +2941,9 @@ impl Operator for Select {
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct ParentOneParams {
-    /// The child's identity, in decimal.
+    /// The child: its name, or its uid in decimal.
     pub child: String,
-    /// The parent's, or empty to clear.
+    /// The parent, the same way; empty to clear.
     pub parent: String,
 }
 
@@ -2964,24 +2967,29 @@ impl Operator for ParentOne {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let find = |text: &str| {
-            text.trim().parse::<u64>().ok().and_then(|raw| {
-                doc.document()
-                    .object_by_uid(kreate_scene::Uid::from_raw(raw))
-            })
+        // By uid as the outliner names things, or by name as a script does.
+        let find = |text: &str| -> Result<ObjectId, OpError> {
+            let text = text.trim();
+            let d = doc.document();
+            text.parse::<u64>()
+                .ok()
+                .and_then(|raw| d.object_by_uid(kreate_scene::Uid::from_raw(raw)))
+                .or_else(|| d.objects().find(|(_, o)| o.name == text).map(|(id, _)| id))
+                .ok_or_else(|| {
+                    OpError::Failed(format!("no object called {text:?} (a name, or a uid)"))
+                })
         };
-        let Some(child) = find(&params.child) else {
-            return Ok(OpResult::Cancelled);
-        };
+        let child = find(&params.child)?;
         let parent = if params.parent.trim().is_empty() {
             None
         } else {
-            match find(&params.parent) {
-                Some(p) => Some(p),
-                None => return Ok(OpResult::Cancelled),
-            }
+            Some(find(&params.parent)?)
         };
-        if parent == Some(child) || doc.document().object(child).map(|o| o.parent) == Some(parent) {
+        if parent == Some(child) {
+            return Err(OpError::Failed("an object cannot be its own parent".into()));
+        }
+        if doc.document().object(child).map(|o| o.parent) == Some(parent) {
+            crate::report::say("already parented so");
             return Ok(OpResult::Cancelled);
         }
         doc.document_mut()
@@ -4281,6 +4289,42 @@ mod tests {
             .unwrap();
         assert_eq!(doc.object(b).unwrap().parent, Some(a));
         assert!(doc.selection.objects.is_empty());
+        // By name as well, as a script says it; an unknown one is an error,
+        // not a quiet nothing.
+        let mut named = crate::PropertyMap::new();
+        named.set("child", crate::PropertyValue::Text("B".into()));
+        named.set("parent", crate::PropertyValue::Text("".into()));
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "object.parent_one",
+            &named,
+        )
+        .unwrap();
+        assert_eq!(doc.object(b).unwrap().parent, None);
+        named.set("parent", crate::PropertyValue::Text("Nobody".into()));
+        let err = h
+            .dispatch(
+                &r,
+                &mut doc,
+                &Context::default(),
+                "object.parent_one",
+                &named,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Nobody"), "{err}");
+        named.set("parent", crate::PropertyValue::Text("A".into()));
+        h.dispatch(
+            &r,
+            &mut doc,
+            &Context::default(),
+            "object.parent_one",
+            &named,
+        )
+        .unwrap();
+        assert_eq!(doc.object(b).unwrap().parent, Some(a));
         let mut back = crate::PropertyMap::new();
         back.set("child", uid(&doc, a));
         back.set("parent", uid(&doc, b));

@@ -314,6 +314,13 @@ pub fn take_boolean_gave_up() -> bool {
     GAVE_UP_NEWS.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
+thread_local! {
+    /// Set by a boolean that left its input as it was, fresh or remembered,
+    /// during the one stack being evaluated: how the cache knows which
+    /// object's picture is not what its stack says.
+    static GAVE_UP_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// A boolean, or its input unchanged when the meshes are too complex for one.
 fn boolean_or_input(
     input: &MeshData,
@@ -327,6 +334,7 @@ fn boolean_or_input(
         cutter.num_verts(),
     ];
     if GAVE_UP.lock().ok().and_then(|g| *g) == Some(key) {
+        GAVE_UP_HERE.with(|f| f.set(true));
         return input.clone();
     }
     match kreate_mesh::modifiers::boolean::try_boolean(input, cutter, op) {
@@ -336,6 +344,7 @@ fn boolean_or_input(
                 *g = Some(key);
             }
             GAVE_UP_NEWS.store(true, std::sync::atomic::Ordering::Relaxed);
+            GAVE_UP_HERE.with(|f| f.set(true));
             input.clone()
         }
     }
@@ -565,6 +574,11 @@ pub struct ModifierCache {
     sims: Vec<SimEntry>,
     /// Bodies built from their features, one per object.
     bodies: Vec<BodyEntry>,
+    /// Objects whose stack holds a boolean that gave up, as of their last
+    /// evaluation: their picture is the input unchanged, and whoever asks
+    /// after the scene is told so rather than left to see a cut that is
+    /// not there.
+    failed: Vec<ObjectId>,
     generation: u64,
     /// Counters, so "did it re-evaluate more than it had to" is answerable. It
     /// is invisible at a glance and shows up only as a stutter on a scene big
@@ -576,6 +590,12 @@ pub struct ModifierCache {
 impl ModifierCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether a boolean in the object's stack gave up at its last
+    /// evaluation, so what is shown is the stack's input unchanged.
+    pub fn boolean_failed(&self, id: ObjectId) -> bool {
+        self.failed.contains(&id)
     }
 
     /// The evaluated mesh for one object, evaluating it if necessary.
@@ -630,7 +650,16 @@ impl ModifierCache {
             None => input.clone(),
         };
         let operands = operands_of(doc, id, &object.modifiers);
+        GAVE_UP_HERE.with(|f| f.set(false));
+        let misses = self.misses;
         let stacked = self.evaluate_with(&skinned, &object.modifiers, ctx, &operands);
+        // Only an evaluation that ran says anything; a hit keeps the answer.
+        if self.misses != misses {
+            self.failed.retain(|f| *f != id);
+            if GAVE_UP_HERE.with(|f| f.get()) {
+                self.failed.push(id);
+            }
+        }
         // Geometry nodes, after the stack, as Blender's modifier sits last.
         Some(match &object.geometry_nodes {
             Some(graph) => self.noded(&stacked, graph),
@@ -1658,6 +1687,44 @@ mod time_tests {
                 op: BooleanOp::Difference,
             });
         assert_eq!(cache.evaluated(&doc, target, &ctx).unwrap().num_faces(), 6);
+    }
+
+    /// A boolean that gave up leaves its object showing the input, and the
+    /// cache says so of that object — and stops saying so once it is cut.
+    #[test]
+    fn an_object_whose_boolean_gave_up_is_known() {
+        use kreate_mesh::modifiers::BooleanOp;
+        let mut doc = Document::new();
+        let target = doc.add_mesh_object("Target", kreate_mesh::primitives::cube(2.0));
+        let cutter = doc.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
+        let operand = doc.object_uid(cutter).unwrap();
+        doc.object_mut(target)
+            .unwrap()
+            .modifiers
+            .push(ModifierInstance::new(ModifierKind::Boolean(
+                BooleanModifier {
+                    operand,
+                    op: BooleanOp::Difference,
+                },
+            )));
+        // As a boolean too big to finish would have left it: this pair of
+        // sizes remembered as given up.
+        *GAVE_UP.lock().unwrap() = Some([6, 8, 6, 8]);
+        let mut cache = ModifierCache::new();
+        let ctx = EvalCtx::still();
+        let out = cache.evaluated(&doc, target, &ctx).unwrap();
+        assert_eq!(out.num_faces(), 6, "shown uncut");
+        assert!(cache.boolean_failed(target));
+        // Still known on a cache hit.
+        cache.evaluated(&doc, target, &ctx);
+        assert!(cache.boolean_failed(target));
+        // Forgotten and cut once it can be.
+        *GAVE_UP.lock().unwrap() = None;
+        doc.object_mut(cutter).unwrap().transform.translation =
+            kreate_math::DVec3::new(1.0, 0.0, 0.0);
+        let out = cache.evaluated(&doc, target, &ctx).unwrap();
+        assert!(out.num_faces() > 6);
+        assert!(!cache.boolean_failed(target));
     }
 
     #[test]

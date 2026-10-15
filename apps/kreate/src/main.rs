@@ -14776,6 +14776,29 @@ kreate.ops.object.add_primitive()",
         assert_eq!(app.doc.objects().count(), 0, "the second line did not run");
     }
 
+    /// A line that changed nothing is answered as cancelled with why, and
+    /// the lines after it still run: a script is not stopped by a no-op.
+    #[test]
+    fn the_connector_says_why_a_line_changed_nothing() {
+        let mut app = app();
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": "kreate.ops.object.add_primitive()
+kreate.ops.object.set_transform(location=(0, 0, 0))
+kreate.ops.object.add_primitive()" }),
+            )
+            .unwrap();
+        let lines = out["lines"].as_array().unwrap();
+        assert_eq!(lines[1]["result"], "cancelled");
+        assert_eq!(lines[1]["ok"], true);
+        let warning = lines[1]["warning"].as_str().unwrap();
+        assert!(warning.contains("already"), "{warning}");
+        assert_eq!(lines[2]["result"], "finished");
+        assert_eq!(app.doc.objects().count(), 2);
+        assert!(out.get("warnings").is_none(), "no boolean gave up");
+    }
+
     /// Entering edit mode with a light active and a mesh selected edits the
     /// mesh: that is what was meant.
     #[test]

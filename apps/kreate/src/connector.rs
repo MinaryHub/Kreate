@@ -189,6 +189,22 @@ impl App {
                     .into_iter()
                     .map(|line| {
                         let mut v = match line.result {
+                            // A line that changed nothing is not an error —
+                            // the lines after it still run — but it is said,
+                            // with why when the operator said why.
+                            Ok(r) if r.starts_with("Cancelled") => {
+                                let why = r
+                                    .strip_prefix("Cancelled")
+                                    .and_then(|s| s.strip_prefix(": "))
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| {
+                                        "the operator had nothing to do or declined its input: \
+                                         check the active object, the selection and the values"
+                                            .to_string()
+                                    });
+                                json!({ "line": line.text, "ok": true, "result": "cancelled", "warning": format!("nothing changed: {why}") })
+                            }
                             Ok(r) => json!({ "line": line.text, "ok": true, "result": r }),
                             Err(e) => json!({ "line": line.text, "ok": false, "error": e }),
                         };
@@ -215,7 +231,27 @@ impl App {
                     .active
                     .and_then(|id| self.doc.object(id))
                     .map(|o| o.name.clone());
-                Ok(json!({ "lines": lines, "mode": self.op_ctx.mode.tag(), "active": active }))
+                // What the picture now shows that the lines did not say: a
+                // boolean modifier that gave up leaves its object uncut, and
+                // only the status bar knew.
+                self.evaluate_scene();
+                let warnings: Vec<String> = self
+                    .doc
+                    .objects()
+                    .filter(|(id, _)| self.modifiers.boolean_failed(*id))
+                    .map(|(_, o)| {
+                        format!(
+                            "{}: a boolean modifier gave up (too many faces); the object shows its mesh uncut",
+                            o.name
+                        )
+                    })
+                    .collect();
+                let mut out =
+                    json!({ "lines": lines, "mode": self.op_ctx.mode.tag(), "active": active });
+                if !warnings.is_empty() {
+                    out["warnings"] = json!(warnings);
+                }
+                Ok(out)
             }
             // An application action by its keymap id — `render.image`,
             // `render.animation`, `view.frame_all` — as if its key were pressed.
@@ -1189,6 +1225,12 @@ impl App {
                             .filter_map(|m| doc.material(m).map(|mat| json!({ "name": mat.name, "uid": doc.material_uid(m).map(|u| u.raw()) })))
                             .collect();
                         v["materials"] = json!(slots);
+                        if self.modifiers.boolean_failed(id) {
+                            v["boolean_failed"] = json!(true);
+                            v["warning"] = json!(
+                                "a boolean modifier gave up (too many faces): the object shows its mesh uncut"
+                            );
+                        }
                     }
                     ObjectData::Light(light) => {
                         if let Some(l) = doc.light(light) {

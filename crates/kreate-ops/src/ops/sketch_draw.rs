@@ -539,6 +539,7 @@ impl Operator for Line {
             ids.push(ids[0]);
         }
         if ids.len() < 2 {
+            crate::report::say("a line needs two different points");
             return Ok(OpResult::Cancelled);
         }
         let lines: Vec<[u32; 2]> = ids.windows(2).map(|w| [w[0], w[1]]).collect();
