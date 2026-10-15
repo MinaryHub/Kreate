@@ -8221,23 +8221,39 @@ fn draw_geometry_editor(
             .iter()
             .enumerate()
             .map(|(n, node)| {
-                let geometry = |label: String, connected: bool| SocketView {
-                    label,
-                    ty: SocketType::Geometry,
+                use kreate_scene::geonodes::GeoSocket;
+                let socket = |ty: GeoSocket, label: &str, connected: bool| SocketView {
+                    label: t(&format!("geo-socket-{label}")),
+                    ty: match ty {
+                        GeoSocket::Geometry => SocketType::Geometry,
+                        GeoSocket::Float => SocketType::Scalar,
+                        GeoSocket::Vector => SocketType::Vector,
+                    },
                     connected,
                     default: None,
                 };
+                let labels = node.kind.input_labels();
                 NodeView {
                     // i18n-exempt: a node's name is the document's own text
                     title: node.name.clone(),
                     position: node.position,
-                    outputs: if node.kind.has_output() {
-                        vec![geometry(t("geo-socket-geometry"), false)]
-                    } else {
-                        Vec::new()
-                    },
-                    inputs: (0..node.kind.inputs())
-                        .map(|i| geometry(t("geo-socket-geometry"), graph.incoming(n, i).is_some()))
+                    outputs: node
+                        .kind
+                        .output_type()
+                        .map(|ty| vec![socket(ty, node.kind.output_label(), false)])
+                        .unwrap_or_default(),
+                    inputs: node
+                        .kind
+                        .input_types()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| {
+                            socket(
+                                *ty,
+                                labels.get(i).copied().unwrap_or("geometry"),
+                                graph.incoming(n, i).is_some(),
+                            )
+                        })
                         .collect(),
                     fields: node
                         .kind
@@ -8263,7 +8279,15 @@ fn draw_geometry_editor(
                         .collect(),
                     family: match node.kind {
                         GeoNodeKind::Input | GeoNodeKind::Output => Family::Input,
-                        GeoNodeKind::Primitive { .. } => Family::Texture,
+                        GeoNodeKind::Primitive { .. }
+                        | GeoNodeKind::CurveLine { .. }
+                        | GeoNodeKind::CurveCircle { .. }
+                        | GeoNodeKind::CurveSpiral { .. } => Family::Texture,
+                        _ if node.kind.output_type() != Some(GeoSocket::Geometry)
+                            && node.kind.has_output() =>
+                        {
+                            Family::Converter
+                        }
                         _ => Family::Geometry,
                     },
                 }

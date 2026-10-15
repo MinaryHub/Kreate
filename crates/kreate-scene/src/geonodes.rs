@@ -8,6 +8,23 @@
 //!
 //! The graph is data on the object, saved and copied with it, and evaluated
 //! by the modifier cache like the stack, keyed on its input and its own value.
+//!
+//! # Fields
+//!
+//! Wires carry geometry, or a *field*: a number or a direction that is not
+//! one value but a rule for one at every point — the point's position, its
+//! normal, its index, a noise over space, and sums and products of those.
+//! A field is worked out where it arrives: Set Position reads its offset at
+//! each vertex of the geometry it moves, Instance on Points reads a scale and
+//! a turn at each point it puts a copy on. Blender's fields, the same idea
+//! with fewer nodes.
+//!
+//! # Curves
+//!
+//! A curve is a row of points in order, with no faces: the point layer
+//! [`CURVE`] says which curve each point is on and [`CYCLIC`] whether that
+//! curve closes. Made by the curve primitives, evened out by Resample, turned
+//! into points (pointing along the curve) or into a tube.
 
 use kreate_math::{DAffine3, DQuat, DVec3, Vec3};
 use kreate_mesh::edit::join::{join, Part};
@@ -59,12 +76,312 @@ pub enum GeoNodeKind {
     },
     /// Every vertex moved: by an offset, and along its normal by a noise
     /// that varies over the surface — a field, sampled where each vertex is.
+    /// A vector field wired into its second input is added on top.
     SetPosition {
         offset: [f32; 3],
         noise: f32,
         noise_scale: f32,
         seed: u32,
     },
+    /// Where each point is: a vector field.
+    Position,
+    /// Which way each point faces: a vector field.
+    Normal,
+    /// Each point's number, from zero: a number field.
+    Index,
+    /// One number everywhere.
+    Value { value: f32 },
+    /// One direction everywhere.
+    Vector { value: [f32; 3] },
+    /// Smooth noise read at a point — its position when nothing is wired —
+    /// from -1 to 1.
+    NoiseField { scale: f32, seed: u32 },
+    /// Two numbers met by one of [`MATH_OPS`]; `a` and `b` are what an
+    /// unwired input takes.
+    Math { op: u32, a: f32, b: f32 },
+    /// A direction times a number.
+    VectorScale { scale: f32 },
+    /// Three numbers as a direction.
+    CombineXyz { x: f32, y: f32, z: f32 },
+    /// A straight curve up Z.
+    CurveLine { length: f32, resolution: u32 },
+    /// A closed circle in XY.
+    CurveCircle { radius: f32, resolution: u32 },
+    /// A helix up Z.
+    CurveSpiral {
+        turns: f32,
+        height: f32,
+        radius: f32,
+        resolution: u32,
+    },
+    /// Each curve given `count` points, evenly along it.
+    ResampleCurve { count: u32 },
+    /// The curves' points, each facing along its curve: for instancing.
+    CurveToPoints,
+    /// Each curve swept into a tube.
+    CurveToMesh {
+        radius: f32,
+        segments: u32,
+        caps: bool,
+    },
+}
+
+/// What a wire carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeoSocket {
+    Geometry,
+    /// A number at every point.
+    Float,
+    /// A direction at every point.
+    Vector,
+}
+
+/// [`GeoNodeKind::Math`]'s operations, in its `op`'s order.
+pub const MATH_OPS: [&str; 8] = [
+    "add", "subtract", "multiply", "divide", "power", "minimum", "maximum", "sine",
+];
+
+/// The point layer a curve's points carry: which curve each is on.
+pub const CURVE: &str = ".geo_curve";
+/// The point layer saying the point's curve closes.
+pub const CYCLIC: &str = ".geo_cyclic";
+
+/// A field: a rule for a value at every point of a geometry.
+#[derive(Clone, Debug, PartialEq)]
+enum Field {
+    Float(f32),
+    Vector(Vec3),
+    Position,
+    Normal,
+    Index,
+    Noise {
+        at: Box<Field>,
+        scale: f32,
+        seed: u32,
+    },
+    Math {
+        op: u32,
+        a: Box<Field>,
+        b: Box<Field>,
+    },
+    Scale {
+        v: Box<Field>,
+        s: Box<Field>,
+    },
+    Combine(Box<[Field; 3]>),
+}
+
+/// The geometry a field is read on, and its normals once asked for.
+struct FieldCtx<'a> {
+    m: &'a MeshData,
+    normals: std::cell::OnceCell<Vec<Vec3>>,
+}
+
+impl<'a> FieldCtx<'a> {
+    fn new(m: &'a MeshData) -> Self {
+        Self {
+            m,
+            normals: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn normals(&self) -> &[Vec3] {
+        self.normals.get_or_init(|| point_normals(self.m))
+    }
+}
+
+fn math(op: u32, a: f32, b: f32) -> f32 {
+    match op {
+        0 => a + b,
+        1 => a - b,
+        2 => a * b,
+        3 => {
+            if b == 0.0 {
+                0.0
+            } else {
+                a / b
+            }
+        }
+        4 => a.powf(b),
+        5 => a.min(b),
+        6 => a.max(b),
+        _ => a.sin(),
+    }
+}
+
+impl Field {
+    fn floats(&self, c: &FieldCtx<'_>) -> Vec<f32> {
+        let n = c.m.num_verts() as usize;
+        match self {
+            Field::Float(v) => vec![*v; n],
+            Field::Index => (0..n).map(|i| i as f32).collect(),
+            Field::Noise { at, scale, seed } => at
+                .vectors(c)
+                .iter()
+                .map(|p| noise3(*p * *scale, *seed))
+                .collect(),
+            Field::Math { op, a, b } => a
+                .floats(c)
+                .into_iter()
+                .zip(b.floats(c))
+                .map(|(a, b)| math(*op, a, b))
+                .collect(),
+            // A direction where a number is wanted: its length.
+            Field::Vector(_)
+            | Field::Position
+            | Field::Normal
+            | Field::Scale { .. }
+            | Field::Combine(_) => self.vectors(c).iter().map(|v| v.length()).collect(),
+        }
+    }
+
+    fn vectors(&self, c: &FieldCtx<'_>) -> Vec<Vec3> {
+        let n = c.m.num_verts() as usize;
+        match self {
+            Field::Vector(v) => vec![*v; n],
+            Field::Position => c.m.positions().to_vec(),
+            Field::Normal => c.normals().to_vec(),
+            Field::Scale { v, s } => v
+                .vectors(c)
+                .into_iter()
+                .zip(s.floats(c))
+                .map(|(v, s)| v * s)
+                .collect(),
+            Field::Combine(f) => {
+                let (x, y, z) = (f[0].floats(c), f[1].floats(c), f[2].floats(c));
+                (0..n).map(|i| Vec3::new(x[i], y[i], z[i])).collect()
+            }
+            // A number where a direction is wanted: the same on every axis.
+            Field::Float(_) | Field::Index | Field::Noise { .. } | Field::Math { .. } => {
+                self.floats(c).into_iter().map(Vec3::splat).collect()
+            }
+        }
+    }
+}
+
+/// What a node gives.
+#[derive(Clone, Debug)]
+enum Value {
+    Geometry(MeshData),
+    Field(Field),
+}
+
+/// Each point's normal: the one it was scattered with, or its faces'.
+fn point_normals(m: &MeshData) -> Vec<Vec3> {
+    match m.attributes().get_f32x3(POINT_NORMAL) {
+        Some(n) if n.len() == m.num_verts() as usize => n.to_vec(),
+        _ => vertex_normals(m),
+    }
+}
+
+/// Curves as one geometry: their points in a row, each tagged with its
+/// curve and whether that closes.
+pub fn curves_mesh(curves: &[(Vec<Vec3>, bool)]) -> MeshData {
+    let mut positions = Vec::new();
+    let mut index = Vec::new();
+    let mut cyclic = Vec::new();
+    for (i, (points, closed)) in curves.iter().enumerate() {
+        for p in points {
+            positions.push(*p);
+            index.push(i as i32);
+            cyclic.push(*closed);
+        }
+    }
+    let mut m = MeshData::from_faces(positions, &[]);
+    m.attributes_mut().insert(
+        CURVE,
+        kreate_mesh::Domain::Point,
+        kreate_mesh::AttrData::I32(std::sync::Arc::new(index)),
+    );
+    m.attributes_mut().insert(
+        CYCLIC,
+        kreate_mesh::Domain::Point,
+        kreate_mesh::AttrData::Bool(std::sync::Arc::new(cyclic)),
+    );
+    m
+}
+
+/// The curves a geometry holds. Points with no faces and no curve layer are
+/// one open curve, in their order; a mesh with faces holds none.
+pub fn curves_of(m: &MeshData) -> Vec<(Vec<Vec3>, bool)> {
+    let p = m.positions();
+    let index = m.attributes().get_i32(CURVE).filter(|v| v.len() == p.len());
+    let Some(index) = index else {
+        return if m.num_faces() == 0 && p.len() >= 2 {
+            vec![(p.to_vec(), false)]
+        } else {
+            Vec::new()
+        };
+    };
+    let cyclic = m
+        .attributes()
+        .get_bool(CYCLIC)
+        .filter(|v| v.len() == p.len());
+    let mut out: Vec<(Vec<Vec3>, bool)> = Vec::new();
+    let mut last = None;
+    for (i, q) in p.iter().enumerate() {
+        if last != Some(index[i]) {
+            out.push((Vec::new(), cyclic.is_some_and(|c| c[i])));
+            last = Some(index[i]);
+        }
+        out.last_mut().expect("one").0.push(*q);
+    }
+    out
+}
+
+/// `count` points evenly along a curve, by length.
+fn resample(points: &[Vec3], closed: bool, count: u32) -> Vec<Vec3> {
+    let count = count.max(if closed { 3 } else { 2 }) as usize;
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+    let mut ring: Vec<Vec3> = points.to_vec();
+    if closed {
+        ring.push(points[0]);
+    }
+    let mut along = vec![0.0f32];
+    for w in ring.windows(2) {
+        along.push(along.last().expect("one") + w[0].distance(w[1]));
+    }
+    let total = *along.last().expect("one");
+    if total <= 0.0 {
+        return vec![points[0]; count];
+    }
+    // A closed curve's last point is not its first again.
+    let steps = if closed { count } else { count - 1 };
+    (0..count)
+        .map(|k| {
+            let d = total * k as f32 / steps as f32;
+            let i = along.partition_point(|a| *a <= d).clamp(1, ring.len() - 1);
+            let (a, b) = (along[i - 1], along[i]);
+            let t = if b > a { (d - a) / (b - a) } else { 0.0 };
+            ring[i - 1].lerp(ring[i], t.clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
+/// Each point's direction along its curve.
+fn tangents(points: &[Vec3], closed: bool) -> Vec<Vec3> {
+    let n = points.len();
+    (0..n)
+        .map(|i| {
+            let prev = if i > 0 {
+                points[i - 1]
+            } else if closed {
+                points[n - 1]
+            } else {
+                points[i]
+            };
+            let next = if i + 1 < n {
+                points[i + 1]
+            } else if closed {
+                points[0]
+            } else {
+                points[i]
+            };
+            (next - prev).normalize_or(Vec3::Z)
+        })
+        .collect()
 }
 
 /// The point layer [`GeoNodeKind::DistributePoints`] leaves each point's
@@ -125,6 +442,7 @@ fn distribute_points(m: &MeshData, density: f32, seed: u32) -> MeshData {
 }
 
 /// A copy of `shape` at every vertex of `points`.
+#[allow(clippy::too_many_arguments)]
 fn instance_on_points(
     points: &MeshData,
     shape: &MeshData,
@@ -133,6 +451,8 @@ fn instance_on_points(
     random_rotation: bool,
     align: bool,
     seed: u32,
+    scales: Option<&[f32]>,
+    turns: Option<&[Vec3]>,
 ) -> MeshData {
     if points.num_verts() == 0 || shape.num_verts() == 0 {
         return MeshData::empty();
@@ -146,7 +466,8 @@ fn instance_on_points(
         .positions()
         .iter()
         .zip(&normals)
-        .map(|(p, n)| {
+        .enumerate()
+        .map(|(i, (p, n))| {
             let up = if align {
                 n.as_dvec3().normalize_or(DVec3::Z)
             } else {
@@ -159,7 +480,20 @@ fn instance_on_points(
                 DQuat::IDENTITY
             };
             let s = scale as f64 * (1.0 - random_scale.clamp(0.0, 1.0) as f64 * rng.unit());
-            DAffine3::from_scale_rotation_translation(DVec3::splat(s), stand * spin, p.as_dvec3())
+            let s = s * scales.and_then(|v| v.get(i)).map_or(1.0, |v| *v as f64);
+            let turn = turns.and_then(|v| v.get(i)).map_or(DQuat::IDENTITY, |r| {
+                DQuat::from_euler(
+                    kreate_math::glam::EulerRot::ZYX,
+                    r.z as f64,
+                    r.y as f64,
+                    r.x as f64,
+                )
+            });
+            DAffine3::from_scale_rotation_translation(
+                DVec3::splat(s),
+                stand * spin * turn,
+                p.as_dvec3(),
+            )
         })
         .collect();
     let parts: Vec<Part<'_>> = transforms
@@ -230,18 +564,93 @@ pub const PRIMITIVES: [&str; 6] = [
 ];
 
 impl GeoNodeKind {
-    /// How many geometry inputs it has.
+    /// How many inputs it has.
     pub fn inputs(&self) -> usize {
+        self.input_types().len()
+    }
+
+    /// What each input takes, in order.
+    pub fn input_types(&self) -> &'static [GeoSocket] {
+        use GeoSocket::{Float as F, Geometry as G, Vector as V};
         match self {
-            GeoNodeKind::Input | GeoNodeKind::Primitive { .. } => 0,
-            GeoNodeKind::Join | GeoNodeKind::InstanceOnPoints { .. } => 2,
-            _ => 1,
+            GeoNodeKind::Input
+            | GeoNodeKind::Primitive { .. }
+            | GeoNodeKind::Position
+            | GeoNodeKind::Normal
+            | GeoNodeKind::Index
+            | GeoNodeKind::Value { .. }
+            | GeoNodeKind::Vector { .. }
+            | GeoNodeKind::CurveLine { .. }
+            | GeoNodeKind::CurveCircle { .. }
+            | GeoNodeKind::CurveSpiral { .. } => &[],
+            GeoNodeKind::Join => &[G, G],
+            GeoNodeKind::InstanceOnPoints { .. } => &[G, G, F, V],
+            GeoNodeKind::SetPosition { .. } => &[G, V],
+            GeoNodeKind::NoiseField { .. } => &[V],
+            GeoNodeKind::Math { .. } => &[F, F],
+            GeoNodeKind::VectorScale { .. } => &[V, F],
+            GeoNodeKind::CombineXyz { .. } => &[F, F, F],
+            _ => &[G],
+        }
+    }
+
+    /// The key tails of its inputs' labels: `geo-socket-<name>`.
+    pub fn input_labels(&self) -> &'static [&'static str] {
+        match self {
+            GeoNodeKind::Join => &["geometry", "geometry"],
+            GeoNodeKind::InstanceOnPoints { .. } => &["points", "instance", "scale", "rotation"],
+            GeoNodeKind::SetPosition { .. } => &["geometry", "offset"],
+            GeoNodeKind::NoiseField { .. } => &["vector"],
+            GeoNodeKind::Math { .. } => &["value", "value"],
+            GeoNodeKind::VectorScale { .. } => &["vector", "scale"],
+            GeoNodeKind::CombineXyz { .. } => &["x", "y", "z"],
+            GeoNodeKind::ResampleCurve { .. }
+            | GeoNodeKind::CurveToPoints
+            | GeoNodeKind::CurveToMesh { .. } => &["curve"],
+            _ if self.inputs() == 1 => &["geometry"],
+            _ => &[],
         }
     }
 
     /// Whether it has an output: every kind but the group's output.
     pub fn has_output(&self) -> bool {
         !matches!(self, GeoNodeKind::Output)
+    }
+
+    /// What its output gives, if it has one.
+    pub fn output_type(&self) -> Option<GeoSocket> {
+        Some(match self {
+            GeoNodeKind::Output => return None,
+            GeoNodeKind::Position
+            | GeoNodeKind::Normal
+            | GeoNodeKind::Vector { .. }
+            | GeoNodeKind::VectorScale { .. }
+            | GeoNodeKind::CombineXyz { .. } => GeoSocket::Vector,
+            GeoNodeKind::Index
+            | GeoNodeKind::Value { .. }
+            | GeoNodeKind::NoiseField { .. }
+            | GeoNodeKind::Math { .. } => GeoSocket::Float,
+            _ => GeoSocket::Geometry,
+        })
+    }
+
+    /// The key tail of its output's label.
+    pub fn output_label(&self) -> &'static str {
+        match self.output_type() {
+            Some(GeoSocket::Float) => "value",
+            Some(GeoSocket::Vector) => "vector",
+            _ if matches!(
+                self,
+                GeoNodeKind::CurveLine { .. }
+                    | GeoNodeKind::CurveCircle { .. }
+                    | GeoNodeKind::CurveSpiral { .. }
+                    | GeoNodeKind::ResampleCurve { .. }
+            ) =>
+            {
+                "curve"
+            }
+            _ => "geometry",
+        }
     }
 
     /// A stable name for files and scripts.
@@ -260,12 +669,27 @@ impl GeoNodeKind {
             GeoNodeKind::DistributePoints { .. } => "distribute_points",
             GeoNodeKind::InstanceOnPoints { .. } => "instance_on_points",
             GeoNodeKind::SetPosition { .. } => "set_position",
+            GeoNodeKind::Position => "position",
+            GeoNodeKind::Normal => "normal",
+            GeoNodeKind::Index => "index",
+            GeoNodeKind::Value { .. } => "value",
+            GeoNodeKind::Vector { .. } => "vector",
+            GeoNodeKind::NoiseField { .. } => "noise_field",
+            GeoNodeKind::Math { .. } => "math",
+            GeoNodeKind::VectorScale { .. } => "vector_scale",
+            GeoNodeKind::CombineXyz { .. } => "combine_xyz",
+            GeoNodeKind::CurveLine { .. } => "curve_line",
+            GeoNodeKind::CurveCircle { .. } => "curve_circle",
+            GeoNodeKind::CurveSpiral { .. } => "curve_spiral",
+            GeoNodeKind::ResampleCurve { .. } => "resample_curve",
+            GeoNodeKind::CurveToPoints => "curve_to_points",
+            GeoNodeKind::CurveToMesh { .. } => "curve_to_mesh",
         }
     }
 
     /// The kinds the Add menu offers, in its order. Not the group's input or
     /// output: a graph has one of each.
-    pub const ADDABLE: [&'static str; 11] = [
+    pub const ADDABLE: [&'static str; 26] = [
         "transform",
         "array",
         "subdivide",
@@ -277,12 +701,53 @@ impl GeoNodeKind {
         "distribute_points",
         "instance_on_points",
         "set_position",
+        "position",
+        "normal",
+        "index",
+        "value",
+        "vector",
+        "noise_field",
+        "math",
+        "vector_scale",
+        "combine_xyz",
+        "curve_line",
+        "curve_circle",
+        "curve_spiral",
+        "resample_curve",
+        "curve_to_points",
+        "curve_to_mesh",
     ];
 
     /// The node's numbers, flat — for a file, and for its fields by index.
     pub fn values(&self) -> Vec<f32> {
         match self {
-            GeoNodeKind::Input | GeoNodeKind::Output | GeoNodeKind::Join => Vec::new(),
+            GeoNodeKind::Input
+            | GeoNodeKind::Output
+            | GeoNodeKind::Join
+            | GeoNodeKind::Position
+            | GeoNodeKind::Normal
+            | GeoNodeKind::Index
+            | GeoNodeKind::CurveToPoints => Vec::new(),
+            GeoNodeKind::Value { value } => vec![*value],
+            GeoNodeKind::Vector { value } => value.to_vec(),
+            GeoNodeKind::NoiseField { scale, seed } => vec![*scale, *seed as f32],
+            GeoNodeKind::Math { op, a, b } => vec![*op as f32, *a, *b],
+            GeoNodeKind::VectorScale { scale } => vec![*scale],
+            GeoNodeKind::CombineXyz { x, y, z } => vec![*x, *y, *z],
+            GeoNodeKind::CurveLine { length, resolution } => vec![*length, *resolution as f32],
+            GeoNodeKind::CurveCircle { radius, resolution } => vec![*radius, *resolution as f32],
+            GeoNodeKind::CurveSpiral {
+                turns,
+                height,
+                radius,
+                resolution,
+            } => vec![*turns, *height, *radius, *resolution as f32],
+            GeoNodeKind::ResampleCurve { count } => vec![*count as f32],
+            GeoNodeKind::CurveToMesh {
+                radius,
+                segments,
+                caps,
+            } => vec![*radius, *segments as f32, if *caps { 1.0 } else { 0.0 }],
             GeoNodeKind::Transform {
                 translate,
                 rotate,
@@ -389,6 +854,51 @@ impl GeoNodeKind {
                 noise_scale: at(4, 2.0).max(0.0),
                 seed: at(5, 0.0).clamp(0.0, 1e6) as u32,
             },
+            "position" => GeoNodeKind::Position,
+            "normal" => GeoNodeKind::Normal,
+            "index" => GeoNodeKind::Index,
+            "value" => GeoNodeKind::Value { value: at(0, 1.0) },
+            "vector" => GeoNodeKind::Vector {
+                value: [at(0, 0.0), at(1, 0.0), at(2, 1.0)],
+            },
+            "noise_field" => GeoNodeKind::NoiseField {
+                scale: at(0, 2.0).max(0.0),
+                seed: at(1, 0.0).clamp(0.0, 1e6) as u32,
+            },
+            "math" => GeoNodeKind::Math {
+                op: at(0, 2.0).clamp(0.0, (MATH_OPS.len() - 1) as f32) as u32,
+                a: at(1, 1.0),
+                b: at(2, 1.0),
+            },
+            "vector_scale" => GeoNodeKind::VectorScale { scale: at(0, 1.0) },
+            "combine_xyz" => GeoNodeKind::CombineXyz {
+                x: at(0, 0.0),
+                y: at(1, 0.0),
+                z: at(2, 0.0),
+            },
+            "curve_line" => GeoNodeKind::CurveLine {
+                length: at(0, 1.0),
+                resolution: at(1, 16.0).clamp(2.0, 10_000.0) as u32,
+            },
+            "curve_circle" => GeoNodeKind::CurveCircle {
+                radius: at(0, 1.0),
+                resolution: at(1, 32.0).clamp(3.0, 10_000.0) as u32,
+            },
+            "curve_spiral" => GeoNodeKind::CurveSpiral {
+                turns: at(0, 3.0),
+                height: at(1, 2.0),
+                radius: at(2, 1.0),
+                resolution: at(3, 96.0).clamp(2.0, 10_000.0) as u32,
+            },
+            "resample_curve" => GeoNodeKind::ResampleCurve {
+                count: at(0, 10.0).clamp(2.0, 10_000.0) as u32,
+            },
+            "curve_to_points" => GeoNodeKind::CurveToPoints,
+            "curve_to_mesh" => GeoNodeKind::CurveToMesh {
+                radius: at(0, 0.05).max(0.0),
+                segments: at(1, 8.0).clamp(3.0, 256.0) as u32,
+                caps: at(2, 1.0) >= 0.5,
+            },
             _ => return None,
         })
     }
@@ -406,7 +916,59 @@ impl GeoNodeKind {
             choice: None,
         };
         match self {
-            GeoNodeKind::Input | GeoNodeKind::Output | GeoNodeKind::Join => Vec::new(),
+            GeoNodeKind::Input
+            | GeoNodeKind::Output
+            | GeoNodeKind::Join
+            | GeoNodeKind::Position
+            | GeoNodeKind::Normal
+            | GeoNodeKind::Index
+            | GeoNodeKind::CurveToPoints => Vec::new(),
+            GeoNodeKind::Value { .. } => vec![number("value", 0, -1e6, 1e6)],
+            GeoNodeKind::Vector { .. } => vec![
+                number("x", 0, -1e6, 1e6),
+                number("y", 1, -1e6, 1e6),
+                number("z", 2, -1e6, 1e6),
+            ],
+            GeoNodeKind::NoiseField { .. } => {
+                vec![number("scale", 0, 0.0, 1000.0), number("seed", 1, 0.0, 1e6)]
+            }
+            GeoNodeKind::Math { .. } => vec![
+                GeoField {
+                    choice: Some(&MATH_OPS),
+                    ..number("operation", 0, 0.0, (MATH_OPS.len() - 1) as f32)
+                },
+                number("a", 1, -1e6, 1e6),
+                number("b", 2, -1e6, 1e6),
+            ],
+            GeoNodeKind::VectorScale { .. } => vec![number("scale", 0, -1e6, 1e6)],
+            GeoNodeKind::CombineXyz { .. } => vec![
+                number("x", 0, -1e6, 1e6),
+                number("y", 1, -1e6, 1e6),
+                number("z", 2, -1e6, 1e6),
+            ],
+            GeoNodeKind::CurveLine { .. } => vec![
+                number("length", 0, -1000.0, 1000.0),
+                number("resolution", 1, 2.0, 10_000.0),
+            ],
+            GeoNodeKind::CurveCircle { .. } => vec![
+                number("radius", 0, 0.0, 1000.0),
+                number("resolution", 1, 3.0, 10_000.0),
+            ],
+            GeoNodeKind::CurveSpiral { .. } => vec![
+                number("turns", 0, -1000.0, 1000.0),
+                number("height", 1, -1000.0, 1000.0),
+                number("radius", 2, 0.0, 1000.0),
+                number("resolution", 3, 2.0, 10_000.0),
+            ],
+            GeoNodeKind::ResampleCurve { .. } => vec![number("count", 0, 2.0, 10_000.0)],
+            GeoNodeKind::CurveToMesh { .. } => vec![
+                number("radius", 0, 0.0, 1000.0),
+                number("segments", 1, 3.0, 256.0),
+                GeoField {
+                    choice: Some(&["no", "yes"]),
+                    ..number("caps", 2, 0.0, 1.0)
+                },
+            ],
             GeoNodeKind::Transform { .. } => vec![
                 number("translate-x", 0, -1000.0, 1000.0),
                 number("translate-y", 1, -1000.0, 1000.0),
@@ -515,6 +1077,8 @@ pub struct GeoLink {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GeoLinkError {
     NoSuchSocket,
+    /// A field into a geometry input, or the other way.
+    TypeMismatch,
     /// It would make the graph loop.
     Cycle,
 }
@@ -565,6 +1129,12 @@ impl GeoGraph {
         };
         if !f.kind.has_output() || socket >= t.kind.inputs() {
             return Err(GeoLinkError::NoSuchSocket);
+        }
+        // A number and a direction stand in for each other; geometry is
+        // only geometry.
+        let (a, b) = (f.kind.output_type(), Some(t.kind.input_types()[socket]));
+        if (a == Some(GeoSocket::Geometry)) != (b == Some(GeoSocket::Geometry)) {
+            return Err(GeoLinkError::TypeMismatch);
         }
         if from == to || self.reaches(to, from) {
             return Err(GeoLinkError::Cycle);
@@ -644,23 +1214,55 @@ impl GeoGraph {
             .nodes
             .iter()
             .position(|n| matches!(n.kind, GeoNodeKind::Output))?;
-        let mut memo: Vec<Option<MeshData>> = vec![None; self.nodes.len()];
+        let mut memo: Vec<Option<Value>> = vec![None; self.nodes.len()];
         Some(self.socket(output, 0, input, &mut memo, 0))
     }
 
     /// What arrives at `node`'s input `socket`: the wired node's result, or
     /// nothing.
+    fn arriving(
+        &self,
+        node: usize,
+        socket: usize,
+        input: &MeshData,
+        memo: &mut Vec<Option<Value>>,
+        depth: usize,
+    ) -> Option<Value> {
+        match self.incoming(node, socket) {
+            Some(l) if depth <= self.nodes.len() => {
+                Some(self.node(l.from_node, input, memo, depth + 1))
+            }
+            _ => None,
+        }
+    }
+
+    /// The geometry at an input: empty when nothing, or a field, is there.
     fn socket(
         &self,
         node: usize,
         socket: usize,
         input: &MeshData,
-        memo: &mut Vec<Option<MeshData>>,
+        memo: &mut Vec<Option<Value>>,
         depth: usize,
     ) -> MeshData {
-        match self.incoming(node, socket) {
-            Some(l) if depth <= self.nodes.len() => self.node(l.from_node, input, memo, depth + 1),
+        match self.arriving(node, socket, input, memo, depth) {
+            Some(Value::Geometry(m)) => m,
             _ => MeshData::empty(),
+        }
+    }
+
+    /// The field at an input, if one is wired.
+    fn field(
+        &self,
+        node: usize,
+        socket: usize,
+        input: &MeshData,
+        memo: &mut Vec<Option<Value>>,
+        depth: usize,
+    ) -> Option<Field> {
+        match self.arriving(node, socket, input, memo, depth)? {
+            Value::Field(f) => Some(f),
+            Value::Geometry(_) => None,
         }
     }
 
@@ -668,13 +1270,165 @@ impl GeoGraph {
         &self,
         n: usize,
         input: &MeshData,
-        memo: &mut Vec<Option<MeshData>>,
+        memo: &mut Vec<Option<Value>>,
         depth: usize,
-    ) -> MeshData {
+    ) -> Value {
         if let Some(done) = &memo[n] {
             return done.clone();
         }
+        let geometry = match &self.nodes[n].kind {
+            GeoNodeKind::Position => Err(Field::Position),
+            GeoNodeKind::Normal => Err(Field::Normal),
+            GeoNodeKind::Index => Err(Field::Index),
+            GeoNodeKind::Value { value } => Err(Field::Float(*value)),
+            GeoNodeKind::Vector { value } => Err(Field::Vector(Vec3::from_array(*value))),
+            GeoNodeKind::NoiseField { scale, seed } => Err(Field::Noise {
+                at: Box::new(
+                    self.field(n, 0, input, memo, depth)
+                        .unwrap_or(Field::Position),
+                ),
+                scale: *scale,
+                seed: *seed,
+            }),
+            GeoNodeKind::Math { op, a, b } => Err(Field::Math {
+                op: *op,
+                a: Box::new(
+                    self.field(n, 0, input, memo, depth)
+                        .unwrap_or(Field::Float(*a)),
+                ),
+                b: Box::new(
+                    self.field(n, 1, input, memo, depth)
+                        .unwrap_or(Field::Float(*b)),
+                ),
+            }),
+            GeoNodeKind::VectorScale { scale } => Err(Field::Scale {
+                v: Box::new(
+                    self.field(n, 0, input, memo, depth)
+                        .unwrap_or(Field::Vector(Vec3::ZERO)),
+                ),
+                s: Box::new(
+                    self.field(n, 1, input, memo, depth)
+                        .unwrap_or(Field::Float(*scale)),
+                ),
+            }),
+            GeoNodeKind::CombineXyz { x, y, z } => {
+                let mut f = |i: usize, d: f32| {
+                    self.field(n, i, input, memo, depth)
+                        .unwrap_or(Field::Float(d))
+                };
+                Err(Field::Combine(Box::new([f(0, *x), f(1, *y), f(2, *z)])))
+            }
+            _ => Ok(()),
+        };
+        if let Err(field) = geometry {
+            let out = Value::Field(field);
+            memo[n] = Some(out.clone());
+            return out;
+        }
         let out = match &self.nodes[n].kind {
+            GeoNodeKind::Position
+            | GeoNodeKind::Normal
+            | GeoNodeKind::Index
+            | GeoNodeKind::Value { .. }
+            | GeoNodeKind::Vector { .. }
+            | GeoNodeKind::NoiseField { .. }
+            | GeoNodeKind::Math { .. }
+            | GeoNodeKind::VectorScale { .. }
+            | GeoNodeKind::CombineXyz { .. } => unreachable!("a field is made above"),
+            GeoNodeKind::CurveLine { length, resolution } => {
+                let k = (*resolution).max(2);
+                curves_mesh(&[(
+                    (0..k)
+                        .map(|i| Vec3::new(0.0, 0.0, *length * i as f32 / (k - 1) as f32))
+                        .collect(),
+                    false,
+                )])
+            }
+            GeoNodeKind::CurveCircle { radius, resolution } => {
+                let k = (*resolution).max(3);
+                curves_mesh(&[(
+                    (0..k)
+                        .map(|i| {
+                            let a = std::f32::consts::TAU * i as f32 / k as f32;
+                            Vec3::new(a.cos() * radius, a.sin() * radius, 0.0)
+                        })
+                        .collect(),
+                    true,
+                )])
+            }
+            GeoNodeKind::CurveSpiral {
+                turns,
+                height,
+                radius,
+                resolution,
+            } => {
+                let k = (*resolution).max(2);
+                curves_mesh(&[(
+                    (0..k)
+                        .map(|i| {
+                            let t = i as f32 / (k - 1) as f32;
+                            let a = std::f32::consts::TAU * turns * t;
+                            Vec3::new(a.cos() * radius, a.sin() * radius, height * t)
+                        })
+                        .collect(),
+                    false,
+                )])
+            }
+            GeoNodeKind::ResampleCurve { count } => {
+                let m = self.socket(n, 0, input, memo, depth);
+                let curves: Vec<(Vec<Vec3>, bool)> = curves_of(&m)
+                    .into_iter()
+                    .map(|(p, closed)| (resample(&p, closed, *count), closed))
+                    .collect();
+                curves_mesh(&curves)
+            }
+            GeoNodeKind::CurveToPoints => {
+                let m = self.socket(n, 0, input, memo, depth);
+                let mut positions = Vec::new();
+                let mut normals = Vec::new();
+                for (p, closed) in curves_of(&m) {
+                    normals.extend(tangents(&p, closed));
+                    positions.extend(p);
+                }
+                let mut out = MeshData::from_faces(positions, &[]);
+                out.attributes_mut().insert(
+                    POINT_NORMAL,
+                    kreate_mesh::Domain::Point,
+                    kreate_mesh::AttrData::F32x3(std::sync::Arc::new(normals)),
+                );
+                out
+            }
+            GeoNodeKind::CurveToMesh {
+                radius,
+                segments,
+                caps,
+            } => {
+                let m = self.socket(n, 0, input, memo, depth);
+                let profile = kreate_mesh::primitives::circle_profile(*radius, *segments);
+                let tubes: Vec<MeshData> = curves_of(&m)
+                    .into_iter()
+                    .filter(|(p, _)| p.len() >= 2)
+                    .map(|(path, closed)| {
+                        kreate_mesh::primitives::sweep(&kreate_mesh::primitives::Sweep {
+                            path: &path,
+                            profile: &profile,
+                            resolution: 1,
+                            closed,
+                            scale: (1.0, 1.0),
+                            caps: *caps,
+                        })
+                    })
+                    .collect();
+                let parts: Vec<Part<'_>> = tubes
+                    .iter()
+                    .filter(|m| m.num_verts() > 0)
+                    .map(|mesh| Part {
+                        mesh,
+                        transform: DAffine3::IDENTITY,
+                    })
+                    .collect();
+                join(&parts).0
+            }
             GeoNodeKind::DistributePoints { density, seed } => {
                 let m = self.socket(n, 0, input, memo, depth);
                 distribute_points(&m, *density, *seed)
@@ -688,6 +1442,12 @@ impl GeoGraph {
             } => {
                 let points = self.socket(n, 0, input, memo, depth);
                 let shape = self.socket(n, 1, input, memo, depth);
+                // Read at the points, before anything stands on them.
+                let ctx = FieldCtx::new(&points);
+                let scales = self.field(n, 2, input, memo, depth).map(|f| f.floats(&ctx));
+                let turns = self
+                    .field(n, 3, input, memo, depth)
+                    .map(|f| f.vectors(&ctx));
                 instance_on_points(
                     &points,
                     &shape,
@@ -696,6 +1456,8 @@ impl GeoGraph {
                     *random_rotation,
                     *align,
                     *seed,
+                    scales.as_deref(),
+                    turns.as_deref(),
                 )
             }
             GeoNodeKind::SetPosition {
@@ -705,6 +1467,10 @@ impl GeoGraph {
                 seed,
             } => {
                 let mut m = self.socket(n, 0, input, memo, depth);
+                // The offset field is read where the points were.
+                let extra = self
+                    .field(n, 1, input, memo, depth)
+                    .map(|f| f.vectors(&FieldCtx::new(&m)));
                 set_position(
                     &mut m,
                     Vec3::from_array(*offset),
@@ -712,6 +1478,11 @@ impl GeoGraph {
                     *noise_scale,
                     *seed,
                 );
+                if let Some(extra) = extra {
+                    for (p, d) in m.positions_mut().iter_mut().zip(extra) {
+                        *p += d;
+                    }
+                }
                 m
             }
             GeoNodeKind::Input => input.clone(),
@@ -803,6 +1574,7 @@ impl GeoGraph {
                 }
             }
         };
+        let out = Value::Geometry(out);
         memo[n] = Some(out.clone());
         out
     }
@@ -810,6 +1582,241 @@ impl GeoGraph {
 
 #[cfg(test)]
 mod tests {
+
+    /// A ball moved by a field: its normal, scaled by a number field made
+    /// from the point's height. The top swells, the middle stays.
+    #[test]
+    fn set_position_reads_a_field_at_every_vertex() {
+        let ball = kreate_mesh::primitives::uv_sphere(1.0, 32, 16);
+        let mut g = GeoGraph::passthrough();
+        let s = add(
+            &mut g,
+            GeoNodeKind::SetPosition {
+                offset: [0.0; 3],
+                noise: 0.0,
+                noise_scale: 1.0,
+                seed: 0,
+            },
+        );
+        let normal = add(&mut g, GeoNodeKind::Normal);
+        let position = add(&mut g, GeoNodeKind::Position);
+        // max(z, 0) as a number: the length of a vector is not it, so the
+        // height comes out by Math on the noise of... simpler: z alone via
+        // CombineXYZ is not a separate. Use the position scaled by 0.5.
+        let scale = add(&mut g, GeoNodeKind::VectorScale { scale: 0.5 });
+        let _ = position;
+        g.link(0, s, 0).unwrap();
+        g.link(normal, scale, 0).unwrap();
+        g.link(scale, s, 1).unwrap();
+        g.link(s, 1, 0).unwrap();
+        let out = g.evaluate(&ball).unwrap();
+        // Every vertex out along its normal by a half.
+        for q in out.positions() {
+            assert!((q.length() - 1.5).abs() < 0.02, "{}", q.length());
+        }
+        // A geometry wire into a field input is refused, and the other way.
+        assert_eq!(g.link(0, s, 1), Err(GeoLinkError::TypeMismatch));
+        assert_eq!(g.link(normal, s, 0), Err(GeoLinkError::TypeMismatch));
+        // A number field stands for a direction: Math into the offset.
+        let m = add(
+            &mut g,
+            GeoNodeKind::Math {
+                op: 2,
+                a: 0.25,
+                b: 2.0,
+            },
+        );
+        g.link(m, s, 1).unwrap();
+        let out = g.evaluate(&ball).unwrap();
+        let moved = out.positions()[0] - ball.positions()[0];
+        assert!((moved - Vec3::splat(0.5)).length() < 1e-5, "{moved:?}");
+    }
+
+    #[test]
+    fn index_and_math_fields_make_a_staircase() {
+        let points = MeshData::from_faces(vec![Vec3::ZERO; 4], &[]);
+        let mut g = GeoGraph::passthrough();
+        let s = add(
+            &mut g,
+            GeoNodeKind::SetPosition {
+                offset: [0.0; 3],
+                noise: 0.0,
+                noise_scale: 1.0,
+                seed: 0,
+            },
+        );
+        let index = add(&mut g, GeoNodeKind::Index);
+        let times = add(
+            &mut g,
+            GeoNodeKind::Math {
+                op: 2,
+                a: 0.0,
+                b: 2.0,
+            },
+        );
+        let up = add(
+            &mut g,
+            GeoNodeKind::CombineXyz {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        g.link(0, s, 0).unwrap();
+        g.link(index, times, 0).unwrap();
+        g.link(times, up, 2).unwrap();
+        g.link(up, s, 1).unwrap();
+        g.link(s, 1, 0).unwrap();
+        let out = g.evaluate(&points).unwrap();
+        let z: Vec<f32> = out.positions().iter().map(|p| p.z).collect();
+        assert_eq!(z, vec![0.0, 2.0, 4.0, 6.0]);
+        assert!(out.positions().iter().all(|p| p.x == 0.0 && p.y == 0.0));
+    }
+
+    #[test]
+    fn a_circle_curve_becomes_a_closed_tube() {
+        let mut g = GeoGraph::passthrough();
+        let c = add(
+            &mut g,
+            GeoNodeKind::CurveCircle {
+                radius: 2.0,
+                resolution: 64,
+            },
+        );
+        let r = add(&mut g, GeoNodeKind::ResampleCurve { count: 24 });
+        let t = add(
+            &mut g,
+            GeoNodeKind::CurveToMesh {
+                radius: 0.1,
+                segments: 6,
+                caps: true,
+            },
+        );
+        g.link(c, r, 0).unwrap();
+        g.link(r, t, 0).unwrap();
+        g.link(t, 1, 0).unwrap();
+        let out = g.evaluate(&MeshData::empty()).unwrap();
+        assert_eq!(
+            out.num_faces(),
+            24 * 6,
+            "a ring of quads, no caps on a loop"
+        );
+        // Every point a tube's radius from the circle.
+        for q in out.positions() {
+            let off = (Vec3::new(q.x, q.y, 0.0).length() - 2.0).hypot(q.z);
+            assert!((off - 0.1).abs() < 0.03, "{off}");
+        }
+        // Closed and two-sided: every edge between two faces.
+        let mut count = std::collections::HashMap::new();
+        for f in 0..out.num_faces() {
+            let ring = out.face_verts(f);
+            for k in 0..ring.len() {
+                let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+                *count.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        assert!(count.values().all(|c| *c == 2));
+    }
+
+    #[test]
+    fn resampling_spaces_points_evenly_and_curve_points_face_along_it() {
+        let line = curves_mesh(&[(
+            vec![
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, 4.0),
+            ],
+            false,
+        )]);
+        let curves = curves_of(&line);
+        let even = resample(&curves[0].0, false, 5);
+        let z: Vec<f32> = even.iter().map(|p| p.z).collect();
+        assert_eq!(z, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+        let mut g = GeoGraph::passthrough();
+        let spiral = add(
+            &mut g,
+            GeoNodeKind::CurveSpiral {
+                turns: 2.0,
+                height: 1.0,
+                radius: 1.0,
+                resolution: 50,
+            },
+        );
+        let pts = add(&mut g, GeoNodeKind::CurveToPoints);
+        let cube = add(
+            &mut g,
+            GeoNodeKind::Primitive {
+                shape: 0,
+                size: 0.05,
+            },
+        );
+        let inst = add(
+            &mut g,
+            GeoNodeKind::InstanceOnPoints {
+                scale: 1.0,
+                random_scale: 0.0,
+                random_rotation: false,
+                align: true,
+                seed: 0,
+            },
+        );
+        g.link(spiral, pts, 0).unwrap();
+        g.link(pts, inst, 0).unwrap();
+        g.link(cube, inst, 1).unwrap();
+        g.link(inst, 1, 0).unwrap();
+        let out = g.evaluate(&MeshData::empty()).unwrap();
+        assert_eq!(out.num_faces(), 50 * 6);
+    }
+
+    #[test]
+    fn a_scale_field_sizes_each_instance() {
+        let points = MeshData::from_faces(vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)], &[]);
+        let mut g = GeoGraph::passthrough();
+        let cube = add(
+            &mut g,
+            GeoNodeKind::Primitive {
+                shape: 0,
+                size: 1.0,
+            },
+        );
+        let inst = add(
+            &mut g,
+            GeoNodeKind::InstanceOnPoints {
+                scale: 1.0,
+                random_scale: 0.0,
+                random_rotation: false,
+                align: false,
+                seed: 0,
+            },
+        );
+        let index = add(&mut g, GeoNodeKind::Index);
+        let plus = add(
+            &mut g,
+            GeoNodeKind::Math {
+                op: 0,
+                a: 0.0,
+                b: 1.0,
+            },
+        );
+        g.link(index, plus, 0).unwrap();
+        g.link(0, inst, 0).unwrap();
+        g.link(cube, inst, 1).unwrap();
+        g.link(plus, inst, 2).unwrap();
+        g.link(inst, 1, 0).unwrap();
+        let out = g.evaluate(&points).unwrap();
+        let width = |lo: f32, hi: f32| {
+            let xs: Vec<f32> = out
+                .positions()
+                .iter()
+                .map(|p| p.x)
+                .filter(|x| *x > lo && *x < hi)
+                .collect();
+            xs.iter().fold(f32::MIN, |a, b| a.max(*b)) - xs.iter().fold(f32::MAX, |a, b| a.min(*b))
+        };
+        assert!((width(-5.0, 5.0) - 1.0).abs() < 1e-4, "the first at one");
+        assert!((width(5.0, 15.0) - 2.0).abs() < 1e-4, "the second at two");
+    }
+
     use super::*;
 
     fn add(g: &mut GeoGraph, kind: GeoNodeKind) -> usize {
@@ -950,7 +1957,7 @@ mod tests {
             ],
             &[vec![0, 1, 2]],
         );
-        let out = instance_on_points(&points, &pin, 1.0, 0.0, false, true, 0);
+        let out = instance_on_points(&points, &pin, 1.0, 0.0, false, true, 0, None, None);
         let n = points.attributes().get_f32x3(POINT_NORMAL).unwrap()[0];
         let tip = out.positions()[1] - out.positions()[0];
         assert!(

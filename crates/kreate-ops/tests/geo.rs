@@ -86,3 +86,28 @@ fn a_graph_built_by_operators_is_what_the_object_shows_and_undo_takes_it_back() 
         .is_err());
     assert_eq!(faces(&doc), 18);
 }
+
+#[test]
+fn every_kind_on_the_add_menu_is_the_one_added() {
+    // The operator's list of kinds is the menu's: an entry past its end was
+    // clamped to the last it knew, and a field node came in as a profile.
+    let mut registry = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    for (i, tag) in kreate_scene::geonodes::GeoNodeKind::ADDABLE.iter().enumerate() {
+        let mut history = History::new();
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
+        let cube = doc.add_object(Object::new("Cube", ObjectData::Mesh(mesh)));
+        doc.selection.add(cube);
+        run(&registry, &mut history, &mut doc, "geo.enable", &[]);
+        run(
+            &registry,
+            &mut history,
+            &mut doc,
+            "geo.add",
+            &[("kind", PropertyValue::Enum(i as u32))],
+        );
+        let graph = doc.object(cube).unwrap().geometry_nodes.as_ref().unwrap();
+        assert_eq!(graph.nodes.last().unwrap().kind.tag(), *tag);
+    }
+}
