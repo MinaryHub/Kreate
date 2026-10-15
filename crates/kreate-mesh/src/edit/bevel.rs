@@ -141,35 +141,6 @@ pub fn bevel_edges_segments(
     touched.sort_unstable_by_key(|v| v.index());
     touched.dedup();
 
-    // --- how far it can go --------------------------------------------------
-    // One width for the whole operation, clamped by the tightest place: an
-    // offset longer than half an edge would pass the offset coming from the
-    // other end and the quad between them would be inside out. A per-edge clamp
-    // would keep the bevel legal and make it visibly uneven, which reads as a
-    // bug rather than as a limit.
-    let mut limit = f32::INFINITY;
-    for &v in &touched {
-        for g in mesh.vert_edges(v) {
-            let Some([a, b]) = mesh.edge_verts(g) else {
-                continue;
-            };
-            let (Some(pa), Some(pb)) = (mesh.position(a), mesh.position(b)) else {
-                continue;
-            };
-            let length = (pb - pa).length();
-            if length > 1e-6 {
-                // Halved again for the doubly-inset corners: those move by the
-                // width along *both* of a face's edges, so half an edge each way
-                // is already the limit before they meet.
-                limit = limit.min(length * 0.49 * 0.5);
-            }
-        }
-    }
-    let applied = width.min(limit);
-    if applied < width {
-        out.clamped = true;
-    }
-
     // --- the plan ------------------------------------------------------------
     // Read in full before anything is written: every rule below reads the loop
     // cycles, and those stop existing the moment the old faces are removed.
@@ -216,6 +187,57 @@ pub fn bevel_edges_segments(
             corners.push((v, corner));
         }
         plan.push((f, corners));
+    }
+
+    // --- how far it can go --------------------------------------------------
+    // One width for the whole operation, clamped by the tightest place: every
+    // new point slides that far along one of its vertex's edges, so an edge
+    // one of whose ends slides along it takes a width short of its length,
+    // and one both of whose ends do, short of half — past that the two
+    // points pass and the face between them is inside out. Only the edges
+    // something slides along count: a short edge elsewhere at the vertex
+    // limits nothing. A per-edge clamp would keep the bevel legal and make
+    // it visibly uneven, which reads as a bug rather than as a limit.
+    let mut sliding: Vec<(VertId, EdgeId)> = Vec::new();
+    for (f, corners) in &plan {
+        for (v, corner) in corners {
+            let along: Vec<EdgeId> = match corner {
+                Corner::Keep => Vec::new(),
+                Corner::Along(g) => vec![*g],
+                Corner::Split(a, b) => vec![*a, *b],
+                Corner::Both => corner_edges(mesh, *f, *v)
+                    .map(|(a, b)| vec![a, b])
+                    .unwrap_or_default(),
+            };
+            for g in along {
+                if !sliding.contains(&(*v, g)) {
+                    sliding.push((*v, g));
+                }
+            }
+        }
+    }
+    let mut limit = f32::INFINITY;
+    for &(v, g) in &sliding {
+        let Some([a, b]) = mesh.edge_verts(g) else {
+            continue;
+        };
+        let (Some(pa), Some(pb)) = (mesh.position(a), mesh.position(b)) else {
+            continue;
+        };
+        let length = (pb - pa).length();
+        if length > 1e-6 {
+            let other = if a == v { b } else { a };
+            let ends = if sliding.contains(&(other, g)) {
+                2.0
+            } else {
+                1.0
+            };
+            limit = limit.min(length * 0.98 / ends);
+        }
+    }
+    let applied = width.min(limit);
+    if applied < width {
+        out.clamped = true;
     }
 
     // --- the new vertices ---------------------------------------------------
@@ -1017,6 +1039,29 @@ mod tests {
             );
         }
         assert_eq!(m.to_mesh_data().validate(), Vec::new());
+    }
+
+    /// A bevel goes as far as the edges it slides along allow: on a two-unit
+    /// cube, nearly half an edge with every edge bevelled, nearly a whole one
+    /// with one edge — not a quarter of the shortest edge anywhere near.
+    #[test]
+    fn a_bevel_goes_as_far_as_the_edges_it_slides_along_allow() {
+        let mut m = cube();
+        let all: Vec<EdgeId> = m.edge_ids().collect();
+        let out = bevel_edges(&mut m, &all, 0.9).unwrap();
+        m.assert_valid();
+        assert!(!out.clamped, "0.9 of a 2-unit cube's edges fits");
+        assert_eq!(m.to_mesh_data().validate(), Vec::new());
+        let mut m = cube();
+        let one = m.edge_ids().next().unwrap();
+        let out = bevel_edges(&mut m, &[one], 1.8).unwrap();
+        m.assert_valid();
+        assert!(!out.clamped, "one edge slides along edges two long");
+        assert!(watertight(&m));
+        let mut m = cube();
+        let out = bevel_edges(&mut m, &[one], 2.5).unwrap();
+        m.assert_valid();
+        assert!(out.clamped, "past the length of the edge it slides along");
     }
 
     #[test]
