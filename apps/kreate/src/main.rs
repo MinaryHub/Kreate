@@ -9589,35 +9589,53 @@ impl App {
                 text: trimmed.to_string(),
                 kind: LineKind::Input,
             });
-            let result = match kreate::appcall::parse(trimmed) {
-                Some(Ok(call)) => self.run_app_call(call),
-                Some(Err(e)) => Err(e),
-                None => {
-                    let _ = kreate_ops::report::take();
-                    let outcome = self
-                        .history
-                        .run_script(
-                            &self.registry,
-                            &mut self.doc,
-                            Some(&mut self.edit),
-                            &self.op_ctx,
-                            trimmed,
-                        )
-                        .pop();
-                    let said = kreate_ops::report::take();
-                    let with = |base: String| match &said {
-                        Some(s) => format!("{base}: {s}"),
-                        None => base,
-                    };
-                    match outcome.map(|o| o.result) {
-                        Some(Ok(kreate_ops::OpResult::Finished)) => {
-                            Ok(with("finished".to_string()))
+            // What the line had done for it before it ran, said with its
+            // result: the object it named selected, the mode it needed
+            // entered.
+            let mut notes: Vec<String> = Vec::new();
+            let (line_text, target) =
+                kreate_ops::script::take_object_target(&self.registry, trimmed);
+            let targeted = match target {
+                Some(name) => self.select_for_line(&name, &mut notes),
+                None => Ok(()),
+            };
+            let result =
+                match targeted.and_then(|()| self.enter_mode_for_line(&line_text, &mut notes)) {
+                    Err(e) => Err(e),
+                    Ok(()) => match kreate::appcall::parse(&line_text) {
+                        Some(Ok(call)) => self.run_app_call(call),
+                        Some(Err(e)) => Err(e),
+                        None => {
+                            let _ = kreate_ops::report::take();
+                            let outcome = self
+                                .history
+                                .run_script(
+                                    &self.registry,
+                                    &mut self.doc,
+                                    Some(&mut self.edit),
+                                    &self.op_ctx,
+                                    &line_text,
+                                )
+                                .pop();
+                            let said = kreate_ops::report::take();
+                            let with = |base: String| match &said {
+                                Some(s) => format!("{base}: {s}"),
+                                None => base,
+                            };
+                            match outcome.map(|o| o.result) {
+                                Some(Ok(kreate_ops::OpResult::Finished)) => {
+                                    Ok(with("finished".to_string()))
+                                }
+                                Some(Ok(other)) => Ok(with(format!("{other:?}"))),
+                                Some(Err(e)) => Err(e.to_string()),
+                                None => continue,
+                            }
                         }
-                        Some(Ok(other)) => Ok(with(format!("{other:?}"))),
-                        Some(Err(e)) => Err(e.to_string()),
-                        None => continue,
-                    }
-                }
+                    },
+                };
+            let result = match result {
+                Ok(r) if !notes.is_empty() => Ok(format!("{r} ({})", notes.join(", "))),
+                other => other,
             };
             match &result {
                 Ok(r) if r == "finished" => {}
@@ -9686,6 +9704,72 @@ impl App {
     }
 
     /// A script line the application answers rather than an operator.
+    /// Selects the object a script line named with `object=`, making it
+    /// the active one, so the line acts on it. Out of edit mode first when
+    /// it is another object than the one being edited: the mesh operators
+    /// after it go back in by themselves.
+    fn select_for_line(&mut self, name: &str, notes: &mut Vec<String>) -> Result<(), String> {
+        let Some(id) = self
+            .doc
+            .objects()
+            .find(|(_, o)| o.name == name)
+            .map(|(id, _)| id)
+        else {
+            return Err(format!(
+                "no object called {name:?}: get_scene lists the names (a second \"Cube\" is \"Cube.001\")"
+            ));
+        };
+        if self.doc.selection.active == Some(id) && self.doc.selection.objects.len() == 1 {
+            return Ok(());
+        }
+        if self.op_ctx.mode != OpMode::RESTING && self.doc.selection.active != Some(id) {
+            self.run_app_call(kreate::appcall::AppCall::ModeSet("object".into()))?;
+            notes.push("left edit mode".into());
+        }
+        let mut p = PropertyMap::new();
+        p.set("name", PropertyValue::Text(name.to_string()));
+        self.run_op("object.select", p);
+        notes.push(format!("{name} selected"));
+        Ok(())
+    }
+
+    /// Switches mode for a script line that needs another one: a mesh.* or
+    /// uv.* line out of edit mode enters it on the active mesh, an object.*
+    /// line in edit mode leaves it. The commonest error a script met, and
+    /// one with only one fix.
+    fn enter_mode_for_line(&mut self, line: &str, notes: &mut Vec<String>) -> Result<(), String> {
+        let body = line
+            .trim()
+            .strip_prefix("kreate.ops.")
+            .unwrap_or(line.trim());
+        let Some(id) = body.split('(').next().map(str::trim) else {
+            return Ok(());
+        };
+        let Some(info) = self.registry.get(id) else {
+            return Ok(());
+        };
+        if info.poll(&self.op_ctx, &self.doc) {
+            return Ok(());
+        }
+        let elements = self.op_ctx.mode.edits_elements();
+        let wants_elements = id.starts_with("mesh.") || id.starts_with("uv.");
+        let has_mesh = kreate_ops::mode::Has::of(&self.doc).mesh
+            || self
+                .doc
+                .selection
+                .objects
+                .iter()
+                .any(|o| self.doc.object(*o).and_then(|o| o.mesh()).is_some());
+        if wants_elements && !elements && has_mesh {
+            self.run_app_call(kreate::appcall::AppCall::ModeSet("edit".into()))?;
+            notes.push("entered edit mode".into());
+        } else if !wants_elements && id.starts_with("object.") && elements {
+            self.run_app_call(kreate::appcall::AppCall::ModeSet("object".into()))?;
+            notes.push("left edit mode".into());
+        }
+        Ok(())
+    }
+
     fn run_app_call(&mut self, call: kreate::appcall::AppCall) -> Result<String, String> {
         use kreate::appcall::AppCall;
         match call {
@@ -14774,6 +14858,56 @@ kreate.ops.object.add_primitive()",
         assert!(why.contains("mode_set"), "the fix is named: {why}");
         assert!(report[1].result.as_ref().unwrap_err().contains("skipped"));
         assert_eq!(app.doc.objects().count(), 0, "the second line did not run");
+    }
+
+    /// A line names its object with `object=` and is run on it; a mesh line
+    /// out of edit mode enters it and an object line in edit mode leaves it,
+    /// each said with the result.
+    #[test]
+    fn a_line_selects_its_object_and_enters_the_mode_it_needs() {
+        let mut app = app();
+        let report = app.run_script_reporting(
+            "kreate.ops.object.add_primitive()
+kreate.ops.object.add_primitive(location=(3, 0, 0))
+kreate.ops.mesh.select(action=\"all\", object=\"Cube\")
+kreate.ops.mesh.translate(translation=(0, 0, 1))
+kreate.ops.object.set_transform(object=\"Cube.001\", location=(3, 0, 2))",
+        );
+        for line in &report {
+            assert!(line.result.is_ok(), "{}: {:?}", line.text, line.result);
+        }
+        let third = report[2].result.as_ref().unwrap();
+        assert!(
+            third.contains("Cube selected") && third.contains("entered edit mode"),
+            "{third}"
+        );
+        assert!(
+            !report[3].result.as_ref().unwrap().contains("mode"),
+            "already there"
+        );
+        let fifth = report[4].result.as_ref().unwrap();
+        assert!(
+            fifth.contains("left edit mode") && fifth.contains("Cube.001 selected"),
+            "{fifth}"
+        );
+        assert_eq!(app.op_ctx.mode, OpMode::RESTING);
+        let cube = app.doc.objects().find(|(_, o)| o.name == "Cube").unwrap().1;
+        let mesh = app.doc.mesh(cube.mesh().unwrap()).unwrap();
+        assert!(
+            mesh.positions().iter().all(|p| p.z >= -1e-6),
+            "the two-unit cube was moved up by one: {:?}",
+            mesh.positions()
+        );
+        let other = app
+            .doc
+            .objects()
+            .find(|(_, o)| o.name == "Cube.001")
+            .unwrap()
+            .1;
+        assert_eq!(other.transform.translation.z, 2.0);
+        // A name nobody has is an error that names it.
+        let report = app.run_script_reporting("kreate.ops.object.delete(object=\"Nobody\")");
+        assert!(report[0].result.as_ref().unwrap_err().contains("Nobody"));
     }
 
     /// A line that changed nothing is answered as cancelled with why, and

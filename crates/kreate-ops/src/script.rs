@@ -103,6 +103,49 @@ pub fn parse_call(registry: &OperatorRegistry, line: &str) -> Result<Call, Scrip
 }
 
 /// The comma-separated arguments, respecting parentheses, brackets and quotes.
+/// A line's `object="Name"` argument taken off, for the caller to select
+/// that object before the line runs: the line without it, and the name.
+///
+/// Every operator acts on the selection, so a script said `object.select`
+/// before nearly every line; this is that line folded into the one after
+/// it. Left alone when the operator has an `object` parameter of its own
+/// (a sketch on a face names the part that way), when it is not an operator
+/// line, or when it cannot be read — the ordinary parse says why then.
+pub fn take_object_target(registry: &OperatorRegistry, line: &str) -> (String, Option<String>) {
+    let line = line.trim();
+    let untouched = || (line.to_string(), None);
+    let body = line.strip_prefix(PREFIX).unwrap_or(line);
+    let (Some(open), true) = (body.find('('), body.ends_with(')')) else {
+        return untouched();
+    };
+    let id = body[..open].trim();
+    let Some(info) = registry.get(id) else {
+        return untouched();
+    };
+    if info.schema.iter().any(|d| d.name == "object") {
+        return untouched();
+    }
+    let args = &body[open + 1..body.len() - 1];
+    let Ok(parts) = split_args(args) else {
+        return untouched();
+    };
+    let mut name = None;
+    let mut kept: Vec<&str> = Vec::new();
+    for part in parts {
+        match part.split_once('=') {
+            Some((key, raw)) if key.trim() == "object" => match parse_value(raw.trim()) {
+                Ok(Raw::Text(text)) => name = Some(text),
+                _ => return untouched(),
+            },
+            _ => kept.push(part),
+        }
+    }
+    match name {
+        Some(name) => (format!("{PREFIX}{id}({})", kept.join(", ")), Some(name)),
+        None => untouched(),
+    }
+}
+
 fn split_args(args: &str) -> Result<Vec<&str>, ScriptError> {
     let mut out = Vec::new();
     let mut depth = 0i32;
@@ -454,6 +497,35 @@ impl History {
 
 #[cfg(test)]
 mod tests {
+    /// `object="Name"` comes off a line for the caller to select by, unless
+    /// the operator has an `object` of its own.
+    #[test]
+    fn an_object_target_is_taken_off_a_line() {
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let (line, name) = take_object_target(
+            &registry,
+            "kreate.ops.object.set_transform(object=\"Cube\", location=(1, 2, 3))",
+        );
+        assert_eq!(name.as_deref(), Some("Cube"));
+        assert_eq!(line, "kreate.ops.object.set_transform(location=(1, 2, 3))");
+        assert!(parse_call(&registry, &line).is_ok());
+        // Its own parameter: left where it is.
+        let (line, name) = take_object_target(
+            &registry,
+            "kreate.ops.sketch.new(plane=\"face\", object=\"Part\")",
+        );
+        assert_eq!(name, None);
+        assert!(line.contains("object="));
+        // Not one at all: untouched.
+        let (line, name) =
+            take_object_target(&registry, "kreate.ops.object.mode_set(mode=\"edit\")");
+        assert_eq!(
+            (line.as_str(), name),
+            ("kreate.ops.object.mode_set(mode=\"edit\")", None)
+        );
+    }
+
     /// Units in a script: `20mm` is 0.02, `90deg` a quarter turn, in a tuple
     /// too and quoted too; a unit the parameter cannot take is refused.
     #[test]
