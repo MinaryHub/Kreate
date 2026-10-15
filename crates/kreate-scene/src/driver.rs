@@ -149,9 +149,10 @@ impl Document {
                 .action
                 .and_then(|a| self.action(a))
                 .and_then(|action| {
-                    action.curves.iter().find(|c| {
-                        *c.path.property == *v.property && c.path.index == Some(v.index)
-                    })
+                    action
+                        .curves
+                        .iter()
+                        .find(|c| *c.path.property == *v.property && c.path.index == Some(v.index))
                 })
                 .and_then(|c| c.evaluate(self.playback.frame));
             let value = match keyed {

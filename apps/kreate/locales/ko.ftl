@@ -1623,3 +1623,4 @@ op-sketch-reattach = 스케치를 면에 다시 붙이기
 op-sketch-reattach-desc = 부품의 면 위에 만든 스케치를, 부품이 바뀐 뒤 그 면에 다시 맞춥니다. 그린 것은 그대로 두고 면의 윤곽은 새로 투영합니다.
 op-sketch-reattach-outline = 윤곽 다시 투영
 op-object-add-bearing-shields = 실드
+op-object-add-gear-shaft-angle = 축 사이 각 (베벨)

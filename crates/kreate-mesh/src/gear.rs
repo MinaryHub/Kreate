@@ -463,7 +463,15 @@ pub fn rack_mate_turn(teeth: u32) -> f64 {
 /// A straight bevel gear's pitch cone angle, running with `mate` teeth on a
 /// shaft at right angles.
 pub fn bevel_cone_angle(teeth: u32, mate: u32) -> f64 {
-    (teeth.max(3) as f64).atan2(mate.max(3) as f64)
+    bevel_cone_angle_at(teeth, mate, PI / 2.0)
+}
+
+/// A bevel gear's pitch cone half-angle when its shaft meets its mate's at
+/// `shaft` radians: tan δ = sin Σ / (z₂/z₁ + cos Σ), the two cones' angles
+/// adding to Σ. At a right angle, atan(z₁/z₂).
+pub fn bevel_cone_angle_at(teeth: u32, mate: u32, shaft: f64) -> f64 {
+    let ratio = mate.max(3) as f64 / teeth.max(3) as f64;
+    shaft.sin().atan2(ratio + shaft.cos())
 }
 
 /// A straight bevel gear, its shaft at right angles to its mate's: the
@@ -473,7 +481,12 @@ pub fn bevel_cone_angle(teeth: u32, mate: u32) -> f64 {
 /// width. Its axis is Z, the large end's pitch circle in z = 0, the apex
 /// above it, the first tooth on +X turned on by `turn`.
 pub fn bevel_gear(p: &GearParams, mate: u32, turn: f64) -> MeshData {
-    let delta = bevel_cone_angle(p.teeth, mate);
+    bevel_gear_at(p, mate, PI / 2.0, turn)
+}
+
+/// [`bevel_gear`] for shafts meeting at `shaft` radians.
+pub fn bevel_gear_at(p: &GearParams, mate: u32, shaft: f64, turn: f64) -> MeshData {
+    let delta = bevel_cone_angle_at(p.teeth, mate, shaft);
     let z = p.teeth.max(3) as f64;
     let r = p.module * z * 0.5;
     let rv = r / delta.cos();
@@ -495,7 +508,7 @@ pub fn bevel_gear(p: &GearParams, mate: u32, turn: f64) -> MeshData {
     let cone = r / delta.sin();
     let face = p
         .width
-        .clamp(1e-6, bevel_face_limit(p.teeth, mate, p.module));
+        .clamp(1e-6, bevel_face_limit_at(p.teeth, mate, shaft, p.module));
     let apex = DVec3::new(0.0, 0.0, r / delta.tan());
     let back_apex_z = -r * delta.tan();
     // One tooth of the virtual gear spans 2π / zv; the real one 2π / z. Laid
@@ -533,7 +546,12 @@ pub fn bevel_gear(p: &GearParams, mate: u32, turn: f64) -> MeshData {
 /// A bevel gear's cone distance: from the apex to the large end's pitch
 /// circle, along the cone.
 pub fn bevel_cone_distance(teeth: u32, mate: u32, module: f64) -> f64 {
-    module * teeth.max(3) as f64 * 0.5 / bevel_cone_angle(teeth, mate).sin()
+    bevel_cone_distance_at(teeth, mate, PI / 2.0, module)
+}
+
+/// [`bevel_cone_distance`] for shafts meeting at `shaft` radians.
+pub fn bevel_cone_distance_at(teeth: u32, mate: u32, shaft: f64, module: f64) -> f64 {
+    module * teeth.max(3) as f64 * 0.5 / bevel_cone_angle_at(teeth, mate, shaft).sin()
 }
 
 /// The widest a bevel gear's face can be: half its cone distance, where the
@@ -541,18 +559,28 @@ pub fn bevel_cone_distance(teeth: u32, mate: u32, module: f64) -> f64 {
 /// cut; past a half the teeth at the small end are too small to carry
 /// anything, and at the whole of it they meet at the apex.
 pub fn bevel_face_limit(teeth: u32, mate: u32, module: f64) -> f64 {
-    bevel_cone_distance(teeth, mate, module) * 0.5
+    bevel_face_limit_at(teeth, mate, PI / 2.0, module)
+}
+
+/// [`bevel_face_limit`] for shafts meeting at `shaft` radians.
+pub fn bevel_face_limit_at(teeth: u32, mate: u32, shaft: f64, module: f64) -> f64 {
+    bevel_cone_distance_at(teeth, mate, shaft, module) * 0.5
 }
 
 /// The widest bore a bevel gear can take: within its small end's root,
 /// leaving a fifth of it as wall.
 pub fn bevel_bore_limit(p: &GearParams, mate: u32) -> f64 {
-    let delta = bevel_cone_angle(p.teeth, mate);
+    bevel_bore_limit_at(p, mate, PI / 2.0)
+}
+
+/// [`bevel_bore_limit`] for shafts meeting at `shaft` radians.
+pub fn bevel_bore_limit_at(p: &GearParams, mate: u32, shaft: f64) -> f64 {
+    let delta = bevel_cone_angle_at(p.teeth, mate, shaft);
     let r = p.module * p.teeth.max(3) as f64 * 0.5;
     let cone = r / delta.sin();
     let face = p
         .width
-        .clamp(1e-6, bevel_face_limit(p.teeth, mate, p.module));
+        .clamp(1e-6, bevel_face_limit_at(p.teeth, mate, shaft, p.module));
     let k = (cone - face) / cone;
     2.0 * (r - 1.25 * p.module * delta.cos()) * k * 0.8
 }
@@ -632,16 +660,32 @@ fn loft(bottom: &[DVec3], top: &[DVec3], bore_r: f64) -> MeshData {
 /// so its large end's pitch circle touches the first's. The rotation and the
 /// translation, and how far its own outline is to be turned.
 pub fn bevel_mate_place(first: u32, second: u32, module: f64) -> (DQuat, DVec3, f64) {
+    bevel_mate_place_at(first, second, PI / 2.0, module)
+}
+
+/// [`bevel_mate_place`] for shafts meeting at `shaft` radians: the second
+/// gear's axis through the first's apex, `shaft` from the first's, leaning
+/// over +X; both cones' pitch elements meeting along the same line.
+pub fn bevel_mate_place_at(
+    first: u32,
+    second: u32,
+    shaft: f64,
+    module: f64,
+) -> (DQuat, DVec3, f64) {
+    let d1 = bevel_cone_angle_at(first, second, shaft);
+    let d2 = shaft - d1;
     let r1 = module * first.max(3) as f64 * 0.5;
     let r2 = module * second.max(3) as f64 * 0.5;
-    // Its own Z (toward its apex) along the world's -X; its X, where a gap
-    // of it is to face the first gear, straight down.
-    let turn = DQuat::from_mat3(&kreate_math::DMat3::from_cols(
-        DVec3::new(0.0, 0.0, -1.0),
-        DVec3::new(0.0, -1.0, 0.0),
-        DVec3::new(-1.0, 0.0, 0.0),
-    ));
-    (turn, DVec3::new(r1, 0.0, r2), PI / second.max(3) as f64)
+    // The apex above the first gear, and the second's large end back from
+    // it down its own axis — which, toward the apex, is `w`.
+    let apex = DVec3::new(0.0, 0.0, r1 / d1.tan());
+    let w = DVec3::new(-shaft.sin(), 0.0, shaft.cos());
+    let centre = apex - w * (r2 / d2.tan());
+    // Its X square to its axis in the plane of the two, the side a gap of
+    // it is to face the first gear; at a right angle, straight down.
+    let x = DVec3::new(-shaft.cos(), 0.0, -shaft.sin());
+    let turn = DQuat::from_mat3(&kreate_math::DMat3::from_cols(x, w.cross(x), w));
+    (turn, centre, PI / second.max(3) as f64)
 }
 
 // --- worms ----------------------------------------------------------------------
@@ -718,6 +762,41 @@ pub fn worm(w: &WormParams) -> MeshData {
 
 #[cfg(test)]
 mod tests {
+    /// At a right angle the general bevel is the right-angled one; at
+    /// another, the two cones' angles add to the shaft angle, and both
+    /// gears' apexes are one point.
+    #[test]
+    fn bevel_gears_at_any_shaft_angle_share_their_apex() {
+        let q = PI / 2.0;
+        assert!((bevel_cone_angle_at(20, 40, q) - bevel_cone_angle(20, 40)).abs() < 1e-12);
+        let (t90, c90, _) = bevel_mate_place(20, 40, 0.002);
+        let (t, c, _) = bevel_mate_place_at(20, 40, q, 0.002);
+        assert!((c - c90).length() < 1e-12 && t.dot(t90).abs() > 1.0 - 1e-12);
+        for shaft in [q * 0.6, q, q * 1.4] {
+            let (d1, d2) = (
+                bevel_cone_angle_at(20, 30, shaft),
+                bevel_cone_angle_at(30, 20, shaft),
+            );
+            assert!((d1 + d2 - shaft).abs() < 1e-12, "{shaft}");
+            let (turn, centre, _) = bevel_mate_place_at(20, 30, shaft, 0.002);
+            let apex1 = DVec3::new(0.0, 0.0, 0.02 / d1.tan());
+            let apex2 = centre + turn * DVec3::new(0.0, 0.0, 0.03 / d2.tan());
+            assert!((apex1 - apex2).length() < 1e-12, "{shaft}: {apex1} {apex2}");
+            // The axes meet at the shaft angle.
+            let a2 = turn * DVec3::Z;
+            assert!((a2.dot(DVec3::Z).acos() - shaft).abs() < 1e-9);
+            let g = GearParams {
+                teeth: 20,
+                ..GearParams::default()
+            };
+            let m = bevel_gear_at(&GearParams { width: 0.004, ..g }, 30, shaft, 0.0);
+            assert!(
+                m.validate().is_empty() && crate::measure::is_closed(&m),
+                "{shaft}"
+            );
+        }
+    }
+
     use super::*;
     use crate::measure::{is_closed, mass_properties};
 

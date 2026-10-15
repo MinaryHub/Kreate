@@ -194,7 +194,7 @@ pub struct AddGearParams {
     pub backlash: f64,
     /// Teeth of a second gear made to run with this one, set at the centre
     /// distance and turned to mesh: beside a spur gear, inside a ring gear,
-    /// on a rack, at right angles to a bevel gear; zero for none. A bevel
+    /// on a rack, at the shaft angle to a bevel gear; zero for none. A bevel
     /// gear with none is a mitre gear, made for a mate of its own size.
     #[param(min = 0, max = 400, unit = "count")]
     pub mate_teeth: u32,
@@ -207,6 +207,10 @@ pub struct AddGearParams {
     /// A worm's diameter factor q: its pitch diameter over the module.
     #[param(min = 4.0, max = 25.0)]
     pub diameter_factor: f64,
+    /// The angle between a bevel gear's shaft and its mate's: a right
+    /// angle for most, less or more for a drive turned off square.
+    #[param(min = 0.35, max = 2.8, unit = "angle")]
+    pub shaft_angle: f64,
     /// Where the gear's axis stands, on its bottom face.
     pub location: [f64; 3],
 }
@@ -226,6 +230,7 @@ impl Default for AddGearParams {
             rim: 0.005,
             starts: 1,
             diameter_factor: 10.0,
+            shaft_angle: std::f64::consts::FRAC_PI_2,
             kind: 0,
             location: [0.0; 3],
         }
@@ -300,7 +305,20 @@ impl Operator for AddGear {
             1 | 2 => {}
             3 => {
                 let partner = if mate >= 6 { mate } else { g.teeth };
-                let face = gear::bevel_face_limit(g.teeth, partner, g.module);
+                let shaft = params.shaft_angle;
+                // Each cone must open less than flat: past it the gear is a
+                // crown or an internal bevel, which these are not.
+                let d1 = gear::bevel_cone_angle_at(g.teeth, partner, shaft);
+                let limit = 85f64.to_radians();
+                if !(d1 > 0.05 && d1 < limit && shaft - d1 > 0.05 && shaft - d1 < limit) {
+                    return Err(OpError::Failed(format!(
+                        "at a shaft angle of {:.0}° these teeth make a cone {:.0}° and {:.0}° from its axis: each must be under 85°; bring the shaft angle nearer a right angle or change the teeth",
+                        shaft.to_degrees(),
+                        d1.to_degrees(),
+                        (shaft - d1).to_degrees()
+                    )));
+                }
+                let face = gear::bevel_face_limit_at(g.teeth, partner, shaft, g.module);
                 if g.width > face + 1e-12 {
                     return Err(OpError::Failed(format!(
                         "the face width of this bevel gear can be at most {} mm, half its                          cone distance (a third, {} mm, is usual); {} mm was asked for",
@@ -309,10 +327,18 @@ impl Operator for AddGear {
                         mm(g.width)
                     )));
                 }
-                too_big("bore", g.bore, gear::bevel_bore_limit(&g, partner))?;
+                too_big(
+                    "bore",
+                    g.bore,
+                    gear::bevel_bore_limit_at(&g, partner, shaft),
+                )?;
                 if mate >= 6 {
                     let other = gear::GearParams { teeth: mate, ..g };
-                    too_big("bore", g.bore, gear::bevel_bore_limit(&other, g.teeth))?;
+                    too_big(
+                        "bore",
+                        g.bore,
+                        gear::bevel_bore_limit_at(&other, g.teeth, shaft),
+                    )?;
                 }
             }
             4 => {
@@ -388,20 +414,27 @@ impl Operator for AddGear {
                     ));
                 }
             }
-            // A straight bevel gear, and its mate at right angles.
+            // A straight bevel gear, and its mate at the shaft angle.
             3 => {
                 let partner = if mate >= 6 { mate } else { g.teeth };
+                let shaft = params.shaft_angle;
                 parts.push((
                     label("Bevel gear", g.teeth),
-                    gear::bevel_gear(&g, partner, 0.0),
+                    gear::bevel_gear_at(&g, partner, shaft, 0.0),
                     DQuat::IDENTITY,
                     at,
                 ));
                 if mate >= 6 {
-                    let (turn, offset, own) = gear::bevel_mate_place(g.teeth, mate, g.module);
+                    let (turn, offset, own) =
+                        gear::bevel_mate_place_at(g.teeth, mate, shaft, g.module);
                     parts.push((
                         label("Bevel gear", mate),
-                        gear::bevel_gear(&gear::GearParams { teeth: mate, ..g }, g.teeth, own),
+                        gear::bevel_gear_at(
+                            &gear::GearParams { teeth: mate, ..g },
+                            g.teeth,
+                            shaft,
+                            own,
+                        ),
                         turn,
                         at + offset,
                     ));
@@ -5266,6 +5299,42 @@ mod gear_tests {
             .0;
         let y = worm.world_transform(wheel).translation.y;
         assert!((y - 0.040).abs() < 1e-9, "{y}");
+    }
+
+    /// Bevel gears on shafts at 60°: two gears, the mate's axis 60° from
+    /// the first's; and a shaft angle that would make a crown, refused.
+    #[test]
+    fn bevel_gears_can_meet_at_an_angle_other_than_square() {
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut p = PropertyMap::new();
+        p.set("kind", PropertyValue::Enum(3));
+        p.set("mate_teeth", PropertyValue::Int(30));
+        p.set("width", PropertyValue::Float(0.004));
+        p.set("bore", PropertyValue::Float(0.0));
+        p.set("shaft_angle", PropertyValue::Float(60f64.to_radians()));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.add_gear", &p)
+            .unwrap();
+        let gears: Vec<_> = doc.objects().map(|(id, _)| id).collect();
+        assert_eq!(gears.len(), 2);
+        let axes: Vec<kreate_math::DVec3> = gears
+            .iter()
+            .map(|id| {
+                doc.world_transform(*id)
+                    .transform_vector3(kreate_math::DVec3::Z)
+                    .normalize()
+            })
+            .collect();
+        assert!((axes[0].dot(axes[1]).acos().to_degrees() - 60.0).abs() < 1e-6);
+        let mut crown = p.clone();
+        crown.set("teeth", PropertyValue::Int(60));
+        crown.set("mate_teeth", PropertyValue::Int(12));
+        crown.set("shaft_angle", PropertyValue::Float(150f64.to_radians()));
+        assert!(h
+            .dispatch(&r, &mut doc, &Context::default(), "object.add_gear", &crown)
+            .is_err());
     }
 
     #[test]

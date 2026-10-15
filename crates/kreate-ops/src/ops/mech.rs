@@ -571,8 +571,17 @@ impl Operator for AddBearing {
         );
         // i18n-exempt: a designation and its size
         let suffix = ["", "-Z", "-2Z"][params.shields.min(2) as usize];
-        let name = format!("Bearing {}{suffix} ({}x{}x{})", b.name, b.bore, b.outside, b.width);
-        add_part(doc, name, mech::bearing_shielded(&b, params.shields), at, turn);
+        let name = format!(
+            "Bearing {}{suffix} ({}x{}x{})",
+            b.name, b.bore, b.outside, b.width
+        );
+        add_part(
+            doc,
+            name,
+            mech::bearing_shielded(&b, params.shields),
+            at,
+            turn,
+        );
         Ok(OpResult::Finished)
     }
 }

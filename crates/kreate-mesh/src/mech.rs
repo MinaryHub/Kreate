@@ -557,7 +557,12 @@ pub fn fastener(kind: FastenerKind, size: usize, length: f64, thread: bool) -> M
         FastenerKind::Nut => {
             let minor = (s.d - 1.0825 * s.pitch) * mm;
             let height = f.nut_height * mm;
-            let body = prism(&hexagon(f.across_flats * mm), &round(minor * 0.5, 48), 0.0, height);
+            let body = prism(
+                &hexagon(f.across_flats * mm),
+                &round(minor * 0.5, 48),
+                0.0,
+                height,
+            );
             if !thread {
                 return body;
             }
@@ -1756,7 +1761,10 @@ mod tests {
             mass_properties(&one, |q| q).volume,
             mass_properties(&two, |q| q).volume,
         );
-        assert!(v1 > open && (v2 - open - 2.0 * (v1 - open)).abs() < 1e-12, "{open} {v1} {v2}");
+        assert!(
+            v1 > open && (v2 - open - 2.0 * (v1 - open)).abs() < 1e-12,
+            "{open} {v1} {v2}"
+        );
     }
 
     #[test]

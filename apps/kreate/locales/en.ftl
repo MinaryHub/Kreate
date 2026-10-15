@@ -1617,3 +1617,4 @@ op-sketch-reattach = Reattach Sketch to Face
 op-sketch-reattach-desc = Puts a sketch made on a part's face back on that face after the part changed: what was drawn keeps its place, and the face's outline is projected again.
 op-sketch-reattach-outline = Project the outline again
 op-object-add-bearing-shields = Shields
+op-object-add-gear-shaft-angle = Shaft angle (bevel)
