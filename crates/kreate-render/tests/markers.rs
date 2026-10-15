@@ -37,8 +37,8 @@ const INK: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
 /// A cube at the origin, seen from the default camera, with the given markers.
 fn shoot(gpu: &Gpu, lines: &[OverlayLine], points: &[OverlayPoint]) -> (Vec<[u8; 4]>, Camera) {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
-    viewport.shading = ShadingMode::Studio;
-    viewport.show_grid = false;
+    viewport.shading = SHADING.with(|s| s.get());
+    viewport.show_grid = GRID.with(|g| g.get());
     viewport.show_wireframe = false;
 
     let mesh = kreate_mesh::primitives::cube(1.0);
@@ -119,6 +119,66 @@ fn shoot(gpu: &Gpu, lines: &[OverlayLine], points: &[OverlayPoint]) -> (Vec<[u8;
         }
     }
     (out, camera)
+}
+
+thread_local! {
+    static SHADING: std::cell::Cell<ShadingMode> = const { std::cell::Cell::new(ShadingMode::Studio) };
+    static GRID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The rendered view is the picture as it will be rendered: lamps and
+/// cameras drawn as lines and rings, and the floor grid, are left out of it.
+#[test]
+fn the_rendered_view_draws_no_markers_and_no_grid() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let camera = Camera {
+        distance: 4.0,
+        ..Camera::default()
+    };
+    let toward = (camera.eye() - glam::DVec3::ZERO).normalize();
+    let ring = [ring_at(toward * 1.5)];
+    let shot = |shading: ShadingMode, grid: bool, points: &[OverlayPoint]| {
+        SHADING.with(|s| s.set(shading));
+        GRID.with(|g| g.set(grid));
+        let (frame, _) = shoot(&gpu, &[], points);
+        SHADING.with(|s| s.set(ShadingMode::Studio));
+        GRID.with(|g| g.set(false));
+        frame
+    };
+    assert!(
+        magenta(&shot(ShadingMode::Material, false, &ring)) > 15,
+        "the preview shows the lamp"
+    );
+    assert_eq!(
+        magenta(&shot(ShadingMode::Rendered, false, &ring)),
+        0,
+        "the rendered view does not"
+    );
+    // The grid: drawn in the preview, so asked for here, and not in the
+    // rendered view — which is then the same picture with it asked for or not.
+    let differs = |a: &[[u8; 4]], b: &[[u8; 4]]| {
+        a.iter()
+            .zip(b)
+            .filter(|(p, q)| (0..3).any(|i| p[i].abs_diff(q[i]) > 4))
+            .count()
+    };
+    let (with, without) = (
+        shot(ShadingMode::Material, true, &[]),
+        shot(ShadingMode::Material, false, &[]),
+    );
+    assert!(differs(&with, &without) > 50, "the preview draws the grid");
+    let (with, without) = (
+        shot(ShadingMode::Rendered, true, &[]),
+        shot(ShadingMode::Rendered, false, &[]),
+    );
+    assert_eq!(
+        differs(&with, &without),
+        0,
+        "the rendered view draws no grid"
+    );
 }
 
 fn magenta(frame: &[[u8; 4]]) -> usize {

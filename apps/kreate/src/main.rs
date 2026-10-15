@@ -9784,6 +9784,14 @@ impl App {
     /// is a hit on what is on screen. `None` when the frame has not yet said
     /// where the picture is.
     fn glyph_under_cursor(&self) -> Option<kreate_scene::ObjectId> {
+        // The rendered view draws no lamps or cameras, so none is clicked.
+        if self
+            .gfx
+            .as_ref()
+            .is_some_and(|g| g.viewport.shading == ShadingMode::Rendered)
+        {
+            return None;
+        }
         let (x, y) = self.input.cursor?;
         let projector = self.ui.projector?;
         let ppp = self.egui_ctx.pixels_per_point();

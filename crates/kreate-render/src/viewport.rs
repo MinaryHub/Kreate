@@ -4500,7 +4500,10 @@ impl Viewport {
         // model's edges, and writing its depth there hid the edges and markers
         // drawn later along every grid line: edges broken into dots. Hidden
         // by the surfaces, never hiding an overlay.
-        if self.show_grid {
+        // The rendered view is the picture as it will be rendered: no floor
+        // grid, and no lamps or cameras drawn as lines (below).
+        let rendered = self.shading == ShadingMode::Rendered;
+        if self.show_grid && !rendered {
             pass.set_pipeline(&self.grid);
             pass.set_bind_group(0, &self.grid_bind, &[]);
             pass.draw(0..3, 0..1);
@@ -4600,7 +4603,7 @@ impl Viewport {
 
         // The markers last, over the grid, and against the depth the solid
         // pass wrote: a lamp behind a wall is behind the wall.
-        if self.marker_lines.count > 0 || self.marker_points.count > 0 {
+        if !rendered && (self.marker_lines.count > 0 || self.marker_points.count > 0) {
             pass.set_bind_group(0, &self.marker_globals_bind, &[]);
             pass.set_bind_group(1, &self.marker_lines.bind, &[]);
             pass.set_bind_group(2, &self.marker_points.bind, &[]);
