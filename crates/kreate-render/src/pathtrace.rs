@@ -216,7 +216,18 @@ struct Params {
     /// The environment's importance map: columns, rows, whether there is
     /// one, and nothing.
     env: [u32; 4],
+    /// The last traced frame's clip from eye-relative world, and its eye:
+    /// where this frame's first hits were on that frame's picture.
+    prev_view_proj: [[f32; 4]; 4],
+    prev_eye: [f32; 4],
+    /// x: nonzero when this sample may carry the last frame's mean over.
+    /// y: the most frames of it a pixel keeps.
+    reproject: [u32; 4],
 }
+
+/// The most of the last frames a pixel carries over when the view moves:
+/// its own samples outweigh them from this many on.
+pub const HISTORY: u32 = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -312,6 +323,20 @@ pub struct PathTracer {
     scene: Option<Scene>,
     sum: wgpu::Buffer,
     sum_pixels: u32,
+    /// Per pixel: where its first hit is and whether it has one, that hit's
+    /// normal, and the mean carried over from the frames before with how
+    /// many frames it stands for. See [`HISTORY`].
+    aux: wgpu::Buffer,
+    /// The last frame's sum and then its `aux`, copied when the view moves.
+    prev: wgpu::Buffer,
+    /// The view the sum was traced through: clip from eye-relative world,
+    /// and the eye.
+    previous: Option<(Mat4, glam::DVec3)>,
+    /// Whether the sum is of the scene as it stands — false once the scene,
+    /// its lights or its size change, when nothing may be carried over.
+    history_ok: bool,
+    /// This sample carries the last frame's mean over.
+    reproject_now: bool,
     scene_bind: Option<wgpu::BindGroup>,
     resolve_bind: Option<wgpu::BindGroup>,
     size: (u32, u32),
@@ -635,6 +660,8 @@ impl PathTracer {
                 storage(14, true, c),
                 storage(15, true, c),
                 storage(16, true, c),
+                storage(17, false, c),
+                storage(18, true, c),
             ],
         });
         let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -647,7 +674,7 @@ impl PathTracer {
         let f = wgpu::ShaderStages::FRAGMENT;
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("path trace resolve"),
-            entries: &[storage(0, true, f), uniform(1, f)],
+            entries: &[storage(0, true, f), uniform(1, f), storage(2, true, f)],
         });
         let resolve_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("path trace resolve"),
@@ -702,7 +729,12 @@ impl PathTracer {
             16,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let sum = buffer("path trace sum", 32, wgpu::BufferUsages::STORAGE);
+        let per_pixel = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
+        let sum = buffer("path trace sum", 32, per_pixel);
+        let aux = buffer("path trace aux", 48, per_pixel);
+        let prev = buffer("path trace previous", 80, per_pixel);
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("path trace images"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -734,6 +766,11 @@ impl PathTracer {
             scene: None,
             sum,
             sum_pixels: 1,
+            aux,
+            prev,
+            previous: None,
+            history_ok: false,
+            reproject_now: false,
             scene_bind: None,
             resolve_bind: None,
             size: (0, 0),
@@ -1137,6 +1174,13 @@ impl PathTracer {
         });
         self.scene_bind = None;
         self.sample = 0;
+        self.history_ok = false;
+    }
+
+    /// Nothing from before carries over to the next view: the scene's
+    /// lights or materials changed, and the picture with them.
+    pub fn forget_history(&mut self) {
+        self.history_ok = false;
     }
 
     /// The environment's importance map, or none for a flat world.
@@ -1157,6 +1201,7 @@ impl PathTracer {
         self.env_size = map.map(|m| (m.columns, m.rows));
         self.scene_bind = None;
         self.sample = 0;
+        self.history_ok = false;
     }
 
     /// The per-pixel sums, for the denoiser to read the surface colour and
@@ -1188,19 +1233,29 @@ impl PathTracer {
         let pixels = region.0.max(1) * region.1.max(1);
         if pixels > self.sum_pixels || self.size != region {
             if pixels > self.sum_pixels {
-                self.sum = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("path trace sum"),
-                    // Two vec4s a pixel: see `pt_sum` in the shader.
-                    size: pixels as u64 * 32,
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                });
+                let per_pixel = wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST;
+                let buffer = |label, vec4s: u64| {
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size: pixels as u64 * vec4s * 16,
+                        usage: per_pixel,
+                        mapped_at_creation: false,
+                    })
+                };
+                // Two vec4s a pixel: see `pt_sum` in the shader; three for
+                // `pt_aux`; and both again for the last frame's.
+                self.sum = buffer("path trace sum", 2);
+                self.aux = buffer("path trace aux", 3);
+                self.prev = buffer("path trace previous", 5);
                 self.sum_pixels = pixels;
             }
             self.size = region;
             self.scene_bind = None;
             self.resolve_bind = None;
             self.sample = 0;
+            self.history_ok = false;
         }
         if let (None, Some(scene)) = (&self.scene_bind, &self.scene) {
             let mut entries: Vec<wgpu::BindGroupEntry> = [
@@ -1253,6 +1308,14 @@ impl PathTracer {
                 binding: 16,
                 resource: scene.colors.as_entire_binding(),
             });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 17,
+                resource: self.aux.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 18,
+                resource: self.prev.as_entire_binding(),
+            });
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),
                 layout: &self.scene_layout,
@@ -1272,10 +1335,24 @@ impl PathTracer {
                         binding: 1,
                         resource: self.resolve_params.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.aux.as_entire_binding(),
+                    },
                 ],
             }));
         }
         self.sample = sample;
+        // A first sample of a moved view, the scene as it was: each pixel
+        // finds its first hit on the last frame's picture and carries that
+        // pixel's mean over, while its own samples are few.
+        let here = (projection * view, eye);
+        let before = self.previous.filter(|_| self.history_ok);
+        self.reproject_now = sample <= 1 && before.is_some();
+        self.previous = Some(here);
+        self.history_ok = true;
+        let (prev_view_proj, prev_eye) = before.unwrap_or(here);
+        let moved = (prev_eye - eye).as_vec3();
         // The view's rows are the camera's axes in the world.
         let world = view.inverse();
         let (right, up) = (world.x_axis, world.y_axis);
@@ -1297,6 +1374,11 @@ impl PathTracer {
                 Some((c, r)) => [c, r, 1, 0],
                 None => [0, 0, 0, 0],
             },
+            prev_view_proj: prev_view_proj.to_cols_array_2d(),
+            // Where the last eye is from this one: the shader's hits are
+            // this eye's plus an offset, kept small for f32.
+            prev_eye: [moved.x, moved.y, moved.z, 0.0],
+            reproject: [u32::from(self.reproject_now), HISTORY, 0, 0],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         queue.write_buffer(
@@ -1316,6 +1398,12 @@ impl PathTracer {
         let (Some(scene_bind), Some(resolve_bind)) = (&self.scene_bind, &self.resolve_bind) else {
             return;
         };
+        if self.reproject_now {
+            // The last frame's, before this sample writes over them.
+            let pixels = self.size.0 as u64 * self.size.1 as u64;
+            encoder.copy_buffer_to_buffer(&self.sum, 0, &self.prev, 0, pixels * 32);
+            encoder.copy_buffer_to_buffer(&self.aux, 0, &self.prev, pixels * 32, pixels * 48);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("path trace"),

@@ -2103,6 +2103,45 @@ fn traced_shot_with(
 thread_local! {
     /// The adaptive sampling's threshold the traced scenes use.
     static NOISE_THRESHOLD: std::cell::Cell<f32> = const { std::cell::Cell::new(0.01) };
+    /// From which frame the traced scene's camera is turned a little.
+    static NUDGE_FROM: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
+}
+
+/// A view turned a little after many samples keeps what it can of them:
+/// each pixel finds its surface on the last picture and carries that mean
+/// over. Its first frame is far nearer the settled picture than one fresh
+/// sample is — and a still view still settles on its own mean.
+#[test]
+fn a_moved_view_carries_the_last_frames_samples_over() {
+    let gpu = gpu_or_skip!(gpu());
+    let shot = |nudge: u32, frames: u32| {
+        NUDGE_FROM.with(|n| n.set(nudge));
+        NOISE_THRESHOLD.with(|t| t.set(0.0));
+        let p = traced_shot_with(&gpu, true, frames, None, false);
+        NUDGE_FROM.with(|n| n.set(u32::MAX));
+        NOISE_THRESHOLD.with(|t| t.set(0.01));
+        p
+    };
+    let settled = shot(0, 256);
+    let fresh = shot(0, 1);
+    let carried = shot(64, 65);
+    let apart = |p: &[[f32; 4]]| {
+        settled
+            .iter()
+            .zip(p)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>())
+            .sum::<f32>()
+            / settled.len() as f32
+    };
+    let (fresh, carried) = (apart(&fresh), apart(&carried));
+    assert!(
+        carried < fresh * 0.5,
+        "carried over {carried} against a fresh sample's {fresh}"
+    );
+    // Kept still after the move, the carried mean fades out: as near the
+    // settled picture as a still view's own samples come.
+    let still = shot(64, 64 + 192);
+    assert!(apart(&still) < 0.02, "settled to {}", apart(&still));
 }
 
 /// Adaptive sampling stops quiet pixels early and changes nothing else: a
@@ -2282,7 +2321,7 @@ fn traced_scene(
         draws[0].material = 1;
     }
     let mut out = Vec::new();
-    for _ in 0..frames {
+    for frame in 0..frames {
         // Faint lamps far off first, when a test asks: each takes a shadow
         // map, so the sun after them is left with none.
         let mut lights: Vec<PlacedLight> = (0..DECOYS.with(|d| d.get()))
@@ -2294,6 +2333,15 @@ fn traced_scene(
             })
             .collect();
         lights.push(key_light(20_000.0));
+        let nudged = Camera {
+            rotation: glam::DQuat::from_rotation_z(0.04) * camera.rotation,
+            ..camera
+        };
+        let camera = if frame >= NUDGE_FROM.with(|n| n.get()) {
+            nudged
+        } else {
+            camera
+        };
         viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &lights);
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
         out = read_frame(gpu, &mut viewport, &draws);

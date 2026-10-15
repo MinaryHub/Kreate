@@ -39,6 +39,13 @@ struct PtParams {
     // The environment's importance map: columns, rows, nonzero when there is
     // one.
     env: vec4<u32>,
+    // The last traced frame's clip from its eye-relative world, and where
+    // its eye is from this one's.
+    prev_view_proj: mat4x4<f32>,
+    prev_eye: vec4<f32>,
+    // x: this sample carries the last frame's mean over; y: the most frames
+    // a pixel keeps.
+    reproject: vec4<u32>,
 };
 
 struct PtNode {
@@ -90,6 +97,12 @@ const PT_SURFACE: u32 = 4u;
 // Each vertex's colour, a byte a channel, red lowest: what multiplies the
 // surface's base colour, white where the mesh has none.
 @group(0) @binding(16) var<storage, read> pt_colors: array<u32>;
+// Per pixel: its first hit relative to the eye (w one when there is one),
+// that hit's normal, and the mean carried over from earlier frames with how
+// many frames it stands for.
+@group(0) @binding(17) var<storage, read_write> pt_aux: array<vec4<f32>>;
+// The last frame's sum, then its aux: copied when the view moves.
+@group(0) @binding(18) var<storage, read> pt_prev: array<vec4<f32>>;
 
 // What a compiled material decided at a point: the generated `pt_material`
 // fills it, from whichever material the surface names.
@@ -691,6 +704,53 @@ fn pt_transmittance(origin: vec3<f32>, dir: vec3<f32>, reach: f32) -> f32 {
     return through;
 }
 
+// The mean the last frame had where this pixel's first hit was, and how
+// many frames it stands for — nothing when the hit is off that picture or
+// was not what the last frame saw there: another surface in front, or one
+// facing another way. Its own carried mean comes with it, so a moving view
+// keeps up to `reproject.y` frames.
+fn pt_carried(at: vec4<f32>, normal: vec3<f32>) -> vec4<f32> {
+    if (pt.reproject.x == 0u || at.w < 0.5) {
+        return vec4<f32>(0.0);
+    }
+    // The hit from the last eye.
+    let from_last = at.xyz - pt.prev_eye.xyz;
+    let clip = pt.prev_view_proj * vec4<f32>(from_last, 1.0);
+    if (clip.w <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let ndc = clip.xy / clip.w;
+    let px = vec2<f32>((ndc.x * 0.5 + 0.5) * f32(pt.size.x), (0.5 - ndc.y * 0.5) * f32(pt.size.y));
+    if (px.x < 0.0 || px.y < 0.0 || px.x >= f32(pt.size.x) || px.y >= f32(pt.size.y)) {
+        return vec4<f32>(0.0);
+    }
+    let q = u32(px.y) * pt.size.x + u32(px.x);
+    let n = pt.size.x * pt.size.y;
+    let was = pt_prev[n * 2u + q * 3u];
+    let was_normal = pt_prev[n * 2u + q * 3u + 1u].xyz;
+    if (was.w < 0.5) {
+        return vec4<f32>(0.0);
+    }
+    // The same surface: as far from the last eye within a little of the
+    // distance, and facing the same way.
+    let was_from_last = was.xyz - pt.prev_eye.xyz;
+    let d = length(from_last);
+    if (abs(length(was_from_last) - d) > 0.02 * d + 1e-3 || dot(normalize(was_normal), normalize(normal)) < 0.9) {
+        return vec4<f32>(0.0);
+    }
+    let own = pt_prev[q * 2u];
+    let carried = pt_prev[n * 2u + q * 3u + 2u];
+    // What that pixel showed: its own samples, and what it carried while
+    // they were few.
+    let k = max(carried.w - own.w, 0.0);
+    let weight = own.w + k;
+    if (weight <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let mean = (own.rgb + carried.rgb * k) / weight;
+    return vec4<f32>(mean, min(weight, f32(pt.reproject.y)));
+}
+
 @compute @workgroup_size(8, 8)
 fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= pt.size.x || id.y >= pt.size.y) {
@@ -760,6 +820,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // squares apart by: white where the path met nothing, or glass first.
     var first_albedo = vec3<f32>(1.0);
     var met_surface = false;
+    // Where that first surface is, from the eye, and which way it faces.
+    var first_at = vec4<f32>(0.0);
+    var first_normal = vec3<f32>(0.0);
     // Glass is not counted against the bounces: a path through a block of it
     // crosses two faces and, at the steep angles total internal reflection
     // traps, several more — counted, it would run out inside and come back
@@ -1015,6 +1078,8 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             if (extra.w <= 0.0) {
                 let sheen = mix(vec3<f32>(0.04), s.base_color, s.metallic);
                 first_albedo = s.base_color * (1.0 - s.metallic) * 0.96 + sheen;
+                first_at = vec4<f32>(p - pt.eye.xyz, 1.0);
+                first_normal = geometric;
             }
         }
         let v = -dir;
@@ -1268,7 +1333,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let rl = pt_luminance(radiance);
     let sample = vec4<f32>(radiance, 1.0);
     let stats = vec4<f32>(first_albedo, rl * rl);
+    // The first hit, for the next view to find this pixel by.
+    pt_aux[pixel * 3u] = first_at;
+    pt_aux[pixel * 3u + 1u] = vec4<f32>(first_normal, 0.0);
     if (pt.sample <= 1u) {
+        pt_aux[pixel * 3u + 2u] = pt_carried(first_at, first_normal);
         pt_sum[pixel * 2u] = sample;
         pt_sum[pixel * 2u + 1u] = stats;
     } else {

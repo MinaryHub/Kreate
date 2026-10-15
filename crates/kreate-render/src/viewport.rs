@@ -4731,6 +4731,7 @@ impl Viewport {
     /// a mesh rewritten in place, a light, a material.
     pub fn restart_accumulation(&mut self) {
         self.accum_samples = 0;
+        self.pathtracer.forget_history();
     }
 
     /// Whether a still view still has frames to add, so the caller should
