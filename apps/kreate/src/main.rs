@@ -1406,6 +1406,15 @@ impl App {
         // user means "in or out of editing whatever this is". With more modes it
         // is still a two-way gesture, between object mode and the last one they
         // were editing in.
+        //
+        // A sketch is held as a mesh of points and lines, and editing it is
+        // the sketch tools, not its vertices: Tab on one goes into it.
+        if self.op_ctx.mode == OpMode::Object
+            && kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_some()
+        {
+            self.set_mode(OpMode::Sketch);
+            return;
+        }
         let has = kreate_ops::mode::Has::of(&self.doc);
         self.set_mode(kreate::mode::toggled(self.op_ctx.mode, has));
     }
@@ -9463,7 +9472,11 @@ impl App {
                 // surface — so without this a click on a lamp selected
                 // whatever was behind it, or nothing, and lights could not be
                 // selected in the viewport at all.
-                let glyph = self.glyph_under_cursor();
+                // Then a sketch's lines, drawn on top as well and as
+                // invisible to the id buffer.
+                let glyph = self
+                    .glyph_under_cursor()
+                    .or_else(|| self.sketch_under_cursor());
                 let hit_key = match (glyph, hit) {
                     (Some(id), _) => Some(shell::object_key(id)),
                     (None, Some(hit)) => Some(hit.object),
@@ -9797,6 +9810,15 @@ impl App {
         let ppp = self.egui_ctx.pixels_per_point();
         let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
         shell::glyph_under(&self.doc, &projector, at)
+    }
+
+    /// The sketch whose line is under the cursor, if any.
+    fn sketch_under_cursor(&self) -> Option<kreate_scene::ObjectId> {
+        let (x, y) = self.input.cursor?;
+        let projector = self.ui.projector?;
+        let ppp = self.egui_ctx.pixels_per_point();
+        let at = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+        kreate::sketching::sketch_under(&self.doc, &projector, at, 6.0)
     }
 
     /// The cursor's position in the viewport, as normalised device coordinates.
@@ -15106,6 +15128,27 @@ kreate.ops.object.add_primitive()",
             .collect();
         caught.sort();
         assert_eq!(caught, vec![(100, 0), (200, 0), (500, 0)]);
+    }
+
+    /// A sketch is edited again: Tab on it goes into the sketch tools, not
+    /// its vertices, and Tab again comes out.
+    #[test]
+    fn tab_on_a_sketch_goes_back_into_it() {
+        let mut app = app();
+        app.run_op_with("sketch.new", &[]);
+        app.run_op_with(
+            "sketch.line",
+            &[(
+                "points",
+                PropertyValue::Floats(vec![0.01, 0.01, 0.02, 0.01]),
+            )],
+        );
+        app.set_mode(OpMode::Object);
+        assert_eq!(app.op_ctx.mode, OpMode::Object);
+        app.toggle_edit_mode();
+        assert_eq!(app.op_ctx.mode, OpMode::Sketch);
+        app.toggle_edit_mode();
+        assert_eq!(app.op_ctx.mode, OpMode::Object);
     }
 
     #[test]

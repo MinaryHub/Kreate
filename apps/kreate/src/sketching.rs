@@ -521,6 +521,53 @@ pub fn other_lines(
     others
 }
 
+/// The shown sketch whose line passes nearest `at` on screen, within
+/// `reach` points: what a click in object mode selects. A sketch has no
+/// surface, so the id buffer never finds it.
+pub fn sketch_under(
+    doc: &kreate_scene::Document,
+    projector: &kreate_ui::object_glyph::Projector,
+    at: egui::Pos2,
+    reach: f32,
+) -> Option<kreate_scene::document::ObjectId> {
+    use kreate_math::DVec3;
+    let mut best: Option<(f32, kreate_scene::document::ObjectId)> = None;
+    for (id, o) in doc.objects() {
+        if o.sketch_lines.is_empty() || !doc.is_shown(id) {
+            continue;
+        }
+        let world = doc.world_transform(id);
+        let pts = kreate_ops::ops::sketch_draw::points(doc, id);
+        for [a, b] in &o.sketch_lines {
+            let (Some(p), Some(q)) = (pts.get(*a as usize), pts.get(*b as usize)) else {
+                continue;
+            };
+            let (Some(p), Some(q)) = (
+                projector.project(world.transform_point3(DVec3::new(p.x, p.y, 0.0))),
+                projector.project(world.transform_point3(DVec3::new(q.x, q.y, 0.0))),
+            ) else {
+                continue;
+            };
+            let d = segment_distance(at, p, q);
+            if d <= reach && best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, id));
+            }
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// How far `at` is from the segment `p`–`q`, on screen.
+fn segment_distance(at: egui::Pos2, p: egui::Pos2, q: egui::Pos2) -> f32 {
+    let (d, w) = (q - p, at - p);
+    let t = if d.length_sq() > 1e-12 {
+        (w.dot(d) / d.length_sq()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p + d * t).distance(at)
+}
+
 /// The other sketches' points a drawing can start from, in the world: their
 /// ends and corners, lone points and the centres of their circles and arcs
 /// — not the points round a circle, which are only how it is drawn, nor any
@@ -976,6 +1023,52 @@ fn crossing(p0: DVec2, p1: DVec2, q0: DVec2, q1: DVec2) -> Option<DVec2> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_click_near_a_sketchs_line_finds_the_sketch() {
+        let mut doc = kreate_scene::Document::new();
+        let mut mesh = kreate_mesh::MeshData::from_faces(
+            vec![
+                kreate_math::Vec3::new(-1.0, 0.0, 0.0),
+                kreate_math::Vec3::new(1.0, 0.0, 0.0),
+            ],
+            &[],
+        );
+        let _ = &mut mesh;
+        let m = doc.add_mesh(mesh);
+        let mut o = kreate_scene::document::Object::new(
+            "Sketch",
+            kreate_scene::document::ObjectData::Mesh(m),
+        );
+        o.sketch_lines = vec![[0, 1]];
+        let id = doc.add_object(o);
+        // Looking straight down at the line from above.
+        let camera = kreate_render::Camera {
+            pivot: kreate_math::DVec3::ZERO,
+            rotation: kreate_math::DQuat::IDENTITY,
+            distance: 5.0,
+            ..kreate_render::Camera::default()
+        };
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+        let projector = kreate_ui::object_glyph::Projector {
+            eye: camera.eye(),
+            rotation: camera.rotation,
+            projection: camera.projection_matrix(1.0).as_dmat4(),
+            rect,
+        };
+        let on = projector
+            .project(kreate_math::DVec3::new(0.3, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(
+            sketch_under(&doc, &projector, on + egui::vec2(0.0, 3.0), 6.0),
+            Some(id)
+        );
+        assert_eq!(
+            sketch_under(&doc, &projector, on + egui::vec2(0.0, 30.0), 6.0),
+            None
+        );
+    }
+
     use super::*;
 
     /// A unit square on screen at 100 px a unit, and a circle.
