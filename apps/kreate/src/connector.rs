@@ -1473,7 +1473,9 @@ impl App {
     }
 
     /// The undo history: how far it goes, where it stands, and the last
-    /// `limit` steps as script lines.
+    /// `limit` steps as script lines — each cut to a preview, as the history
+    /// panel shows them: a paste's line carries the whole copied scene, and
+    /// nobody asking what was done wants megabytes of it.
     pub(super) fn history_json(&self, limit: usize) -> serde_json::Value {
         use serde_json::json;
         let h = &self.history;
@@ -1483,11 +1485,11 @@ impl App {
         let done: Vec<_> = entries[first..cursor]
             .iter()
             .enumerate()
-            .map(|(i, e)| json!({ "step": first + i + 1, "label": e.label, "line": e.to_script_call() }))
+            .map(|(i, e)| json!({ "step": first + i + 1, "label": e.label, "line": e.to_script_preview(HISTORY_LINE) }))
             .collect();
         let undone: Vec<_> = entries[cursor..]
             .iter()
-            .map(|e| json!({ "label": e.label, "line": e.to_script_call() }))
+            .map(|e| json!({ "label": e.label, "line": e.to_script_preview(HISTORY_LINE) }))
             .collect();
         json!({
             "steps": entries.len(),
@@ -1878,6 +1880,9 @@ fn hidden_for_only(doc: &Document, only: &[String]) -> Vec<kreate_scene::ObjectI
         .map(|(id, _)| id)
         .collect()
 }
+
+/// How much of a history step's script line `get_history` gives.
+const HISTORY_LINE: usize = 240;
 
 /// Which objects `get_scene` lists, and how much of each.
 #[derive(Clone, Debug, Default)]
