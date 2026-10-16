@@ -7,6 +7,7 @@
 fn main() {
     println!("cargo:rerun-if-changed=assets/kreate.ico");
     commit();
+    build_number();
     // `winresource` is a build-dependency only on a Windows host (build
     // scripts are compiled for the host), so the code that names it must be too.
     #[cfg(windows)]
@@ -49,4 +50,80 @@ fn commit() {
             println!("cargo:rerun-if-changed={dir}/{head}");
         }
     }
+}
+
+/// A number for each build that changed something, and when it was made:
+/// `KREATE_BUILD` and `KREATE_BUILT`. The release number stays what the
+/// workspace says — the updater compares it — and this tells two builds of
+/// one release, or of one commit, apart.
+///
+/// The count is kept beside the build's output, in `target/`, so it climbs
+/// for as long as that folder lives. This script runs again when any source
+/// of the application or the crates changes, and only then: a build that
+/// changed nothing is the same program and keeps its number.
+fn build_number() {
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default());
+    // target/<profile>/build/<crate>-<hash>/out → target
+    let counter = out
+        .ancestors()
+        .nth(4)
+        .map(|target| target.join(".kreate-build-number"));
+    let number = counter
+        .as_ref()
+        .and_then(|path| {
+            let last: u64 = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            let next = last + 1;
+            std::fs::write(path, next.to_string()).ok()?;
+            Some(next)
+        })
+        .unwrap_or(0);
+    println!("cargo:rustc-env=KREATE_BUILD={number}");
+    println!("cargo:rustc-env=KREATE_BUILT={}", now());
+    for dir in [
+        "src",
+        "locales",
+        "assets",
+        "../../crates",
+        "../../Cargo.toml",
+    ] {
+        println!("cargo:rerun-if-changed={dir}");
+    }
+}
+
+/// The local time to the minute, `2026-10-16 22:41`: from `date` where
+/// there is one, otherwise UTC worked out from the clock.
+fn now() -> String {
+    let local = std::process::Command::new("date")
+        .arg("+%Y-%m-%d %H:%M")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| s.len() == 16);
+    if let Some(local) = local {
+        return local;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's days-to-civil.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rest / 3600,
+        rest % 3600 / 60
+    )
 }

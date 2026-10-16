@@ -12,13 +12,29 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// empty when built outside a git checkout.
 pub const COMMIT: &str = env!("KREATE_COMMIT");
 
-/// `0.2.0 (1a2b3c4d)`, or just `0.2.0` without a commit.
+/// Which build of the release this is: one more for every build that
+/// changed something. The release number is left alone — the updater
+/// compares it.
+pub const BUILD: &str = env!("KREATE_BUILD");
+
+/// When it was built, to the minute.
+pub const BUILT: &str = env!("KREATE_BUILT");
+
+/// `0.3.0 build 37 (1a2b3c4d, 2026-10-16 22:41)`; the parts it does not
+/// know are left out.
 pub fn describe() -> String {
-    if COMMIT.is_empty() {
-        VERSION.to_string()
-    } else {
-        format!("{VERSION} ({COMMIT})")
+    let mut out = VERSION.to_string();
+    if !BUILD.is_empty() && BUILD != "0" {
+        out.push_str(&format!(" build {BUILD}"));
     }
+    let details: Vec<&str> = [COMMIT, BUILT]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !details.is_empty() {
+        out.push_str(&format!(" ({})", details.join(", ")));
+    }
+    out
 }
 
 /// The platform, for a report: `macos aarch64`.
