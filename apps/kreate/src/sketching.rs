@@ -468,6 +468,9 @@ pub struct SketchUi {
     /// The hover was caught by snapping — a midpoint, a crossing, the grid,
     /// the scene — rather than by a point of the sketch.
     pub snapped: bool,
+    /// The line tool's pointer is on the first point of the outline being
+    /// drawn: a click there closes it.
+    pub closing: bool,
     /// A drag-box: where it began and where the pointer is, on screen.
     pub band: Option<[DVec2; 2]>,
 }

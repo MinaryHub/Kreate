@@ -4336,6 +4336,23 @@ impl App {
                 },
             },
         };
+        // Drawing an outline, back at where it began: caught there, before
+        // anything else. The first point is not in the sketch until the
+        // outline is, so nothing above can find it — and an outline begun
+        // in the open could not be closed.
+        let first = self.sketching.clicks.first().copied();
+        let closing = self.sketching.tool == kreate::sketching::Tool::Line
+            && self.sketching.clicks.len() >= 3
+            && first.is_some_and(|(p, _)| {
+                self.sketch_screen(p)
+                    .zip(self.sketch_cursor())
+                    .is_some_and(|(s, at)| s.distance(at) <= 10.0)
+            });
+        let (hover, snapped) = match (closing, first) {
+            (true, Some(first)) => (first, true),
+            _ => (hover, snapped),
+        };
+        self.sketching.closing = closing;
         self.sketching.hover = Some(hover);
         self.sketching.snapped = snapped;
         // A drag follows: where the pointer is, snapped as drawing is.
@@ -4484,6 +4501,15 @@ impl App {
         let world = Arc::new(world);
         self.sketch_snap_cache = Some((version, mode, world.clone()));
         world
+    }
+
+    /// A point of the active sketch's plane on screen, in interface points.
+    fn sketch_screen(&self, p: glam::DVec2) -> Option<glam::DVec2> {
+        let (_, world) = self.sketch_target()?;
+        let projector = self.ui.projector?;
+        projector
+            .project(world.transform_point3(DVec3::new(p.x, p.y, 0.0)))
+            .map(|q| glam::DVec2::new(q.x as f64, q.y as f64))
     }
 
     /// The sketch as what is dragged can snap to: all of it but what moves.
@@ -4658,6 +4684,11 @@ impl App {
                 let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
                 match tool {
                     Tool::Line => {
+                        // On the outline's first point: closed.
+                        if self.sketching.closing {
+                            self.commit_sketch_line(true);
+                            return true;
+                        }
                         let first = self.sketching.clicks.first().map(|c| c.1);
                         self.sketching.clicks.push((p, join));
                         self.sketching.typed.clear();
