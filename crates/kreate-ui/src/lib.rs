@@ -43,7 +43,7 @@ pub mod wsfile;
 
 pub use area::{
     AreaId, AreaRect, Axis, EditorId, EditorInfo, EditorRegistry, Handle, Layout, NodeSpec, Screen,
-    SplitId,
+    Side, SplitId,
 };
 pub use command::{Command, CommandQueue};
 pub use fonts::{install as install_fonts, prewarm as prewarm_fonts};

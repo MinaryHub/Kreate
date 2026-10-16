@@ -297,6 +297,15 @@ enum Node {
     },
 }
 
+/// Which side of an area another is docked on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 /// One workspace's layout.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Screen {
@@ -426,6 +435,59 @@ impl Screen {
             second: Box::new(new_leaf),
         };
         Some(new_area)
+    }
+
+    /// Puts an area back into the screen beside `beside`, on `side`, taking
+    /// `share` of the space they then divide — keeping the id it had, so what
+    /// was kept for it while it floated (a properties tab, a scroll) is still
+    /// its own.
+    ///
+    /// `false` when `beside` is not on the screen or `id` already is.
+    pub fn dock(
+        &mut self,
+        beside: AreaId,
+        side: Side,
+        share: f32,
+        id: AreaId,
+        editor: EditorId,
+    ) -> bool {
+        if self.areas().iter().any(|(a, _)| *a == id) {
+            return false;
+        }
+        // An id from before is below the counter already; one that is not
+        // moves it on, so nothing made later can take it.
+        self.next = self.next.max(id.0 + 1);
+        let split_id = SplitId(self.take_id());
+        let share = sane_ratio(share);
+        let Some(node) = find_node_mut(&mut self.root, beside) else {
+            return false;
+        };
+        let leaf = Node::Leaf { id, editor };
+        let existing = std::mem::replace(node, leaf.clone());
+        let (axis, before) = match side {
+            Side::Left => (Axis::Vertical, true),
+            Side::Right => (Axis::Vertical, false),
+            Side::Top => (Axis::Horizontal, true),
+            Side::Bottom => (Axis::Horizontal, false),
+        };
+        *node = if before {
+            Node::Split {
+                id: split_id,
+                axis,
+                ratio: share,
+                first: Box::new(leaf),
+                second: Box::new(existing),
+            }
+        } else {
+            Node::Split {
+                id: split_id,
+                axis,
+                ratio: sane_ratio(1.0 - share),
+                first: Box::new(existing),
+                second: Box::new(leaf),
+            }
+        };
+        true
     }
 
     /// Closes `area`; its sibling takes the space they shared.
@@ -1406,5 +1468,56 @@ mod tests {
         ] {
             assert!(!registry.full_bleed(&id), "{id} claims the whole area");
         }
+    }
+
+    /// Undocked and docked again: the area comes back with its own id, on
+    /// the side asked, taking the share asked.
+    #[test]
+    fn an_area_taken_out_docks_back_with_its_id_where_it_is_put() {
+        let mut screen = Screen::single(EditorId::VIEWPORT);
+        let viewport = screen.areas()[0].0;
+        let outliner = screen
+            .split(viewport, Axis::Vertical, 0.75, EditorId::OUTLINER)
+            .unwrap();
+        // Taken out to float.
+        assert!(screen.close(outliner));
+        assert_eq!(screen.area_count(), 1);
+        // Docked on the viewport's left, a quarter of the width.
+        assert!(screen.dock(viewport, Side::Left, 0.25, outliner, EditorId::OUTLINER));
+        let space = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 500.0));
+        let layout = screen.layout(space);
+        let rect = |id: AreaId| layout.areas.iter().find(|a| a.id == id).unwrap().rect;
+        assert!(
+            rect(outliner).center().x < rect(viewport).center().x,
+            "on the left"
+        );
+        assert!(
+            (rect(outliner).width() - 250.0).abs() < 10.0,
+            "{:?}",
+            rect(outliner)
+        );
+        // Not twice, and not beside an area that is not there.
+        assert!(!screen.dock(viewport, Side::Right, 0.25, outliner, EditorId::OUTLINER));
+        assert!(!screen.dock(
+            AreaId(999),
+            Side::Right,
+            0.25,
+            AreaId(1000),
+            EditorId::CONSOLE
+        ));
+        // Below: a horizontal split, the new area second.
+        let console = AreaId(1000);
+        assert!(screen.dock(viewport, Side::Bottom, 0.3, console, EditorId::CONSOLE));
+        let layout = screen.layout(space);
+        let rect = |id: AreaId| layout.areas.iter().find(|a| a.id == id).unwrap().rect;
+        assert!(
+            rect(console).center().y > rect(viewport).center().y,
+            "below"
+        );
+        // What it makes next does not take an id handed back.
+        let next = screen
+            .split(viewport, Axis::Vertical, 0.5, EditorId::PROPERTIES)
+            .unwrap();
+        assert!(next.0 > console.0);
     }
 }

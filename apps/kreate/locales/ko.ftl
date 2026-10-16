@@ -1695,3 +1695,7 @@ op-app-sketch-free = 선택한 것의 구속 제거
 op-app-sketch-free-desc = 선택한 선과 점에 걸린 구속을 모두 풉니다. 위치는 그대로입니다.
 op-mesh-edges-to-sketch = 엣지로 스케치 만들기
 op-mesh-edges-to-sketch-desc = 선택한 엣지들이 놓인 평면에 새 스케치를 만듭니다. 객체 바깥쪽을 향하므로 바로 돌출·잘라내기·회전에 쓸 수 있습니다. 메시는 그대로 둡니다.
+area-undock = 창으로 떼어내기
+area-dock = 다시 도킹
+op-area-undock-desc = 이 영역을 레이아웃에서 떼어 별도 창으로 띄웁니다. 창 제목을 끌어 다른 영역의 가장자리에 놓으면 그쪽에 도킹됩니다.
+op-area-dock-desc = 떠 있는 이 영역을 레이아웃에 다시 넣습니다. 뷰포트 오른쪽에 붙습니다.

@@ -76,6 +76,8 @@ pub struct ShellState {
     /// list while iterating it does. The command queue takes the same shape for
     /// the same reason.
     area_edits: Vec<AreaEdit>,
+    /// Areas taken out of the screen to float in windows of their own.
+    pub floating: Vec<FloatingArea>,
     /// Whether the layouts have changed since they were last written.
     ///
     /// Set by any applied layout edit, including a resize — which is why the
@@ -469,7 +471,30 @@ enum AreaEdit {
     /// Switch to another workspace. Deferred like the rest, because the frame
     /// is drawing tabs and areas from the list this changes.
     Switch(usize),
+    /// Take an area out of the screen into a window of its own, where it was.
+    Undock(kreate_ui::AreaId, egui::Rect),
+    /// Put a floating area back, beside another, on a side.
+    Dock(kreate_ui::AreaId, kreate_ui::AreaId, kreate_ui::Side),
 }
+
+/// An area floating in a window of its own: undocked from a workspace's
+/// screen, and docked back by its menu or by dropping it on an area's edge.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FloatingArea {
+    /// The workspace it was taken from, and is shown with.
+    pub workspace: usize,
+    /// The id it had on the screen, kept so it docks back as itself.
+    pub id: kreate_ui::AreaId,
+    pub editor: kreate_ui::EditorId,
+    /// Where its window is.
+    pub rect: egui::Rect,
+    /// Its window is being dragged: where it would dock is shown, and it
+    /// docks there when let go.
+    pub dragging: bool,
+}
+
+/// How much of the area it docks beside an area takes.
+const DOCK_SHARE: f32 = 0.28;
 
 impl ShellState {
     /// The layout on screen.
@@ -519,6 +544,38 @@ impl ShellState {
     /// Asks for an area to show another editor when the frame ends.
     pub fn set_area_editor(&mut self, area: kreate_ui::AreaId, kind: kreate_ui::EditorId) {
         self.area_edits.push(AreaEdit::SetEditor(area, kind));
+    }
+
+    /// Asks for an area to float in a window of its own, at `rect`.
+    pub fn undock_area(&mut self, area: kreate_ui::AreaId, rect: egui::Rect) {
+        self.area_edits.push(AreaEdit::Undock(area, rect));
+    }
+
+    /// Asks for a floating area to be docked beside `beside`, on `side`.
+    pub fn dock_area(
+        &mut self,
+        area: kreate_ui::AreaId,
+        beside: kreate_ui::AreaId,
+        side: kreate_ui::Side,
+    ) {
+        self.area_edits.push(AreaEdit::Dock(area, beside, side));
+    }
+
+    /// Whether an area is floating rather than on the screen.
+    pub fn is_floating(&self, area: kreate_ui::AreaId) -> bool {
+        self.floating.iter().any(|f| f.id == area)
+    }
+
+    /// Where a floating area docks from its menu: on the right of the first
+    /// viewport, as the side panels are laid out, or of the first area.
+    fn default_dock(&self) -> Option<(kreate_ui::AreaId, kreate_ui::Side)> {
+        let areas = self.screen().areas();
+        let beside = areas
+            .iter()
+            .find(|(_, e)| *e == kreate_ui::EditorId::VIEWPORT)
+            .or(areas.first())?
+            .0;
+        Some((beside, kreate_ui::Side::Right))
     }
 
     /// Asks to switch workspace when the frame ends.
@@ -669,6 +726,42 @@ impl ShellState {
                 AreaEdit::Switch(index) => {
                     self.workspaces.switch_to(index);
                 }
+                AreaEdit::Undock(area, rect) => {
+                    let Some(editor) = self.screen().editor(area) else {
+                        continue;
+                    };
+                    if self.screen_mut().close(area) {
+                        self.floating.push(FloatingArea {
+                            workspace: self.workspaces.active_index(),
+                            id: area,
+                            editor,
+                            // A little in from where it was, so it is seen
+                            // to lift off.
+                            rect: rect.translate(egui::vec2(24.0, 24.0)),
+                            dragging: false,
+                        });
+                    }
+                }
+                AreaEdit::Dock(area, beside, side) => {
+                    let Some(at) = self.floating.iter().position(|f| f.id == area) else {
+                        continue;
+                    };
+                    let editor = self.floating[at].editor.clone();
+                    let mut docked =
+                        self.screen_mut()
+                            .dock(beside, side, DOCK_SHARE, area, editor.clone());
+                    // Beside what is gone: where its menu would put it.
+                    if !docked {
+                        if let Some((beside, side)) = self.default_dock() {
+                            docked = self
+                                .screen_mut()
+                                .dock(beside, side, DOCK_SHARE, area, editor);
+                        }
+                    }
+                    if docked {
+                        self.floating.remove(at);
+                    }
+                }
             }
         }
     }
@@ -722,6 +815,7 @@ impl Default for ShellState {
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
             area_edits: Vec::new(),
+            floating: Vec::new(),
             layout_dirty: false,
             dragging: None,
             egui_wants_keyboard: false,
@@ -1788,6 +1882,8 @@ struct Labels {
     area_split_v: String,
     area_split_h: String,
     area_close: String,
+    area_undock: String,
+    area_dock: String,
     extrude: String,
     subdivide: String,
     dissolve: String,
@@ -2166,6 +2262,8 @@ impl Labels {
             area_split_v: t("area-split-vertical"),
             area_split_h: t("area-split-horizontal"),
             area_close: t("area-close"),
+            area_undock: t("area-undock"),
+            area_dock: t("area-dock"),
             extrude: t("menu-extrude"),
             subdivide: t("menu-subdivide"),
             dissolve: t("menu-dissolve"),
@@ -2392,6 +2490,8 @@ pub fn draw(
     // that starts on one is not stolen by whatever is under it — a handle is
     // four points wide and always overlaps an editor's edge.
     let mut viewport_rect = egui::Rect::ZERO;
+    // Where the screen's areas are, for a floating one dropped on an edge.
+    let mut screen_areas: Vec<kreate_ui::AreaRect> = Vec::new();
     // The gaps between the areas in the window's own colour, not whatever
     // the frame was cleared to: black seams on the light chrome.
     let gaps = kreate_ui::theme::from_ui(ui).sunken;
@@ -2400,6 +2500,7 @@ pub fn draw(
         .show(ui, |ui| {
             let screen = ui.available_rect_before_wrap();
             let layout = state.screen().layout(screen);
+            screen_areas = layout.areas.clone();
             drag_handles(ui, state, &layout);
 
             // The first viewport area is the one edited in; each one after it
@@ -2448,11 +2549,130 @@ pub fn draw(
                 }
             }
         });
+
+    // Areas floating in windows of their own, over the screen. Dragged by
+    // the title onto an area's edge, one docks there when let go.
+    let ctx = ui.ctx().clone();
+    let space = state.workspaces.active_index();
+    let floating: Vec<FloatingArea> = state
+        .floating
+        .iter()
+        .filter(|f| f.workspace == space)
+        .cloned()
+        .collect();
+    let pointer = ctx.input(|i| i.pointer.interact_pos());
+    let (down, released) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_released()));
+    let accent = kreate_ui::theme::from_ui(ui).accent;
+    for f in floating {
+        let title = state
+            .editors
+            .get(&f.editor)
+            .map(|info| state.catalog.format(info.name_key, TextKind::Ui, &[]))
+            .unwrap_or_else(|| f.editor.as_str().to_string());
+        let mut open = true;
+        let shown = egui::Window::new(title)
+            .id(egui::Id::new(("floating-area", f.id.0)))
+            .default_rect(f.rect)
+            .min_size(egui::vec2(220.0, 160.0))
+            .resizable(true)
+            .collapsible(false)
+            .open(&mut open)
+            .show(&ctx, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                let area = kreate_ui::AreaRect {
+                    id: f.id,
+                    editor: f.editor.clone(),
+                    rect,
+                };
+                draw_area(
+                    ui,
+                    state,
+                    &area,
+                    &l,
+                    registry,
+                    history,
+                    keymap,
+                    preset,
+                    overrides,
+                    doc,
+                    &selected,
+                    active,
+                    &mut modifier_rows,
+                    None,
+                    mode,
+                );
+                ui.allocate_rect(rect, egui::Sense::hover());
+            });
+        if !open {
+            // Closed with its window: gone, as a closed area is.
+            state.floating.retain(|g| g.id != f.id);
+            continue;
+        }
+        let Some(shown) = shown else { continue };
+        let rect = shown.response.rect;
+        state.viewport_blockers.push(rect);
+        // Moved, not resized: its title is being dragged.
+        let moved =
+            (rect.min - f.rect.min).length() > 0.5 && (rect.size() - f.rect.size()).length() < 0.5;
+        let dragging = down && (f.dragging || moved);
+        let zone = pointer.and_then(|p| dock_zone(&screen_areas, p));
+        if dragging {
+            if let Some((_, _, highlight)) = zone {
+                ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("dock-zone"),
+                ))
+                .rect_filled(highlight, 4.0, accent.gamma_multiply(0.35));
+            }
+        }
+        if f.dragging && released {
+            if let Some((beside, side, _)) = zone {
+                state.dock_area(f.id, beside, side);
+            }
+        }
+        if let Some(g) = state.floating.iter_mut().find(|g| g.id == f.id) {
+            g.rect = rect;
+            g.dragging = dragging;
+        }
+    }
     state.apply_area_edits();
     draw_help_windows(ui.ctx(), state, &l);
     draw_search(ui, state, &l, history, mode);
     draw_pie(ui, state, &l, doc, mode);
     viewport_rect
+}
+
+/// Where a floating area dropped at `p` would dock: the area under it and
+/// the side whose edge it is nearest, within the outer third, and the part
+/// of the area it would take, to show. In the middle of an area, nowhere.
+fn dock_zone(
+    areas: &[kreate_ui::AreaRect],
+    p: egui::Pos2,
+) -> Option<(kreate_ui::AreaId, kreate_ui::Side, egui::Rect)> {
+    use kreate_ui::Side;
+    let area = areas.iter().find(|a| a.rect.contains(p))?;
+    let r = area.rect;
+    let fx = (p.x - r.min.x) / r.width().max(1.0);
+    let fy = (p.y - r.min.y) / r.height().max(1.0);
+    let (near, side) = [
+        (fx, Side::Left),
+        (1.0 - fx, Side::Right),
+        (fy, Side::Top),
+        (1.0 - fy, Side::Bottom),
+    ]
+    .into_iter()
+    .min_by(|a, b| a.0.total_cmp(&b.0))?;
+    if near > 0.3 {
+        return None;
+    }
+    let (w, h) = (r.width() * DOCK_SHARE, r.height() * DOCK_SHARE);
+    let highlight = match side {
+        Side::Left => egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + w, r.max.y)),
+        Side::Right => egui::Rect::from_min_max(egui::pos2(r.max.x - w, r.min.y), r.max),
+        Side::Top => egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + h)),
+        Side::Bottom => egui::Rect::from_min_max(egui::pos2(r.min.x, r.max.y - h), r.max),
+    };
+    Some((area.id, side, highlight))
 }
 
 /// A pie's entries and title, by the name its key binding gives.
@@ -3678,17 +3898,49 @@ fn draw_view_menu(
             ui.separator();
         }
         ui.menu_button(&l.area_menu, |ui| {
-            if menu_item(ui, state, "area.split_vertical", &[], &l.area_split_v) {
+            // A floating area is not on the screen to be split.
+            let docked = !state.is_floating(area.id);
+            if menu_item_enabled(
+                ui,
+                state,
+                "area.split_vertical",
+                &[],
+                &l.area_split_v,
+                docked,
+            ) {
                 state.split_area(area.id, kreate_ui::Axis::Vertical);
             }
-            if menu_item(ui, state, "area.split_horizontal", &[], &l.area_split_h) {
+            if menu_item_enabled(
+                ui,
+                state,
+                "area.split_horizontal",
+                &[],
+                &l.area_split_h,
+                docked,
+            ) {
                 state.split_area(area.id, kreate_ui::Axis::Horizontal);
             }
             // Disabled rather than hidden on the last area: a menu whose
             // entries come and go is a menu the user cannot learn.
-            let last = state.screen().area_count() <= 1;
-            if menu_item_enabled(ui, state, "area.close", &[], &l.area_close, !last) {
-                state.close_area(area.id);
+            let floating = state.is_floating(area.id);
+            if floating {
+                // A floating area docks back, or is closed with its window.
+                if menu_item(ui, state, "area.dock", &[], &l.area_dock) {
+                    if let Some((beside, side)) = state.default_dock() {
+                        state.dock_area(area.id, beside, side);
+                    }
+                }
+            } else {
+                let last = state.screen().area_count() <= 1;
+                // The viewport stays: it is drawn into the screen by the
+                // GPU, not into a window.
+                let can_float = !last && area.editor != kreate_ui::EditorId::VIEWPORT;
+                if menu_item_enabled(ui, state, "area.undock", &[], &l.area_undock, can_float) {
+                    state.undock_area(area.id, area.rect);
+                }
+                if menu_item_enabled(ui, state, "area.close", &[], &l.area_close, !last) {
+                    state.close_area(area.id);
+                }
             }
         });
     });
@@ -14652,6 +14904,59 @@ mod tests {
     #[test]
     fn an_empty_document_produces_no_rows() {
         assert!(outliner_rows(&Document::new()).is_empty());
+    }
+
+    #[test]
+    fn an_area_floats_out_and_docks_back_as_itself() {
+        let mut state = ShellState::default();
+        let find = |state: &ShellState, kind: kreate_ui::EditorId| {
+            state
+                .screen()
+                .areas()
+                .into_iter()
+                .find(|(_, k)| *k == kind)
+                .map(|(id, _)| id)
+        };
+        let outliner = find(&state, kreate_ui::EditorId::OUTLINER).expect("an outliner");
+        let viewport = find(&state, kreate_ui::EditorId::VIEWPORT).expect("a viewport");
+        let before = state.screen().area_count();
+        let at = egui::Rect::from_min_size(egui::pos2(900.0, 40.0), egui::vec2(300.0, 400.0));
+        state.undock_area(outliner, at);
+        state.apply_area_edits();
+        assert_eq!(state.screen().area_count(), before - 1);
+        assert!(state.is_floating(outliner));
+        assert_eq!(state.floating[0].editor, kreate_ui::EditorId::OUTLINER);
+        // Dropped on the viewport's left edge.
+        state.dock_area(outliner, viewport, kreate_ui::Side::Left);
+        state.apply_area_edits();
+        assert!(!state.is_floating(outliner));
+        assert_eq!(
+            find(&state, kreate_ui::EditorId::OUTLINER),
+            Some(outliner),
+            "as itself"
+        );
+        let layout = state.screen().layout(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1600.0, 900.0),
+        ));
+        let rect = |id| layout.areas.iter().find(|a| a.id == id).unwrap().rect;
+        assert!(rect(outliner).center().x < rect(viewport).center().x);
+    }
+
+    #[test]
+    fn a_floating_area_docks_on_the_edge_it_is_dropped_near() {
+        let areas = vec![kreate_ui::AreaRect {
+            id: kreate_ui::AreaId(1),
+            editor: kreate_ui::EditorId::VIEWPORT,
+            rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0)),
+        }];
+        let side = |x, y| dock_zone(&areas, egui::pos2(x, y)).map(|z| z.1);
+        assert_eq!(side(980.0, 300.0), Some(kreate_ui::Side::Right));
+        assert_eq!(side(20.0, 300.0), Some(kreate_ui::Side::Left));
+        assert_eq!(side(500.0, 10.0), Some(kreate_ui::Side::Top));
+        assert_eq!(side(500.0, 590.0), Some(kreate_ui::Side::Bottom));
+        assert_eq!(side(500.0, 300.0), None, "the middle docks nowhere");
+        assert_eq!(side(1500.0, 300.0), None, "outside every area");
     }
 
     #[test]

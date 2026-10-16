@@ -1689,3 +1689,7 @@ op-app-sketch-free = Remove Constraints from Selection
 op-app-sketch-free-desc = Takes off every constraint on the selected lines and points; they stay where they are.
 op-mesh-edges-to-sketch = Edges to Sketch
 op-mesh-edges-to-sketch-desc = Lays the selected edges into a new sketch on the plane they lie in, facing out of the object: an outline to extrude, cut or revolve. The mesh stays as it is.
+area-undock = Float in a Window
+area-dock = Dock Back
+op-area-undock-desc = Takes this area out of the layout into a window of its own. Drag the window by its title onto an area's edge to dock it there.
+op-area-dock-desc = Puts this floating area back into the layout, on the right of the viewport.
