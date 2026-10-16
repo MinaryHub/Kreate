@@ -1764,6 +1764,7 @@ struct Labels {
     drawing_front: String,
     drawing_right: String,
     dissolve_limited: String,
+    edges_to_sketch: String,
     design_section: String,
     world_image: String,
     duplicate: String,
@@ -2141,6 +2142,7 @@ impl Labels {
             drawing_front: t("drawing-front"),
             drawing_right: t("drawing-right"),
             dissolve_limited: t("menu-dissolve-limited"),
+            edges_to_sketch: t("op-mesh-edges-to-sketch"),
             design_section: t("design-section"),
             world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
@@ -9415,6 +9417,11 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                 Separator,
                 entry("mesh.spin", &l.spin, op("mesh.spin", &[])),
                 entry("mesh.knife", &l.knife, dispatch("mesh.knife")),
+                entry(
+                    "mesh.edges_to_sketch",
+                    &l.edges_to_sketch,
+                    op("mesh.edges_to_sketch", &[]),
+                ),
                 Separator,
                 // Shading is a property of the mesh rather than of a selection,
                 // which is why it is here and not under Face.

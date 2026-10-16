@@ -1693,3 +1693,5 @@ op-sketch-constraint-free-desc = 선택한 점과 선에 걸린 구속을 모두
 op-sketch-constraint-remove = 이 구속을 제거합니다. 점은 그 자리에 남습니다
 op-app-sketch-free = 선택한 것의 구속 제거
 op-app-sketch-free-desc = 선택한 선과 점에 걸린 구속을 모두 풉니다. 위치는 그대로입니다.
+op-mesh-edges-to-sketch = 엣지로 스케치 만들기
+op-mesh-edges-to-sketch-desc = 선택한 엣지들이 놓인 평면에 새 스케치를 만듭니다. 객체 바깥쪽을 향하므로 바로 돌출·잘라내기·회전에 쓸 수 있습니다. 메시는 그대로 둡니다.

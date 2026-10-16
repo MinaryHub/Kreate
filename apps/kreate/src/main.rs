@@ -1786,6 +1786,7 @@ impl App {
                         ("mesh.merge", &[]),
                         ("mesh.split", &[]),
                         ("mesh.separate", &[]),
+                        ("mesh.edges_to_sketch", &[]),
                     ],
                     self,
                 ),

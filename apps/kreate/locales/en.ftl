@@ -1687,3 +1687,5 @@ op-sketch-constraint-free-desc = Takes off every constraint on the selected poin
 op-sketch-constraint-remove = Remove this constraint; the points stay where they are
 op-app-sketch-free = Remove Constraints from Selection
 op-app-sketch-free-desc = Takes off every constraint on the selected lines and points; they stay where they are.
+op-mesh-edges-to-sketch = Edges to Sketch
+op-mesh-edges-to-sketch-desc = Lays the selected edges into a new sketch on the plane they lie in, facing out of the object: an outline to extrude, cut or revolve. The mesh stays as it is.
