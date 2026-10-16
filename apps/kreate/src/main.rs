@@ -1009,7 +1009,10 @@ struct App {
     sectioned: Vec<(Arc<MeshData>, [f64; 7], Arc<MeshData>)>,
     /// The brush size circle select last used, so the next one starts there.
     circle_radius: f32,
-    /// Local view (`/`): the objects shown, and the view to go back to.
+    /// Local view (`/`): the objects it set aside — everything not selected
+    /// when it was entered — and the view to go back to. What is set aside
+    /// rather than what is shown, so what is made while in it is shown, as
+    /// in Blender: a cube added in local view was there and not drawn.
     local_view: Option<(Vec<kreate_scene::document::ObjectId>, kreate_render::Camera)>,
     /// Looking through the scene camera (Numpad 0): the view to go back to.
     camera_view: Option<kreate_render::Camera>,
@@ -3470,7 +3473,13 @@ impl App {
             self.status("select something for local view");
             return;
         }
-        self.local_view = Some((keep, self.camera));
+        let aside: Vec<_> = self
+            .doc
+            .objects()
+            .map(|(id, _)| id)
+            .filter(|id| !keep.contains(id))
+            .collect();
+        self.local_view = Some((aside, self.camera));
         self.evaluate_scene();
         self.frame_selected();
         self.status("Local View — / to leave");
@@ -7192,6 +7201,9 @@ impl App {
     /// open having silently failed.
     fn adopt(&mut self, document: Document) {
         self.doc = document;
+        // Local view named objects of the scene that went; in the new one the
+        // same numbers are other objects, or none.
+        self.local_view = None;
         // In a shared session the new scene is shared too, and what is added
         // to it is numbered in this participant's own range.
         if let Some(site) = self.session.as_ref().and_then(|s| s.site()) {
@@ -7417,8 +7429,8 @@ impl App {
         self.unhidden = unhidden;
         self.cut_sections(&editing);
         // Local view: only what it was entered with is drawn or picked.
-        if let Some((keep, _)) = &self.local_view {
-            self.evaluated.retain(|(id, _)| keep.contains(id));
+        if let Some((aside, _)) = &self.local_view {
+            self.evaluated.retain(|(id, _)| !aside.contains(id));
         }
         // In weight paint mode the painted mesh is shown by its weights.
         if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Weights {
@@ -11103,14 +11115,17 @@ impl App {
             }
             _ => None,
         };
+        let local: Option<Vec<ObjectId>> = self.local_view.as_ref().map(|(aside, _)| {
+            self.doc
+                .objects()
+                .map(|(id, _)| id)
+                .filter(|id| !aside.contains(id))
+                .collect()
+        });
         let (mut marker_lines, marker_points) = if self.rendering_still {
             Default::default()
         } else {
-            kreate::glyphs::markers_only(
-                &self.doc,
-                shown,
-                self.local_view.as_ref().map(|(ids, _)| ids.as_slice()),
-            )
+            kreate::glyphs::markers_only(&self.doc, shown, local.as_deref())
         };
         if !self.rendering_still {
             marker_lines.extend(collab::peer_lines(self.session.as_ref(), &self.doc));
@@ -15918,9 +15933,23 @@ kreate.ops.object.add_primitive()" }),
             app.evaluated.iter().all(|(id, _)| *id == a),
             "B is still drawn"
         );
+        // Made while in it: shown, as Blender shows it.
+        let c = app.doc.add_object(Object::new("C", ObjectData::Mesh(mesh)));
+        app.evaluate_scene();
+        assert!(
+            app.evaluated.iter().any(|(id, _)| *id == c),
+            "C is not drawn"
+        );
+        assert!(app.evaluated.iter().all(|(id, _)| *id != b), "B is drawn");
         app.toggle_local_view();
         app.evaluate_scene();
         assert!(app.evaluated.iter().any(|(id, _)| *id == b));
+        // A new document leaves it.
+        app.doc.selection.add(a);
+        app.toggle_local_view();
+        assert!(app.local_view.is_some());
+        app.adopt(kreate_scene::Document::new());
+        assert!(app.local_view.is_none());
         // Nothing selected: no local view to enter.
         app.doc.selection.clear();
         app.toggle_local_view();
