@@ -106,7 +106,7 @@ impl Operator for AddPrimitive {
             .copied()
             .unwrap_or("cube");
 
-        let mesh = match name {
+        let mut mesh = match name {
             "plane" => p::plane(size),
             "grid" => p::grid(size, seg.min(256), rings.min(256)),
             "uv_sphere" => p::uv_sphere(size * 0.5, seg, rings),
@@ -125,6 +125,20 @@ impl Operator for AddPrimitive {
             return Err(OpError::Failed(format!(
                 "generated {name} is invalid: {violations:?}"
             )));
+        }
+
+        // The rounded shapes smooth, their rims kept sharp: a sphere made of
+        // flat facets is a sphere nobody asked for, and a cylinder smoothed
+        // across its rim shades its caps as if they bulged.
+        if matches!(
+            name,
+            "uv_sphere" | "ico_sphere" | "cylinder" | "cone" | "torus"
+        ) {
+            let mut bm = mesh.to_bmesh();
+            let faces: Vec<_> = bm.face_ids().collect();
+            edit::set_shade_smooth(&mut bm, &faces, true);
+            edit::auto_smooth(&mut bm, PRIMITIVE_SHARP_ANGLE);
+            mesh = bm.to_mesh_data();
         }
 
         let angles = DVec3::from_array(params.rotation);
@@ -154,6 +168,10 @@ impl Operator for AddPrimitive {
         Ok(OpResult::Finished)
     }
 }
+
+/// Past this angle between two faces a new rounded primitive keeps the
+/// edge sharp: 30°, so a cylinder's rim stays a rim and its sides are round.
+const PRIMITIVE_SHARP_ANGLE: f32 = std::f32::consts::FRAC_PI_6;
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct AddGearParams {

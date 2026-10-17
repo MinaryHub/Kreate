@@ -164,7 +164,16 @@ pub enum ViewTransform {
     ///
     /// Not a good default for a render, and the tests say why: white clips.
     Standard,
+    /// AgX with Blender's Punchy look: more contrast and more colour, for a
+    /// picture that reads as finished rather than as a neutral grade waiting
+    /// for one. The same curve, so a highlight still desaturates to white.
+    AgXPunchy,
 }
+
+/// The Punchy look's power and saturation, applied as Blender applies its
+/// AgX looks: in the curve's encoded space, after it and before the outset.
+pub const PUNCHY_POWER: f32 = 1.35;
+pub const PUNCHY_SATURATION: f32 = 1.4;
 
 /// How scene-linear light is turned into a picture.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -219,7 +228,7 @@ impl DisplayTransform {
     /// a picture opened up by six stops shows light six stops dimmer.
     pub fn black_radiance(&self) -> f32 {
         let floor = match self.view {
-            ViewTransform::AgX => exp2(MIN_EV),
+            ViewTransform::AgX | ViewTransform::AgXPunchy => exp2(MIN_EV),
             ViewTransform::Standard => 0.25 / 255.0 / SRGB_TOE_SLOPE,
         };
         floor / exp2(self.exposure)
@@ -239,7 +248,8 @@ impl DisplayTransform {
             nonneg(color.b * scale),
         ];
         let display = match self.view {
-            ViewTransform::AgX => agx(exposed),
+            ViewTransform::AgX => agx(exposed, false),
+            ViewTransform::AgXPunchy => agx(exposed, true),
             ViewTransform::Standard => exposed,
         };
         DisplayRgb::new(
@@ -318,7 +328,7 @@ fn contrast(x: f32) -> f32 {
 const SRGB_TOE_SLOPE: f32 = 12.92;
 
 /// The transform proper, on non-negative Rec.709 linear light.
-fn agx(color: [f32; 3]) -> [f32; 3] {
+fn agx(color: [f32; 3], punchy: bool) -> [f32; 3] {
     let mut c = transform(&REC709_TO_REC2020, color);
     // A primaries conversion can send a saturated colour slightly negative.
     for v in &mut c {
@@ -333,6 +343,9 @@ fn agx(color: [f32; 3]) -> [f32; 3] {
         let log = v.max(1e-10).log2();
         *v = contrast(((log - MIN_EV) / range).clamp(0.0, 1.0));
     }
+    if punchy {
+        c = punchy_look(c);
+    }
 
     c = transform(&OUTSET, c);
     // Back to linear light, because the primaries conversion below is only a
@@ -343,6 +356,23 @@ fn agx(color: [f32; 3]) -> [f32; 3] {
     transform(&REC2020_TO_REC709, c)
 }
 
+/// The Punchy look on the curve's output: a power for contrast, then a
+/// saturation about the Rec.709 luminance. Mirrored line for line in the
+/// shader.
+fn punchy_look(c: [f32; 3]) -> [f32; 3] {
+    let p = [
+        nonneg(c[0]).powf(PUNCHY_POWER),
+        nonneg(c[1]).powf(PUNCHY_POWER),
+        nonneg(c[2]).powf(PUNCHY_POWER),
+    ];
+    let luma = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+    [
+        luma + PUNCHY_SATURATION * (p[0] - luma),
+        luma + PUNCHY_SATURATION * (p[1] - luma),
+        luma + PUNCHY_SATURATION * (p[2] - luma),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     // The black point is checked against the picture rather than against the
@@ -350,6 +380,27 @@ mod tests {
 
     use super::*;
     use crate::color::Srgb;
+
+    #[test]
+    fn punchy_has_more_contrast_and_colour_and_still_whitens_highlights() {
+        let base = DisplayTransform::DEFAULT;
+        let punchy = DisplayTransform {
+            view: ViewTransform::AgXPunchy,
+            exposure: 0.0,
+        };
+        // Darker shadows and the same white.
+        let dark = grey(0.03);
+        assert!(punchy.apply(dark).r < base.apply(dark).r);
+        let white = grey(1e4);
+        assert!(punchy.apply(white).r > 0.95);
+        // A saturated colour stays more saturated.
+        let red = SceneRgb::new(0.6, 0.08, 0.05);
+        let (b, p) = (base.apply(red), punchy.apply(red));
+        assert!(p.r - p.g > b.r - b.g, "{b:?} {p:?}");
+        // Grey stays grey.
+        let mid = punchy.apply(grey(0.18));
+        assert!((mid.r - mid.g).abs() < 1e-3 && (mid.g - mid.b).abs() < 1e-3);
+    }
 
     /// What an 8-bit screen would be sent.
     fn on_screen(color: SceneRgb) -> [u8; 3] {

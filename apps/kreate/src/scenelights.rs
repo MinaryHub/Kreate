@@ -27,30 +27,78 @@ use kreate_scene::{Document, LightKind};
 /// The material preview's own light: what Blender's Material Preview lights
 /// a material with, so it can be judged before the scene has a lamp.
 pub struct Preview {
-    /// An even pale sky, in nits.
+    /// The flat sky behind the studio, for what reads a flat world.
     pub world: [f32; 3],
-    /// One soft key from over the viewer's left shoulder.
+    /// The studio's key lamp, for its shadow.
     pub lights: Vec<PlacedLight>,
     /// Stops: the light is the application's, so its exposure is too.
     pub exposure: f32,
+    /// How far the studio is turned about up, in radians: see
+    /// [`kreate_render::studio`].
+    pub yaw: f32,
 }
 
-/// The preview light for a view turned by `view`: the key turns with it, as
-/// Blender's preview light does, so the side being looked at is lit.
-pub fn material_preview(view: glam::DQuat) -> Preview {
-    let from = view.as_quat() * glam::Vec3::new(-0.6, 0.9, 0.8);
+/// How bright the studio's key lamp is, beside the softbox it stands for:
+/// the softbox lights through the environment and casts no shadow, so the
+/// lamp is the share of its light that does.
+const STUDIO_KEY_LUX: f32 = 10.0;
+
+/// The exposure the studio is shown at.
+pub const STUDIO_EXPOSURE: f32 = -0.6;
+
+/// The studio, turned by `yaw` about up.
+fn studio(yaw: f32) -> Preview {
+    let turn = glam::Quat::from_rotation_z(yaw);
+    let from = turn * kreate_render::studio::key_direction();
     Preview {
-        world: [0.42, 0.42, 0.44],
+        world: [0.5, 0.5, 0.52],
         lights: vec![PlacedLight {
             falloff: Falloff::Parallel,
             direction: -from.normalize(),
-            amount: [7.0; 3],
-            angular_radius: 0.12,
+            amount: [STUDIO_KEY_LUX; 3],
+            angular_radius: 0.1,
             cast_shadow: true,
             ..Default::default()
         }],
-        exposure: 0.0,
+        exposure: STUDIO_EXPOSURE,
+        yaw,
     }
+}
+
+/// The preview light for a view turned by `view`: the studio turns with it
+/// about up, as Blender's preview light does, so the key is always over the
+/// viewer's left shoulder and the side being looked at is lit.
+pub fn material_preview(view: glam::DQuat) -> Preview {
+    let ahead = view.as_quat() * -glam::Vec3::Z;
+    // The studio is laid out for a viewer looking along +Y.
+    let yaw = if ahead.truncate().length_squared() > 1e-8 {
+        (-ahead.x).atan2(ahead.y)
+    } else {
+        0.0
+    };
+    studio(yaw)
+}
+
+/// The studio the rendered view uses when the scene brings no light of its
+/// own: fixed in the world, so turning round a part shows its other side
+/// in shadow, as a real room would.
+pub fn rendered_studio() -> Preview {
+    // Turned to the default view, which looks across the diagonal: laid out
+    // for a view along +Y, the key stood almost behind that viewer and every
+    // shadow fell out of sight behind its part.
+    studio(DEFAULT_VIEW_YAW)
+}
+
+/// The default view's turn about up from +Y, as `material_preview` measures
+/// it: the new document's camera looks along about (0.5, 0.74).
+const DEFAULT_VIEW_YAW: f32 = -0.6;
+
+/// Whether the rendered view lights the scene with the studio: when it has
+/// no lamp and its sky is not a picture. A scene lit only by a flat grey
+/// sky is a scene with no light in it, and showing it so was a flat grey
+/// picture; a lamp, or a sky image, is the user choosing their own.
+pub fn uses_studio(doc: &Document) -> bool {
+    doc.lit_by().next().is_none() && crate::environment::background_image(doc).is_none()
 }
 
 pub fn placed_lights(doc: &Document) -> Vec<PlacedLight> {

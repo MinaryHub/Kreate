@@ -801,6 +801,11 @@ struct App {
     /// Here rather than in the viewport because it is a fact about the
     /// *document*, and `kreate-render` does not see one.
     environment: Option<kreate::environment::EnvironmentKey>,
+    /// Whether the viewports hold the studio's room as their environment.
+    studio_environment: bool,
+    /// Whether the scene's own sky must be rebuilt, the studio having held
+    /// the environment in the meantime.
+    environment_stale: bool,
     registry: OperatorRegistry,
     history: History,
     op_ctx: OpContext,
@@ -1112,6 +1117,8 @@ impl App {
         // File ▸ Open Recent, as the last session left it.
         app.ui.resolution_scale = kreate::prefs::viewport_path()
             .map_or(1.0, |p| kreate::prefs::load_resolution_scale(&p));
+        app.ui.punchy =
+            kreate::prefs::viewport_path().is_none_or(|p| kreate::prefs::load_punchy(&p));
         app.ui.appearance = kreate::prefs::interface_path()
             .map(|p| kreate::prefs::load_appearance(&p))
             .unwrap_or_default();
@@ -1152,6 +1159,8 @@ impl App {
             materials: None,
             path_trace_key: None,
             environment: None,
+            studio_environment: false,
+            environment_stale: false,
             registry,
             history: History::new(),
             op_ctx: OpContext::default(),
@@ -11164,8 +11173,23 @@ impl App {
             path_trace: gfx.viewport.path_trace,
             textures: self.solid_textures,
         };
-        let preview = (gfx.viewport.shading == kreate_render::ShadingMode::Material)
-            .then(|| scenelights::material_preview(self.camera.rotation));
+        // The application's studio: always in the material preview, and in
+        // the rendered view when the scene brings no light of its own.
+        let studio_rendered = gfx.viewport.shading == kreate_render::ShadingMode::Rendered
+            && scenelights::uses_studio(&self.doc);
+        gfx.viewport.studio_lit = studio_rendered;
+        for v in gfx.extra.values_mut() {
+            v.viewport.studio_lit = studio_rendered;
+        }
+        let preview = match gfx.viewport.shading {
+            kreate_render::ShadingMode::Material => {
+                Some(scenelights::material_preview(self.camera.rotation))
+            }
+            kreate_render::ShadingMode::Rendered if scenelights::uses_studio(&self.doc) => {
+                Some(scenelights::rendered_studio())
+            }
+            _ => None,
+        };
         if gfx.viewport.shading.lit() {
             // The extra viewports are lit as this one is: each setting below
             // goes to them too, and one made since the last lit frame is
@@ -11176,20 +11200,51 @@ impl App {
             // view as Blender's preview light does — the scene's lamps and
             // sky are the rendered view's.
             if let Some(preview) = &preview {
+                // The studio's room, uploaded once and kept while it is the
+                // one in use: six faces and their mips are not a frame's cost.
+                self.environment = None;
+                let (device, queue) = (&gfx.gpu.device, &gfx.gpu.queue);
+                let upload = !self.studio_environment;
+                let pixels = (upload || fresh).then(kreate_render::studio::equirect);
                 gfx.viewport.set_world(preview.world);
-                let had = self.environment.take().is_some();
-                if had {
-                    gfx.viewport
-                        .clear_environment(&gfx.gpu.device, &gfx.gpu.queue);
+                if upload {
+                    if let Some(pixels) = &pixels {
+                        gfx.viewport.set_environment(
+                            device,
+                            queue,
+                            kreate_render::studio::WIDTH,
+                            kreate_render::studio::HEIGHT,
+                            pixels,
+                        );
+                    }
                 }
                 for v in gfx.extra.values_mut() {
                     v.viewport.set_world(preview.world);
-                    if had || v.fresh {
-                        v.viewport
-                            .clear_environment(&gfx.gpu.device, &gfx.gpu.queue);
+                    if upload || v.fresh {
+                        if let Some(pixels) = &pixels {
+                            v.viewport.set_environment(
+                                device,
+                                queue,
+                                kreate_render::studio::WIDTH,
+                                kreate_render::studio::HEIGHT,
+                                pixels,
+                            );
+                        }
                     }
                 }
+                self.studio_environment = true;
             } else {
+                // Out of the studio: its room goes, and the scene's own sky
+                // is rebuilt below as if it had never been there.
+                if std::mem::take(&mut self.studio_environment) {
+                    let (device, queue) = (&gfx.gpu.device, &gfx.gpu.queue);
+                    gfx.viewport.clear_environment(device, queue);
+                    for v in gfx.extra.values_mut() {
+                        v.viewport.clear_environment(device, queue);
+                    }
+                    self.environment = None;
+                    self.environment_stale = true;
+                }
                 let world = scenelights::world_radiance(&self.doc);
                 gfx.viewport.set_world(world);
                 for v in gfx.extra.values_mut() {
@@ -11200,7 +11255,8 @@ impl App {
             // faces and their mips is not a per-frame cost, and the key is what
             // tells "the same sky again" from "a sky that finished loading".
             let want = kreate::environment::key_of(&self.doc);
-            if preview.is_none() && (want != self.environment || fresh) {
+            let stale = std::mem::take(&mut self.environment_stale);
+            if preview.is_none() && (want != self.environment || fresh || stale) {
                 let (device, queue) = (&gfx.gpu.device, &gfx.gpu.queue);
                 let viewports = std::iter::once(&mut gfx.viewport)
                     .chain(gfx.extra.values_mut().map(|v| &mut v.viewport));
@@ -11234,6 +11290,11 @@ impl App {
                 .and_then(|id| self.doc.world(id))
                 .map(|w| (w.rotation as f32, w.strength as f32))
                 .unwrap_or((0.0, 1.0));
+            // The studio turns with the view in the preview; the scene's sky
+            // is turned by its own dial.
+            let (rotation, strength) = preview
+                .as_ref()
+                .map_or((rotation, strength), |p| (p.yaw, 1.0));
             gfx.viewport
                 .set_world_shape(&gfx.gpu.queue, rotation, strength);
             for v in gfx.extra.values_mut() {
@@ -11495,7 +11556,11 @@ impl App {
                 .as_ref()
                 .map_or(shot.exposure as f32, |p| p.exposure);
             let display = kreate_render::display::Display {
-                view: kreate_math::ViewTransform::AgX,
+                view: if self.ui.punchy {
+                    kreate_math::ViewTransform::AgXPunchy
+                } else {
+                    kreate_math::ViewTransform::AgX
+                },
                 exposure,
             };
             gfx.viewport.set_display(&gfx.gpu.queue, display);

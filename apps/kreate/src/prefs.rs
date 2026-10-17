@@ -134,7 +134,32 @@ pub fn load_resolution_scale(path: &Path) -> f32 {
 }
 
 pub fn save_resolution_scale(path: &Path, scale: f32) -> Result<(), std::io::Error> {
-    write_atomic(path, &format!("resolution_scale = {scale}\n"))
+    save_viewport(path, scale, load_punchy(path))
+}
+
+/// Whether the lit views use the Punchy look of AgX, from the same file; yes
+/// when the file is missing or does not say, the neutral grade having read
+/// as washed out.
+pub fn load_punchy(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|l| {
+                let (key, value) = l.split_once('=')?;
+                (key.trim() == "look").then(|| value.trim() != "base")
+            })
+        })
+        .unwrap_or(true)
+}
+
+/// The viewport preferences, both of them: a file of one line would lose
+/// the other each time it was written.
+pub fn save_viewport(path: &Path, scale: f32, punchy: bool) -> Result<(), std::io::Error> {
+    let look = if punchy { "punchy" } else { "base" };
+    write_atomic(
+        path,
+        &format!("resolution_scale = {scale}\nlook = {look}\n"),
+    )
 }
 
 /// The interface preferences' file: `theme = light`.

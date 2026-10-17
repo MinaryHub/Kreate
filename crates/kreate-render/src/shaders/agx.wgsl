@@ -65,6 +65,11 @@ const OUTSET_2 = vec3<f32>(-0.14132976, -0.11060664, 1.2519364);
 // because a uniform block has no enums.
 const VIEW_AGX: u32 = 0u;
 const VIEW_STANDARD: u32 = 1u;
+const VIEW_AGX_PUNCHY: u32 = 2u;
+
+// Blender's Punchy look, as `kreate_math::agx` applies it.
+const PUNCHY_POWER: f32 = 1.35;
+const PUNCHY_SATURATION: f32 = 1.4;
 
 struct Display {
     /// Stops. The picture's exposure, not a light's — see the Rust module.
@@ -113,7 +118,13 @@ fn contrast(x: f32) -> f32 {
         + 0.4298 * x2 + 0.1191 * x - 0.00232;
 }
 
-fn agx(color: vec3<f32>) -> vec3<f32> {
+fn punchy_look(c: vec3<f32>) -> vec3<f32> {
+    let p = pow(nonneg3(c), vec3<f32>(PUNCHY_POWER));
+    let luma = dot(p, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec3<f32>(luma) + PUNCHY_SATURATION * (p - vec3<f32>(luma));
+}
+
+fn agx(color: vec3<f32>, punchy: bool) -> vec3<f32> {
     var c = row3(R709_TO_R2020_0, R709_TO_R2020_1, R709_TO_R2020_2, color);
     // A primaries conversion can send a saturated colour slightly negative.
     c = nonneg3(c);
@@ -136,6 +147,9 @@ fn agx(color: vec3<f32>) -> vec3<f32> {
     );
     c = clamp((c - vec3<f32>(MIN_EV)) / vec3<f32>(range), vec3<f32>(0.0), vec3<f32>(1.0));
     c = vec3<f32>(contrast(c.x), contrast(c.y), contrast(c.z));
+    if punchy {
+        c = punchy_look(c);
+    }
 
     c = row3(OUTSET_0, OUTSET_1, OUTSET_2, c);
     // Undoes AgX's own 2.2 display encoding, so the primaries conversion below
@@ -155,7 +169,9 @@ fn display_transform(color: vec3<f32>, params: Display) -> vec3<f32> {
     let exposed = nonneg3(color * exp2(params.exposure));
     var display = exposed;
     if params.view == VIEW_AGX {
-        display = agx(exposed);
+        display = agx(exposed, false);
+    } else if params.view == VIEW_AGX_PUNCHY {
+        display = agx(exposed, true);
     }
     return clamp(display, vec3<f32>(0.0), vec3<f32>(1.0));
 }

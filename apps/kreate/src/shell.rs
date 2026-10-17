@@ -292,6 +292,9 @@ pub struct ShellState {
     /// The viewport drawn at this fraction of its pixels on each side, and
     /// stretched to fit: Blender's Resolution Scale, for a slow machine.
     pub resolution_scale: f32,
+    /// Whether the lit views use the Punchy look of AgX. See
+    /// `prefs::load_punchy`.
+    pub punchy: bool,
     /// The open document's name, `*` in front while it has unsaved changes:
     /// what the application bar's document chip shows.
     pub document_title: String,
@@ -853,6 +856,7 @@ impl Default for ShellState {
             recent_files: Vec::new(),
             node_clipboard: None,
             resolution_scale: 1.0,
+            punchy: true,
             document_title: "untitled".into(),
             adjust_open: false,
             appearance: kreate_ui::Appearance::Dark,
@@ -3642,10 +3646,23 @@ fn draw_area(
                         {
                             state.resolution_scale = scale;
                             if let Some(path) = crate::prefs::viewport_path() {
-                                let _ = crate::prefs::save_resolution_scale(&path, scale);
+                                let _ = crate::prefs::save_viewport(&path, scale, state.punchy);
                             }
                         }
                     });
+                    if ui
+                        .checkbox(&mut state.punchy, state.catalog.get("prefs-punchy"))
+                        .on_hover_text(state.catalog.get("prefs-punchy-desc"))
+                        .changed()
+                    {
+                        if let Some(path) = crate::prefs::viewport_path() {
+                            let _ = crate::prefs::save_viewport(
+                                &path,
+                                state.resolution_scale,
+                                state.punchy,
+                            );
+                        }
+                    }
                     ui.separator();
                     let conflicts = keymap.conflicts();
                     let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());

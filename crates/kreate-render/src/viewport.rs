@@ -66,6 +66,9 @@ pub fn wires_shown(shading: ShadingMode, overlay: bool) -> (bool, bool) {
     match shading {
         ShadingMode::Rendered => (false, false),
         ShadingMode::Wireframe => (true, true),
+        // The material preview is for judging materials, and a mesh's wires
+        // drawn over every surface were most of what it showed.
+        ShadingMode::Material => (false, true),
         _ => (overlay, true),
     }
 }
@@ -1728,6 +1731,10 @@ pub struct Viewport {
     /// Whether to draw the model's shadow on the floor, as Fusion does by
     /// default. In every view but the rendered one, which has its lights'.
     pub show_ground_shadow: bool,
+    /// Whether the rendered view is lit by the application's studio rather
+    /// than the scene's own lights: then it has the ground shadow too, the
+    /// studio being a floor and a room. Set by the caller each frame.
+    pub studio_lit: bool,
     /// Whether to draw the ground grid. A user-facing toggle, and what lets a
     /// test compare geometry without the world-anchored lattice in the way.
     pub show_grid: bool,
@@ -2835,6 +2842,7 @@ impl Viewport {
             grid_line: palette::GRID_LINE,
             show_grid: true,
             show_ground_shadow: true,
+            studio_lit: false,
             ground_pipeline,
             ground_buf,
             ground_bind,
@@ -3191,8 +3199,10 @@ impl Viewport {
             );
         }
         if self.blooming() {
-            // Over white once exposed: the picture's own exposure, so what
-            // glows is what the display cannot show.
+            // Two stops over white once exposed: the picture's own exposure,
+            // so what glows is what the display cannot show — not a white
+            // floor, which AgX shows short of white and the old threshold of
+            // one set glowing at its edges.
             self.bloom.prepare(
                 device,
                 queue,
@@ -3201,7 +3211,7 @@ impl Viewport {
                 self.size,
                 self.display.exposure,
                 self.bloom_intensity,
-                1.0,
+                4.0,
             );
         }
         self.aa.set_region(queue, self.render_size);
@@ -3655,8 +3665,13 @@ impl Viewport {
         bounds: kreate_math::Aabb,
         grid: f32,
     ) -> Option<GroundFrame> {
+        // The rendered view's own lights cast their own shadows, and the
+        // path tracer its true ones: only the studio's floor is drawn there.
+        let rendered_without =
+            self.shading == ShadingMode::Rendered && (!self.studio_lit || self.path_tracing());
         if !self.show_ground_shadow
-            || matches!(self.shading, ShadingMode::Rendered | ShadingMode::Wireframe)
+            || self.shading == ShadingMode::Wireframe
+            || rendered_without
             || bounds.is_empty()
         {
             return None;
@@ -5886,7 +5901,8 @@ mod tests {
         assert_eq!(wires_shown(ShadingMode::Studio, true), (true, true));
         assert_eq!(wires_shown(ShadingMode::Studio, false), (false, true));
         assert_eq!(wires_shown(ShadingMode::Wireframe, false), (true, true));
-        assert_eq!(wires_shown(ShadingMode::Material, true), (true, true));
+        // The material preview shows materials, not wires.
+        assert_eq!(wires_shown(ShadingMode::Material, true), (false, true));
     }
 
     use super::*;

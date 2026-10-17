@@ -36,6 +36,7 @@ pub mod region_select;
 pub mod shading;
 pub mod shadow;
 pub mod ssr;
+pub mod studio;
 pub mod tiles;
 pub mod viewport;
 pub mod volume;

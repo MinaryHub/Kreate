@@ -83,6 +83,7 @@ fn view_id(view: kreate_math::ViewTransform) -> u32 {
     match view {
         kreate_math::ViewTransform::AgX => 0,
         kreate_math::ViewTransform::Standard => 1,
+        kreate_math::ViewTransform::AgXPunchy => 2,
     }
 }
 
@@ -524,6 +525,7 @@ mod tests {
         for (view, name) in [
             (kreate_math::ViewTransform::AgX, "VIEW_AGX"),
             (kreate_math::ViewTransform::Standard, "VIEW_STANDARD"),
+            (kreate_math::ViewTransform::AgXPunchy, "VIEW_AGX_PUNCHY"),
         ] {
             let declaration = format!("const {name}: u32 = {}u;", view_id(view));
             assert!(

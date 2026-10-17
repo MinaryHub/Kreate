@@ -165,9 +165,11 @@ fn bbox(frame: &[[u8; 4]], keep: impl Fn([u8; 4]) -> bool) -> Option<(u32, u32, 
     b
 }
 
-/// The selection accent: red well above blue, green in between.
+/// The selection accent: red well above blue, green below it — the wire's
+/// orange, or the outline's deeper red, which is what the material preview
+/// shows a selection by now that it draws no wires.
 fn is_accent(p: [u8; 4]) -> bool {
-    p[0] > 180 && p[2] < 110 && p[1] > 90 && p[1] < 200
+    p[0] > 180 && p[2] < 110 && p[1] < 200 && p[0] as i32 > p[1] as i32 + 50
 }
 
 /// A grey shaded pixel: the three channels near each other and lit, but not
@@ -188,7 +190,7 @@ fn the_shaded_object_sits_where_its_own_outline_is() {
         return;
     };
     // In the material preview: the rendered view's own lit passes, with the
-    // wire overlay still drawn over them. The rendered view itself draws no
+    // selection outline drawn over them. The rendered view itself draws no
     // wire, being the picture as a render makes it.
     let frame = shoot(&gpu, ShadingMode::Material, true);
     let surface = bbox(&frame, is_grey_surface).expect("a shaded cube");

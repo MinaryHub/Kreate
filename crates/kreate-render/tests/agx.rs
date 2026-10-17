@@ -480,6 +480,22 @@ fn agx_on_the_gpu_is_agx_on_the_cpu() {
 }
 
 #[test]
+fn the_punchy_look_on_the_gpu_is_the_punchy_look_on_the_cpu() {
+    // The look is a second place the two could drift: its power and its
+    // saturation, spelled in both.
+    let gpu = gpu_or_skip!(gpu());
+    for exposure in [-2.0, 0.0, 3.0] {
+        compare(
+            &gpu,
+            Display {
+                view: ViewTransform::AgXPunchy,
+                exposure,
+            },
+        );
+    }
+}
+
+#[test]
 fn they_agree_at_every_exposure() {
     // Exposure multiplies *before* the log encoding, so a mismatch would show
     // only away from zero stops — and zero stops is the setting every casual
