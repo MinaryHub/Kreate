@@ -3679,6 +3679,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<FillHole>();
     registry.register::<InsetFaces>();
     registry.register::<LoopCut>();
+    registry.register::<EdgeSlide>();
+    registry.register::<Symmetrize>();
     registry.register::<MarkSharp>();
     registry.register::<MergeVerts>();
     registry.register::<SelectElements>();
@@ -3754,6 +3756,126 @@ pub fn selected_faces_normal(doc: &Document) -> Option<glam::DVec3> {
     }
     let n = sum.normalize_or_zero();
     (n != glam::DVec3::ZERO).then_some(n)
+}
+
+// --- edge slide ---------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct EdgeSlideParams {
+    /// How far across: one is all the way to the neighbouring vertices on
+    /// one side, minus one on the other.
+    #[param(min = -1.0, max = 1.0, unit = "factor")]
+    pub factor: f64,
+}
+
+/// Blender's `G G`: the selected edges slid across the faces beside them.
+pub struct EdgeSlide;
+
+impl Operator for EdgeSlide {
+    type Params = EdgeSlideParams;
+    fn id() -> &'static str {
+        "mesh.edge_slide"
+    }
+    fn label() -> &'static str {
+        "Edge Slide"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let moved = with_bmesh(doc, |bm| Ok(edit::edge_slide(bm, params.factor as f32)))?;
+        Ok(if moved == 0 {
+            OpResult::Cancelled
+        } else {
+            OpResult::Finished
+        })
+    }
+}
+
+/// Where an edge slide of the active mesh's selection goes, in the world:
+/// the selected vertices' middle, and the middle of where a factor of one
+/// takes them. What the drag measures the pointer against.
+pub fn edge_slide_handle(doc: &Document) -> Option<(glam::DVec3, glam::DVec3)> {
+    let object = target_object(doc)?;
+    let mesh = doc.mesh(target_mesh(doc)?)?;
+    let bm = kreate_mesh::BMesh::from_mesh_data(mesh);
+    let rails = edit::slide_rails(&bm);
+    let plus: Vec<_> = rails
+        .iter()
+        .filter_map(|r| Some((r.from, r.plus?)))
+        .collect();
+    let pairs = if plus.is_empty() {
+        rails
+            .iter()
+            .filter_map(|r| Some((r.from, r.minus?)))
+            .collect()
+    } else {
+        plus
+    };
+    if pairs.is_empty() {
+        return None;
+    }
+    let n = pairs.len() as f32;
+    let from = pairs.iter().map(|p| p.0).sum::<kreate_math::Vec3>() / n;
+    let to = pairs.iter().map(|p| p.1).sum::<kreate_math::Vec3>() / n;
+    let to_world = doc.world_transform(object);
+    Some((
+        to_world.transform_point3(from.as_dvec3()),
+        to_world.transform_point3(to.as_dvec3()),
+    ))
+}
+
+// --- symmetrize -------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SymmetrizeParams {
+    /// The axis across whose plane, through the object's origin.
+    #[param(variants("x", "y", "z"))]
+    pub axis: u32,
+    /// Which half is kept and copied over.
+    #[param(variants("positive_to_negative", "negative_to_positive"))]
+    pub direction: u32,
+}
+
+/// Blender's Symmetrize: one half of the mesh cut away and the other
+/// reflected into its place, welded at the seam.
+pub struct Symmetrize;
+
+impl Operator for Symmetrize {
+    type Params = SymmetrizeParams;
+    fn id() -> &'static str {
+        "mesh.symmetrize"
+    }
+    fn label() -> &'static str {
+        "Symmetrize"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let done = with_bmesh(doc, |bm| {
+            let mesh = bm.to_mesh_data();
+            let out = edit::symmetrize(&mesh, params.axis, params.direction == 1);
+            if out.num_faces() == 0 {
+                return Ok(false);
+            }
+            *bm = kreate_mesh::BMesh::from_mesh_data(&out);
+            Ok(true)
+        })?;
+        Ok(if done {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
 }
 
 /// The edge a loop cut starts from, as its two ends in the world: the first
@@ -4780,6 +4902,73 @@ mod tests {
         let after = doc.mesh(mesh).unwrap();
         assert_eq!(after.num_faces(), 8, "four walls plus four bridging quads");
         assert_eq!(after.validate(), Vec::new());
+    }
+
+    #[test]
+    fn an_edge_slides_across_its_face_and_the_handle_says_which_way() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = cube_doc();
+        let ends = {
+            let m = doc.mesh_mut(mesh).unwrap();
+            let mut bm = m.to_bmesh();
+            let e = bm.edge_ids().next().unwrap();
+            bm.set_edge_selected(e, true);
+            *m = bm.to_mesh_data();
+            m.edges()[0]
+        };
+        let before = doc.mesh(mesh).unwrap().positions().to_vec();
+        let (from, to) = edge_slide_handle(&doc).expect("an edge to slide");
+        assert!((to - from).length() > 1.0, "a cube's edge, two across");
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.edge_slide",
+            &params(&[("factor", PropertyValue::Float(0.5))]),
+        )
+        .unwrap();
+        let after = doc.mesh(mesh).unwrap().positions().to_vec();
+        for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+            let moved = (*a - *b).length();
+            if ends.contains(&(i as u32)) {
+                assert!(
+                    (moved - 1.0).abs() < 1e-4,
+                    "halfway along a side of two: {moved}"
+                );
+            } else {
+                assert!(moved < 1e-6, "only the edge's ends move");
+            }
+        }
+        assert!(h.undo(&mut doc));
+        assert_eq!(doc.mesh(mesh).unwrap().positions(), &before[..]);
+    }
+
+    #[test]
+    fn symmetrize_keeps_one_half_and_undoes() {
+        let r = registry();
+        let mut h = History::new();
+        let (mut doc, mesh, ctx) = cube_doc();
+        for p in doc.mesh_mut(mesh).unwrap().positions_mut() {
+            p.x += 0.5;
+        }
+        h.dispatch(
+            &r,
+            &mut doc,
+            &ctx,
+            "mesh.symmetrize",
+            &params(&[
+                ("axis", PropertyValue::Int(0)),
+                ("direction", PropertyValue::Int(0)),
+            ]),
+        )
+        .unwrap();
+        let out = doc.mesh(mesh).unwrap();
+        let v = kreate_mesh::measure::mass_properties(out, |p| p).volume;
+        assert!((v - 12.0).abs() < 1e-3, "{v}");
+        assert!(kreate_mesh::measure::is_closed(out));
+        assert!(h.undo(&mut doc));
+        assert_eq!(doc.mesh(mesh).unwrap().num_faces(), 6);
     }
 
     #[test]

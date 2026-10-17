@@ -2695,6 +2695,16 @@ impl App {
                 }
             }
         }
+        // An edge slide measures the pointer along the way the edges go.
+        if kind == kreate::modal::Kind::EdgeSlide {
+            match kreate_ops::ops::mesh::edge_slide_handle(&self.doc) {
+                Some((a, b)) => gesture.set_slide_edge(a, b),
+                None => {
+                    self.status("select edges with faces beside them to slide");
+                    return;
+                }
+            }
+        }
         // Ctrl inverts snapping, and it may already be held when the gesture
         // starts. Read once here rather than waiting for the next modifier
         // event, which might never come.
@@ -6002,6 +6012,19 @@ impl App {
             return true;
         }
         match code {
+            // `G` again in a mesh's move, Blender's `G G`: the move undone
+            // and the selected edges slid instead.
+            KeyCode::KeyG
+                if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::MeshElements
+                    && self
+                        .gesture
+                        .as_ref()
+                        .is_some_and(|(g, _)| g.kind == kreate::modal::Kind::Move) =>
+            {
+                self.cancel_gesture();
+                self.begin_gesture(kreate::modal::Kind::EdgeSlide);
+                true
+            }
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 if self.gesture.as_ref().is_some_and(|(g, _)| g.picking_base()) {
                     self.finish_base_pick();
@@ -10597,6 +10620,7 @@ impl App {
                     kreate::modal::Kind::Inset => kreate_ui::toolbar::Tool::Inset,
                     kreate::modal::Kind::Bevel => kreate_ui::toolbar::Tool::Bevel,
                     kreate::modal::Kind::LoopCut => kreate_ui::toolbar::Tool::LoopCut,
+                    kreate::modal::Kind::EdgeSlide => kreate_ui::toolbar::Tool::Move,
                 }),
             })
             .or_else(|| {
@@ -12147,6 +12171,7 @@ impl App {
             "object.translate" | "mesh.translate" | "pose.translate" => {
                 self.begin_gesture(kreate::modal::Kind::Move)
             }
+            "mesh.edge_slide" => self.begin_gesture(kreate::modal::Kind::EdgeSlide),
             "object.rotate" | "mesh.rotate" | "pose.rotate" => {
                 self.begin_gesture(kreate::modal::Kind::Rotate)
             }

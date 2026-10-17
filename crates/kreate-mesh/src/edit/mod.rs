@@ -21,9 +21,11 @@ pub mod loopcut;
 pub mod merge;
 pub mod normals;
 pub mod region;
+pub mod slide;
 pub mod spin;
 pub mod split;
 pub mod subdivide;
+pub mod symmetrize;
 pub mod uv_edit;
 pub mod uv_pack;
 pub mod uv_project;
@@ -53,9 +55,11 @@ pub use normals::{
     Recalculation,
 };
 pub use region::Region;
+pub use slide::{edge_slide, rails as slide_rails, Rail};
 pub use spin::{close_spin, spin, spin_selected, Spin};
 pub use split::{rip_selected_edges, split_edges, split_region, split_selected_faces, Split};
 pub use subdivide::{subdivide_faces, subdivide_selected, Subdivision};
+pub use symmetrize::symmetrize;
 pub use uv_edit::{islands as uv_islands, SelectAction as UvSelectAction, Transform2};
 pub use uv_pack::{cluster_by_angle, pack as uv_pack, smart_project};
 pub use uv_project::{project as uv_project, project_with as uv_project_with, Fit, Projection};

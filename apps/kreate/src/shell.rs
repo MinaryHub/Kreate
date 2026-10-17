@@ -5190,7 +5190,15 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
 /// Every key the Mechanical menu names, to look up once.
 fn mech_keys() -> Vec<&'static str> {
     // Named here too: the edit mode's Face menu has the shell and draft.
-    let mut keys = vec!["menu-mechanical", "mech-shell", "mech-draft", "mech-fits"];
+    // And the edit mode's Mesh menu's slide and symmetrize, read the same way.
+    let mut keys = vec![
+        "menu-mechanical",
+        "mech-shell",
+        "mech-draft",
+        "mech-fits",
+        "menu-edge-slide",
+        "menu-symmetrize",
+    ];
     keys.extend(FITS_KEYS);
     for (group, entries) in MECH_MENU {
         if !group.is_empty() {
@@ -9948,6 +9956,20 @@ fn mesh_menus(l: &Labels, select_mode: u32) -> Vec<TopMenu> {
                     op(
                         "mesh.loop_cut",
                         &[("cuts", V::Int(1)), ("position", V::Float(0.5))],
+                    ),
+                ),
+                // The drag, as `G G` starts it.
+                entry(
+                    "mesh.edge_slide",
+                    &l.m("menu-edge-slide"),
+                    dispatch("mesh.edge_slide"),
+                ),
+                entry(
+                    "mesh.symmetrize",
+                    &l.m("menu-symmetrize"),
+                    op(
+                        "mesh.symmetrize",
+                        &[("axis", V::Int(0)), ("direction", V::Int(0))],
                     ),
                 ),
                 entry(

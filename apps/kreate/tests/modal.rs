@@ -918,6 +918,7 @@ fn every_operator_a_gesture_names_exists() {
         Kind::Inset,
         Kind::Bevel,
         Kind::LoopCut,
+        Kind::EdgeSlide,
     ] {
         for mode in kreate_ops::operator::Mode::ALL {
             let id = kind.op_id(mode);
@@ -977,6 +978,7 @@ fn the_parameters_a_gesture_produces_are_the_operators_own() {
         Kind::Inset,
         Kind::Bevel,
         Kind::LoopCut,
+        Kind::EdgeSlide,
     ]
     .into_iter()
     .flat_map(|kind| {
@@ -1912,4 +1914,41 @@ fn picking_nothing_keeps_the_nearest_point_landing() {
         "nothing of the cube is in the corner"
     );
     assert!(g.status().contains("snap"), "{}", g.status());
+}
+
+/// An edge slide follows the pointer along the way the edges go on screen,
+/// either way, and a typed number is the factor itself.
+#[test]
+fn an_edge_slide_measures_the_pointer_along_its_way() {
+    let camera = camera();
+    let begin = || {
+        let mut g = Gesture::begin(
+            Kind::EdgeSlide,
+            (400.0, 300.0),
+            DVec3::ZERO,
+            &camera,
+            VIEWPORT,
+            WORLD_AXES,
+            Snap::default(),
+            SnapWorld::default(),
+        );
+        g.set_slide_edge(DVec3::ZERO, DVec3::new(1.0, 0.0, 0.0));
+        g
+    };
+    let factor = |p: &kreate_ops::PropertyMap| p.get("factor").and_then(|v| v.as_float()).unwrap();
+    let mut g = begin();
+    let still = factor(&at(&mut g, (400.0, 300.0)));
+    assert!(still.abs() < 1e-9, "{still}");
+    let mut g = begin();
+    let one_way = factor(&at(&mut g, (430.0, 300.0)));
+    let mut g = begin();
+    let other_way = factor(&at(&mut g, (370.0, 300.0)));
+    assert!(
+        one_way != 0.0 && (one_way + other_way).abs() < 1e-6,
+        "{one_way} {other_way}"
+    );
+    // Far past the end: all the way, no further.
+    let mut g = begin();
+    let far = factor(&at(&mut g, (4000.0, 300.0)));
+    assert!((far.abs() - 1.0).abs() < 1e-9, "{far}");
 }

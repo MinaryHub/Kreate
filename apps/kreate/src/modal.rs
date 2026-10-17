@@ -94,6 +94,9 @@ pub enum Kind {
     /// Blender's `Ctrl+R`: the new loop slides along the selected edge with the
     /// pointer, and a typed number is how many loops.
     LoopCut,
+    /// Blender's `G G`: the selected edges slide across the faces beside
+    /// them, the pointer along the way they go; a typed number is the factor.
+    EdgeSlide,
 }
 
 impl Kind {
@@ -115,6 +118,7 @@ impl Kind {
             Kind::Inset => "mesh.inset",
             Kind::Bevel => "mesh.bevel",
             Kind::LoopCut => "mesh.loop_cut",
+            Kind::EdgeSlide => "mesh.edge_slide",
         }
     }
 
@@ -128,6 +132,7 @@ impl Kind {
             Kind::Inset => "Inset",
             Kind::Bevel => "Bevel",
             Kind::LoopCut => "Loop Cut",
+            Kind::EdgeSlide => "Edge Slide",
         }
     }
 
@@ -941,7 +946,7 @@ impl Gesture {
             Kind::Rotate => crate::expr::Unit::Angle,
             // Anchored, a loop cut's number is a distance from the end.
             Kind::LoopCut if self.anchor.is_some() => crate::expr::Unit::Length,
-            Kind::Scale | Kind::LoopCut => crate::expr::Unit::Factor,
+            Kind::Scale | Kind::LoopCut | Kind::EdgeSlide => crate::expr::Unit::Factor,
         }
     }
 
@@ -991,6 +996,13 @@ impl Gesture {
                     params.set("edge", PropertyValue::Int(edge as i64));
                 }
                 params.set("position", PropertyValue::Float(self.cut_position(dx, dy)));
+            }
+            Kind::EdgeSlide => {
+                let factor = self
+                    .typed()
+                    .unwrap_or_else(|| self.slide_factor(dx, dy))
+                    .clamp(-1.0, 1.0);
+                params.set("factor", PropertyValue::Float(factor));
             }
             Kind::Rotate => {
                 let axis = self.axis.unwrap_or_else(|| self.view_axis());
@@ -1199,6 +1211,21 @@ impl Gesture {
         self.slide_position_from(0.5, dx, dy).clamp(0.02, 0.98)
     }
 
+    /// How far an edge slide has gone: the motion along the slide's way on
+    /// screen, as a share of how far one whole slide reaches there — minus
+    /// for the other side.
+    fn slide_factor(&self, dx: f32, dy: f32) -> f64 {
+        let Some(((ax, ay), (bx, by))) = self.slide else {
+            return 0.0;
+        };
+        let (ex, ey) = (bx - ax, by - ay);
+        let length2 = ex * ex + ey * ey;
+        if length2 < 1.0 {
+            return 0.0;
+        }
+        (((dx * ex + dy * ey) / length2) as f64).clamp(-1.0, 1.0)
+    }
+
     /// The same, from `from` along the edge rather than its middle.
     fn slide_position_from(&self, from: f64, dx: f32, dy: f32) -> f64 {
         let Some(((ax, ay), (bx, by))) = self.slide else {
@@ -1322,6 +1349,14 @@ impl Gesture {
                 )
             }
             Kind::Bevel => format!("width {}", len(self.bevel_width())),
+            Kind::EdgeSlide => {
+                let (dx, dy) = self.effective_delta(self.cursor);
+                let factor = self
+                    .typed()
+                    .unwrap_or_else(|| self.slide_factor(dx, dy))
+                    .clamp(-1.0, 1.0);
+                format!("factor {factor:.3}  (type a factor, -1 to 1)")
+            }
             Kind::LoopCut => {
                 let (dx, dy) = self.effective_delta(self.cursor);
                 match (self.anchor, self.anchored_distance(dx, dy)) {
