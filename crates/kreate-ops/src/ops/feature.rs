@@ -21,6 +21,241 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Remove>();
     registry.register::<ToMesh>();
     registry.register::<Round>();
+    registry.register::<ShellFeature>();
+    registry.register::<PatternFeature>();
+    registry.register::<CircularFeature>();
+    registry.register::<MirrorFeature>();
+}
+
+/// The body a body-level feature goes on: by name, or the active body.
+fn body_for(doc: &Document, name: &str) -> Result<ObjectId, OpError> {
+    if name.trim().is_empty() {
+        doc.selection
+            .active
+            .filter(|id| doc.object(*id).is_some_and(|o| !o.features.is_empty()))
+    } else {
+        body_named(doc, name)
+    }
+    .ok_or_else(|| OpError::Failed("pick a body made from a sketch".into()))
+}
+
+/// Adds a feature that works on the body so far, as the next step of its
+/// timeline, doing what the step before it did — joining or cutting.
+fn add_on_body(doc: &mut DocMut<'_>, body: ObjectId, shape: Shape) -> Result<OpResult, OpError> {
+    let order = feature::next_order(doc.document());
+    let operation = doc
+        .document()
+        .object(body)
+        .and_then(|o| o.features.last())
+        .map(|f| f.operation)
+        .unwrap_or_default();
+    let f = Feature {
+        shape,
+        sketch: kreate_scene::Uid::NONE,
+        seeds: Vec::new(),
+        operation,
+        order,
+    };
+    doc.document_mut()
+        .object_mut(body)
+        .expect("a body")
+        .features
+        .push(f);
+    Ok(OpResult::Finished)
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct ShellParams {
+    /// The body by name; empty for the active one.
+    pub body: String,
+    /// How thick the wall is left.
+    #[param(min = 0.0, soft_max = 0.02, unit = "length")]
+    pub thickness: f64,
+    /// The side taken off, so the body is a tray rather than hollow.
+    #[param(variants("none", "+x", "-x", "+y", "-y", "+z", "-z"))]
+    pub open: u32,
+}
+
+impl Default for ShellParams {
+    fn default() -> Self {
+        Self {
+            body: String::new(),
+            thickness: 0.002,
+            open: 5,
+        }
+    }
+}
+
+/// Hollows the body to a wall, its top taken off: Fusion's Shell, as a
+/// step of the timeline.
+pub struct ShellFeature;
+
+impl Operator for ShellFeature {
+    type Params = ShellParams;
+    fn id() -> &'static str {
+        "feature.shell"
+    }
+    fn label() -> &'static str {
+        "Shell"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let body = body_for(doc.document(), &params.body)?;
+        if !(params.thickness > 0.0 && params.thickness.is_finite()) {
+            return Ok(OpResult::Cancelled);
+        }
+        add_on_body(
+            doc,
+            body,
+            Shape::Shell {
+                thickness: params.thickness,
+                open: params.open.min(6),
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct PatternParams {
+    pub body: String,
+    /// How many in all, the original counted.
+    #[param(min = 1, max = 1000, unit = "count")]
+    pub count: u32,
+    /// From one copy to the next, in the body's space.
+    #[param(unit = "length")]
+    pub step: [f64; 3],
+}
+
+impl Default for PatternParams {
+    fn default() -> Self {
+        Self {
+            body: String::new(),
+            count: 3,
+            step: [0.02, 0.0, 0.0],
+        }
+    }
+}
+
+/// Repeats the body's last feature along a line: Fusion's Rectangular
+/// Pattern, along one direction.
+pub struct PatternFeature;
+
+impl Operator for PatternFeature {
+    type Params = PatternParams;
+    fn id() -> &'static str {
+        "feature.pattern"
+    }
+    fn label() -> &'static str {
+        "Linear Pattern"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let body = body_for(doc.document(), &params.body)?;
+        if params.count < 2 || params.step.iter().any(|v| !v.is_finite()) {
+            return Ok(OpResult::Cancelled);
+        }
+        add_on_body(
+            doc,
+            body,
+            Shape::Pattern {
+                count: params.count,
+                step: params.step,
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct CircularParams {
+    pub body: String,
+    #[param(min = 1, max = 1000, unit = "count")]
+    pub count: u32,
+    /// The body's axis they go round, through its origin.
+    #[param(variants("x", "y", "z"))]
+    pub axis: u32,
+}
+
+impl Default for CircularParams {
+    fn default() -> Self {
+        Self {
+            body: String::new(),
+            count: 6,
+            axis: 2,
+        }
+    }
+}
+
+/// Repeats the body's last feature round an axis: Fusion's Circular
+/// Pattern.
+pub struct CircularFeature;
+
+impl Operator for CircularFeature {
+    type Params = CircularParams;
+    fn id() -> &'static str {
+        "feature.circular"
+    }
+    fn label() -> &'static str {
+        "Circular Pattern"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let body = body_for(doc.document(), &params.body)?;
+        if params.count < 2 {
+            return Ok(OpResult::Cancelled);
+        }
+        add_on_body(
+            doc,
+            body,
+            Shape::Circular {
+                count: params.count,
+                axis: params.axis.min(2),
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MirrorParams {
+    pub body: String,
+    /// Square to this axis of the body, through its origin.
+    #[param(variants("x", "y", "z"))]
+    pub axis: u32,
+}
+
+/// Reflects the body's last feature across a plane: Fusion's Mirror.
+pub struct MirrorFeature;
+
+impl Operator for MirrorFeature {
+    type Params = MirrorParams;
+    fn id() -> &'static str {
+        "feature.mirror"
+    }
+    fn label() -> &'static str {
+        "Mirror Feature"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let body = body_for(doc.document(), &params.body)?;
+        add_on_body(
+            doc,
+            body,
+            Shape::Mirror {
+                axis: params.axis.min(2),
+            },
+        )
+    }
 }
 
 /// A body, by name; the most recently made when the name is empty.
@@ -343,6 +578,11 @@ impl Operator for Set {
                 }
                 Shape::Revolve { angle, .. } => *angle = params.amount,
                 Shape::Round { radius, .. } => *radius = params.amount.abs(),
+                Shape::Shell { thickness, .. } => *thickness = params.amount.abs(),
+                Shape::Pattern { count, .. } | Shape::Circular { count, .. } => {
+                    *count = (params.amount.round() as i64).clamp(1, 1000) as u32;
+                }
+                Shape::Mirror { .. } => {}
             }
         }
         f.operation = if params.operation == 1 {
@@ -1033,6 +1273,132 @@ mod tests {
                 "doubling the radius"
             );
         }
+    }
+
+    /// A plate shelled, patterned, mirrored and turned round: each a step
+    /// of the timeline, each read back from the file.
+    #[test]
+    fn body_features_shell_pattern_mirror_and_circular() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([0.04, 0.02, 0.0])),
+                ("join", PropertyValue::Int(1)),
+            ],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.01, 0.01])),
+                ("distance", PropertyValue::Float(0.01)),
+            ],
+        )
+        .unwrap();
+        let id = body(&doc);
+        let plate = volume(&doc, id);
+        assert!((plate - 8e-6).abs() < 1e-8, "{plate}");
+        doc.selection.clear();
+        doc.selection.add(id);
+        doc.selection.active = Some(id);
+
+        // A linear pattern of three: three plates.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.pattern",
+            &[
+                ("count", PropertyValue::Int(3)),
+                ("step", PropertyValue::Vec3([0.05, 0.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        assert!(
+            (volume(&doc, id) - 3.0 * plate).abs() < 1e-7,
+            "{}",
+            volume(&doc, id)
+        );
+        assert!(h.undo(&mut doc));
+
+        // Mirrored across the YZ plane: a plate from -40 to 40 mm.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.mirror",
+            &[("axis", PropertyValue::Enum(0))],
+        )
+        .unwrap();
+        assert!(
+            (volume(&doc, id) - 2.0 * plate).abs() < 1e-7,
+            "{}",
+            volume(&doc, id)
+        );
+        assert!(h.undo(&mut doc));
+
+        // Round Z, four times: four plates, each a quarter turn on.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.circular",
+            &[
+                ("count", PropertyValue::Int(4)),
+                ("axis", PropertyValue::Enum(2)),
+            ],
+        )
+        .unwrap();
+        let four = volume(&doc, id);
+        assert!(four > 3.5 * plate && four < 4.1 * plate, "{four}");
+        assert!(h.undo(&mut doc));
+
+        // Shelled, 2 mm, open at the top: a tray.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.shell",
+            &[
+                ("thickness", PropertyValue::Float(0.002)),
+                ("open", PropertyValue::Enum(5)),
+            ],
+        )
+        .unwrap();
+        let tray = volume(&doc, id);
+        // The walls and floor: 8 - (36 x 16 x 8) mm³.
+        let want = 8e-6 - 0.036 * 0.016 * 0.008;
+        assert!((tray - want).abs() < want * 0.05, "{tray} vs {want}");
+        assert_eq!(doc.object(id).unwrap().features.len(), 2);
+
+        // Through the file.
+        let bytes = kreate_io::container::write(&doc, &Default::default(), &[]).unwrap();
+        let back = kreate_io::container::read(std::io::Cursor::new(bytes))
+            .unwrap()
+            .document;
+        let (_, o) = back
+            .objects()
+            .find(|(_, o)| !o.features.is_empty())
+            .unwrap();
+        assert_eq!(
+            o.features[1].shape,
+            Shape::Shell {
+                thickness: 0.002,
+                open: 5
+            }
+        );
     }
 
     #[test]

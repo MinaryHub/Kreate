@@ -55,6 +55,36 @@ pub enum Shape {
     /// Every sharp edge of the body so far rounded to this radius, in
     /// metres — or cut back this far, for a chamfer. Names no sketch.
     Round { radius: f64, chamfer: bool },
+    /// The body hollowed to a wall `thickness` thick; `open` is the side
+    /// taken off — 0 none, then +X, −X, +Y, −Y, +Z, −Z — so a box becomes a
+    /// tray. Fusion's Shell.
+    Shell { thickness: f64, open: u32 },
+    /// The feature before it repeated `count` times in all, each `step`
+    /// further along in the body's space, joined or cut as it was.
+    Pattern { count: u32, step: [f64; 3] },
+    /// The feature before it repeated `count` times round the body's axis
+    /// (0 X, 1 Y, 2 Z) through its origin, evenly.
+    Circular { count: u32, axis: u32 },
+    /// The feature before it reflected across the body's plane through its
+    /// origin square to the axis given, joined or cut as it was.
+    Mirror { axis: u32 },
+}
+
+/// The directions a shell's open side may face, as `Shape::Shell::open`
+/// numbers them after none.
+pub const SHELL_SIDES: [&str; 7] = ["none", "+x", "-x", "+y", "-y", "+z", "-z"];
+
+fn side_direction(open: u32) -> Option<kreate_math::DVec3> {
+    use kreate_math::DVec3;
+    Some(match open {
+        1 => DVec3::X,
+        2 => -DVec3::X,
+        3 => DVec3::Y,
+        4 => -DVec3::Y,
+        5 => DVec3::Z,
+        6 => -DVec3::Z,
+        _ => return None,
+    })
 }
 
 /// One step of a body.
@@ -78,7 +108,16 @@ impl Feature {
             Shape::Revolve { .. } => "revolve",
             Shape::Round { chamfer: false, .. } => "fillet",
             Shape::Round { chamfer: true, .. } => "chamfer",
+            Shape::Shell { .. } => "shell",
+            Shape::Pattern { .. } => "pattern",
+            Shape::Circular { .. } => "circular",
+            Shape::Mirror { .. } => "mirror",
         }
+    }
+
+    /// Whether it works on the body so far rather than on a sketch.
+    pub fn on_body(&self) -> bool {
+        !matches!(self.shape, Shape::Extrude { .. } | Shape::Revolve { .. })
     }
 }
 
@@ -153,7 +192,11 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
                 };
                 regions::revolve_region(&all[i], a, b - a, angle as f32, 64)
             }
-            Shape::Round { .. } => continue,
+            Shape::Round { .. }
+            | Shape::Shell { .. }
+            | Shape::Pattern { .. }
+            | Shape::Circular { .. }
+            | Shape::Mirror { .. } => continue,
         };
         out = if out.num_faces() == 0 {
             piece
@@ -164,18 +207,154 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
     out
 }
 
+/// `piece` joined to or cut from `out`, as `op` says; the first piece
+/// starts the body.
+fn combine(out: MeshData, piece: MeshData, op: Operation) -> MeshData {
+    if out.num_faces() == 0 {
+        return match op {
+            Operation::Join => piece,
+            Operation::Cut => out,
+        };
+    }
+    let op = match op {
+        Operation::Join => BooleanOp::Union,
+        Operation::Cut => BooleanOp::Difference,
+    };
+    boolean(&out, &piece, op)
+}
+
+/// `piece` with every position put through `f`, its faces turned round
+/// when `f` turns the solid inside out.
+fn mapped(
+    piece: &MeshData,
+    flip: bool,
+    f: impl Fn(kreate_math::DVec3) -> kreate_math::DVec3,
+) -> MeshData {
+    let positions: Vec<kreate_math::Vec3> = piece
+        .positions()
+        .iter()
+        .map(|p| f(p.as_dvec3()).as_vec3())
+        .collect();
+    let faces: Vec<Vec<u32>> = piece
+        .faces()
+        .map(|face| {
+            if flip {
+                face.iter().rev().copied().collect()
+            } else {
+                face.to_vec()
+            }
+        })
+        .collect();
+    MeshData::from_faces(positions, &faces)
+}
+
+/// The faces of `mesh` that face `dir` and lie furthest that way: a box's
+/// top, for +Z, however many faces it is in.
+fn faces_facing(mesh: &MeshData, dir: kreate_math::DVec3) -> Vec<u32> {
+    let p = mesh.positions();
+    let mut candidates: Vec<(u32, f64)> = Vec::new();
+    for f in 0..mesh.num_faces() {
+        let ring = mesh.face_verts(f);
+        let mut n = kreate_math::DVec3::ZERO;
+        let mut c = kreate_math::DVec3::ZERO;
+        for i in 0..ring.len() {
+            let (a, b) = (
+                p[ring[i] as usize].as_dvec3(),
+                p[ring[(i + 1) % ring.len()] as usize].as_dvec3(),
+            );
+            n += a.cross(b);
+            c += a;
+        }
+        let n = n.normalize_or_zero();
+        if n.dot(dir) > 0.999 {
+            candidates.push((f, (c / ring.len() as f64).dot(dir)));
+        }
+    }
+    let Some(top) = candidates
+        .iter()
+        .map(|c| c.1)
+        .fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.max(d))))
+    else {
+        return Vec::new();
+    };
+    let scale = p
+        .iter()
+        .map(|v| v.as_dvec3().length())
+        .fold(0.0f64, f64::max)
+        .max(1e-9);
+    candidates
+        .into_iter()
+        .filter(|(_, d)| (top - d).abs() < 1e-6 * scale.max(1.0))
+        .map(|(f, _)| f)
+        .collect()
+}
+
 /// A body: its features run in order, in its own space. The first one
 /// starts it whatever it says; after that, each joins or cuts.
 pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshData {
     let to_body = body_world.inverse();
     let mut out = MeshData::empty();
+    // The last solid a feature made, in the body's space, with what it did:
+    // what a pattern or a mirror repeats.
+    let mut last: Option<(MeshData, Operation)> = None;
     for f in features {
-        // A round works on what the body is so far, not on a sketch.
-        if let Shape::Round { radius, chamfer } = f.shape {
-            if out.num_faces() > 0 && radius > 0.0 {
-                out = kreate_mesh::modifiers::bevel::round_edges(&out, radius as f32, chamfer);
+        // These work on what the body is so far, not on a sketch.
+        match f.shape {
+            Shape::Round { radius, chamfer } => {
+                if out.num_faces() > 0 && radius > 0.0 {
+                    out = kreate_mesh::modifiers::bevel::round_edges(&out, radius as f32, chamfer);
+                }
+                continue;
             }
-            continue;
+            Shape::Shell { thickness, open } => {
+                if out.num_faces() > 0 && thickness > 0.0 {
+                    let open: Vec<u32> = side_direction(open)
+                        .map(|dir| faces_facing(&out, dir))
+                        .unwrap_or_default();
+                    out = kreate_mesh::mech::shell(&out, &open, thickness as f32);
+                }
+                continue;
+            }
+            Shape::Pattern { count, step } => {
+                if let Some((piece, op)) = &last {
+                    let step = kreate_math::DVec3::from_array(step);
+                    for k in 1..count.max(1) {
+                        let copy = mapped(piece, false, |p| p + step * k as f64);
+                        out = combine(out, copy, *op);
+                    }
+                }
+                continue;
+            }
+            Shape::Circular { count, axis } => {
+                if let Some((piece, op)) = &last {
+                    let axis = match axis {
+                        0 => kreate_math::DVec3::X,
+                        1 => kreate_math::DVec3::Y,
+                        _ => kreate_math::DVec3::Z,
+                    };
+                    for k in 1..count.max(1) {
+                        let turn = kreate_math::DQuat::from_axis_angle(
+                            axis,
+                            std::f64::consts::TAU * k as f64 / count as f64,
+                        );
+                        let copy = mapped(piece, false, |p| turn * p);
+                        out = combine(out, copy, *op);
+                    }
+                }
+                continue;
+            }
+            Shape::Mirror { axis } => {
+                if let Some((piece, op)) = &last {
+                    let a = (axis as usize).min(2);
+                    let copy = mapped(piece, true, |mut p| {
+                        p[a] = -p[a];
+                        p
+                    });
+                    out = combine(out, copy, *op);
+                }
+                continue;
+            }
+            Shape::Extrude { .. } | Shape::Revolve { .. } => {}
         }
         let mut piece = solid(doc, f);
         if piece.num_faces() == 0 {
@@ -189,18 +368,8 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
         for p in piece.positions_mut() {
             *p = into.transform_point3(p.as_dvec3()).as_vec3();
         }
-        out = if out.num_faces() == 0 {
-            match f.operation {
-                Operation::Join => piece,
-                Operation::Cut => continue,
-            }
-        } else {
-            let op = match f.operation {
-                Operation::Join => BooleanOp::Union,
-                Operation::Cut => BooleanOp::Difference,
-            };
-            boolean(&out, &piece, op)
-        };
+        last = Some((piece.clone(), f.operation));
+        out = combine(out, piece, f.operation);
     }
     out
 }

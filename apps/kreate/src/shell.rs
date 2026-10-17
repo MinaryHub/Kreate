@@ -5057,6 +5057,10 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
                 "feature.round",
                 MechArg::Bool("chamfer", true),
             ),
+            ("mech-shell-feature", "feature.shell", MechArg::None),
+            ("mech-pattern", "feature.pattern", MechArg::None),
+            ("mech-circular", "feature.circular", MechArg::None),
+            ("mech-mirror", "feature.mirror", MechArg::None),
         ],
     ),
     (
@@ -13741,6 +13745,9 @@ pub struct FeatureRow {
     pub body: String,
     pub index: u32,
     pub is_sketch: bool,
+    /// The feature's kind, as `Feature::kind_tag` names it; `sketch` for a
+    /// sketch's row.
+    pub kind: String,
     pub revolve: bool,
     /// The extrude's distance in metres, or the revolve's angle in radians.
     pub amount: f64,
@@ -14437,6 +14444,7 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
             egui::Grid::new("feature-edit-grid")
                 .num_columns(2)
                 .show(ui, |ui| {
+                    let kind = edit.row.kind.as_str();
                     if edit.row.revolve {
                         ui.label(state.catalog.get("feature-angle"));
                         ui.add(
@@ -14444,12 +14452,29 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                                 .speed(1.0)
                                 .suffix("°"),
                         );
+                    } else if matches!(kind, "pattern" | "circular") {
+                        ui.label(state.catalog.get("feature-count"));
+                        ui.add(
+                            egui::DragValue::new(&mut edit.amount)
+                                .speed(0.1)
+                                .range(1.0..=1000.0)
+                                .fixed_decimals(0),
+                        );
+                    } else if kind == "mirror" {
+                        ui.label("");
+                        ui.label("");
                     } else {
-                        ui.label(state.catalog.get("feature-distance"));
+                        ui.label(state.catalog.get(if kind == "shell" {
+                            "feature-thickness"
+                        } else {
+                            "feature-distance"
+                        }));
                         ui.add(egui::DragValue::new(&mut edit.amount).speed(0.1));
-                        ui.end_row();
-                        ui.label(state.catalog.get("feature-symmetric"));
-                        ui.checkbox(&mut edit.row.symmetric, "");
+                        if kind == "extrude" {
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-symmetric"));
+                            ui.checkbox(&mut edit.row.symmetric, "");
+                        }
                     }
                     ui.end_row();
                     ui.label(state.catalog.get("feature-cut"));
@@ -14474,6 +14499,8 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                     p.set("index", V::Int(edit.row.index as i64));
                     let amount = if edit.row.revolve {
                         edit.amount.to_radians()
+                    } else if matches!(edit.row.kind.as_str(), "pattern" | "circular") {
+                        edit.amount.round()
                     } else {
                         edit.amount * unit
                     };

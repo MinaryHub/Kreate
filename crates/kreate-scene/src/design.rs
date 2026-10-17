@@ -259,7 +259,7 @@ impl Document {
                         Shape::Extrude { distance, .. } => (distance, v * unit),
                         Shape::Revolve { angle, .. } => (angle, v.to_radians()),
                         Shape::Round { radius, .. } => (radius, v * unit),
-                        #[allow(unreachable_patterns)]
+                        Shape::Shell { thickness, .. } => (thickness, v * unit),
                         _ => continue,
                     };
                     if (*slot.0 - slot.1).abs() > 1e-12 {

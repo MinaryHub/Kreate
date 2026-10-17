@@ -3156,17 +3156,30 @@ pub struct FeatureRecord {
     pub angle: f64,
     #[serde(default)]
     pub order: u64,
+    /// A pattern's copies.
+    #[serde(default)]
+    pub count: u32,
+    /// A pattern's step, in the body's space.
+    #[serde(default)]
+    pub step: [f64; 3],
+    /// A shell's open side, as `kreate_scene::feature::SHELL_SIDES`.
+    #[serde(default)]
+    pub open: u32,
 }
 
 fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
     use kreate_scene::feature::Shape;
-    let (distance, symmetric, axis, angle) = match f.shape {
+    let (distance, symmetric, axis, angle, count, step, open) = match f.shape {
         Shape::Extrude {
             distance,
             symmetric,
-        } => (distance, symmetric, [0, 0], 0.0),
-        Shape::Revolve { axis, angle } => (0.0, false, axis, angle),
-        Shape::Round { radius, .. } => (radius, false, [0, 0], 0.0),
+        } => (distance, symmetric, [0, 0], 0.0, 0, [0.0; 3], 0),
+        Shape::Revolve { axis, angle } => (0.0, false, axis, angle, 0, [0.0; 3], 0),
+        Shape::Round { radius, .. } => (radius, false, [0, 0], 0.0, 0, [0.0; 3], 0),
+        Shape::Shell { thickness, open } => (thickness, false, [0, 0], 0.0, 0, [0.0; 3], open),
+        Shape::Pattern { count, step } => (0.0, false, [0, 0], 0.0, count, step, 0),
+        Shape::Circular { count, axis } => (0.0, false, [axis, 0], 0.0, count, [0.0; 3], 0),
+        Shape::Mirror { axis } => (0.0, false, [axis, 0], 0.0, 0, [0.0; 3], 0),
     };
     FeatureRecord {
         kind: f.kind_tag().into(),
@@ -3178,6 +3191,9 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         axis,
         angle,
         order: f.order,
+        count,
+        step,
+        open,
     }
 }
 
@@ -3197,6 +3213,21 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         "fillet" | "chamfer" if r.distance.is_finite() => Shape::Round {
             radius: r.distance,
             chamfer: r.kind == "chamfer",
+        },
+        "shell" if r.distance.is_finite() => Shape::Shell {
+            thickness: r.distance,
+            open: r.open.min(6),
+        },
+        "pattern" if r.step.iter().all(|v| v.is_finite()) => Shape::Pattern {
+            count: r.count.clamp(1, 1000),
+            step: r.step,
+        },
+        "circular" => Shape::Circular {
+            count: r.count.clamp(1, 1000),
+            axis: r.axis[0].min(2),
+        },
+        "mirror" => Shape::Mirror {
+            axis: r.axis[0].min(2),
         },
         _ => return None,
     };

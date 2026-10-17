@@ -698,11 +698,21 @@ pub fn feature_rows(
                 } => (false, distance, symmetric),
                 kreate_scene::feature::Shape::Revolve { angle, .. } => (true, angle, false),
                 kreate_scene::feature::Shape::Round { radius, .. } => (false, radius, false),
+                kreate_scene::feature::Shape::Shell { thickness, .. } => (false, thickness, false),
+                kreate_scene::feature::Shape::Pattern { count, .. }
+                | kreate_scene::feature::Shape::Circular { count, .. } => {
+                    (false, f64::from(count), false)
+                }
+                kreate_scene::feature::Shape::Mirror { .. } => (false, 0.0, false),
             };
             let kind = catalog.get(match f.kind_tag() {
                 "revolve" => "sketch-tool-revolve",
                 "fillet" => "feature-fillet",
                 "chamfer" => "feature-chamfer",
+                "shell" => "feature-shell",
+                "pattern" => "feature-pattern",
+                "circular" => "feature-circular",
+                "mirror" => "feature-mirror",
                 _ => "sketch-tool-extrude",
             });
             rows.push(crate::shell::FeatureRow {
@@ -712,6 +722,7 @@ pub fn feature_rows(
                 body: o.name.clone(),
                 index: i as u32,
                 is_sketch: false,
+                kind: f.kind_tag().to_string(),
                 revolve,
                 amount,
                 symmetric,
@@ -744,6 +755,7 @@ pub fn feature_rows(
             body: String::new(),
             index: 0,
             is_sketch: true,
+            kind: "sketch".to_string(),
             revolve: false,
             amount: 0.0,
             symmetric: false,
