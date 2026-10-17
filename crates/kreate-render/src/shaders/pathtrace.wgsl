@@ -985,6 +985,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 local_n,
                 pdx,
                 pdy,
+                abs(dot(n, dir)),
             );
             // Cut away here: the path goes on as if the triangle were not
             // there, from the point it reached — not counted as a bounce,

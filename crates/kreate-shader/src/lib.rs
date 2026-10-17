@@ -78,7 +78,9 @@
 //! frame, because it is geometry and the material is not.
 
 use kreate_scene::document::ImageId;
-use kreate_scene::shader::{MathOp, NodeKind, Projection, RampMode, ShaderGraph, Socket, WaveKind};
+use kreate_scene::shader::{
+    GradientKind, MathOp, NodeKind, Projection, RampMode, ShaderGraph, Socket, WaveKind,
+};
 use kreate_scene::ColorSpace;
 use std::fmt::Write as _;
 
@@ -232,7 +234,7 @@ pub fn compile_with(
     let _ = writeln!(wgsl);
     let _ = writeln!(
         wgsl,
-        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}"
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32>, facing: f32 }}"
     );
     // Where a coordinate lands in an image, which is stored top row first
     // while V runs up — Blender's and OBJ's way, and Kreate's. Without the
@@ -537,6 +539,18 @@ impl Emitter<'_> {
                     MathOp::Power => format!("select(0.0, pow({x}, {y}), {x} > 0.0)"),
                     MathOp::Minimum => format!("min({x}, {y})"),
                     MathOp::Maximum => format!("max({x}, {y})"),
+                    MathOp::Sine => format!("sin({x})"),
+                    MathOp::Cosine => format!("cos({x})"),
+                    MathOp::Absolute => format!("abs({x})"),
+                    MathOp::Floor => format!("floor({x})"),
+                    MathOp::Fraction => format!("fract({x})"),
+                    MathOp::SquareRoot => format!("select(0.0, sqrt({x}), {x} > 0.0)"),
+                    // Blender's: the sign of the first, as C's `fmod`.
+                    MathOp::Modulo => {
+                        format!("select(0.0, {x} - {y} * trunc({x} / {y}), {y} != 0.0)")
+                    }
+                    MathOp::LessThan => format!("select(0.0, 1.0, {x} < {y})"),
+                    MathOp::GreaterThan => format!("select(0.0, 1.0, {x} > {y})"),
                 };
                 let _ = writeln!(self.body, "    let n{node} = {e};");
             }
@@ -748,6 +762,64 @@ impl Emitter<'_> {
                     slot + 1
                 );
             }
+            NodeKind::Fresnel { ior } => {
+                self.procedural = true;
+                self.constants.push([ior, 0.0, 0.0, 0.0]);
+                let ior = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node} = kr_fresnel(geometry.facing, max({ior}, 1e-5));"
+                );
+            }
+            NodeKind::LayerWeight { blend } => {
+                self.procedural = true;
+                self.constants.push([blend, 0.0, 0.0, 0.0]);
+                let b = self.input_expr(node, 0, &format!("material.values[{slot}].x"))?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node}_b = clamp({b}, 0.0, 1.0);\n    let n{node}_fr = kr_fresnel(geometry.facing, 1.0 / max(1.0 - n{node}_b, 1e-5));\n    let n{node}_fa = kr_facing(geometry.facing, n{node}_b);"
+                );
+            }
+            NodeKind::MapRange {
+                value,
+                from_min,
+                from_max,
+                to_min,
+                to_max,
+            } => {
+                self.constants.push([value, from_min, from_max, to_min]);
+                self.constants.push([to_max, 0.0, 0.0, 0.0]);
+                let [v, a, b, c] = self.numbers(node, slot)?;
+                let d = self.input_expr(node, 4, &format!("material.values[{}].x", slot + 1))?;
+                let _ = writeln!(
+                    self.body,
+                    "    let n{node} = mix({c}, {d}, clamp(select(0.0, ({v} - {a}) / ({b} - {a}), {b} != {a}), 0.0, 1.0));"
+                );
+            }
+            NodeKind::Gradient { kind } => {
+                self.constants.push([kind.index() as f32, 0.0, 0.0, 0.0]);
+                let at = self.input_expr(node, 0, "geometry.position")?;
+                // Which ramp is the shape, as a wave's stripes are.
+                let f = match kind {
+                    GradientKind::Linear => format!("clamp(({at}).x, 0.0, 1.0)"),
+                    GradientKind::Quadratic => {
+                        format!("clamp(max(({at}).x, 0.0) * max(({at}).x, 0.0), 0.0, 1.0)")
+                    }
+                    GradientKind::Spherical => format!("max(1.0 - length({at}), 0.0)"),
+                };
+                let _ = writeln!(self.body, "    let n{node}_f = {f};");
+                let _ = writeln!(self.body, "    let n{node}_c = vec3<f32>(n{node}_f);");
+            }
+            NodeKind::SeparateXyz => {
+                self.constants.push([0.0; 4]);
+                let c = self.input_expr(node, 0, "geometry.position")?;
+                let _ = writeln!(self.body, "    let n{node} = {c};");
+            }
+            NodeKind::CombineXyz(v) | NodeKind::CombineRgb(v) => {
+                self.constants.push([v[0], v[1], v[2], 0.0]);
+                let [x, y, z, _] = self.numbers_upto(node, slot, 3)?;
+                let _ = writeln!(self.body, "    let n{node} = vec3<f32>({x}, {y}, {z});");
+            }
             NodeKind::Surface {
                 base_color,
                 metallic,
@@ -778,6 +850,26 @@ impl Emitter<'_> {
         for (socket, channel) in ["x", "y", "z", "w"].into_iter().enumerate() {
             out[socket] =
                 self.input_expr(node, socket, &format!("material.values[{slot}].{channel}"))?;
+        }
+        Ok(out)
+    }
+
+    /// A node's first `count` scalar inputs, each a wire or its slot's
+    /// channel; the rest are the channel alone.
+    fn numbers_upto(
+        &self,
+        node: usize,
+        slot: usize,
+        count: usize,
+    ) -> Result<[String; 4], CompileError> {
+        let mut out: [String; 4] = Default::default();
+        for (socket, channel) in ["x", "y", "z", "w"].into_iter().enumerate() {
+            let fallback = format!("material.values[{slot}].{channel}");
+            out[socket] = if socket < count {
+                self.input_expr(node, socket, &fallback)?
+            } else {
+                fallback
+            };
         }
         Ok(out)
     }
@@ -845,22 +937,28 @@ impl Emitter<'_> {
                 NodeKind::Noise { .. }
                 | NodeKind::Voronoi { .. }
                 | NodeKind::Checker { .. }
-                | NodeKind::Wave { .. },
+                | NodeKind::Wave { .. }
+                | NodeKind::Gradient { .. },
                 Socket::Scalar,
             ) => format!("n{}_f", link.from_node),
             (
                 NodeKind::Noise { .. }
                 | NodeKind::Voronoi { .. }
                 | NodeKind::Checker { .. }
-                | NodeKind::Wave { .. },
+                | NodeKind::Wave { .. }
+                | NodeKind::Gradient { .. },
                 _,
             ) => format!("n{}_c", link.from_node),
+            (NodeKind::LayerWeight { .. }, _) => match link.from_socket {
+                0 => format!("n{}_fr", link.from_node),
+                _ => format!("n{}_fa", link.from_node),
+            },
             (NodeKind::TexCoord, _) => match link.from_socket {
                 0 => "geometry.position".to_string(),
                 1 => "vec3<f32>(uv, 0.0)".to_string(),
                 _ => "geometry.normal".to_string(),
             },
-            (NodeKind::SeparateRgb, _) => {
+            (NodeKind::SeparateRgb | NodeKind::SeparateXyz, _) => {
                 let channel = ["x", "y", "z"]
                     .get(link.from_socket)
                     .ok_or(CompileError::BrokenLink)?;
@@ -879,7 +977,7 @@ impl Emitter<'_> {
 /// [`for_tracer`] strips them from each material.
 pub fn tracer_declarations() -> String {
     format!(
-        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32> }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32, occlusion: f32 }}\n{TEXEL}{PROCEDURAL}"
+        "struct MaterialGeometry {{ position: vec3<f32>, normal: vec3<f32>, position_dx: vec3<f32>, position_dy: vec3<f32>, facing: f32 }}\nstruct MaterialSample {{ surface: Surface, normal: vec3<f32>, gradient: vec3<f32>, emission: vec3<f32>, transmission: f32, ior: f32, alpha: f32, clip: f32, occlusion: f32 }}\n{TEXEL}{PROCEDURAL}"
     )
 }
 
@@ -1112,6 +1210,29 @@ fn kr_rotate(p: vec3<f32>, r: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(c.z * y.x - s.z * y.y, s.z * y.x + c.z * y.y, y.z);
 }
 
+// The share a dielectric of relative index `eta` reflects, light arriving
+// at `c`, the cosine to its normal: Blender's `fresnel_dielectric_cos`.
+fn kr_fresnel(c: f32, eta: f32) -> f32 {
+    let g2 = eta * eta - 1.0 + c * c;
+    if g2 <= 0.0 {
+        return 1.0;
+    }
+    let g = sqrt(g2);
+    let a = (g - c) / (g + c);
+    let b = (c * (g + c) - 1.0) / (c * (g - c) + 1.0);
+    return 0.5 * a * a * (1.0 + b * b);
+}
+
+// Layer Weight's facing: one at the rim, bent by the blend.
+fn kr_facing(c: f32, blend: f32) -> f32 {
+    var f = abs(c);
+    if blend != 0.5 {
+        let b = clamp(blend, 0.0, 0.99999);
+        f = pow(f, select(0.5 / (1.0 - b), 2.0 * b, b < 0.5));
+    }
+    return 1.0 - f;
+}
+
 // Blender's sine profile, along the diagonal or out from the origin.
 fn kr_wave(p: vec3<f32>, rings: bool, distortion: f32, detail: f32, detail_scale: f32) -> f32 {
     var n = (p.x + p.y + p.z) * 10.0;
@@ -1150,6 +1271,132 @@ mod tests {
         assert!(glowing
             .wgsl
             .contains("out.emission = material.values[1].yzw;"));
+    }
+
+    /// Each new node wired to where the surface reads its type, through a
+    /// noise for a point: compiles, and validates as WGSL.
+    #[test]
+    fn the_rim_masks_ranges_gradients_and_combines_compile_and_validate() {
+        let wire = |g: &mut ShaderGraph, from: usize, socket: usize, to: usize, at: usize| {
+            g.link(Link {
+                from_node: from,
+                from_socket: socket,
+                to_node: to,
+                to_socket: at,
+            })
+            .expect("connects");
+        };
+        for tag in [
+            "fresnel",
+            "layer_weight",
+            "map_range",
+            "gradient",
+            "separate_xyz",
+            "combine_xyz",
+            "combine_rgb",
+        ] {
+            let kind = NodeKind::new_of(tag).expect("a kind");
+            let outputs = kind.outputs().to_vec();
+            let mut g = flat();
+            let n = g.add_node(Node::new(tag, kind)).unwrap();
+            for (socket, ty) in outputs.iter().enumerate() {
+                match ty {
+                    Socket::Color => wire(&mut g, n, socket, 0, 0),
+                    Socket::Scalar => wire(&mut g, n, socket, 0, 1 + socket % 2),
+                    Socket::Coordinate => {
+                        let noise = g
+                            .add_node(Node::new("N", NodeKind::new_of("noise").unwrap()))
+                            .unwrap();
+                        wire(&mut g, n, socket, noise, 4);
+                        wire(&mut g, noise, 0, 0, 2);
+                    }
+                    Socket::Vector => unreachable!("{tag}"),
+                }
+            }
+            // A point fed in where one is read, so the input side is
+            // exercised too.
+            if g.nodes[n].kind.inputs().first() == Some(&Socket::Coordinate) {
+                let coord = g
+                    .add_node(Node::new("T", NodeKind::new_of("tex_coord").unwrap()))
+                    .unwrap();
+                wire(&mut g, coord, 0, n, 0);
+            }
+            let compiled = compile(&g).unwrap_or_else(|e| panic!("{tag}: {e:?}"));
+            validates(&compiled);
+        }
+    }
+
+    #[test]
+    fn every_math_operation_compiles_and_the_unary_ones_read_one_number() {
+        for op in MathOp::ALL {
+            let mut g = flat();
+            let m = g
+                .add_node(Node::new("M", NodeKind::Math { op, a: 0.3, b: 2.0 }))
+                .unwrap();
+            g.link(Link {
+                from_node: m,
+                from_socket: 0,
+                to_node: 0,
+                to_socket: 2,
+            })
+            .unwrap();
+            let compiled = compile(&g).expect("compiles");
+            validates(&compiled);
+            assert_eq!(
+                MathOp::from_index(op.index()),
+                op,
+                "{} keeps its number",
+                op.tag()
+            );
+            let slot = compiled
+                .constants
+                .iter()
+                .position(|c| *c == [0.3, 2.0, 0.0, 0.0])
+                .expect("the math's slot");
+            assert_eq!(
+                compiled
+                    .wgsl
+                    .contains(&format!("material.values[{slot}].y")),
+                !op.unary(),
+                "{}",
+                op.tag()
+            );
+        }
+        // The seven a file from before knew keep their numbers.
+        assert_eq!(MathOp::from_index(6), MathOp::Maximum);
+    }
+
+    #[test]
+    fn a_map_range_takes_two_slots_and_a_fresnel_reads_the_facing() {
+        let mut g = flat();
+        let r = g
+            .add_node(Node::new("R", NodeKind::new_of("map_range").unwrap()))
+            .unwrap();
+        g.link(Link {
+            from_node: r,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 2,
+        })
+        .unwrap();
+        let compiled = compile(&g).expect("compiles");
+        assert!(compiled.constants.contains(&[1.0, 0.0, 1.0, 0.0]));
+        assert!(compiled.constants.contains(&[1.0, 0.0, 0.0, 0.0]));
+
+        let mut g = flat();
+        let f = g
+            .add_node(Node::new("F", NodeKind::new_of("fresnel").unwrap()))
+            .unwrap();
+        g.link(Link {
+            from_node: f,
+            from_socket: 0,
+            to_node: 0,
+            to_socket: 1,
+        })
+        .unwrap();
+        let compiled = compile(&g).expect("compiles");
+        assert!(compiled.wgsl.contains("kr_fresnel(geometry.facing"));
+        assert!(compiled.constants.contains(&[1.45, 0.0, 0.0, 0.0]));
     }
 
     /// An image identity, which only a document can hand out.

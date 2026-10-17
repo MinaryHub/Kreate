@@ -9132,6 +9132,31 @@ fn graph_view(
                             // A texture's point has no number to show: unwired,
                             // it is the surface's own position.
                             _ if *s == Socket::Coordinate => None,
+                            // The new converters and rim masks: each socket's
+                            // number is the one at its place in `values`.
+                            (
+                                NodeKind::Fresnel { .. }
+                                | NodeKind::LayerWeight { .. }
+                                | NodeKind::MapRange { .. }
+                                | NodeKind::CombineXyz(_)
+                                | NodeKind::CombineRgb(_),
+                                _,
+                            ) => {
+                                let (min, max) = match kind {
+                                    NodeKind::Fresnel { .. } => (1.0, 3.0),
+                                    NodeKind::LayerWeight { .. } | NodeKind::CombineRgb(_) => {
+                                        (0.0, 1.0)
+                                    }
+                                    _ => (-100.0, 100.0),
+                                };
+                                Some(FieldView::Value {
+                                    field: i as u32,
+                                    value: kind.values().get(i).copied().unwrap_or(0.0),
+                                    min,
+                                    max,
+                                    label: String::new(),
+                                })
+                            }
                             // A texture's numbers are its sockets' defaults, in
                             // the order `NodeKind::values` keeps them.
                             (
@@ -9298,6 +9323,14 @@ fn graph_view(
                     value: kind.index(),
                     options: vec![t("node-wave-bands"), t("node-wave-rings")],
                 }],
+                NodeKind::Gradient { kind } => vec![FieldView::Choice {
+                    field: 0,
+                    value: kind.index(),
+                    options: kreate_scene::shader::GradientKind::ALL
+                        .iter()
+                        .map(|k| t(&format!("node-gradient-{}", k.tag())))
+                        .collect(),
+                }],
                 _ => Vec::new(),
             };
             NodeView {
@@ -9308,19 +9341,28 @@ fn graph_view(
                 fields,
                 inputs,
                 family: match kind {
-                    NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::TexCoord => Family::Input,
+                    NodeKind::Color(_)
+                    | NodeKind::Value(_)
+                    | NodeKind::TexCoord
+                    | NodeKind::Fresnel { .. }
+                    | NodeKind::LayerWeight { .. } => Family::Input,
                     NodeKind::Image { .. }
                     | NodeKind::Noise { .. }
                     | NodeKind::Voronoi { .. }
                     | NodeKind::Checker { .. }
-                    | NodeKind::Wave { .. } => Family::Texture,
+                    | NodeKind::Wave { .. }
+                    | NodeKind::Gradient { .. } => Family::Texture,
                     NodeKind::Multiply
                     | NodeKind::MultiplyValue
                     | NodeKind::SeparateRgb
                     | NodeKind::MixColor { .. }
                     | NodeKind::Math { .. }
                     | NodeKind::ColorRamp { .. }
-                    | NodeKind::Invert => Family::Converter,
+                    | NodeKind::Invert
+                    | NodeKind::MapRange { .. }
+                    | NodeKind::SeparateXyz
+                    | NodeKind::CombineXyz(_)
+                    | NodeKind::CombineRgb(_) => Family::Converter,
                     NodeKind::NormalMap { .. }
                     | NodeKind::Bump { .. }
                     | NodeKind::Mapping { .. } => Family::Vector,

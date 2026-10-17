@@ -235,6 +235,32 @@ pub enum NodeKind {
         detail: f32,
         detail_scale: f32,
     },
+    /// How much a dielectric reflects where it is seen from: Blender's
+    /// Fresnel, from the angle between the surface and the eye and an index
+    /// of refraction. White at the rim, dark face on.
+    Fresnel { ior: f32 },
+    /// Two rim masks from one blend: Blender's Layer Weight — a Fresnel
+    /// that takes zero to one instead of an IOR, and the plain facing
+    /// ratio bent by it.
+    LayerWeight { blend: f32 },
+    /// A number taken from one range to another, held inside it: Blender's
+    /// Map Range, linear and clamped.
+    MapRange {
+        value: f32,
+        from_min: f32,
+        from_max: f32,
+        to_min: f32,
+        to_max: f32,
+    },
+    /// A ramp across the object: Blender's Gradient Texture.
+    Gradient { kind: GradientKind },
+    /// A point's three coordinates as three numbers.
+    SeparateXyz,
+    /// Three numbers as a point to read a texture at. The numbers are what
+    /// unwired sockets take.
+    CombineXyz([f32; 3]),
+    /// Three numbers as a colour; [`NodeKind::SeparateRgb`] the other way.
+    CombineRgb([f32; 3]),
     /// The surface that gets shaded. A graph has exactly one.
     ///
     /// Its inputs carry the values an unconnected socket takes, so a graph with
@@ -270,6 +296,32 @@ pub enum MathOp {
     Power,
     Minimum,
     Maximum,
+    // One number in: the second socket is not read.
+    Sine,
+    Cosine,
+    Absolute,
+    Floor,
+    Fraction,
+    SquareRoot,
+    // Two again.
+    Modulo,
+    LessThan,
+    GreaterThan,
+}
+
+impl MathOp {
+    /// Whether it reads only its first number.
+    pub fn unary(self) -> bool {
+        matches!(
+            self,
+            Self::Sine
+                | Self::Cosine
+                | Self::Absolute
+                | Self::Floor
+                | Self::Fraction
+                | Self::SquareRoot
+        )
+    }
 }
 
 /// How a Color Ramp goes from one stop to the next.
@@ -349,8 +401,41 @@ impl WaveKind {
     }
 }
 
+/// Which way a Gradient node ramps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GradientKind {
+    /// Along X, zero to one.
+    #[default]
+    Linear,
+    /// Along X, squared: slow out of the dark.
+    Quadratic,
+    /// Out from the origin, one there and zero a metre away.
+    Spherical,
+}
+
+impl GradientKind {
+    pub const ALL: [Self; 3] = [Self::Linear, Self::Quadratic, Self::Spherical];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Quadratic => "quadratic",
+            Self::Spherical => "spherical",
+        }
+    }
+
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|o| *o == self).unwrap_or(0) as u32
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+}
+
 impl MathOp {
-    pub const ALL: [Self; 7] = [
+    /// In the order files number them: new ones only ever at the end.
+    pub const ALL: [Self; 16] = [
         Self::Add,
         Self::Subtract,
         Self::Multiply,
@@ -358,6 +443,15 @@ impl MathOp {
         Self::Power,
         Self::Minimum,
         Self::Maximum,
+        Self::Sine,
+        Self::Cosine,
+        Self::Absolute,
+        Self::Floor,
+        Self::Fraction,
+        Self::SquareRoot,
+        Self::Modulo,
+        Self::LessThan,
+        Self::GreaterThan,
     ];
 
     pub fn tag(self) -> &'static str {
@@ -369,6 +463,15 @@ impl MathOp {
             Self::Power => "power",
             Self::Minimum => "minimum",
             Self::Maximum => "maximum",
+            Self::Sine => "sine",
+            Self::Cosine => "cosine",
+            Self::Absolute => "absolute",
+            Self::Floor => "floor",
+            Self::Fraction => "fraction",
+            Self::SquareRoot => "sqrt",
+            Self::Modulo => "modulo",
+            Self::LessThan => "less_than",
+            Self::GreaterThan => "greater_than",
         }
     }
 
@@ -410,6 +513,10 @@ impl NodeKind {
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar, Socket::Scalar],
             NodeKind::MixColor { .. } => &[Socket::Scalar, Socket::Color, Socket::Color],
             NodeKind::Invert => &[Socket::Color],
+            NodeKind::Fresnel { .. } | NodeKind::LayerWeight { .. } => &[Socket::Scalar],
+            NodeKind::MapRange { .. } => &[Socket::Scalar; 5],
+            NodeKind::Gradient { .. } | NodeKind::SeparateXyz => &[Socket::Coordinate],
+            NodeKind::CombineXyz(_) | NodeKind::CombineRgb(_) => &[Socket::Scalar; 3],
             // Each texture's point last, so the sockets files already name
             // keep their numbers.
             NodeKind::Noise { .. } | NodeKind::Wave { .. } => &[
@@ -470,7 +577,14 @@ impl NodeKind {
             NodeKind::Multiply => &[Socket::Color],
             NodeKind::SeparateRgb => &[Socket::Scalar, Socket::Scalar, Socket::Scalar],
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar],
-            NodeKind::MixColor { .. } | NodeKind::Invert => &[Socket::Color],
+            NodeKind::MixColor { .. } | NodeKind::Invert | NodeKind::CombineRgb(_) => {
+                &[Socket::Color]
+            }
+            NodeKind::Fresnel { .. } | NodeKind::MapRange { .. } => &[Socket::Scalar],
+            NodeKind::LayerWeight { .. } => &[Socket::Scalar, Socket::Scalar],
+            NodeKind::Gradient { .. } => &[Socket::Color, Socket::Scalar],
+            NodeKind::SeparateXyz => &[Socket::Scalar; 3],
+            NodeKind::CombineXyz(_) => &[Socket::Coordinate],
             NodeKind::NormalMap { .. } | NodeKind::Bump { .. } => &[Socket::Vector],
             // Blender's order: the noises lead with their number, the
             // patterns with their colour.
@@ -510,6 +624,13 @@ impl NodeKind {
             NodeKind::ColorRamp { .. } => "color_ramp",
             NodeKind::TexCoord => "tex_coord",
             NodeKind::Mapping { .. } => "mapping",
+            NodeKind::Fresnel { .. } => "fresnel",
+            NodeKind::LayerWeight { .. } => "layer_weight",
+            NodeKind::MapRange { .. } => "map_range",
+            NodeKind::Gradient { .. } => "gradient",
+            NodeKind::SeparateXyz => "separate_xyz",
+            NodeKind::CombineXyz(_) => "combine_xyz",
+            NodeKind::CombineRgb(_) => "combine_rgb",
             NodeKind::Surface { .. } => "surface",
             NodeKind::Group(_) => "group",
         }
@@ -606,9 +727,21 @@ impl NodeKind {
                     *clip,
                 ]
             }
+            NodeKind::Fresnel { ior } => vec![*ior],
+            NodeKind::LayerWeight { blend } => vec![*blend],
+            NodeKind::MapRange {
+                value,
+                from_min,
+                from_max,
+                to_min,
+                to_max,
+            } => vec![*value, *from_min, *from_max, *to_min, *to_max],
+            NodeKind::Gradient { kind } => vec![kind.index() as f32],
+            NodeKind::CombineXyz(v) | NodeKind::CombineRgb(v) => v.to_vec(),
             NodeKind::Multiply
             | NodeKind::TexCoord
             | NodeKind::SeparateRgb
+            | NodeKind::SeparateXyz
             | NodeKind::MultiplyValue
             | NodeKind::Invert
             | NodeKind::Group(_) => Vec::new(),
@@ -698,6 +831,21 @@ impl NodeKind {
                 rotation: [at(3, 0.0), at(4, 0.0), at(5, 0.0)],
                 scale: [at(6, 1.0), at(7, 1.0), at(8, 1.0)],
             },
+            "fresnel" => NodeKind::Fresnel { ior: at(0, 1.45) },
+            "layer_weight" => NodeKind::LayerWeight { blend: at(0, 0.5) },
+            "map_range" => NodeKind::MapRange {
+                value: at(0, 1.0),
+                from_min: at(1, 0.0),
+                from_max: at(2, 1.0),
+                to_min: at(3, 0.0),
+                to_max: at(4, 1.0),
+            },
+            "gradient" => NodeKind::Gradient {
+                kind: GradientKind::from_index(at(0, 0.0).max(0.0) as u32),
+            },
+            "separate_xyz" => NodeKind::SeparateXyz,
+            "combine_xyz" => NodeKind::CombineXyz([at(0, 0.0), at(1, 0.0), at(2, 0.0)]),
+            "combine_rgb" => NodeKind::CombineRgb([at(0, 0.0), at(1, 0.0), at(2, 0.0)]),
             "surface" => NodeKind::Surface {
                 base_color: SceneRgb::new(at(0, 0.8), at(1, 0.8), at(2, 0.8)),
                 metallic: at(3, 0.0),
@@ -722,7 +870,7 @@ impl NodeKind {
     /// The kinds somebody can add, in the order the Add menu lists them.
     ///
     /// Not the surface: a graph has exactly one, and it is never added.
-    pub const ADDABLE: [&'static str; 18] = [
+    pub const ADDABLE: [&'static str; 25] = [
         "color",
         "value",
         "image",
@@ -741,6 +889,13 @@ impl NodeKind {
         "color_ramp",
         "tex_coord",
         "mapping",
+        "fresnel",
+        "layer_weight",
+        "map_range",
+        "gradient",
+        "separate_xyz",
+        "combine_xyz",
+        "combine_rgb",
     ];
 
     /// What each input is called, for a person.
@@ -766,6 +921,12 @@ impl NodeKind {
             NodeKind::ColorRamp { .. } => &["Fac"],
             NodeKind::TexCoord => &[],
             NodeKind::Mapping { .. } => &["Vector"],
+            NodeKind::Fresnel { .. } => &["IOR"],
+            NodeKind::LayerWeight { .. } => &["Blend"],
+            NodeKind::MapRange { .. } => &["Value", "From Min", "From Max", "To Min", "To Max"],
+            NodeKind::Gradient { .. } | NodeKind::SeparateXyz => &["Vector"],
+            NodeKind::CombineXyz(_) => &["X", "Y", "Z"],
+            NodeKind::CombineRgb(_) => &["R", "G", "B"],
             NodeKind::Bump { .. } => &["Strength", "Distance", "Height", "Normal"],
             NodeKind::Checker { .. } => &["Color1", "Color2", "Scale", "Vector"],
             NodeKind::Wave { .. } => &["Scale", "Distortion", "Detail", "Detail Scale", "Vector"],
@@ -800,7 +961,14 @@ impl NodeKind {
             NodeKind::Color(_)
             | NodeKind::Multiply
             | NodeKind::MixColor { .. }
-            | NodeKind::Invert => &["Color"],
+            | NodeKind::Invert
+            | NodeKind::CombineRgb(_) => &["Color"],
+            NodeKind::Fresnel { .. } => &["Fac"],
+            NodeKind::LayerWeight { .. } => &["Fresnel", "Facing"],
+            NodeKind::MapRange { .. } => &["Result"],
+            NodeKind::Gradient { .. } => &["Color", "Fac"],
+            NodeKind::SeparateXyz => &["X", "Y", "Z"],
+            NodeKind::CombineXyz(_) => &["Vector"],
             NodeKind::Value(_) | NodeKind::MultiplyValue | NodeKind::Math { .. } => &["Value"],
             NodeKind::Image { .. } => &["Color", "Alpha"],
             NodeKind::SeparateRgb => &["R", "G", "B"],

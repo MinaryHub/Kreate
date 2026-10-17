@@ -166,6 +166,9 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     geometry.normal = normalize(in.local_normal);
     geometry.position_dx = dpdx(in.local);
     geometry.position_dy = dpdy(in.local);
+    // The cosine between the eye and the smooth normal, for a Fresnel: the
+    // side seen, so a back face reads as one seen face on, not from behind.
+    geometry.facing = abs(dot(normalize(in.normal), view));
     let sample = material_sample(in.uv, uv_dx, uv_dy, geometry);
     var surface = sample.surface;
     surface.base_color *= in.tint.rgb;

@@ -355,7 +355,14 @@ pub struct AddNodeParams {
         "bump",
         "color_ramp",
         "tex_coord",
-        "mapping"
+        "mapping",
+        "fresnel",
+        "layer_weight",
+        "map_range",
+        "gradient",
+        "separate_xyz",
+        "combine_xyz",
+        "combine_rgb"
     ))]
     pub kind: u32,
     /// Where it lands, in graph units.
@@ -413,6 +420,13 @@ pub fn default_name(kind: &NodeKind) -> &'static str {
         NodeKind::MixColor { .. } => "Mix",
         NodeKind::Math { .. } => "Math",
         NodeKind::Invert => "Invert Color",
+        NodeKind::Fresnel { .. } => "Fresnel",
+        NodeKind::LayerWeight { .. } => "Layer Weight",
+        NodeKind::MapRange { .. } => "Map Range",
+        NodeKind::Gradient { .. } => "Gradient Texture",
+        NodeKind::SeparateXyz => "Separate XYZ",
+        NodeKind::CombineXyz(_) => "Combine XYZ",
+        NodeKind::CombineRgb(_) => "Combine RGB",
         NodeKind::Noise { .. } => "Noise Texture",
         NodeKind::Voronoi { .. } => "Voronoi Texture",
         NodeKind::Checker { .. } => "Checker Texture",
@@ -735,7 +749,9 @@ pub struct SetNodeValueParams {
     /// and two. A bump's strength and distance are zero and one. A Color Ramp's
     /// blending is zero, its number of stops one, and each stop's position
     /// two onwards; a Mapping's location, rotation and scale are zero to
-    /// eight, three each.
+    /// eight, three each. A Fresnel's IOR and a Layer Weight's blend are
+    /// zero; a Map Range's value, from-min, from-max, to-min and to-max zero
+    /// to four; a Gradient's kind zero; a Combine's three numbers zero to two.
     #[param(min = 0.0)]
     pub field: u32,
     pub value: f64,
@@ -820,6 +836,22 @@ impl Operator for SetNodeValue {
             }
             (NodeKind::Image { blend, .. }, 1) => *blend = v.clamp(0.0, 1.0),
             (NodeKind::Image { scale, .. }, 2) => *scale = v,
+            (NodeKind::Fresnel { ior }, 0) => *ior = v.max(0.0),
+            (NodeKind::LayerWeight { blend }, 0) => *blend = v.clamp(0.0, 1.0),
+            (
+                NodeKind::MapRange {
+                    value,
+                    from_min,
+                    from_max,
+                    to_min,
+                    to_max,
+                },
+                i,
+            ) if i < 5 => *[value, from_min, from_max, to_min, to_max][i as usize] = v,
+            (NodeKind::Gradient { kind }, 0) => {
+                *kind = kreate_scene::shader::GradientKind::from_index(v.round().max(0.0) as u32)
+            }
+            (NodeKind::CombineXyz(c) | NodeKind::CombineRgb(c), i) if i < 3 => c[i as usize] = v,
             (NodeKind::Wave { kind, .. }, 4) => {
                 *kind = kreate_scene::shader::WaveKind::from_index(v.round().max(0.0) as u32)
             }
