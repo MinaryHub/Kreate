@@ -28,6 +28,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Arc>();
     registry.register::<Point>();
     registry.register::<Spline>();
+    registry.register::<Polygon>();
+    registry.register::<Slot>();
+    registry.register::<Fillet>();
     registry.register::<Constrain>();
     registry.register::<MovePoints>();
     registry.register::<Delete>();
@@ -906,6 +909,451 @@ impl Operator for Spline {
                 closed: params.closed,
             }],
         )
+    }
+}
+
+// --- polygons, slots and fillets --------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct PolygonParams {
+    #[param(unit = "length")]
+    pub centre: [f64; 3],
+    /// From the centre to a corner.
+    #[param(min = 0.0, unit = "length")]
+    pub radius: f64,
+    #[param(min = 3, max = 64, unit = "count")]
+    pub sides: u32,
+    /// Turned, in radians: 0 puts the first corner along +X.
+    #[param(unit = "angle")]
+    pub rotation: f64,
+    /// The existing point the centre lands on, plus one.
+    #[param(hidden)]
+    pub join: u32,
+}
+
+impl Default for PolygonParams {
+    fn default() -> Self {
+        Self {
+            centre: [0.0; 3],
+            radius: 0.01,
+            sides: 6,
+            rotation: 0.0,
+            join: 0,
+        }
+    }
+}
+
+/// A regular polygon about a centre, held regular: Fusion's Circumscribed
+/// Polygon by its corners.
+pub struct Polygon;
+
+impl Operator for Polygon {
+    type Params = PolygonParams;
+    fn id() -> &'static str {
+        "sketch.polygon"
+    }
+    fn label() -> &'static str {
+        "Polygon"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        if !(params.radius > 0.0 && params.radius.is_finite()) {
+            return Err(OpError::Failed("a polygon needs a radius".into()));
+        }
+        let mut pts = points(doc.document(), id);
+        let c = xy(params.centre);
+        let centre = place(&mut pts, c, Some(&params.join));
+        let n = params.sides.clamp(3, 64);
+        let ring: Vec<u32> = (0..n)
+            .map(|i| {
+                let a = params.rotation + i as f64 * std::f64::consts::TAU / n as f64;
+                pts.push(c + DVec2::new(a.cos(), a.sin()) * params.radius);
+                pts.len() as u32 - 1
+            })
+            .collect();
+        let lines = (0..n as usize)
+            .map(|i| [ring[i], ring[(i + 1) % n as usize]])
+            .collect();
+        commit(
+            doc,
+            id,
+            pts,
+            lines,
+            vec![Constraint::Polygon { centre, ring }],
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SlotParams {
+    /// The centres of its two round ends.
+    #[param(unit = "length")]
+    pub a: [f64; 3],
+    #[param(unit = "length")]
+    pub b: [f64; 3],
+    /// Across the slot.
+    #[param(min = 0.0, unit = "length")]
+    pub width: f64,
+    /// Points round each end.
+    #[param(min = 2, max = 128, unit = "count")]
+    pub segments: u32,
+    /// The existing points the centres land on, plus one.
+    #[param(hidden)]
+    pub joins: Vec<u32>,
+}
+
+impl Default for SlotParams {
+    fn default() -> Self {
+        Self {
+            a: [0.0; 3],
+            b: [0.02, 0.0, 0.0],
+            width: 0.005,
+            segments: 12,
+            joins: Vec::new(),
+        }
+    }
+}
+
+/// A slot between two centres: two lines and two half circles, each line
+/// held tangent to both ends. Fusion's Center to Center Slot.
+pub struct Slot;
+
+impl Operator for Slot {
+    type Params = SlotParams;
+    fn id() -> &'static str {
+        "sketch.slot"
+    }
+    fn label() -> &'static str {
+        "Slot"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let (a, b) = (xy(params.a), xy(params.b));
+        let r = params.width * 0.5;
+        let d = b - a;
+        if !(r > 0.0 && r.is_finite()) || d.length() < 1e-9 {
+            return Err(OpError::Failed(
+                "a slot needs two centres apart and a width".into(),
+            ));
+        }
+        let dir = d.normalize();
+        let side = DVec2::new(-dir.y, dir.x);
+        let mut pts = points(doc.document(), id);
+        let ca = place(&mut pts, a, params.joins.first());
+        let cb = place(&mut pts, b, params.joins.get(1));
+        let n = params.segments.clamp(2, 128) as usize;
+        // Each end anticlockwise from its first ring point to its last, as
+        // an arc is held: the far end from below round through b + dir to
+        // above, the near end from above round through a - dir to below.
+        let mut arc = |c: DVec2, from: DVec2| -> Vec<u32> {
+            let start = from.y.atan2(from.x);
+            (0..=n)
+                .map(|k| {
+                    let t = start + std::f64::consts::PI * k as f64 / n as f64;
+                    pts.push(c + DVec2::new(t.cos(), t.sin()) * r);
+                    pts.len() as u32 - 1
+                })
+                .collect()
+        };
+        let far = arc(b, -side);
+        let near = arc(a, side);
+        let mut lines: Vec<[u32; 2]> = Vec::new();
+        lines.extend(far.windows(2).map(|w| [w[0], w[1]]));
+        lines.extend(near.windows(2).map(|w| [w[0], w[1]]));
+        // The two straight sides join the arcs' ends.
+        let (top_a, top_b) = (near[0], far[n]);
+        let (bottom_b, bottom_a) = (far[0], near[n]);
+        lines.push([top_a, top_b]);
+        lines.push([bottom_b, bottom_a]);
+        let constraints = vec![
+            Constraint::Arc {
+                centre: cb,
+                ring: far.clone(),
+            },
+            Constraint::Arc {
+                centre: ca,
+                ring: near.clone(),
+            },
+            Constraint::Tangent {
+                a: top_a,
+                b: top_b,
+                centre: cb,
+                on: far[0],
+            },
+            Constraint::Tangent {
+                a: top_a,
+                b: top_b,
+                centre: ca,
+                on: near[0],
+            },
+            Constraint::Tangent {
+                a: bottom_b,
+                b: bottom_a,
+                centre: cb,
+                on: far[0],
+            },
+            Constraint::Tangent {
+                a: bottom_b,
+                b: bottom_a,
+                centre: ca,
+                on: near[0],
+            },
+            // The two ends the same size.
+            Constraint::Equal {
+                a: ca,
+                b: near[0],
+                c: cb,
+                d: far[0],
+            },
+        ];
+        commit(doc, id, pts, lines, constraints)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct FilletParams {
+    /// The corner: a point two lines meet at.
+    #[param(hidden)]
+    pub point: u32,
+    #[param(min = 0.0, unit = "length")]
+    pub radius: f64,
+    /// Points along the round.
+    #[param(min = 2, max = 64, unit = "count")]
+    pub segments: u32,
+}
+
+impl Default for FilletParams {
+    fn default() -> Self {
+        Self {
+            point: 0,
+            radius: 0.002,
+            segments: 8,
+        }
+    }
+}
+
+/// Rounds a corner: the two lines meeting at a point are cut back and an
+/// arc tangent to both put between them, its radius dimensioned.
+pub struct Fillet;
+
+impl Operator for Fillet {
+    type Params = FilletParams;
+    fn id() -> &'static str {
+        "sketch.fillet"
+    }
+    fn label() -> &'static str {
+        "Sketch Fillet"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let mut pts = points(doc.document(), id);
+        let object = doc.document().object(id).expect("the sketch");
+        let p = params.point;
+        if p as usize >= pts.len() {
+            return Err(OpError::Failed("no such point".into()));
+        }
+        let at: Vec<(usize, u32)> = object
+            .sketch_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                if l[0] == p {
+                    Some((i, l[1]))
+                } else if l[1] == p {
+                    Some((i, l[0]))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let [(la, a), (lb, b)] = at[..] else {
+            return Err(OpError::Failed(
+                "a fillet wants a corner where exactly two lines meet".into(),
+            ));
+        };
+        let (pa, pb, pp) = (pts[a as usize], pts[b as usize], pts[p as usize]);
+        let (ua, ub) = ((pa - pp).normalize_or_zero(), (pb - pp).normalize_or_zero());
+        let cos = ua.dot(ub).clamp(-1.0, 1.0);
+        let theta = cos.acos();
+        if theta < 1e-6 || theta > std::f64::consts::PI - 1e-6 {
+            return Err(OpError::Failed(
+                "the lines are in a row: nothing to round".into(),
+            ));
+        }
+        let r = params.radius;
+        if !(r > 0.0 && r.is_finite()) {
+            return Err(OpError::Failed("a fillet needs a radius".into()));
+        }
+        let back = r / (theta * 0.5).tan();
+        if back >= (pa - pp).length() - 1e-9 || back >= (pb - pp).length() - 1e-9 {
+            return Err(OpError::Failed(
+                "the radius is too big for these lines".into(),
+            ));
+        }
+        let (ta, tb) = (pp + ua * back, pp + ub * back);
+        let bisector = (ua + ub).normalize_or_zero();
+        let centre_at = pp + bisector * (r / (theta * 0.5).sin());
+        // The arc from ta to tb, the short way round the centre.
+        let n = params.segments.clamp(2, 64) as usize;
+        let (sa, sb) = (
+            (ta - centre_at).y.atan2((ta - centre_at).x),
+            (tb - centre_at).y.atan2((tb - centre_at).x),
+        );
+        let mut sweep = (sb - sa).rem_euclid(std::f64::consts::TAU);
+        let (from, to, sweep) = if sweep > std::f64::consts::PI {
+            sweep = std::f64::consts::TAU - sweep;
+            (tb, ta, sweep)
+        } else {
+            (ta, tb, sweep)
+        };
+        let start = (from - centre_at).y.atan2((from - centre_at).x);
+        let _ = to;
+        let centre = {
+            pts.push(centre_at);
+            pts.len() as u32 - 1
+        };
+        let ring: Vec<u32> = (0..=n)
+            .map(|k| {
+                let t = start + sweep * k as f64 / n as f64;
+                pts.push(centre_at + DVec2::new(t.cos(), t.sin()) * r);
+                pts.len() as u32 - 1
+            })
+            .collect();
+        // Which ring end sits on which line.
+        let (end_a, end_b) = if from == ta {
+            (ring[0], ring[n])
+        } else {
+            (ring[n], ring[0])
+        };
+        let mut lines = object.sketch_lines.clone();
+        let mut constraints = object.sketch.clone();
+        lines[la] = [a, end_a];
+        lines[lb] = [b, end_b];
+        lines.extend(ring.windows(2).map(|w| [w[0], w[1]]));
+        // What was said of the lines through the corner is said of them cut
+        // back: a level line stays level.
+        for c in constraints.iter_mut() {
+            *c = c.remapped(&|v| v);
+            let swap = |x: &mut u32, y: &mut u32, from_other: u32, to: u32| {
+                if (*x == p && *y == from_other) || (*y == p && *x == from_other) {
+                    if *x == p {
+                        *x = to;
+                    } else {
+                        *y = to;
+                    }
+                }
+            };
+            match c {
+                Constraint::Horizontal { a: x, b: y }
+                | Constraint::Vertical { a: x, b: y }
+                | Constraint::OnLine { a: x, b: y, .. }
+                | Constraint::Tangent { a: x, b: y, .. } => {
+                    swap(x, y, a, end_a);
+                    swap(x, y, b, end_b);
+                }
+                Constraint::Parallel {
+                    a: x,
+                    b: y,
+                    c: z,
+                    d: w,
+                }
+                | Constraint::Perpendicular {
+                    a: x,
+                    b: y,
+                    c: z,
+                    d: w,
+                }
+                | Constraint::Angle {
+                    a: x,
+                    b: y,
+                    c: z,
+                    d: w,
+                    ..
+                } => {
+                    swap(x, y, a, end_a);
+                    swap(x, y, b, end_b);
+                    swap(z, w, a, end_a);
+                    swap(z, w, b, end_b);
+                }
+                _ => {}
+            }
+        }
+        // The corner's own holds — a distance to it, its fix — go with it.
+        constraints.retain(|c| !c.points().contains(&p));
+        constraints.push(Constraint::Arc {
+            centre,
+            ring: ring.clone(),
+        });
+        constraints.push(Constraint::Tangent {
+            a,
+            b: end_a,
+            centre,
+            on: ring[0],
+        });
+        constraints.push(Constraint::Tangent {
+            a: b,
+            b: end_b,
+            centre,
+            on: ring[0],
+        });
+        constraints.push(Constraint::Distance {
+            a: centre,
+            b: ring[0],
+            value: r,
+        });
+        // The corner point itself goes: nothing is on it any more.
+        let mut gone = vec![false; pts.len()];
+        gone[p as usize] = true;
+        let mut map = vec![u32::MAX; pts.len()];
+        let mut kept = Vec::new();
+        for (i, q) in pts.iter().enumerate() {
+            if !gone[i] {
+                map[i] = kept.len() as u32;
+                kept.push(*q);
+            }
+        }
+        let renumber = |v: u32| map[v as usize];
+        let constraints: Vec<Constraint> =
+            constraints.iter().map(|c| c.remapped(&renumber)).collect();
+        let lines: Vec<[u32; 2]> = lines
+            .iter()
+            .filter(|l| !gone[l[0] as usize] && !gone[l[1] as usize])
+            .map(|l| [renumber(l[0]), renumber(l[1])])
+            .collect();
+        let mesh_id = object.mesh().expect("a sketch is a mesh");
+        let positions: Vec<Vec3> = kept
+            .iter()
+            .map(|q| Vec3::new(q.x as f32, q.y as f32, 0.0))
+            .collect();
+        *doc.document_mut()
+            .mesh_mut(mesh_id)
+            .expect("the sketch's mesh") = MeshData::from_faces(positions, &[]);
+        let o = doc.document_mut().object_mut(id).expect("the sketch");
+        o.sketch_lines = lines;
+        o.sketch = constraints;
+        solve(doc, id);
+        Ok(OpResult::Finished)
     }
 }
 
@@ -1846,6 +2294,153 @@ mod tests {
         .unwrap();
         let regions = kreate_scene::feature::sketch_regions(&doc, id);
         assert!(!regions.is_empty(), "a closed spline encloses a region");
+    }
+
+    #[test]
+    fn a_polygon_is_regular_and_stays_so_when_a_corner_is_pulled() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.polygon",
+            &[
+                ("centre", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("radius", PropertyValue::Float(1.0)),
+                ("sides", PropertyValue::Int(6)),
+                ("join", PropertyValue::Int(1)),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        assert_eq!(o.sketch_lines.len(), 6);
+        assert_eq!(
+            points(&doc, id).len(),
+            7,
+            "the origin as centre, six corners"
+        );
+        // Pulled out: still regular, larger.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.move",
+            &[
+                ("points", PropertyValue::Ints(vec![1])),
+                ("offset", PropertyValue::Vec3([0.5, 0.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let p = points(&doc, id);
+        let radii: Vec<f64> = (1..7).map(|i| p[i].length()).collect();
+        assert!(radii.iter().all(|r| (r - 1.5).abs() < 1e-4), "{radii:?}");
+        assert_eq!(kreate_scene::feature::sketch_regions(&doc, id).len(), 1);
+    }
+
+    #[test]
+    fn a_slot_is_closed_and_its_ends_are_round() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.slot",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([4.0, 0.0, 0.0])),
+                ("width", PropertyValue::Float(2.0)),
+                ("segments", PropertyValue::Int(8)),
+            ],
+        )
+        .unwrap();
+        let regions = kreate_scene::feature::sketch_regions(&doc, id);
+        assert_eq!(regions.len(), 1, "closed");
+        // Two round ends of radius 1 and a 4 x 2 middle: 8 + π, near.
+        let area = regions[0].area().abs() as f64;
+        let want = 8.0 + std::f64::consts::PI;
+        assert!((area - want).abs() < want * 0.03, "{area} vs {want}");
+        let p = points(&doc, id);
+        assert!(p
+            .iter()
+            .all(|q| q.y.abs() <= 1.0 + 1e-6 && q.x >= -1.0 - 1e-6 && q.x <= 5.0 + 1e-6));
+    }
+
+    #[test]
+    fn a_fillet_rounds_a_corner_tangent_to_both_lines() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        // An L: along X then up Y, the corner at (2, 0).
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[(
+                "points",
+                PropertyValue::Floats(vec![0.0, 0.0, 2.0, 0.0, 2.0, 2.0]),
+            )],
+        )
+        .unwrap();
+        let corner = points(&doc, id)
+            .iter()
+            .position(|p| (p.x - 2.0).abs() < 1e-9 && p.y.abs() < 1e-9)
+            .unwrap() as i64;
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.fillet",
+            &[
+                ("point", PropertyValue::Int(corner)),
+                ("radius", PropertyValue::Float(0.5)),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        let p = points(&doc, id);
+        assert!(
+            !p.iter()
+                .any(|q| (q.x - 2.0).abs() < 1e-9 && q.y.abs() < 1e-9),
+            "the corner went"
+        );
+        let arc = o
+            .sketch
+            .iter()
+            .find_map(|c| match c {
+                Constraint::Arc { centre, ring } => Some((*centre, ring.clone())),
+                _ => None,
+            })
+            .expect("an arc");
+        assert!(
+            (p[arc.0 as usize] - DVec2::new(1.5, 0.5)).length() < 1e-6,
+            "{:?}",
+            p[arc.0 as usize]
+        );
+        for v in &arc.1 {
+            assert!(((p[*v as usize] - DVec2::new(1.5, 0.5)).length() - 0.5).abs() < 1e-6);
+        }
+        assert_eq!(
+            o.sketch
+                .iter()
+                .filter(|c| matches!(c, Constraint::Tangent { .. }))
+                .count(),
+            2
+        );
+        // Too big for the lines: said so.
+        let other = points(&doc, id).len() as i64; // no such point
+        assert!(run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.fillet",
+            &[("point", PropertyValue::Int(other))]
+        )
+        .is_err());
     }
 
     #[test]

@@ -65,6 +65,10 @@ pub enum Constraint {
         ring: Vec<u32>,
         closed: bool,
     },
+    /// A regular polygon: `ring` evenly round `centre`, each as far as the
+    /// first — a circle's rule on its corners, which stay corners to pick
+    /// and draw from.
+    Polygon { centre: u32, ring: Vec<u32> },
 }
 
 /// Where a fit-point spline's ring points lie: `count` points spread evenly
@@ -108,7 +112,7 @@ pub fn spline_ring(through: &[DVec2], count: usize, closed: bool) -> Vec<DVec2> 
 }
 
 /// The kinds, in the order the operators number them.
-pub const KINDS: [&str; 14] = [
+pub const KINDS: [&str; 15] = [
     "distance",
     "horizontal",
     "vertical",
@@ -123,6 +127,7 @@ pub const KINDS: [&str; 14] = [
     "arc",
     "tangent",
     "spline",
+    "polygon",
 ];
 
 impl Constraint {
@@ -147,6 +152,7 @@ impl Constraint {
             Constraint::Arc { .. } => 11,
             Constraint::Tangent { .. } => 12,
             Constraint::Spline { .. } => 13,
+            Constraint::Polygon { .. } => 14,
         }
     }
 
@@ -163,11 +169,11 @@ impl Constraint {
             | Constraint::Parallel { a, b, c, d }
             | Constraint::Perpendicular { a, b, c, d }
             | Constraint::Equal { a, b, c, d } => vec![*a, *b, *c, *d],
-            Constraint::Circle { centre, ring } | Constraint::Arc { centre, ring } => {
-                std::iter::once(*centre)
-                    .chain(ring.iter().copied())
-                    .collect()
-            }
+            Constraint::Circle { centre, ring }
+            | Constraint::Arc { centre, ring }
+            | Constraint::Polygon { centre, ring } => std::iter::once(*centre)
+                .chain(ring.iter().copied())
+                .collect(),
             Constraint::Tangent { a, b, centre, on } => vec![*a, *b, *centre, *on],
             Constraint::Spline { through, ring, .. } => {
                 through.iter().chain(ring.iter()).copied().collect()
@@ -202,7 +208,9 @@ impl Constraint {
                 *c = map(*c);
                 *d = map(*d);
             }
-            Constraint::Circle { centre, ring } | Constraint::Arc { centre, ring } => {
+            Constraint::Circle { centre, ring }
+            | Constraint::Arc { centre, ring }
+            | Constraint::Polygon { centre, ring } => {
                 *centre = map(*centre);
                 for r in ring.iter_mut() {
                     *r = map(*r);
@@ -295,13 +303,13 @@ impl Constraint {
                 a: get(1)?,
                 b: get(2)?,
             },
-            "circle" | "arc" => {
+            "circle" | "arc" | "polygon" => {
                 let centre = get(0)?;
                 let ring = p.get(1..).filter(|r| r.len() >= 2)?.to_vec();
-                if tag == "circle" {
-                    Constraint::Circle { centre, ring }
-                } else {
-                    Constraint::Arc { centre, ring }
+                match tag {
+                    "circle" => Constraint::Circle { centre, ring },
+                    "arc" => Constraint::Arc { centre, ring },
+                    _ => Constraint::Polygon { centre, ring },
                 }
             }
             "tangent" => Constraint::Tangent {
@@ -366,7 +374,7 @@ impl Constraint {
                 let u = line(a, b);
                 out.push(u.perp_dot(p(q) - p(a)) / u.length().max(1e-12));
             }
-            Constraint::Circle { centre, ref ring } => {
+            Constraint::Circle { centre, ref ring } | Constraint::Polygon { centre, ref ring } => {
                 let c = p(centre);
                 let first = p(ring[0]) - c;
                 let r = first.length();

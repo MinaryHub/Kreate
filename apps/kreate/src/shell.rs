@@ -4572,8 +4572,11 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "circle",
                         "arc",
                         "spline",
+                        "polygon",
+                        "slot",
                         "pattern",
                         "point",
+                        "fillet",
                         "trim",
                     ],
                 ),
@@ -13520,7 +13523,7 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 21] = [
+const SKETCH_TOOLS: [&str; 24] = [
     "select",
     "pattern",
     "line",
@@ -13528,6 +13531,9 @@ const SKETCH_TOOLS: [&str; 21] = [
     "circle",
     "arc",
     "spline",
+    "polygon",
+    "slot",
+    "fillet",
     "point",
     "trim",
     "dimension",

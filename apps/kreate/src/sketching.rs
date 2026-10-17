@@ -24,6 +24,12 @@ pub enum Tool {
     Point,
     /// A smooth curve through the points clicked: Fusion's fit-point spline.
     Spline,
+    /// A regular polygon: its centre, then a corner.
+    Polygon,
+    /// A slot: one end's centre, the other's, then how wide.
+    Slot,
+    /// Click a corner to round it.
+    Fillet,
     /// Click a line, circle or arc to take out the piece between the
     /// crossings either side.
     Trim,
@@ -48,6 +54,9 @@ impl Tool {
             "arc" => Tool::Arc,
             "point" => Tool::Point,
             "spline" => Tool::Spline,
+            "polygon" => Tool::Polygon,
+            "slot" => Tool::Slot,
+            "fillet" => Tool::Fillet,
             "trim" => Tool::Trim,
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
@@ -75,6 +84,9 @@ impl Tool {
             Tool::Arc => "arc",
             Tool::Point => "point",
             Tool::Spline => "spline",
+            Tool::Polygon => "polygon",
+            Tool::Slot => "slot",
+            Tool::Fillet => "fillet",
             Tool::Trim => "trim",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
@@ -89,7 +101,14 @@ impl Tool {
     pub fn draws(self) -> bool {
         matches!(
             self,
-            Tool::Line | Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Point | Tool::Spline
+            Tool::Line
+                | Tool::Rectangle
+                | Tool::Circle
+                | Tool::Arc
+                | Tool::Point
+                | Tool::Spline
+                | Tool::Polygon
+                | Tool::Slot
         )
     }
 }
@@ -1014,6 +1033,40 @@ pub fn view(
                     .unwrap_or(c.distance(h));
                 view.preview.push(circle(*c, r));
             }
+            (Tool::Polygon, [c]) => {
+                let r = typed.first().map(|d| d.abs()).unwrap_or(c.distance(h));
+                let a0 = (h - *c).y.atan2((h - *c).x);
+                let pts: Vec<DVec2> = (0..=6)
+                    .map(|i| {
+                        let a = a0 + i as f64 * std::f64::consts::TAU / 6.0;
+                        *c + DVec2::new(a.cos(), a.sin()) * r
+                    })
+                    .collect();
+                view.preview.push(polyline(pts));
+            }
+            (Tool::Slot, [a]) => view.preview.push(polyline(vec![*a, h])),
+            (Tool::Slot, [a, b]) => {
+                let d = *b - *a;
+                let dir = d.normalize_or_zero();
+                let side = DVec2::new(-dir.y, dir.x);
+                let r = typed
+                    .first()
+                    .map(|w| w.abs() * 0.5)
+                    .unwrap_or_else(|| (h - *a).dot(side).abs().max(1e-6));
+                let mut pts = Vec::new();
+                for k in 0..=12 {
+                    let t = std::f64::consts::FRAC_PI_2 - std::f64::consts::PI * k as f64 / 12.0;
+                    let (s, c) = t.sin_cos();
+                    pts.push(*b + dir * (c * r) + side * (s * r));
+                }
+                for k in 0..=12 {
+                    let t = -std::f64::consts::FRAC_PI_2 - std::f64::consts::PI * k as f64 / 12.0;
+                    let (s, c) = t.sin_cos();
+                    pts.push(*a + dir * (c * r) + side * (s * r));
+                }
+                pts.push(pts[0]);
+                view.preview.push(polyline(pts));
+            }
             (Tool::Arc, [s]) => view.preview.push(polyline(vec![*s, h])),
             (Tool::Arc, [s, e]) => {
                 if let Some(c) = kreate_ops::ops::sketch_draw::circumcentre(*s, *e, h) {
@@ -1076,6 +1129,12 @@ pub fn view(
         (Tool::Arc, 1) => "sketch-prompt-arc-end",
         (Tool::Arc, _) => "sketch-prompt-arc-through",
         (Tool::Point, _) => "sketch-prompt-point",
+        (Tool::Polygon, 0) => "sketch-prompt-centre",
+        (Tool::Polygon, _) => "sketch-prompt-polygon-corner",
+        (Tool::Slot, 0) => "sketch-prompt-slot-start",
+        (Tool::Slot, 1) => "sketch-prompt-slot-end",
+        (Tool::Slot, _) => "sketch-prompt-slot-width",
+        (Tool::Fillet, _) => "sketch-prompt-fillet",
         (Tool::Trim, _) => "sketch-prompt-trim",
         (Tool::Dimension, _) => "sketch-prompt-dimension",
         (Tool::Constrain(_), _) => "sketch-prompt-constrain",

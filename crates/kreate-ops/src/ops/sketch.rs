@@ -295,6 +295,7 @@ impl Operator for ConstraintFree {
                 c,
                 kreate_scene::sketch::Constraint::Circle { .. }
                     | kreate_scene::sketch::Constraint::Arc { .. }
+                    | kreate_scene::sketch::Constraint::Polygon { .. }
             ) || !c.points().iter().any(|p| params.points.contains(p))
         });
         Ok(if list.len() < before {

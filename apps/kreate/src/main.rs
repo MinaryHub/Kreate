@@ -4953,10 +4953,65 @@ impl App {
                         self.sketching.clicks.push((p, join));
                         self.sketching.typed.clear();
                     }
-                    Tool::Rectangle | Tool::Circle | Tool::Arc => {
+                    Tool::Fillet => {
+                        if let Some(Pick::Point(v)) = pick {
+                            let typed = kreate::sketching::typed_lengths(
+                                &self.sketching.typed,
+                                self.doc.design.length_unit.metres(),
+                            );
+                            let mut args = vec![("point", PropertyValue::Int(v as i64))];
+                            if let Some(r) = typed.first() {
+                                args.push(("radius", PropertyValue::Float(r.abs())));
+                            }
+                            self.run_op_with("sketch.fillet", &args);
+                            self.sketching.typed.clear();
+                        }
+                    }
+                    Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
                         self.sketching.clicks.push((p, join));
                         let c = self.sketching.clicks.clone();
+                        let unit = self.doc.design.length_unit.metres();
+                        let typed = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
                         match (tool, c.len()) {
+                            (Tool::Polygon, 2) => {
+                                let r = typed
+                                    .first()
+                                    .map(|d| d.abs())
+                                    .unwrap_or(c[0].0.distance(c[1].0));
+                                let rotation = (c[1].0 - c[0].0).y.atan2((c[1].0 - c[0].0).x);
+                                if r > 1e-9 {
+                                    self.run_op_with(
+                                        "sketch.polygon",
+                                        &[
+                                            ("centre", v3(c[0].0)),
+                                            ("radius", PropertyValue::Float(r)),
+                                            ("rotation", PropertyValue::Float(rotation)),
+                                            ("join", PropertyValue::Int(c[0].1 as i64)),
+                                        ],
+                                    );
+                                }
+                                self.sketch_tool_done();
+                            }
+                            (Tool::Slot, 3) => {
+                                let d = c[1].0 - c[0].0;
+                                let side = glam::DVec2::new(-d.y, d.x).normalize_or_zero();
+                                let w = typed
+                                    .first()
+                                    .map(|w| w.abs())
+                                    .unwrap_or(((c[2].0 - c[0].0).dot(side)).abs() * 2.0);
+                                if w > 1e-9 && d.length() > 1e-9 {
+                                    self.run_op_with(
+                                        "sketch.slot",
+                                        &[
+                                            ("a", v3(c[0].0)),
+                                            ("b", v3(c[1].0)),
+                                            ("width", PropertyValue::Float(w)),
+                                            ("joins", PropertyValue::Ints(vec![c[0].1, c[1].1])),
+                                        ],
+                                    );
+                                }
+                                self.sketch_tool_done();
+                            }
                             (Tool::Rectangle, 2) => {
                                 self.run_op_with(
                                     "sketch.rectangle",
