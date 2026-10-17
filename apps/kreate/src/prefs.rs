@@ -134,7 +134,21 @@ pub fn load_resolution_scale(path: &Path) -> f32 {
 }
 
 pub fn save_resolution_scale(path: &Path, scale: f32) -> Result<(), std::io::Error> {
-    save_viewport(path, scale, load_punchy(path))
+    save_viewport(path, scale, load_punchy(path), load_trace_when_still(path))
+}
+
+/// Whether the rendered view traces whenever it is still, from the same
+/// file; yes when it does not say.
+pub fn load_trace_when_still(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|l| {
+                let (key, value) = l.split_once('=')?;
+                (key.trim() == "trace_when_still").then(|| value.trim() != "false")
+            })
+        })
+        .unwrap_or(true)
 }
 
 /// Whether the lit views use the Punchy look of AgX, from the same file; yes
@@ -152,13 +166,20 @@ pub fn load_punchy(path: &Path) -> bool {
         .unwrap_or(true)
 }
 
-/// The viewport preferences, both of them: a file of one line would lose
-/// the other each time it was written.
-pub fn save_viewport(path: &Path, scale: f32, punchy: bool) -> Result<(), std::io::Error> {
+/// The viewport preferences, all of them: a file holding one would lose the
+/// others each time it was written.
+pub fn save_viewport(
+    path: &Path,
+    scale: f32,
+    punchy: bool,
+    trace_when_still: bool,
+) -> Result<(), std::io::Error> {
     let look = if punchy { "punchy" } else { "base" };
     write_atomic(
         path,
-        &format!("resolution_scale = {scale}\nlook = {look}\n"),
+        &format!(
+            "resolution_scale = {scale}\nlook = {look}\ntrace_when_still = {trace_when_still}\n"
+        ),
     )
 }
 

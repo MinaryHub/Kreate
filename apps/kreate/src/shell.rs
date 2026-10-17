@@ -295,6 +295,8 @@ pub struct ShellState {
     /// Whether the lit views use the Punchy look of AgX. See
     /// `prefs::load_punchy`.
     pub punchy: bool,
+    /// Whether the rendered view traces whenever it is still.
+    pub trace_when_still: bool,
     /// The open document's name, `*` in front while it has unsaved changes:
     /// what the application bar's document chip shows.
     pub document_title: String,
@@ -857,6 +859,7 @@ impl Default for ShellState {
             node_clipboard: None,
             resolution_scale: 1.0,
             punchy: true,
+            trace_when_still: true,
             document_title: "untitled".into(),
             adjust_open: false,
             appearance: kreate_ui::Appearance::Dark,
@@ -3646,20 +3649,33 @@ fn draw_area(
                         {
                             state.resolution_scale = scale;
                             if let Some(path) = crate::prefs::viewport_path() {
-                                let _ = crate::prefs::save_viewport(&path, scale, state.punchy);
+                                let _ = crate::prefs::save_viewport(
+                                    &path,
+                                    scale,
+                                    state.punchy,
+                                    state.trace_when_still,
+                                );
                             }
                         }
                     });
-                    if ui
+                    let punchy = ui
                         .checkbox(&mut state.punchy, state.catalog.get("prefs-punchy"))
                         .on_hover_text(state.catalog.get("prefs-punchy-desc"))
-                        .changed()
-                    {
+                        .changed();
+                    let still = ui
+                        .checkbox(
+                            &mut state.trace_when_still,
+                            state.catalog.get("prefs-trace-when-still"),
+                        )
+                        .on_hover_text(state.catalog.get("prefs-trace-when-still-desc"))
+                        .changed();
+                    if punchy || still {
                         if let Some(path) = crate::prefs::viewport_path() {
                             let _ = crate::prefs::save_viewport(
                                 &path,
                                 state.resolution_scale,
                                 state.punchy,
+                                state.trace_when_still,
                             );
                         }
                     }

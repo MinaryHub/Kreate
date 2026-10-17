@@ -21,6 +21,9 @@ struct Params {
     radius: f32,
     // How dark full occlusion is, 0 to 1.
     strength: f32,
+    // Which frame of a still view's average this is: the directions turn
+    // with it, so the frames average the estimate's grain away.
+    seed: f32,
 };
 
 @group(0) @binding(0) var depth: texture_depth_2d;
@@ -57,25 +60,18 @@ fn view_at(px: vec2<i32>) -> vec4<f32> {
 
 // Sixteen directions in the unit hemisphere about +Z, nearer the centre first
 // so close geometry counts most.
-const KERNEL: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
-    vec3<f32>(0.0536, -0.0254, 0.0627),
-    vec3<f32>(-0.0756, 0.0505, 0.0410),
-    vec3<f32>(0.0251, 0.1063, 0.0592),
-    vec3<f32>(-0.1201, -0.0811, 0.0715),
-    vec3<f32>(0.1654, 0.0482, 0.0913),
-    vec3<f32>(0.0103, -0.2101, 0.1050),
-    vec3<f32>(-0.2010, 0.1302, 0.1420),
-    vec3<f32>(0.2611, -0.1504, 0.1210),
-    vec3<f32>(-0.0730, 0.3102, 0.1903),
-    vec3<f32>(-0.3324, -0.1810, 0.1502),
-    vec3<f32>(0.3912, 0.1813, 0.2310),
-    vec3<f32>(0.0805, -0.4610, 0.2402),
-    vec3<f32>(-0.4502, 0.3020, 0.2811),
-    vec3<f32>(0.5310, -0.2205, 0.3420),
-    vec3<f32>(-0.2402, 0.6110, 0.3603),
-    vec3<f32>(0.4012, 0.5503, 0.5802),
-);
+const PI: f32 = 3.14159265;
+const HALF_PI: f32 = 1.57079633;
+const DIRECTIONS: i32 = 4;
+const STEPS: i32 = 6;
 
+/// The occlusion at a pixel, by its horizons: Jimenez et al.'s
+/// ground-truth ambient occlusion. In each of a few directions across the
+/// screen, how high the geometry within reach rises on either side; the
+/// light the surface can still see between those two horizons, weighted by
+/// the cosine to its normal, is its visibility. It measures what a
+/// hemisphere of random samples guesses at, so a crease darkens as a
+/// crease does and a flat floor not at all.
 @fragment
 fn ao_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(position.xy);
@@ -104,59 +100,105 @@ fn ao_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     // the projection's w row is constant), whose eye point can be inside the
     // model when zoomed in; from the point otherwise.
     let ortho = params.projection[2][3] == 0.0;
-    let to_eye = select(-p, vec3<f32>(0.0, 0.0, 1.0), ortho);
-    if (dot(n, to_eye) < 0.0) {
+    let v = select(normalize(-p), vec3<f32>(0.0, 0.0, 1.0), ortho);
+    if (dot(n, v) < 0.0) {
         n = -n;
     }
 
-    // A frame about the normal, turned by the pixel's place in a 4x4 block.
-    let cell = (px.x & 3) + (px.y & 3) * 4;
-    let angle = f32(cell) * 0.3926991 + 0.2;
-    let spin = vec3<f32>(cos(angle), sin(angle), 0.0);
-    let t = normalize(spin - n * dot(spin, n) + vec3<f32>(1e-4, 0.0, 0.0));
-    let b = cross(n, t);
-
-    let radius = params.radius;
-    let bias = radius * 0.03;
-    var occluded = 0.0;
-    for (var i = 0; i < 16; i++) {
-        let k = KERNEL[i];
-        let s = p + (t * k.x + b * k.y + n * k.z) * radius;
-        let clip = params.projection * vec4<f32>(s, 1.0);
-        if (clip.w <= 0.0) {
-            continue;
-        }
-        let ndc = clip.xy / clip.w;
-        let spx = vec2<i32>(
-            i32((ndc.x * 0.5 + 0.5) * params.region.x),
-            i32((0.5 - ndc.y * 0.5) * params.region.y),
-        );
-        let scene = view_at(spx);
-        if (scene.w == 0.0) {
-            continue;
-        }
-        // In front of the sample (nearer the eye, so a larger z) closes it
-        // off — but only geometry within reach: a wall far behind an object's
-        // edge is not shading it.
-        let reach = smoothstep(0.0, 1.0, radius / max(abs(p.z - scene.z), 1e-6));
-        occluded += select(0.0, 1.0, scene.z >= s.z + bias) * reach;
+    // The reach on screen, in pixels.
+    let scale = params.projection[1][1] * 0.5 * params.region.y;
+    let reach_px = select(scale * params.radius / max(-p.z, 1e-4), scale * params.radius, ortho);
+    if (reach_px < 1.0) {
+        return vec4<f32>(1.0);
     }
-    let ao = 1.0 - occluded / 16.0 * params.strength;
-    return vec4<f32>(clamp(ao, 0.0, 1.0));
+    let step_px = max(min(reach_px, 0.2 * params.region.y) / f32(STEPS), 1.0);
+    // Turned by the pixel's place in a 4x4 block and by the frame; stepped
+    // from an offset that moves the same way.
+    let cell = f32((px.x & 3) + (px.y & 3) * 4);
+    let turn = fract(cell * 0.0625 + params.seed * 0.618034);
+    let offset = fract(52.9829189 * fract(0.06711056 * position.x + 0.00583715 * position.y)
+        + params.seed * 0.381966);
+    let reach2 = params.radius * params.radius;
+
+    var visible = 0.0;
+    for (var i = 0; i < DIRECTIONS; i++) {
+        let phi = (f32(i) + turn) * PI / f32(DIRECTIONS);
+        let dir = vec2<f32>(cos(phi), sin(phi));
+        // On screen y runs down, in the view it runs up.
+        let dir3 = vec3<f32>(dir.x, -dir.y, 0.0);
+        let along = dir3 - dot(dir3, v) * v;
+        let axis = normalize(cross(dir3, v));
+        let projected = n - axis * dot(n, axis);
+        let length_n = length(projected);
+        if (length_n < 1e-4) {
+            visible += 1.0;
+            continue;
+        }
+        let cos_n = clamp(dot(projected / length_n, v), -1.0, 1.0);
+        let gamma = sign(dot(along, projected)) * acos(cos_n);
+        // The highest each side rises, as the cosine to the view.
+        var back = -1.0;
+        var ahead = -1.0;
+        for (var k = 0; k < STEPS; k++) {
+            let t = (f32(k) + offset) * step_px + 1.0;
+            for (var side = 0; side < 2; side++) {
+                let sgn = select(-1.0, 1.0, side == 1);
+                let q = view_at(vec2<i32>(position.xy + dir * sgn * t));
+                if (q.w == 0.0) {
+                    continue;
+                }
+                let delta = q.xyz - p;
+                let dist2 = dot(delta, delta);
+                if (dist2 < 1e-10) {
+                    continue;
+                }
+                let c = dot(delta * inverseSqrt(dist2), v);
+                // Geometry past the reach shades nothing: a wall far behind
+                // an object's edge is not its occluder.
+                let near = clamp(1.0 - dist2 / reach2, 0.0, 1.0);
+                let h = mix(-1.0, c, near);
+                if (side == 1) {
+                    ahead = max(ahead, h);
+                } else {
+                    back = max(back, h);
+                }
+            }
+        }
+        let h0 = gamma + max(-acos(back) - gamma, -HALF_PI);
+        let h1 = gamma + min(acos(ahead) - gamma, HALF_PI);
+        let sg = sin(gamma);
+        let cg = cos(gamma);
+        let a0 = 0.25 * (-cos(2.0 * h0 - gamma) + cg + 2.0 * h0 * sg);
+        let a1 = 0.25 * (-cos(2.0 * h1 - gamma) + cg + 2.0 * h1 * sg);
+        visible += length_n * (a0 + a1);
+    }
+    let seen = clamp(visible / f32(DIRECTIONS), 0.0, 1.0);
+    return vec4<f32>(mix(1.0, seen, params.strength));
 }
 
-// The second pass: the 4x4 block average, multiplied into the image by the
-// blend state (destination times source).
 @fragment
 fn ao_apply(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(position.xy);
     let last = vec2<i32>(textureDimensions(occlusion)) - 1;
+    // Averaged over the 4x4 block the directions turn across — but only with
+    // neighbours at about this depth, so the darkness of a crease does not
+    // bleed across a silhouette onto what is far behind it.
+    let centre = view_at(px);
+    if (centre.w == 0.0) {
+        return vec4<f32>(1.0);
+    }
+    let tolerance = 0.03 * abs(centre.z) + 1e-4;
     var sum = 0.0;
+    var weights = 0.0;
     for (var y = -2; y < 2; y++) {
         for (var x = -2; x < 2; x++) {
-            sum += textureLoad(occlusion, clamp(px + vec2<i32>(x, y), vec2<i32>(0), last), 0).r;
+            let at = clamp(px + vec2<i32>(x, y), vec2<i32>(0), last);
+            let other = view_at(at);
+            let w = select(0.0, exp(-abs(other.z - centre.z) / tolerance), other.w != 0.0);
+            sum += textureLoad(occlusion, at, 0).r * w;
+            weights += w;
         }
     }
-    let ao = sum / 16.0;
+    let ao = select(1.0, sum / weights, weights > 1e-4);
     return vec4<f32>(ao, ao, ao, 1.0);
 }

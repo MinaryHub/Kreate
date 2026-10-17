@@ -53,7 +53,8 @@ struct Shading {
     /// point lands in the depth contact shadows march through.
     view_proj: mat4x4<f32>,
     /// x: nonzero when contact shadows are on. y: the brightest a glow is
-    /// shown, zero for as bright as it is (see `shown_glow`).
+    /// shown, zero for as bright as it is (see `shown_glow`). z: which frame
+    /// of a still view's average this is, and one while the view moves.
     flags: vec4<f32>,
 }
 
@@ -184,19 +185,42 @@ const NORMAL_OFFSET_TEXELS: f32 = 2.0;
 /// shadow softer than this is found only near its own edge and hardens in the
 /// middle. It also cannot be unbounded: every texel of it is a tap.
 ///
-/// Six is about a metre of penumbra on a sun's near cascade, which is a sharp
-/// enough limit that nothing in a viewport reaches it and a cheap enough one
-/// that the search is sixteen taps rather than a hundred.
-const BLOCKER_SEARCH_TEXELS: f32 = 6.0;
+/// Twelve texels, searched with twelve taps of a turned disc: wide enough
+/// for the filter's widest penumbra to be found across its middle, and
+/// twelve taps rather than the hundred a grid that wide would want.
+const BLOCKER_SEARCH_TEXELS: f32 = 12.0;
 
 /// The widest the filter will spread, in texels.
 ///
-/// The taps are a fixed grid, so spreading them further does not soften the
-/// shadow — it separates them, and the shadow bands. This is where that starts,
-/// and a penumbra that wants to be wider is drawn at this width instead: a
-/// shadow slightly too sharp reads as a shadow, and a banded one reads as a
-/// fault.
-const MAX_PENUMBRA_TEXELS: f32 = 8.0;
+/// The taps are a disc turned differently at every point, so spreading them
+/// does not band — it grains, and the still view's average of its jittered
+/// frames smooths the grain away. A grid's limit was eight before its steps
+/// showed; a turned disc goes a good deal further.
+const MAX_PENUMBRA_TEXELS: f32 = 20.0;
+
+/// Taps in the blocker search and in the filter.
+const BLOCKER_TAPS: u32 = 12u;
+const FILTER_TAPS: u32 = 24u;
+
+/// A point of a sunflower spiral filling the unit disc, turned by `spin`:
+/// evenly spread for any number of taps, and with no axis for a shadow's
+/// edge to step along.
+fn vogel(i: u32, count: u32, spin: f32) -> vec2<f32> {
+    let r = sqrt((f32(i) + 0.5) / f32(count));
+    let a = f32(i) * 2.3999632 + spin;
+    return vec2<f32>(cos(a), sin(a)) * r;
+}
+
+/// A turn for the taps at a point: from which shadow texel the point is in,
+/// so it holds still while the view moves — the jitter of a moving view
+/// once turned it every frame, and a penumbra that had been smooth started
+/// to crawl the moment a drag began — and from the frame of a still view's
+/// average, so the frames of that average differ and smooth it.
+fn tap_spin(position: vec3<f32>, texel: f32) -> f32 {
+    let cell = floor(position / max(texel, 1e-6));
+    let h = dot(cell, vec3<f32>(127.1, 311.7, 74.7));
+    return fract(fract(sin(h) * 43758.547) + shading.flags.z * 0.618034) * 6.2831853;
+}
 
 /// How much of the map is worth searching before giving up on softness.
 ///
@@ -208,24 +232,23 @@ fn average_blocker(
     centre: vec2<i32>,
     size: vec2<f32>,
     depth: f32,
+    spin: f32,
 ) -> f32 {
     var total = 0.0;
     var found = 0.0;
-    let step = max(i32(BLOCKER_SEARCH_TEXELS / 1.5), 1);
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let at = clamp(
-                centre + vec2<i32>(dx * step, dy * step),
-                vec2<i32>(0, 0),
-                vec2<i32>(size) - vec2<i32>(1, 1),
-            );
-            let stored = textureLoad(shadow_maps, at, layer, 0);
-            // Reversed-Z: a blocker is *nearer the light*, so its depth is the
-            // greater one.
-            if stored > depth {
-                total = total + stored;
-                found = found + 1.0;
-            }
+    for (var i = 0u; i < BLOCKER_TAPS; i = i + 1u) {
+        let o = vogel(i, BLOCKER_TAPS, spin) * BLOCKER_SEARCH_TEXELS;
+        let at = clamp(
+            centre + vec2<i32>(o),
+            vec2<i32>(0, 0),
+            vec2<i32>(size) - vec2<i32>(1, 1),
+        );
+        let stored = textureLoad(shadow_maps, at, layer, 0);
+        // Reversed-Z: a blocker is *nearer the light*, so its depth is the
+        // greater one.
+        if stored > depth {
+            total = total + stored;
+            found = found + 1.0;
         }
     }
     return select(-1.0, total / found, found > 0.0);
@@ -384,9 +407,10 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     // than the map can express, and a shadow cannot be sharper than its own
     // resolution however small the source is.
     var radius = 1.0;
+    let spin = tap_spin(position, texel_world);
     let scale = info.penumbra[face];
     if scale > 0.0 {
-        let blocker = average_blocker(layer, texel, size, ndc.z + bias);
+        let blocker = average_blocker(layer, texel, size, ndc.z + bias, spin);
         if blocker < 0.0 {
             // Nothing between this point and the light, anywhere the search
             // looked. Fully lit, and the filter below is skipped entirely —
@@ -396,25 +420,22 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
         radius = clamp(scale * (blocker - ndc.z), 1.0, MAX_PENUMBRA_TEXELS);
     }
 
-    // A fixed grid spread over that radius. Five by five rather than three,
-    // because the taps are what the softness is made of: nine of them across
-    // eight texels is a shadow with steps in it.
+    // A turned disc of taps over that radius: no grid for the edge to step
+    // along, and each point's grain different, for the frames to average.
     var lit = 0.0;
-    let spacing = radius * 0.5;
-    for (var dy = -2; dy <= 2; dy = dy + 1) {
-        for (var dx = -2; dx <= 2; dx = dx + 1) {
-            let at = clamp(
-                texel + vec2<i32>(vec2<f32>(f32(dx), f32(dy)) * spacing),
-                vec2<i32>(0, 0),
-                vec2<i32>(size) - vec2<i32>(1, 1),
-            );
-            let stored = textureLoad(shadow_maps, at, layer, 0);
-            // Reversed-Z: nearer the light is *greater*. This fragment is lit
-            // if nothing was closer.
-            lit += select(0.0, 1.0, ndc.z + bias >= stored);
-        }
+    for (var i = 0u; i < FILTER_TAPS; i = i + 1u) {
+        let o = vogel(i, FILTER_TAPS, spin + 1.7) * radius;
+        let at = clamp(
+            texel + vec2<i32>(round(o)),
+            vec2<i32>(0, 0),
+            vec2<i32>(size) - vec2<i32>(1, 1),
+        );
+        let stored = textureLoad(shadow_maps, at, layer, 0);
+        // Reversed-Z: nearer the light is *greater*. This fragment is lit
+        // if nothing was closer.
+        lit += select(0.0, 1.0, ndc.z + bias >= stored);
     }
-    return lit / 25.0;
+    return lit / f32(FILTER_TAPS);
 }
 
 /// Which way the light is, from `at`.

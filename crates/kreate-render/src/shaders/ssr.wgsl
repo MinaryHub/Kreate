@@ -25,6 +25,8 @@ struct Params {
     reach: f32,
     // How thick a surface is taken to be behind its depth, in view units.
     thickness: f32,
+    // Which frame of a still view's average this is.
+    seed: f32,
 };
 
 @group(0) @binding(0) var depth: texture_depth_2d;
@@ -80,8 +82,13 @@ fn ssr_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if (here.w == 0.0) {
         return vec4<f32>(0.0);
     }
-    let p = here.xyz;
     let n = normalize((params.view * vec4<f32>(info.xyz, 0.0)).xyz);
+    // Started a hair off the surface along its normal, scaled by how far
+    // away it is: from the surface itself, depth's rounding found the ray
+    // behind its own neighbours, and a curved metal reflected dark specks
+    // of itself.
+    let p = here.xyz + n * (0.002 * abs(here.z));
+    let start = vec2<f32>(position.xy);
     // Away from the eye: -Z everywhere in an orthographic view.
     let v = select(normalize(p), vec3<f32>(0.0, 0.0, -1.0), params.projection[2][3] == 0.0);
     let r = reflect(v, n);
@@ -90,7 +97,10 @@ fn ssr_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // averages the offsets into a smooth result instead of bands.
     const STEPS: i32 = 48;
     let step = params.reach / f32(STEPS);
-    let noise = fract(52.9829189 * fract(0.06711056 * position.x + 0.00583715 * position.y));
+    // Turned by the frame: a fixed offset per pixel never averaged out, and
+    // showed as a dither across every reflection's edge.
+    let noise = fract(52.9829189 * fract(0.06711056 * position.x + 0.00583715 * position.y)
+        + params.seed * 0.618034);
     var t = step * (0.5 + noise);
     var hit = vec2<f32>(-1.0);
     var before = 0.0;
@@ -119,6 +129,11 @@ fn ssr_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             }
             hit = to_pixel(p + r * hi).xy;
             t = hi;
+            // A hit on the pixels it started from is the surface finding
+            // itself, not a reflection.
+            if (distance(hit, start) < 2.5) {
+                hit = vec2<f32>(-1.0);
+            }
             break;
         }
         before = t;

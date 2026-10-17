@@ -23,6 +23,9 @@ struct Params {
     region: [f32; 2],
     radius: f32,
     strength: f32,
+    /// Which frame of a still view's average this is.
+    seed: f32,
+    _pad: [f32; 3],
 }
 
 pub struct Ao {
@@ -149,14 +152,14 @@ impl Ao {
         };
         let apply = pipeline(
             "ao apply",
-            &[None, Some(&occlusion_layout)],
+            &[Some(&depth_layout), Some(&occlusion_layout)],
             "ao_apply",
             surfaces,
             Some(multiply),
         );
         let apply_linear = pipeline(
             "ao apply linear",
-            &[None, Some(&occlusion_layout)],
+            &[Some(&depth_layout), Some(&occlusion_layout)],
             "ao_apply",
             crate::display::HDR_FORMAT,
             Some(multiply),
@@ -270,6 +273,7 @@ impl Ao {
         region: (u32, u32),
         radius: f32,
         strength: f32,
+        seed: u32,
     ) {
         let params = Params {
             projection: projection.to_cols_array_2d(),
@@ -277,6 +281,8 @@ impl Ao {
             region: [region.0 as f32, region.1 as f32],
             radius,
             strength,
+            seed: (seed % 64) as f32,
+            _pad: [0.0; 3],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
     }
@@ -317,6 +323,7 @@ impl Ao {
         }
         let mut p = begin(encoder, surfaces, "ao apply", false, region);
         p.set_pipeline(apply);
+        p.set_bind_group(0, &self.depth_bind, &[]);
         p.set_bind_group(1, &self.occlusion_bind, &[]);
         p.draw(0..3, 0..1);
     }

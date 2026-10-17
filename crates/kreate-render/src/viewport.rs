@@ -62,6 +62,13 @@ pub enum ShadingMode {
 /// a floor and not a drawing.
 const LIT_LIGHT_GRID_SHARE: f32 = 0.45;
 
+/// How many unchanged frames make a view still enough to trace: twelve,
+/// most of the raster mean, so a drag that pauses or a press before the
+/// pointer moves is not taken for rest — two flipped between the two
+/// pictures at the start of every turn. Under the raster mean's sixteen,
+/// which is when a still view stops being drawn and would stop counting.
+const STILL_FRAMES: u32 = 12;
+
 pub fn wires_shown(shading: ShadingMode, overlay: bool) -> (bool, bool) {
     match shading {
         ShadingMode::Rendered => (false, false),
@@ -1731,6 +1738,13 @@ pub struct Viewport {
     /// Whether to draw the model's shadow on the floor, as Fusion does by
     /// default. In every view but the rendered one, which has its lights'.
     pub show_ground_shadow: bool,
+    /// Whether the rendered view switches to the path tracer whenever the
+    /// view is still, and back to the raster passes when it moves.
+    pub path_trace_when_still: bool,
+    /// Whether this still view is being traced for that reason.
+    auto_trace: bool,
+    /// How many frames in a row the picture has been the same.
+    still_frames: u32,
     /// Whether the rendered view is lit by the application's studio rather
     /// than the scene's own lights: then it has the ground shadow too, the
     /// studio being a floor and a room. Set by the caller each frame.
@@ -2842,6 +2856,9 @@ impl Viewport {
             grid_line: palette::GRID_LINE,
             show_grid: true,
             show_ground_shadow: true,
+            path_trace_when_still: false,
+            auto_trace: false,
+            still_frames: 0,
             studio_lit: false,
             ground_pipeline,
             ground_buf,
@@ -3196,6 +3213,7 @@ impl Viewport {
                 camera.view_rotation(),
                 self.render_size,
                 (camera.distance * 2.0).max(1e-3) as f32,
+                self.accum_samples,
             );
         }
         if self.blooming() {
@@ -3224,7 +3242,8 @@ impl Viewport {
             (camera.distance * 0.1).max(1e-4) as f32,
             // Gentler in the rendered view, where the lights already shade
             // the form and the occlusion is grounding rather than drawing it.
-            if self.shading.lit() { 0.6 } else { 1.0 },
+            if self.shading.lit() { 0.75 } else { 1.0 },
+            self.accum_samples,
         );
 
         let right = camera.right().as_vec3();
@@ -3665,10 +3684,13 @@ impl Viewport {
         bounds: kreate_math::Aabb,
         grid: f32,
     ) -> Option<GroundFrame> {
-        // The rendered view's own lights cast their own shadows, and the
-        // path tracer its true ones: only the studio's floor is drawn there.
+        // The rendered view's own lights cast their own shadows: only the
+        // studio's floor is drawn there. Kept while the still view is traced
+        // for quality, so the floor's shadow does not vanish as the view
+        // comes to rest and come back as it moves; dropped when tracing was
+        // asked for, as a render does.
         let rendered_without =
-            self.shading == ShadingMode::Rendered && (!self.studio_lit || self.path_tracing());
+            self.shading == ShadingMode::Rendered && (!self.studio_lit || self.path_trace);
         if !self.show_ground_shadow
             || self.shading == ShadingMode::Wireframe
             || rendered_without
@@ -3934,7 +3956,8 @@ impl Viewport {
                 } else {
                     0.0
                 },
-                0.0,
+                // The still view's frame, for the shadow filter's turn.
+                self.accum_samples as f32,
                 0.0,
             ],
         }
@@ -5082,7 +5105,15 @@ impl Viewport {
     /// Whether this frame is path traced: asked for, in the rendered view,
     /// with a scene handed over.
     pub fn path_tracing(&self) -> bool {
-        self.path_trace && self.shading == ShadingMode::Rendered && self.pathtracer.has_scene()
+        (self.path_trace || self.auto_trace)
+            && self.shading == ShadingMode::Rendered
+            && self.pathtracer.has_scene()
+    }
+
+    /// Whether the rendered view wants the path tracer's scene: always
+    /// tracing, or tracing whenever the view comes to rest.
+    pub fn wants_path_trace_scene(&self) -> bool {
+        self.path_trace || self.path_trace_when_still
     }
 
     /// Hands the path tracer its scene: the meshes, placed, the flat
@@ -5177,6 +5208,24 @@ impl Viewport {
         if signature != self.accum_signature {
             self.accum_signature = signature;
             self.accum_samples = 0;
+            self.still_frames = 0;
+            self.auto_trace = false;
+        } else {
+            self.still_frames = self.still_frames.saturating_add(1);
+        }
+        // At rest long enough, and the rendered view asked to trace when it
+        // is: the mean starts again, from the path tracer. Any change goes
+        // back to the raster frames above, which keep up with a drag.
+        if self.path_trace_when_still
+            && !self.path_trace
+            && !self.auto_trace
+            && self.still_frames >= STILL_FRAMES
+            && self.shading == ShadingMode::Rendered
+            && self.pathtracer.has_scene()
+        {
+            self.auto_trace = true;
+            self.accum_samples = 0;
+            self.pathtracer.forget_history();
         }
         if self.accum_samples >= self.sample_limit() {
             self.frame_sample = None;

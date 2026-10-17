@@ -1119,6 +1119,8 @@ impl App {
             .map_or(1.0, |p| kreate::prefs::load_resolution_scale(&p));
         app.ui.punchy =
             kreate::prefs::viewport_path().is_none_or(|p| kreate::prefs::load_punchy(&p));
+        app.ui.trace_when_still =
+            kreate::prefs::viewport_path().is_none_or(|p| kreate::prefs::load_trace_when_still(&p));
         app.ui.appearance = kreate::prefs::interface_path()
             .map(|p| kreate::prefs::load_appearance(&p))
             .unwrap_or_default();
@@ -11178,8 +11180,10 @@ impl App {
         let studio_rendered = gfx.viewport.shading == kreate_render::ShadingMode::Rendered
             && scenelights::uses_studio(&self.doc);
         gfx.viewport.studio_lit = studio_rendered;
+        gfx.viewport.path_trace_when_still = self.ui.trace_when_still;
         for v in gfx.extra.values_mut() {
             v.viewport.studio_lit = studio_rendered;
+            v.viewport.path_trace_when_still = self.ui.trace_when_still;
         }
         let preview = match gfx.viewport.shading {
             kreate_render::ShadingMode::Material => {
@@ -11388,7 +11392,7 @@ impl App {
                 });
             // The path tracer's scene, rebuilt when what it is made of
             // changed — not when the camera moved.
-            if gfx.viewport.path_trace {
+            if gfx.viewport.wants_path_trace_scene() {
                 if let Some(materials) = self.materials.as_ref() {
                     let traced_materials = materials.for_tracer(&self.doc);
                     let images = &traced_materials.images;

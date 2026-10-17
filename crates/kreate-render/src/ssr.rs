@@ -25,6 +25,10 @@ struct Params {
     region: [f32; 2],
     reach: f32,
     thickness: f32,
+    /// Which frame of a still view's average this is, so each frame marches
+    /// from a different offset and the average is smooth.
+    seed: f32,
+    _pad: [f32; 3],
 }
 
 pub struct Ssr {
@@ -243,6 +247,7 @@ impl Ssr {
         view: Mat4,
         region: (u32, u32),
         reach: f32,
+        seed: u32,
     ) {
         // Rebound every frame: the depth and the picture are remade with the
         // allocation, and a bind group is cheap.
@@ -283,6 +288,8 @@ impl Ssr {
             region: [region.0 as f32, region.1 as f32],
             reach,
             thickness: reach * 0.05,
+            seed: (seed % 64) as f32,
+            _pad: [0.0; 3],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
     }
