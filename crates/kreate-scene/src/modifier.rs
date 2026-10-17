@@ -55,8 +55,9 @@ use std::sync::Arc;
 
 use kreate_math::SceneTime;
 use kreate_mesh::modifiers::{
-    array, bevel, displace, mirror, simple_deform, solidify, subdivide, triangulate, weld,
-    ArrayParams, BevelParams, BooleanOp, DisplaceParams, MirrorParams, SimpleDeformParams,
+    array, bevel, decimate, displace, mirror, screw, shrinkwrap, simple_deform, solidify,
+    subdivide, triangulate, weld, ArrayParams, BevelParams, BooleanOp, DecimateParams,
+    DisplaceParams, MirrorParams, ScrewParams, ShrinkwrapParams, SimpleDeformParams,
     SolidifyParams, SubdivideParams, WeldParams,
 };
 use kreate_mesh::MeshData;
@@ -123,6 +124,13 @@ pub enum ModifierKind {
     Displace(DisplaceParams),
     /// Twisted, bent, tapered or stretched along an axis.
     SimpleDeform(SimpleDeformParams),
+    /// The mesh's edges swept round an axis, rising by a pitch.
+    Screw(ScrewParams),
+    /// Fewer triangles, the shape kept.
+    Decimate(DecimateParams),
+    /// Every vertex moved onto another object's surface; read as a boolean
+    /// reads its cutter.
+    Shrinkwrap(ShrinkwrapModifier),
     /// A modifier that moves the mesh according to the clock.
     ///
     /// Exists so that the cache's time-keyed path can be driven, and only in a
@@ -155,6 +163,9 @@ impl ModifierKind {
             ModifierKind::Weld(_) => "weld",
             ModifierKind::Displace(_) => "displace",
             ModifierKind::SimpleDeform(_) => "simple_deform",
+            ModifierKind::Screw(_) => "screw",
+            ModifierKind::Decimate(_) => "decimate",
+            ModifierKind::Shrinkwrap(_) => "shrinkwrap",
             #[cfg(test)]
             ModifierKind::Drift(_) => "drift",
         }
@@ -177,6 +188,9 @@ impl ModifierKind {
             ModifierKind::Weld(_) => "modifier-weld",
             ModifierKind::Displace(_) => "modifier-displace",
             ModifierKind::SimpleDeform(_) => "modifier-simple-deform",
+            ModifierKind::Screw(_) => "modifier-screw",
+            ModifierKind::Decimate(_) => "modifier-decimate",
+            ModifierKind::Shrinkwrap(_) => "modifier-shrinkwrap",
             #[cfg(test)]
             ModifierKind::Drift(_) => "modifier-drift",
         }
@@ -204,7 +218,10 @@ impl ModifierKind {
             | ModifierKind::Triangulate
             | ModifierKind::Weld(_)
             | ModifierKind::Displace(_)
-            | ModifierKind::SimpleDeform(_) => false,
+            | ModifierKind::SimpleDeform(_)
+            | ModifierKind::Screw(_)
+            | ModifierKind::Decimate(_)
+            | ModifierKind::Shrinkwrap(_) => false,
             #[cfg(test)]
             ModifierKind::Drift(_) => true,
         }
@@ -226,6 +243,18 @@ impl ModifierKind {
             ModifierKind::Weld(p) => weld(input, p),
             ModifierKind::Displace(p) => displace(input, p),
             ModifierKind::SimpleDeform(p) => simple_deform(input, p),
+            ModifierKind::Screw(p) => screw(input, p),
+            ModifierKind::Decimate(p) => decimate(input, p),
+            ModifierKind::Shrinkwrap(m) => match operands.iter().find(|o| o.uid == m.target) {
+                Some(operand) => {
+                    let mut target = (*operand.mesh).clone();
+                    for p in target.positions_mut() {
+                        *p = operand.to_local.transform_point3(p.as_dvec3()).as_vec3();
+                    }
+                    shrinkwrap(input, &target, &m.params)
+                }
+                None => input.clone(),
+            },
             ModifierKind::Boolean(b) => match operands.iter().find(|o| o.uid == b.operand) {
                 Some(operand) => {
                     let mut cutter = (*operand.mesh).clone();
@@ -276,6 +305,14 @@ impl ModifierKind {
 pub struct BooleanModifier {
     pub operand: Uid,
     pub op: BooleanOp,
+}
+
+/// A shrinkwrap's settings: the object whose surface is wrapped onto, by
+/// its identity, and how.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShrinkwrapModifier {
+    pub target: Uid,
+    pub params: ShrinkwrapParams,
 }
 
 /// A path array's settings: the object whose edges — or sketch lines —
@@ -454,6 +491,7 @@ fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<
         let uid = match m.kind {
             ModifierKind::Boolean(b) => b.operand,
             ModifierKind::PathArray(p) => p.path,
+            ModifierKind::Shrinkwrap(s) => s.target,
             _ => continue,
         };
         if out.iter().any(|o| o.uid == uid) {

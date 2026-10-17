@@ -1209,6 +1209,9 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
         ModifierKind::Weld(_) => "object.modifier_set_weld",
         ModifierKind::Displace(_) => "object.modifier_set_displace",
         ModifierKind::SimpleDeform(_) => "object.modifier_set_simple_deform",
+        ModifierKind::Screw(_) => "object.modifier_set_screw",
+        ModifierKind::Decimate(_) => "object.modifier_set_decimate",
+        ModifierKind::Shrinkwrap(_) => "object.modifier_set_shrinkwrap",
     }
 }
 

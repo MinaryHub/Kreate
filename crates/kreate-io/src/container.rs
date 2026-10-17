@@ -573,6 +573,12 @@ pub struct ModifierRecord {
     pub axis: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount: Option<f32>,
+    /// A screw's rise a turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f32>,
+    /// A decimate's share of triangles kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     /// A path array's step and start along its path, its offset from it,
@@ -628,6 +634,19 @@ fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<Modif
             r.mode = Some(p.mode.tag().to_string());
             r.axis = Some(p.axis);
             r.amount = Some(p.amount);
+        }
+        K::Screw(p) => {
+            r.axis = Some(p.axis);
+            r.angle = Some(p.angle);
+            r.pitch = Some(p.pitch);
+            r.segments = Some(p.steps);
+            r.count = Some(p.turns);
+        }
+        K::Decimate(p) => r.ratio = Some(p.ratio),
+        K::Shrinkwrap(m) => {
+            r.operand = Some(m.target.raw());
+            r.mode = Some(m.params.mode.tag().to_string());
+            r.offset = Some(m.params.offset);
         }
         K::Bevel(p) => {
             r.width = Some(p.width);
@@ -746,6 +765,36 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
                     .unwrap_or(d.mode),
                 axis: r.axis.unwrap_or(d.axis).min(2),
                 amount: r.amount.unwrap_or(d.amount),
+            })
+        }
+        "screw" => {
+            let d = ScrewParams::default();
+            K::Screw(ScrewParams {
+                axis: r.axis.unwrap_or(d.axis).min(2),
+                angle: r.angle.unwrap_or(d.angle),
+                pitch: r.pitch.unwrap_or(d.pitch),
+                steps: r.segments.unwrap_or(d.steps).clamp(3, 512),
+                turns: r.count.unwrap_or(d.turns).min(1000),
+            })
+        }
+        "decimate" => {
+            let d = DecimateParams::default();
+            K::Decimate(DecimateParams {
+                ratio: r.ratio.unwrap_or(d.ratio).clamp(0.0, 1.0),
+            })
+        }
+        "shrinkwrap" => {
+            let d = ShrinkwrapParams::default();
+            K::Shrinkwrap(kreate_scene::modifier::ShrinkwrapModifier {
+                target: kreate_scene::Uid::from_raw(r.operand.unwrap_or(0)),
+                params: ShrinkwrapParams {
+                    mode: r
+                        .mode
+                        .as_deref()
+                        .and_then(WrapMode::from_tag)
+                        .unwrap_or(d.mode),
+                    offset: r.offset.unwrap_or(d.offset),
+                },
             })
         }
         "boolean" => K::Boolean(BooleanModifier {

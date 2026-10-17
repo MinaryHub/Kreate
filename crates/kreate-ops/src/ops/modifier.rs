@@ -20,8 +20,9 @@
 //! looking at one stack.
 
 use kreate_mesh::modifiers::{
-    ArrayParams, BevelParams, BooleanOp, DeformMode, DisplaceParams, MirrorParams,
-    SimpleDeformParams, SolidifyParams, SubdivideParams, WeldParams,
+    ArrayParams, BevelParams, BooleanOp, DecimateParams, DeformMode, DisplaceParams, MirrorParams,
+    ScrewParams, ShrinkwrapParams, SimpleDeformParams, SolidifyParams, SubdivideParams, WeldParams,
+    WrapMode,
 };
 use kreate_ops_derive::OpParams;
 use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
@@ -42,6 +43,9 @@ pub const KINDS: &[&str] = &[
     "weld",
     "displace",
     "simple_deform",
+    "screw",
+    "decimate",
+    "shrinkwrap",
 ];
 
 fn kind_of(index: u32) -> ModifierKind {
@@ -56,6 +60,9 @@ fn kind_of(index: u32) -> ModifierKind {
         8 => ModifierKind::Weld(WeldParams::default()),
         9 => ModifierKind::Displace(DisplaceParams::default()),
         10 => ModifierKind::SimpleDeform(SimpleDeformParams::default()),
+        11 => ModifierKind::Screw(ScrewParams::default()),
+        12 => ModifierKind::Decimate(DecimateParams::default()),
+        13 => ModifierKind::Shrinkwrap(kreate_scene::modifier::ShrinkwrapModifier::default()),
         _ => ModifierKind::Array(ArrayParams::default()),
     }
 }
@@ -95,7 +102,10 @@ pub struct AddParams {
         "triangulate",
         "weld",
         "displace",
-        "simple_deform"
+        "simple_deform",
+        "screw",
+        "decimate",
+        "shrinkwrap"
     ))]
     pub kind: u32,
 }
@@ -452,6 +462,42 @@ pub fn setter_params(
             p.set(
                 "amount",
                 kreate_reflect::PropertyValue::Float(s.amount as f64),
+            );
+        }
+        ModifierKind::Screw(s) => {
+            p.set("axis", kreate_reflect::PropertyValue::Enum(s.axis.min(2)));
+            p.set(
+                "angle",
+                kreate_reflect::PropertyValue::Float(s.angle as f64),
+            );
+            p.set(
+                "pitch",
+                kreate_reflect::PropertyValue::Float(s.pitch as f64),
+            );
+            p.set("steps", kreate_reflect::PropertyValue::Int(s.steps as i64));
+            p.set("turns", kreate_reflect::PropertyValue::Int(s.turns as i64));
+        }
+        ModifierKind::Decimate(d) => {
+            p.set(
+                "ratio",
+                kreate_reflect::PropertyValue::Float(d.ratio as f64),
+            );
+        }
+        ModifierKind::Shrinkwrap(m) => {
+            let name = doc
+                .object_by_uid(m.target)
+                .and_then(|id| doc.object(id))
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            p.set("object", kreate_reflect::PropertyValue::Text(name));
+            let mode = WrapMode::ALL
+                .iter()
+                .position(|w| *w == m.params.mode)
+                .unwrap_or(0) as u32;
+            p.set("mode", kreate_reflect::PropertyValue::Enum(mode));
+            p.set(
+                "offset",
+                kreate_reflect::PropertyValue::Float(m.params.offset as f64),
             );
         }
         ModifierKind::Array(a) => {
@@ -996,6 +1042,215 @@ impl Operator for SetSimpleDeform {
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetScrewParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// The axis swept round, through the object's origin.
+    #[param(variants("x", "y", "z"))]
+    pub axis: u32,
+    /// How far round; a whole turn closes a ring.
+    #[param(min = 0.0, max = 6.3, unit = "angle")]
+    pub angle: f64,
+    /// How far along the axis one whole turn rises; 0 is a plain revolve.
+    #[param(soft_min = -1.0, soft_max = 1.0, unit = "length")]
+    pub pitch: f64,
+    /// Steps round one whole turn.
+    #[param(min = 3, max = 512, unit = "count")]
+    pub steps: u32,
+    /// Whole turns on top of the angle, for a spring.
+    #[param(min = 0, max = 1000, unit = "count")]
+    pub turns: u32,
+}
+
+impl Default for SetScrewParams {
+    fn default() -> Self {
+        let d = ScrewParams::default();
+        Self {
+            index: 0,
+            axis: d.axis,
+            angle: d.angle as f64,
+            pitch: d.pitch as f64,
+            steps: d.steps,
+            turns: d.turns,
+        }
+    }
+}
+
+/// Sets a screw modifier's parameters.
+pub struct SetScrew;
+
+impl Operator for SetScrew {
+    type Params = SetScrewParams;
+    fn id() -> &'static str {
+        "object.modifier_set_screw"
+    }
+    fn label() -> &'static str {
+        "Screw Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "screw")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Screw(ScrewParams {
+                axis: params.axis.min(2),
+                angle: params.angle as f32,
+                pitch: params.pitch as f32,
+                steps: params.steps.clamp(3, 512),
+                turns: params.turns.min(1000),
+            }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetDecimateParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// The share of the triangles kept.
+    #[param(min = 0.0, max = 1.0, step = 0.05)]
+    pub ratio: f64,
+}
+
+impl Default for SetDecimateParams {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            ratio: DecimateParams::default().ratio as f64,
+        }
+    }
+}
+
+/// Sets a decimate modifier's parameters.
+pub struct SetDecimate;
+
+impl Operator for SetDecimate {
+    type Params = SetDecimateParams;
+    fn id() -> &'static str {
+        "object.modifier_set_decimate"
+    }
+    fn label() -> &'static str {
+        "Decimate Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "decimate")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Decimate(DecimateParams {
+                ratio: params.ratio.clamp(0.0, 1.0) as f32,
+            }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetShrinkwrapParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// The object whose surface is wrapped onto, by name.
+    pub object: String,
+    /// Onto the nearest point of the surface, or where a line along each
+    /// vertex's normal meets it.
+    #[param(variants("nearest", "project"))]
+    pub mode: u32,
+    /// How far off the surface the vertices are left.
+    #[param(soft_min = -0.1, soft_max = 0.1, unit = "length")]
+    pub offset: f64,
+}
+
+impl Default for SetShrinkwrapParams {
+    fn default() -> Self {
+        let d = ShrinkwrapParams::default();
+        Self {
+            index: 0,
+            object: String::new(),
+            mode: 0,
+            offset: d.offset as f64,
+        }
+    }
+}
+
+/// Sets a shrinkwrap modifier's parameters.
+pub struct SetShrinkwrap;
+
+impl Operator for SetShrinkwrap {
+    type Params = SetShrinkwrapParams;
+    fn id() -> &'static str {
+        "object.modifier_set_shrinkwrap"
+    }
+    fn label() -> &'static str {
+        "Shrinkwrap Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "shrinkwrap")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let target_uid = if params.object.trim().is_empty() {
+            kreate_scene::Uid::NONE
+        } else {
+            let name = params.object.trim();
+            d.objects()
+                .find(|(_, o)| o.name == name)
+                .and_then(|(id, _)| d.object_uid(id))
+                .ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?
+        };
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Shrinkwrap(kreate_scene::modifier::ShrinkwrapModifier {
+                target: target_uid,
+                params: ShrinkwrapParams {
+                    mode: WrapMode::ALL
+                        .get(params.mode as usize)
+                        .copied()
+                        .unwrap_or_default(),
+                    offset: params.offset as f32,
+                },
+            }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct SetBevelParams {
     #[param(min = 0, unit = "count")]
     pub index: u32,
@@ -1388,6 +1643,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetWeld>();
     registry.register::<SetDisplace>();
     registry.register::<SetSimpleDeform>();
+    registry.register::<SetScrew>();
+    registry.register::<SetDecimate>();
+    registry.register::<SetShrinkwrap>();
     registry.register::<Add>();
     registry.register::<Apply>();
     registry.register::<Remove>();
@@ -1479,6 +1737,92 @@ mod tests {
         assert_eq!(
             o.modifiers[3].kind,
             doc.object(id).unwrap().modifiers[3].kind
+        );
+    }
+
+    /// A shrinkwrap reads its target as a boolean reads its cutter: a cube
+    /// wrapped onto a sphere lies on it, and the file keeps the target.
+    #[test]
+    fn a_shrinkwrap_reads_its_target_and_screw_and_decimate_are_set() {
+        let (r, mut h, mut doc, id, c) = setup();
+        doc.add_mesh_object("Ball", kreate_mesh::primitives::uv_sphere(2.0, 32, 16));
+        let wrap = KINDS.iter().position(|k| *k == "shrinkwrap").unwrap() as u32;
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            &c,
+            "object.modifier_add",
+            &[("kind", PropertyValue::Enum(wrap))],
+        );
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            &c,
+            "object.modifier_set_shrinkwrap",
+            &[
+                ("index", PropertyValue::Int(0)),
+                ("object", PropertyValue::Text("Ball".into())),
+                ("mode", PropertyValue::Enum(0)),
+                ("offset", PropertyValue::Float(0.0)),
+            ],
+        );
+        let mut cache = ModifierCache::new();
+        let shown = cache
+            .evaluated(&doc, id, &kreate_scene::modifier::EvalCtx::still())
+            .unwrap();
+        for p in shown.positions() {
+            assert!((p.length() - 2.0).abs() < 0.02, "{p:?}");
+        }
+        let bytes = kreate_io::container::write(&doc, &Default::default(), &[]).unwrap();
+        let back = kreate_io::container::read(std::io::Cursor::new(bytes))
+            .unwrap()
+            .document;
+        let (_, o) = back.objects().find(|(_, o)| o.name == "Cube").unwrap();
+        assert_eq!(
+            o.modifiers[0].kind,
+            doc.object(id).unwrap().modifiers[0].kind
+        );
+        // A screw and a decimate on a fresh cube, set and read back.
+        let (r, mut h, mut doc, id, c) = setup();
+        for (kind, op, pairs) in [
+            (
+                "screw",
+                "object.modifier_set_screw",
+                vec![
+                    ("index", PropertyValue::Int(0)),
+                    ("pitch", PropertyValue::Float(0.5)),
+                    ("turns", PropertyValue::Int(2)),
+                ],
+            ),
+            (
+                "decimate",
+                "object.modifier_set_decimate",
+                vec![
+                    ("index", PropertyValue::Int(1)),
+                    ("ratio", PropertyValue::Float(0.3)),
+                ],
+            ),
+        ] {
+            let k = KINDS.iter().position(|x| *x == kind).unwrap() as u32;
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                &c,
+                "object.modifier_add",
+                &[("kind", PropertyValue::Enum(k))],
+            );
+            run(&r, &mut h, &mut doc, &c, op, &pairs);
+        }
+        let mods = &doc.object(id).unwrap().modifiers;
+        assert!(matches!(
+            mods[0].kind,
+            ModifierKind::Screw(ScrewParams { turns: 2, .. })
+        ));
+        assert!(
+            matches!(mods[1].kind, ModifierKind::Decimate(DecimateParams { ratio }) if (ratio - 0.3).abs() < 1e-6)
         );
     }
 
@@ -1810,7 +2154,7 @@ mod tests {
     fn the_add_menu_and_the_kind_list_agree() {
         // The variant list drives the dropdown; `kind_of` turns the choice into a
         // modifier. They are two lists and would otherwise drift apart silently.
-        assert_eq!(KINDS.len(), 11);
+        assert_eq!(KINDS.len(), 14);
         for (i, name) in KINDS.iter().enumerate() {
             assert_eq!(kind_of(i as u32).id(), *name);
         }
