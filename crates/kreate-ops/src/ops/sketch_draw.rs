@@ -31,6 +31,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Polygon>();
     registry.register::<Slot>();
     registry.register::<Fillet>();
+    registry.register::<Mirror>();
+    registry.register::<Offset>();
+    registry.register::<ConstructionToggle>();
     registry.register::<Constrain>();
     registry.register::<MovePoints>();
     registry.register::<Delete>();
@@ -1357,6 +1360,308 @@ impl Operator for Fillet {
     }
 }
 
+// --- mirror, offset and construction -----------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MirrorParams {
+    /// The points to mirror, with every line between two of them.
+    #[param(hidden)]
+    pub points: Vec<u32>,
+    /// Lines to mirror, by their place in the sketch's list.
+    #[param(hidden)]
+    pub lines: Vec<u32>,
+    /// The two points of the line to mirror across.
+    #[param(hidden)]
+    pub axis: Vec<u32>,
+}
+
+/// Mirror images of the picked points and lines across a line, each
+/// image held symmetric to its original: move one and the other follows.
+/// Fusion's Mirror.
+pub struct Mirror;
+
+impl Operator for Mirror {
+    type Params = MirrorParams;
+    fn id() -> &'static str {
+        "sketch.mirror"
+    }
+    fn label() -> &'static str {
+        "Mirror"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let mut pts = points(doc.document(), id);
+        let object = doc.document().object(id).expect("the sketch");
+        let [a0, a1] = params.axis[..] else {
+            return Err(OpError::Failed("pick the line to mirror across".into()));
+        };
+        if a0 as usize >= pts.len() || a1 as usize >= pts.len() || a0 == a1 {
+            return Err(OpError::Failed("no such axis line".into()));
+        }
+        let (set, with) = pattern_source(
+            &object.sketch_lines,
+            &object.sketch,
+            &params.points,
+            &params.lines,
+            pts.len(),
+        );
+        let set: Vec<u32> = set.into_iter().filter(|v| *v != a0 && *v != a1).collect();
+        if set.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let (pa, pb) = (pts[a0 as usize], pts[a1 as usize]);
+        let u = (pb - pa).normalize_or_zero();
+        if u == DVec2::ZERO {
+            return Err(OpError::Failed("the axis line has no length".into()));
+        }
+        let reflect = |p: DVec2| {
+            let d = p - pa;
+            pa + u * d.dot(u) * 2.0 - d
+        };
+        let mut map = std::collections::HashMap::new();
+        let mut constraints = Vec::new();
+        for v in &set {
+            let image = pts.len() as u32;
+            pts.push(reflect(pts[*v as usize]));
+            map.insert(*v, image);
+            constraints.push(Constraint::Symmetric {
+                a: *v,
+                b: image,
+                axis: [a0, a1],
+            });
+        }
+        let to = |v: u32| map.get(&v).copied().unwrap_or(v);
+        let lines: Vec<[u32; 2]> = with
+            .iter()
+            .map(|l| object.sketch_lines[*l as usize])
+            .filter(|[a, b]| map.contains_key(a) && map.contains_key(b))
+            .map(|[a, b]| [to(a), to(b)])
+            .collect();
+        // The shape's own relations, mirrored: a circle stays a circle, a
+        // construction line stays construction.
+        let shape: Vec<Constraint> = object
+            .sketch
+            .iter()
+            .filter(|c| !c.points().is_empty() && c.points().iter().all(|v| map.contains_key(v)))
+            .filter(|c| {
+                !matches!(
+                    c,
+                    Constraint::Distance { .. }
+                        | Constraint::Angle { .. }
+                        | Constraint::Fixed { .. }
+                        | Constraint::Symmetric { .. }
+                )
+            })
+            .map(|c| c.remapped(&to))
+            .collect();
+        constraints.extend(shape);
+        commit(doc, id, pts, lines, constraints)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct OffsetParams {
+    /// Lines to offset, by their place in the sketch's list; a run of them
+    /// joined at their ends is offset as one.
+    #[param(hidden)]
+    pub lines: Vec<u32>,
+    /// How far, to the left of each line's direction; negative the other
+    /// way.
+    #[param(unit = "length")]
+    pub distance: f64,
+}
+
+impl Default for OffsetParams {
+    fn default() -> Self {
+        Self {
+            lines: Vec::new(),
+            distance: 0.005,
+        }
+    }
+}
+
+/// Copies of the picked lines a distance to one side, held parallel to
+/// them, joined where the originals were joined. Fusion's Offset, for
+/// lines.
+pub struct Offset;
+
+impl Operator for Offset {
+    type Params = OffsetParams;
+    fn id() -> &'static str {
+        "sketch.offset"
+    }
+    fn label() -> &'static str {
+        "Offset"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let d = params.distance;
+        if !d.is_finite() || d == 0.0 {
+            return Err(OpError::Failed("an offset needs a distance".into()));
+        }
+        let mut pts = points(doc.document(), id);
+        let object = doc.document().object(id).expect("the sketch");
+        let picked: Vec<[u32; 2]> = params
+            .lines
+            .iter()
+            .filter_map(|l| object.sketch_lines.get(*l as usize).copied())
+            .filter(|[a, b]| (*a as usize) < pts.len() && (*b as usize) < pts.len() && a != b)
+            .collect();
+        if picked.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        // Each line moved sideways; the offset of each original point is
+        // where the moved lines through it cross, so a corner stays a
+        // corner.
+        let shifted: Vec<(DVec2, DVec2)> = picked
+            .iter()
+            .map(|[a, b]| {
+                let (pa, pb) = (pts[*a as usize], pts[*b as usize]);
+                let n = (pb - pa).perp().normalize_or_zero() * d;
+                (pa + n, pb + n)
+            })
+            .collect();
+        let mut image: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut at_point = |pts: &mut Vec<DVec2>, v: u32| -> u32 {
+            if let Some(i) = image.get(&v) {
+                return *i;
+            }
+            let on: Vec<usize> = picked
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.contains(&v))
+                .map(|(i, _)| i)
+                .collect();
+            let place = if on.len() >= 2 {
+                let (p0, p1) = shifted[on[0]];
+                let (q0, q1) = shifted[on[1]];
+                let (r, s) = (p1 - p0, q1 - q0);
+                let denom = r.perp_dot(s);
+                if denom.abs() > 1e-12 {
+                    p0 + r * ((q0 - p0).perp_dot(s) / denom)
+                } else {
+                    let [a, _] = picked[on[0]];
+                    if a == v {
+                        p0
+                    } else {
+                        p1
+                    }
+                }
+            } else {
+                let [a, _] = picked[on[0]];
+                if a == v {
+                    shifted[on[0]].0
+                } else {
+                    shifted[on[0]].1
+                }
+            };
+            pts.push(place);
+            let i = pts.len() as u32 - 1;
+            image.insert(v, i);
+            i
+        };
+        let mut lines = Vec::new();
+        let mut constraints = Vec::new();
+        for (k, [a, b]) in picked.iter().enumerate() {
+            let (ia, ib) = (at_point(&mut pts, *a), at_point(&mut pts, *b));
+            lines.push([ia, ib]);
+            constraints.push(Constraint::Parallel {
+                a: *a,
+                b: *b,
+                c: ia,
+                d: ib,
+            });
+            if Constraint::is_construction(&object.sketch, [*a, *b]) {
+                constraints.push(Constraint::Construction { a: ia, b: ib });
+            }
+            // The first line's offset is the dimension: the rest follow
+            // their corners.
+            if k == 0 {
+                constraints.push(Constraint::Distance {
+                    a: *a,
+                    b: ia,
+                    value: pts[*a as usize].distance(pts[ia as usize]),
+                });
+            }
+        }
+        commit(doc, id, pts, lines, constraints)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ConstructionParams {
+    /// Lines, by their place in the sketch's list.
+    #[param(hidden)]
+    pub lines: Vec<u32>,
+    /// Made construction, or made ordinary again.
+    pub on: bool,
+}
+
+/// Marks lines construction — drawn dashed, bounding no region — or
+/// ordinary again.
+pub struct ConstructionToggle;
+
+impl Operator for ConstructionToggle {
+    type Params = ConstructionParams;
+    fn id() -> &'static str {
+        "sketch.construction"
+    }
+    fn label() -> &'static str {
+        "Construction Line"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let object = doc.document().object(id).expect("the sketch");
+        let picked: Vec<[u32; 2]> = params
+            .lines
+            .iter()
+            .filter_map(|l| object.sketch_lines.get(*l as usize).copied())
+            .collect();
+        if picked.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let o = doc.document_mut().object_mut(id).expect("the sketch");
+        let before = o.sketch.len();
+        o.sketch.retain(|c| match c {
+            Constraint::Construction { a, b } => !picked
+                .iter()
+                .any(|[x, y]| (x == a && y == b) || (x == b && y == a)),
+            _ => true,
+        });
+        if params.on {
+            for [a, b] in &picked {
+                o.sketch.push(Constraint::Construction { a: *a, b: *b });
+            }
+        }
+        Ok(if o.sketch.len() != before || params.on {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
 // --- points ------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -2294,6 +2599,165 @@ mod tests {
         .unwrap();
         let regions = kreate_scene::feature::sketch_regions(&doc, id);
         assert!(!regions.is_empty(), "a closed spline encloses a region");
+    }
+
+    #[test]
+    fn a_mirror_holds_the_image_to_the_original() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        // An axis up Y from the origin, and a line off to its right.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[
+                ("points", PropertyValue::Floats(vec![0.0, 0.0, 0.0, 3.0])),
+                ("joins", PropertyValue::Ints(vec![1, 0])),
+            ],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[("points", PropertyValue::Floats(vec![1.0, 1.0, 2.0, 2.0]))],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        assert_eq!(o.sketch_lines.len(), 2);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.mirror",
+            &[
+                ("lines", PropertyValue::Ints(vec![1])),
+                ("axis", PropertyValue::Ints(vec![0, 1])),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        let p = points(&doc, id);
+        assert_eq!(o.sketch_lines.len(), 3);
+        let [ia, ib] = o.sketch_lines[2];
+        assert!(
+            (p[ia as usize] - DVec2::new(-1.0, 1.0)).length() < 1e-6,
+            "{:?}",
+            p[ia as usize]
+        );
+        assert!((p[ib as usize] - DVec2::new(-2.0, 2.0)).length() < 1e-6);
+        // The original moved: the image follows.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.move",
+            &[
+                ("points", PropertyValue::Ints(vec![2])),
+                ("offset", PropertyValue::Vec3([0.0, 1.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let p = points(&doc, id);
+        assert!(
+            (p[ia as usize].y - p[2].y).abs() < 1e-4 && (p[ia as usize].x + p[2].x).abs() < 1e-4
+        );
+    }
+
+    #[test]
+    fn an_offset_runs_beside_a_corner_and_construction_bounds_nothing() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        // An L: along X, then up.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[(
+                "points",
+                PropertyValue::Floats(vec![0.0, 0.0, 2.0, 0.0, 2.0, 2.0]),
+            )],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.offset",
+            &[
+                ("lines", PropertyValue::Ints(vec![0, 1])),
+                ("distance", PropertyValue::Float(0.5)),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        let p = points(&doc, id);
+        assert_eq!(o.sketch_lines.len(), 4);
+        // To the left of +X is +Y; the corner of the offset is at (1.5, 0.5).
+        let corner = o.sketch_lines[2][1];
+        assert_eq!(corner, o.sketch_lines[3][0], "one corner, shared");
+        assert!(
+            (p[corner as usize] - DVec2::new(1.5, 0.5)).length() < 1e-6,
+            "{:?}",
+            p[corner as usize]
+        );
+        assert_eq!(
+            o.sketch
+                .iter()
+                .filter(|c| matches!(c, Constraint::Parallel { .. }))
+                .count(),
+            2
+        );
+
+        // A square, one side made construction: no region, until it is a
+        // line again.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([5.0, 5.0, 0.0])),
+                ("b", PropertyValue::Vec3([6.0, 6.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let before = kreate_scene::feature::sketch_regions(&doc, id).len();
+        assert_eq!(before, 1);
+        let last = doc.object(id).unwrap().sketch_lines.len() as i64 - 1;
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.construction",
+            &[
+                ("lines", PropertyValue::Ints(vec![last as u32])),
+                ("on", PropertyValue::Bool(true)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(kreate_scene::feature::sketch_regions(&doc, id).len(), 0);
+        assert!(Constraint::is_construction(
+            &doc.object(id).unwrap().sketch,
+            doc.object(id).unwrap().sketch_lines[last as usize]
+        ));
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.construction",
+            &[
+                ("lines", PropertyValue::Ints(vec![last as u32])),
+                ("on", PropertyValue::Bool(false)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(kreate_scene::feature::sketch_regions(&doc, id).len(), 1);
     }
 
     #[test]

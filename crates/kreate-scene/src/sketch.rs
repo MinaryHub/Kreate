@@ -69,6 +69,11 @@ pub enum Constraint {
     /// first — a circle's rule on its corners, which stay corners to pick
     /// and draw from.
     Polygon { centre: u32, ring: Vec<u32> },
+    /// `a` and `b` mirror images across the line through `axis`.
+    Symmetric { a: u32, b: u32, axis: [u32; 2] },
+    /// The line from `a` to `b` is construction: drawn dashed, used to
+    /// place and hold things, and never the edge of a region.
+    Construction { a: u32, b: u32 },
 }
 
 /// Where a fit-point spline's ring points lie: `count` points spread evenly
@@ -112,7 +117,7 @@ pub fn spline_ring(through: &[DVec2], count: usize, closed: bool) -> Vec<DVec2> 
 }
 
 /// The kinds, in the order the operators number them.
-pub const KINDS: [&str; 15] = [
+pub const KINDS: [&str; 17] = [
     "distance",
     "horizontal",
     "vertical",
@@ -128,6 +133,8 @@ pub const KINDS: [&str; 15] = [
     "tangent",
     "spline",
     "polygon",
+    "symmetric",
+    "construction",
 ];
 
 impl Constraint {
@@ -153,6 +160,8 @@ impl Constraint {
             Constraint::Tangent { .. } => 12,
             Constraint::Spline { .. } => 13,
             Constraint::Polygon { .. } => 14,
+            Constraint::Symmetric { .. } => 15,
+            Constraint::Construction { .. } => 16,
         }
     }
 
@@ -178,7 +187,19 @@ impl Constraint {
             Constraint::Spline { through, ring, .. } => {
                 through.iter().chain(ring.iter()).copied().collect()
             }
+            Constraint::Symmetric { a, b, axis } => vec![*a, *b, axis[0], axis[1]],
+            Constraint::Construction { a, b } => vec![*a, *b],
         }
+    }
+
+    /// Whether the line from `a` to `b` is marked construction in `list`.
+    pub fn is_construction(list: &[Constraint], line: [u32; 2]) -> bool {
+        list.iter().any(|c| match c {
+            Constraint::Construction { a, b } => {
+                (*a == line[0] && *b == line[1]) || (*a == line[1] && *b == line[0])
+            }
+            _ => false,
+        })
     }
 
     /// The same constraint on other points: each index through `map`. What
@@ -226,6 +247,16 @@ impl Constraint {
                 for v in through.iter_mut().chain(ring.iter_mut()) {
                     *v = map(*v);
                 }
+            }
+            Constraint::Symmetric { a, b, axis } => {
+                *a = map(*a);
+                *b = map(*b);
+                axis[0] = map(axis[0]);
+                axis[1] = map(axis[1]);
+            }
+            Constraint::Construction { a, b } => {
+                *a = map(*a);
+                *b = map(*b);
             }
         }
         out
@@ -320,6 +351,15 @@ impl Constraint {
             },
             // How many points it passes through, then those, then the ring;
             // `value` says whether it closes.
+            "symmetric" => Constraint::Symmetric {
+                a: get(0)?,
+                b: get(1)?,
+                axis: [get(2)?, get(3)?],
+            },
+            "construction" => Constraint::Construction {
+                a: get(0)?,
+                b: get(1)?,
+            },
             "spline" => {
                 let n = get(0)? as usize;
                 let through = p.get(1..1 + n).filter(|t| t.len() >= 2)?.to_vec();
@@ -406,6 +446,15 @@ impl Constraint {
                 let off = u.perp_dot(p(centre) - p(a)).abs() / u.length().max(1e-12);
                 out.push(off - (p(on) - p(centre)).length());
             }
+            Constraint::Symmetric { a, b, axis } => {
+                let u = line(axis[0], axis[1]);
+                let len = u.length().max(1e-12);
+                // The middle on the axis, and the pair square to it.
+                let mid = (p(a) + p(b)) * 0.5;
+                out.push(u.perp_dot(mid - p(axis[0])) / len);
+                out.push((p(b) - p(a)).dot(u) / len);
+            }
+            Constraint::Construction { .. } => {}
             Constraint::Spline {
                 ref through,
                 ref ring,

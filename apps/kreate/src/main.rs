@@ -4953,6 +4953,56 @@ impl App {
                         self.sketching.clicks.push((p, join));
                         self.sketching.typed.clear();
                     }
+                    // Mirror: the axis is the line clicked; what is selected
+                    // goes across it.
+                    Tool::Mirror => {
+                        if let Some(Pick::Line(l)) = pick {
+                            let g = self.sketch_geometry().unwrap_or_default();
+                            if let Some(ends) = g.lines.get(l as usize).copied() {
+                                let (points, lines) =
+                                    (self.sketching.points.clone(), self.sketching.lines.clone());
+                                self.run_op_with(
+                                    "sketch.mirror",
+                                    &[
+                                        ("points", PropertyValue::Ints(points)),
+                                        ("lines", PropertyValue::Ints(lines)),
+                                        ("axis", PropertyValue::Ints(ends.to_vec())),
+                                    ],
+                                );
+                                self.sketch_tool_done();
+                            }
+                        }
+                    }
+                    // Offset: the selected lines, as far as the click is
+                    // from the first of them, to its side — or as typed.
+                    Tool::Offset => {
+                        let lines = self.sketching.lines.clone();
+                        let g = self.sketch_geometry().unwrap_or_default();
+                        if let Some(&[a, b]) = lines.first().and_then(|l| g.lines.get(*l as usize))
+                        {
+                            let (pa, pb) = (g.points[a as usize], g.points[b as usize]);
+                            let n = (pb - pa).perp().normalize_or_zero();
+                            let side = (p - pa).dot(n);
+                            let typed = kreate::sketching::typed_lengths(
+                                &self.sketching.typed,
+                                self.doc.design.length_unit.metres(),
+                            );
+                            let d = typed
+                                .first()
+                                .map(|t| t.abs() * side.signum())
+                                .unwrap_or(side);
+                            if d.abs() > 1e-9 {
+                                self.run_op_with(
+                                    "sketch.offset",
+                                    &[
+                                        ("lines", PropertyValue::Ints(lines)),
+                                        ("distance", PropertyValue::Float(d)),
+                                    ],
+                                );
+                            }
+                            self.sketch_tool_done();
+                        }
+                    }
                     Tool::Fillet => {
                         if let Some(Pick::Point(v)) = pick {
                             let typed = kreate::sketching::typed_lengths(
@@ -12161,7 +12211,12 @@ impl App {
                     // The pattern works on what is selected: it is kept.
                     let picked = (self.sketching.points.clone(), self.sketching.lines.clone());
                     self.sketching.take(tool);
-                    if tool == kreate::sketching::Tool::Pattern {
+                    if matches!(
+                        tool,
+                        kreate::sketching::Tool::Pattern
+                            | kreate::sketching::Tool::Mirror
+                            | kreate::sketching::Tool::Offset
+                    ) {
                         (self.sketching.points, self.sketching.lines) = picked;
                         self.ui.pattern_dialog.picking_centre = false;
                     }
@@ -12189,6 +12244,32 @@ impl App {
                         "sketch.constraint_free",
                         &[("points", PropertyValue::Ints(points))],
                     );
+                }
+            }
+            // The selected lines made construction, or ordinary again when
+            // every one of them already is.
+            "app.sketch_construction" if self.op_ctx.mode == OpMode::Sketch => {
+                let lines = self.sketching.lines.clone();
+                if let Some(id) = kreate_ops::ops::sketch_draw::active_sketch(&self.doc) {
+                    if let Some(o) = self.doc.object(id) {
+                        let all = !lines.is_empty()
+                            && lines.iter().all(|l| {
+                                o.sketch_lines.get(*l as usize).is_some_and(|line| {
+                                    kreate_scene::sketch::Constraint::is_construction(
+                                        &o.sketch, *line,
+                                    )
+                                })
+                            });
+                        if !lines.is_empty() {
+                            self.run_op_with(
+                                "sketch.construction",
+                                &[
+                                    ("lines", PropertyValue::Ints(lines)),
+                                    ("on", PropertyValue::Bool(!all)),
+                                ],
+                            );
+                        }
+                    }
                 }
             }
             "app.sketch_delete" if self.op_ctx.mode == OpMode::Sketch => {

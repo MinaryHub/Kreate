@@ -1877,6 +1877,7 @@ struct Labels {
     drawing_right: String,
     dissolve_limited: String,
     edges_to_sketch: String,
+    sketch_construction: String,
     design_section: String,
     design_parameters: String,
     param_name: String,
@@ -2275,6 +2276,7 @@ impl Labels {
             drawing_right: t("drawing-right"),
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
+            sketch_construction: t("sketch-construction"),
             design_section: t("design-section"),
             design_parameters: t("design-parameters"),
             param_name: t("param-name"),
@@ -4575,11 +4577,23 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "polygon",
                         "slot",
                         "pattern",
+                        "mirror",
+                        "offset",
                         "point",
                         "fillet",
                         "trim",
                     ],
-                ),
+                )
+                .into_iter()
+                .chain([
+                    MenuNode::Separator,
+                    entry(
+                        "app.sketch_construction",
+                        &l.sketch_construction,
+                        dispatch("app.sketch_construction"),
+                    ),
+                ])
+                .collect(),
             }),
             kreate_ops::mode::Menu::Constrain => out.push(TopMenu {
                 label: l.menu_constrain.clone(),
@@ -11901,6 +11915,10 @@ fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene:
         ui.weak(state.catalog.get("sketch-hint"));
         ui.horizontal_wrapped(|ui| {
             for (kind, tag) in kreate_scene::sketch::KINDS.iter().enumerate() {
+                // Drawn shapes, not relations to add between picked points.
+                if matches!(*tag, "circle" | "arc" | "spline" | "polygon") {
+                    continue;
+                }
                 let label = state.catalog.get(&format!("sketch-kind-{tag}"));
                 if ui.small_button(label).clicked() {
                     let mut p = PropertyMap::new();
@@ -13523,7 +13541,7 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 24] = [
+const SKETCH_TOOLS: [&str; 26] = [
     "select",
     "pattern",
     "line",
@@ -13534,6 +13552,8 @@ const SKETCH_TOOLS: [&str; 24] = [
     "polygon",
     "slot",
     "fillet",
+    "mirror",
+    "offset",
     "point",
     "trim",
     "dimension",
@@ -13585,7 +13605,7 @@ fn sketch_tool_nodes(l: &Labels, names: &[&'static str]) -> Vec<MenuNode> {
 pub struct SketchView {
     /// Each line, and whether both its ends are pinned — Fusion's black
     /// (here the text colour) against its blue.
-    pub lines: Vec<([kreate_math::DVec3; 2], bool, bool)>,
+    pub lines: Vec<([kreate_math::DVec3; 2], bool, bool, bool)>,
     /// The points a tool can pick: pinned, selected.
     pub points: Vec<(kreate_math::DVec3, bool, bool)>,
     /// A constraint's mark, where it is drawn.
@@ -13856,7 +13876,7 @@ fn draw_sketches(
         fill(r, 35);
     }
     let halo = egui::Color32::from_black_alpha(150);
-    for ([a, b], pinned, selected) in &view.lines {
+    for ([a, b], pinned, selected, construction) in &view.lines {
         if let (Some(p), Some(q)) = (project(a), project(b)) {
             let ink = if *selected {
                 theme.accent
@@ -13865,6 +13885,16 @@ fn draw_sketches(
             } else {
                 blue
             };
+            // A construction line: dashed, thin, nothing under it.
+            if *construction {
+                painter.add(egui::Shape::dashed_line(
+                    &[p, q],
+                    egui::Stroke::new(1.0, ink.gamma_multiply(0.8)),
+                    5.0,
+                    4.0,
+                ));
+                continue;
+            }
             // A dark edge under the line, so it reads on a light solid as on
             // the dark ground: a sketch is drawn over the bodies made from
             // it, and their faces are as pale as the line.
@@ -15645,6 +15675,7 @@ mod tests {
             "menu-add-empty",
             "menu-add-curve",
             "design-parameters",
+            "sketch-construction",
             "param-name",
             "param-expression",
             "param-value",

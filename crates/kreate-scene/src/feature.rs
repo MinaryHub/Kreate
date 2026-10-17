@@ -148,7 +148,14 @@ pub fn sketch_regions(doc: &Document, sketch: crate::document::ObjectId) -> Vec<
         .map(|p| Vec2::new(p.x, p.y))
         .collect();
     let mut edges: Vec<[u32; 2]> = mesh.edges().to_vec();
-    edges.extend(object.sketch_lines.iter().copied());
+    // Construction lines place things; they bound nothing.
+    edges.extend(
+        object
+            .sketch_lines
+            .iter()
+            .copied()
+            .filter(|l| !crate::sketch::Constraint::is_construction(&object.sketch, *l)),
+    );
     regions::regions(&points, &edges)
 }
 

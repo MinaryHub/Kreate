@@ -30,6 +30,10 @@ pub enum Tool {
     Slot,
     /// Click a corner to round it.
     Fillet,
+    /// What is selected, mirrored across the line clicked.
+    Mirror,
+    /// The selected lines, copied a distance to the side clicked.
+    Offset,
     /// Click a line, circle or arc to take out the piece between the
     /// crossings either side.
     Trim,
@@ -57,6 +61,8 @@ impl Tool {
             "polygon" => Tool::Polygon,
             "slot" => Tool::Slot,
             "fillet" => Tool::Fillet,
+            "mirror" => Tool::Mirror,
+            "offset" => Tool::Offset,
             "trim" => Tool::Trim,
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
@@ -87,6 +93,8 @@ impl Tool {
             Tool::Polygon => "polygon",
             Tool::Slot => "slot",
             Tool::Fillet => "fillet",
+            Tool::Mirror => "mirror",
+            Tool::Offset => "offset",
             Tool::Trim => "trim",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
@@ -862,6 +870,7 @@ pub fn view(
             [to_world(*p), to_world(*q)],
             pin(*a) && pin(*b),
             ui.lines.contains(&(i as u32)),
+            Constraint::is_construction(&constraints, [*a, *b]),
         ));
     }
     for (i, p) in points.iter().enumerate() {
@@ -1135,6 +1144,8 @@ pub fn view(
         (Tool::Slot, 1) => "sketch-prompt-slot-end",
         (Tool::Slot, _) => "sketch-prompt-slot-width",
         (Tool::Fillet, _) => "sketch-prompt-fillet",
+        (Tool::Mirror, _) => "sketch-prompt-mirror",
+        (Tool::Offset, _) => "sketch-prompt-offset",
         (Tool::Trim, _) => "sketch-prompt-trim",
         (Tool::Dimension, _) => "sketch-prompt-dimension",
         (Tool::Constrain(_), _) => "sketch-prompt-constrain",
