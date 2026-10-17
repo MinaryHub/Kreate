@@ -225,6 +225,9 @@ pub struct Object {
     /// What it is to a robot: a link, a joint, a collision shape. See
     /// [`crate::robot`].
     pub robot: Option<crate::robot::RobotPart>,
+    /// What makes it a curve object: the splines it shows as a wire, a tube
+    /// or a ribbon, in place of its mesh. See [`crate::curve`].
+    pub curve: Option<crate::curve::Curve>,
 }
 
 impl Object {
@@ -259,6 +262,7 @@ impl Object {
             editing_shape: None,
             physics: crate::physics::ObjectPhysics::default(),
             robot: None,
+            curve: None,
         }
     }
 

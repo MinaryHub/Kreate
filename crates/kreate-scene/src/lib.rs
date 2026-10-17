@@ -7,6 +7,7 @@ pub mod animation;
 pub mod armature;
 pub mod camera;
 pub mod clipboard;
+pub mod curve;
 pub mod design;
 pub mod document;
 pub mod driver;

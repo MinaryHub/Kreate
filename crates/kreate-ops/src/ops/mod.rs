@@ -8,6 +8,7 @@
 pub mod anim;
 pub mod armature;
 pub mod collection;
+pub mod curve;
 pub mod design;
 pub mod driver;
 pub mod edges_sketch;
@@ -51,6 +52,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     sketch_draw::register(registry);
     registry.register::<sketch_trim::Trim>();
     registry.register::<edges_sketch::EdgesToSketch>();
+    curve::register(registry);
     feature::register(registry);
     render::register(registry);
     robot::register(registry);

@@ -625,7 +625,11 @@ impl ModifierCache {
         // A body is what its features make, not the mesh it holds; the stack
         // and the rest run on that as on any mesh.
         let built;
-        let stored = if object.features.is_empty() {
+        let stored = if let Some(curve) = &object.curve {
+            // A curve object is its curve, as a body is its features.
+            built = self.curve_mesh(object.uid, curve);
+            &built
+        } else if object.features.is_empty() {
             stored
         } else {
             built = self.body(doc, id);
@@ -1035,6 +1039,35 @@ impl ModifierCache {
         }
         self.misses += 1;
         let output = Arc::new(crate::feature::body(doc, &object.features, world));
+        self.bodies.retain(|e| e.object != uid);
+        self.bodies.push(BodyEntry {
+            object: uid,
+            key,
+            output: output.clone(),
+            used: self.generation,
+        });
+        output
+    }
+
+    /// A curve object's shape, built from its curve or found again. The
+    /// body cache holds it: one entry an object, keyed on the curve.
+    fn curve_mesh(
+        &mut self,
+        uid: kreate_reflect::Uid,
+        curve: &crate::curve::Curve,
+    ) -> Arc<MeshData> {
+        let key = curve.key();
+        if let Some(e) = self
+            .bodies
+            .iter_mut()
+            .find(|e| e.object == uid && e.key == key)
+        {
+            e.used = self.generation;
+            self.hits += 1;
+            return e.output.clone();
+        }
+        self.misses += 1;
+        let output = Arc::new(curve.to_mesh());
         self.bodies.retain(|e| e.object != uid);
         self.bodies.push(BodyEntry {
             object: uid,

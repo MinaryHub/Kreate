@@ -361,6 +361,9 @@ pub struct ObjectRecord {
     /// shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub robot: Option<RobotRecord>,
+    /// Its curve, when it is a curve object. See `kreate_scene::curve`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<CurveObjectRecord>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -1597,6 +1600,115 @@ fn world_from_record(record: &WorldRecord, document: &Document) -> kreate_scene:
     }
 }
 
+/// A curve object's curve, as the file holds it. (An animation curve is a
+/// [`CurveRecord`].)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CurveObjectRecord {
+    pub splines: Vec<SplineRecord>,
+    pub resolution: u32,
+    pub bevel_depth: f64,
+    pub bevel_resolution: u32,
+    #[serde(default)]
+    pub extrude: f64,
+    #[serde(default = "yes")]
+    pub fill_caps: bool,
+    #[serde(default)]
+    pub fill: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// One point of a spline in the file: position, left handle, right handle,
+/// radius, tilt.
+pub type SplinePointRecord = ([f64; 3], [f64; 3], [f64; 3], f64, f64);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplineRecord {
+    /// `bezier`, `poly` or `nurbs`.
+    pub kind: String,
+    pub closed: bool,
+    pub points: Vec<SplinePointRecord>,
+}
+
+impl CurveObjectRecord {
+    pub fn write(curve: &kreate_scene::curve::Curve) -> Self {
+        Self {
+            splines: curve
+                .splines
+                .iter()
+                .map(|s| SplineRecord {
+                    kind: s.kind.tag().to_string(),
+                    closed: s.closed,
+                    points: s
+                        .points
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.position.to_array(),
+                                p.left.to_array(),
+                                p.right.to_array(),
+                                p.radius,
+                                p.tilt,
+                            )
+                        })
+                        .collect(),
+                })
+                .collect(),
+            resolution: curve.resolution,
+            bevel_depth: curve.bevel_depth,
+            bevel_resolution: curve.bevel_resolution,
+            extrude: curve.extrude,
+            fill_caps: curve.fill_caps,
+            fill: curve.fill,
+        }
+    }
+
+    pub fn read(&self) -> kreate_scene::curve::Curve {
+        use kreate_scene::curve::{Curve, CurvePoint, Spline, SplineKind};
+        let finite = |v: [f64; 3]| v.iter().all(|x| x.is_finite());
+        Curve {
+            splines: self
+                .splines
+                .iter()
+                .map(|s| Spline {
+                    // A kind this build does not know is read as a polyline:
+                    // the points are still where they were.
+                    kind: SplineKind::from_tag(&s.kind).unwrap_or(SplineKind::Poly),
+                    closed: s.closed,
+                    points: s
+                        .points
+                        .iter()
+                        .filter(|(p, l, r, _, _)| finite(*p) && finite(*l) && finite(*r))
+                        .map(|(p, l, r, radius, tilt)| CurvePoint {
+                            position: glam::DVec3::from_array(*p),
+                            left: glam::DVec3::from_array(*l),
+                            right: glam::DVec3::from_array(*r),
+                            radius: if radius.is_finite() { *radius } else { 1.0 },
+                            tilt: if tilt.is_finite() { *tilt } else { 0.0 },
+                        })
+                        .collect(),
+                })
+                .collect(),
+            resolution: self.resolution.clamp(1, 64),
+            bevel_depth: if self.bevel_depth.is_finite() {
+                self.bevel_depth.max(0.0)
+            } else {
+                0.0
+            },
+            bevel_resolution: self.bevel_resolution.clamp(3, 256),
+            extrude: if self.extrude.is_finite() {
+                self.extrude.max(0.0)
+            } else {
+                0.0
+            },
+            fill_caps: self.fill_caps,
+            fill: self.fill,
+        }
+    }
+}
+
 /// A document plus everything in the archive this build did not recognise.
 pub struct Loaded {
     pub document: Document,
@@ -2063,6 +2175,7 @@ pub fn write(
                 editing_shape: object.editing_shape.clone(),
                 physics: crate::physics_record::write(&object.physics),
                 robot: object.robot.as_ref().map(RobotRecord::write),
+                curve: object.curve.as_ref().map(CurveObjectRecord::write),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -2790,6 +2903,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             object.physics = crate::physics_record::read(p);
         }
         object.robot = record.robot.as_ref().map(RobotRecord::read);
+        object.curve = record.curve.as_ref().map(CurveObjectRecord::read);
         object.linkage = match &record.linked {
             None => Linkage::Local,
             Some([library, name]) => Linkage::Linked {

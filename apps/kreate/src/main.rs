@@ -406,6 +406,30 @@ struct SculptStroke {
     session: Option<kreate_ops::ModalSession>,
 }
 
+/// Which place of a curve point is held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CurvePart {
+    Point,
+    Left,
+    Right,
+}
+
+/// A curve point or handle being dragged across the view.
+struct CurveDrag {
+    object: ObjectId,
+    spline: u32,
+    index: u32,
+    part: CurvePart,
+    /// The point as it was taken.
+    point: kreate_scene::curve::CurvePoint,
+    /// The plane the drag moves in: facing the view, through what was
+    /// grabbed, in the world.
+    plane: DVec3,
+    /// Where on that plane the pointer began.
+    from: DVec3,
+    session: Option<kreate_ops::ModalSession>,
+}
+
 /// A physics bake on its own thread.
 struct BakeJob {
     token: u32,
@@ -1038,6 +1062,8 @@ struct App {
     solid_auto: Option<((u64, Vec<[u64; 2]>, u64, bool), (u32, String))>,
     /// A sketch drag's step, live while the button is down.
     sketch_drag_session: Option<kreate_ops::ModalSession>,
+    /// A point or handle of the active curve being dragged in the viewport.
+    curve_drag: Option<CurveDrag>,
     /// The object Auto dynamic topology last said it would not cut.
     dyntopo_told: Option<ObjectId>,
     /// File ▸ Shared Session, while in one.
@@ -1174,6 +1200,7 @@ impl App {
             driven_at: u64::MAX,
             sketch_snap_cache: None,
             sketch_drag_session: None,
+            curve_drag: None,
             solid_auto: None,
             dyntopo_told: None,
             session: None,
@@ -2219,6 +2246,7 @@ impl App {
             ("object.add_light", &[]),
             ("object.add_camera", &[]),
             ("object.add_empty", &[]),
+            ("object.add_curve", &[]),
             ("object.add_armature", &[]),
             (
                 "object.bind_armature",
@@ -4255,6 +4283,195 @@ impl App {
                 Some((origin, self.camera.forward()))
             }
         }
+    }
+
+    /// What of the active curve is under the pointer: its spline, point,
+    /// and which of the point's three places — the point itself or a
+    /// handle — within `radius` on screen.
+    fn curve_pick(&self, radius: f64) -> Option<(u32, u32, CurvePart)> {
+        if self.op_ctx.mode != OpMode::RESTING {
+            return None;
+        }
+        let id = kreate_ops::ops::curve::active_curve(&self.doc)?;
+        let curve = self.doc.object(id)?.curve.as_ref()?;
+        let world = self.doc.world_transform(id);
+        let projector = self.ui.projector?;
+        let (x, y) = self.input.cursor?;
+        let ppp = self.egui_ctx.pixels_per_point() as f64;
+        let at = glam::DVec2::new(x / ppp, y / ppp);
+        let screen = |p: DVec3| {
+            projector
+                .project(world.transform_point3(p))
+                .map(|q| glam::DVec2::new(q.x as f64, q.y as f64))
+        };
+        let mut best: Option<((u32, u32, CurvePart), f64)> = None;
+        for (s, spline) in curve.splines.iter().enumerate() {
+            for (i, p) in spline.points.iter().enumerate() {
+                let mut places = vec![(CurvePart::Point, p.position)];
+                if spline.kind == kreate_scene::curve::SplineKind::Bezier {
+                    places.push((CurvePart::Left, p.left));
+                    places.push((CurvePart::Right, p.right));
+                }
+                for (part, place) in places {
+                    let Some(sp) = screen(place) else { continue };
+                    let d = sp.distance(at);
+                    // A handle on its point: the point wins, as the square is
+                    // drawn over the ring.
+                    let d = if part == CurvePart::Point { d - 0.5 } else { d };
+                    if d <= radius && best.is_none_or(|b| d < b.1) {
+                        best = Some(((s as u32, i as u32, part), d));
+                    }
+                }
+            }
+        }
+        best.map(|b| b.0)
+    }
+
+    /// The curve's points and handles: left takes hold of one and drags it
+    /// across the view; right or Esc puts it back.
+    fn curve_mouse(&mut self, button: MouseButton, pressed: bool) -> bool {
+        match (button, pressed) {
+            (MouseButton::Left, true) if self.press_belongs_to_viewport() => {
+                let Some((spline, index, part)) = self.curve_pick(8.0) else {
+                    return false;
+                };
+                let Some(id) = kreate_ops::ops::curve::active_curve(&self.doc) else {
+                    return false;
+                };
+                let Some(point) = self
+                    .doc
+                    .object(id)
+                    .and_then(|o| o.curve.as_ref())
+                    .and_then(|c| c.splines.get(spline as usize))
+                    .and_then(|s| s.points.get(index as usize))
+                    .copied()
+                else {
+                    return false;
+                };
+                let world = self.doc.world_transform(id);
+                let grabbed = world.transform_point3(match part {
+                    CurvePart::Point => point.position,
+                    CurvePart::Left => point.left,
+                    CurvePart::Right => point.right,
+                });
+                // Where the pointer's ray meets the plane facing the view
+                // through what was grabbed: the drag is measured from there.
+                let Some(from) = self.ray_on_plane(grabbed) else {
+                    return false;
+                };
+                self.curve_drag = Some(CurveDrag {
+                    object: id,
+                    spline,
+                    index,
+                    part,
+                    point,
+                    plane: grabbed,
+                    from,
+                    session: None,
+                });
+                true
+            }
+            (MouseButton::Left, false) => {
+                let Some(drag) = self.curve_drag.take() else {
+                    return false;
+                };
+                if let Some(session) = drag.session {
+                    self.history.commit_modal(session);
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+                true
+            }
+            (MouseButton::Right, true) => self.cancel_curve_drag(),
+            _ => false,
+        }
+    }
+
+    /// Where the pointer's ray meets the plane facing the view through `at`.
+    fn ray_on_plane(&self, at: DVec3) -> Option<DVec3> {
+        let (o, d) = self.cursor_ray()?;
+        let n = self.camera.forward();
+        let denom = d.dot(n);
+        if denom.abs() < 1e-12 {
+            return None;
+        }
+        let t = (at - o).dot(n) / denom;
+        Some(o + d * t)
+    }
+
+    /// Moves what is dragged under the pointer, live, as one step.
+    fn drive_curve_drag(&mut self) {
+        let Some(drag) = self.curve_drag.as_ref() else {
+            return;
+        };
+        let (object, spline, index, part, point, plane, from, begun) = (
+            drag.object,
+            drag.spline,
+            drag.index,
+            drag.part,
+            drag.point,
+            drag.plane,
+            drag.from,
+            drag.session.is_some(),
+        );
+        let Some(now) = self.ray_on_plane(plane) else {
+            return;
+        };
+        let to_local = self.doc.world_transform(object).inverse();
+        let delta = to_local.transform_vector3(now - from);
+        if !begun && delta.length() < 1e-9 {
+            return;
+        }
+        let mut p = point;
+        match part {
+            CurvePart::Point => p.translate(delta),
+            CurvePart::Left => p.left += delta,
+            CurvePart::Right => p.right += delta,
+        }
+        let params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::curve::point_params(
+            spline, index, &p,
+        ));
+        let Some(stored) = self.curve_drag.as_mut() else {
+            return;
+        };
+        match stored.session.as_mut() {
+            Some(session) => {
+                if let Err(e) = self.history.update_modal(
+                    &self.registry,
+                    &mut self.doc,
+                    None,
+                    &self.op_ctx,
+                    session,
+                    &params,
+                ) {
+                    tracing::warn!(error = %e, "curve drag failed");
+                }
+            }
+            None => match self.history.begin_modal(
+                &self.registry,
+                &mut self.doc,
+                None,
+                &self.op_ctx,
+                "curve.point_set",
+                &params,
+            ) {
+                Ok(Some(session)) => stored.session = Some(session),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "curve drag failed"),
+            },
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Puts a dragged point back where it was taken.
+    fn cancel_curve_drag(&mut self) -> bool {
+        let Some(drag) = self.curve_drag.take() else {
+            return false;
+        };
+        if let Some(session) = drag.session {
+            History::cancel_modal(session, &mut self.doc);
+        }
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+        true
     }
 
     /// The pointer on the active sketch's plane, in the sketch's own space.
@@ -11601,6 +11818,10 @@ impl App {
         if self.gesture_key(code) {
             return;
         }
+        // A curve point being dragged: Esc puts it back.
+        if code == KeyCode::Escape && self.cancel_curve_drag() {
+            return;
+        }
         if self.circle.is_some()
             && matches!(
                 code,
@@ -12992,6 +13213,11 @@ impl ApplicationHandler for App {
                 if self.op_ctx.mode == OpMode::Sketch && self.sketch_mouse(button, pressed) {
                     return;
                 }
+                // A curve's points and handles, in object mode, before a
+                // click would select something else.
+                if self.curve_mouse(button, pressed) {
+                    return;
+                }
                 // Ctrl+R looking for an edge: left cuts, right gives up.
                 if self.loop_cut_hover.is_some() && pressed {
                     match button {
@@ -13133,6 +13359,9 @@ impl ApplicationHandler for App {
                 }
                 if self.op_ctx.mode == OpMode::Sketch {
                     self.sketch_hover();
+                }
+                if self.curve_drag.is_some() {
+                    self.drive_curve_drag();
                 }
                 if self.measure.is_some() {
                     self.update_measure();
@@ -15586,6 +15815,64 @@ kreate.ops.object.add_primitive()" }),
         app.preview_sketch_pattern(id, world);
         let view = app.ui.sketch_view.as_ref().unwrap();
         assert_eq!(view.preview.len(), 3, "three copies of the one line");
+    }
+
+    /// A curve point dragged across the view: moved live with its handles,
+    /// one step when let go, put back on Esc.
+    #[test]
+    fn a_curve_point_dragged_moves_with_its_handles_and_is_one_step() {
+        let mut app = app();
+        app.run_op_with(
+            "object.add_curve",
+            &[
+                ("shape", PropertyValue::Enum(2)),
+                ("size", PropertyValue::Float(1.0)),
+            ],
+        );
+        let id = kreate_ops::ops::curve::active_curve(&app.doc).expect("a curve");
+        let point = app.doc.object(id).unwrap().curve.as_ref().unwrap().splines[0].points[2];
+        assert_eq!(point.position, DVec3::ZERO);
+        let steps = app.history.entries().len();
+        // The press: the point at the origin, the pointer's plane through it.
+        app.curve_drag = Some(CurveDrag {
+            object: id,
+            spline: 0,
+            index: 2,
+            part: CurvePart::Point,
+            point,
+            plane: DVec3::ZERO,
+            from: DVec3::ZERO,
+            session: None,
+        });
+        // Without a window there is no ray to drive the drag by: the move
+        // is applied the way `drive_curve_drag` applies it, through the
+        // same operator as the drag's own step.
+        let mut p = point;
+        p.translate(DVec3::new(0.0, 0.0, 1.0));
+        let params =
+            kreate_reflect::OpParams::to_map(&kreate_ops::ops::curve::point_params(0, 2, &p));
+        let session = app
+            .history
+            .begin_modal(
+                &app.registry,
+                &mut app.doc,
+                None,
+                &app.op_ctx,
+                "curve.point_set",
+                &params,
+            )
+            .unwrap()
+            .unwrap();
+        app.curve_drag.as_mut().unwrap().session = Some(session);
+        let moved = app.doc.object(id).unwrap().curve.as_ref().unwrap().splines[0].points[2];
+        assert_eq!(moved.position, DVec3::new(0.0, 0.0, 1.0));
+        assert_eq!(moved.left, point.left + DVec3::Z, "handles came along");
+        // Esc: back where it was, no step.
+        assert!(app.cancel_curve_drag());
+        let back = app.doc.object(id).unwrap().curve.as_ref().unwrap().splines[0].points[2];
+        assert_eq!(back.position, DVec3::ZERO);
+        assert_eq!(app.history.entries().len(), steps);
+        assert!(!app.cancel_curve_drag(), "nothing left to cancel");
     }
 
     #[test]

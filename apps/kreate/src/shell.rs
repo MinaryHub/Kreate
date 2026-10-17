@@ -1671,6 +1671,9 @@ struct Labels {
     recover_discard_all: String,
     add_mesh: String,
     add_light: String,
+    add_curve: String,
+    add_curve_shapes: [String; 4],
+    curve_convert: String,
     add_camera: String,
     add_empty: String,
     add_armature: String,
@@ -2035,6 +2038,14 @@ impl Labels {
             recover_discard_all: t("recover-discard-all"),
             add_mesh: t("menu-add-mesh"),
             add_light: t("menu-add-light"),
+            add_curve: t("menu-add-curve"),
+            add_curve_shapes: [
+                t("menu-add-curve-bezier"),
+                t("menu-add-curve-circle"),
+                t("menu-add-curve-path"),
+                t("menu-add-curve-nurbs"),
+            ],
+            curve_convert: t("curve-convert"),
             add_camera: t("menu-add-camera"),
             add_empty: t("menu-add-empty"),
             add_armature: t("menu-add-armature"),
@@ -4936,8 +4947,21 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
             .variant("kind", value),
         ));
     }
+    let curves: Vec<MenuNode> = (0..4u32)
+        .map(|shape| {
+            MenuNode::Entry(
+                MenuEntry::new(
+                    "object.add_curve",
+                    &l.add_curve_shapes[shape as usize],
+                    op("object.add_curve", &[("shape", V::Enum(shape))]),
+                )
+                .variant("shape", V::Enum(shape)),
+            )
+        })
+        .collect();
     vec![
         MenuNode::Sub(l.add_mesh.clone(), shapes),
+        MenuNode::Sub(l.add_curve.clone(), curves),
         MenuNode::Sub(l.add_light.clone(), lights),
         MenuNode::Separator,
         entry(
@@ -11604,6 +11628,7 @@ fn draw_data_tab(
             draw_armature_data(ui, state, doc, registry, id)
         }
         kreate_scene::document::ObjectData::Mesh(id) => {
+            draw_curve_panel(ui, state, registry, l, active);
             draw_sketch_panel(ui, state, active);
             draw_vertex_groups(ui, state, doc, id, active);
             draw_shape_keys(ui, state, active);
@@ -11614,6 +11639,83 @@ fn draw_data_tab(
 
 /// The sketch: its constraints with their dimensions, buttons that add one
 /// on what is selected in edit mode, and the solid it becomes.
+/// A curve object's panel: how it is shown, its splines, and the way out
+/// to a plain mesh.
+fn draw_curve_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    registry: &OperatorRegistry,
+    l: &Labels,
+    object: &kreate_scene::document::Object,
+) {
+    use kreate_reflect::PropertyValue as V;
+    let Some(curve) = &object.curve else {
+        return;
+    };
+    let Some(info) = registry.get("curve.set") else {
+        return;
+    };
+    let title = state.catalog.get("panel-curve");
+    let mut params = kreate_reflect::OpParams::to_map(&kreate_ops::ops::curve::curve_params(curve));
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        let text = field_menu_text(&state.catalog);
+        let out = kreate_ui::property_editor_full(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+            |_| true,
+            |_| None,
+            &l.key_property,
+            |_| None,
+            &text,
+        );
+        if out.changed {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "curve.set", params.clone(), dragging);
+        }
+        ui.separator();
+        let kinds: Vec<String> = kreate_scene::curve::SplineKind::ALL
+            .iter()
+            .map(|k| state.catalog.get(&format!("curve-kind-{}", k.tag())))
+            .collect();
+        let closed_label = state.catalog.get("curve-closed");
+        let spline_label = state.catalog.get("curve-spline");
+        for (i, spline) in curve.splines.iter().enumerate() {
+            ui.horizontal(|ui| {
+                // i18n-exempt: a number
+                ui.label(format!("{spline_label} {}", i + 1));
+                let mut kind = kreate_scene::curve::SplineKind::ALL
+                    .iter()
+                    .position(|k| *k == spline.kind)
+                    .unwrap_or(0);
+                let mut changed = false;
+                egui::ComboBox::from_id_salt(("curve-kind", i))
+                    .selected_text(kinds[kind].as_str())
+                    .show_ui(ui, |ui| {
+                        for (k, name) in kinds.iter().enumerate() {
+                            changed |= ui.selectable_value(&mut kind, k, name.as_str()).changed();
+                        }
+                    });
+                let mut closed = spline.closed;
+                changed |= ui.checkbox(&mut closed, &closed_label).changed();
+                if changed {
+                    let mut p = PropertyMap::new();
+                    p.set("spline", V::Int(i as i64));
+                    p.set("kind", V::Enum(kind as u32));
+                    p.set("closed", V::Bool(closed));
+                    state.queue.run("curve.spline_set", p);
+                }
+            });
+        }
+        ui.add_space(4.0);
+        if ui.button(&l.curve_convert).clicked() {
+            state.queue.run("curve.to_mesh", PropertyMap::new());
+        }
+    });
+}
+
 fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::document::Object) {
     use kreate_reflect::PropertyValue as V;
     let title = state.catalog.get("panel-sketch");
@@ -15280,6 +15382,12 @@ mod tests {
             "menu-add-light",
             "menu-add-camera",
             "menu-add-empty",
+            "menu-add-curve",
+            "menu-add-curve-bezier",
+            "menu-add-curve-circle",
+            "menu-add-curve-path",
+            "menu-add-curve-nurbs",
+            "curve-convert",
             "menu-add-plane",
             "menu-add-grid",
             "menu-add-uv-sphere",

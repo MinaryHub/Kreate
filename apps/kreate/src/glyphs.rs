@@ -113,10 +113,83 @@ pub fn markers_only(
                     camera_glyph(&transform, half, color, &mut lines);
                 }
             }
+            ObjectData::Mesh(_) => {
+                if let Some(curve) = &object.curve {
+                    curve_glyph(
+                        curve,
+                        &transform,
+                        color,
+                        doc.selection.active == Some(id),
+                        &mut lines,
+                        &mut points,
+                    );
+                }
+            }
             _ => {}
         }
     }
     (lines, points)
+}
+
+/// A curve object: its wire, and on the active one its points and handles
+/// — a square for a point, a ring for a handle, a line between.
+fn curve_glyph(
+    curve: &kreate_scene::curve::Curve,
+    transform: &kreate_math::DAffine3,
+    color: [f32; 4],
+    active: bool,
+    lines: &mut Vec<OverlayLine>,
+    points: &mut Vec<OverlayPoint>,
+) {
+    let at = |p: kreate_math::DVec3| transform.transform_point3(p);
+    for [a, b] in curve.wire() {
+        lines.push(OverlayLine {
+            a: at(a),
+            b: at(b),
+            color,
+            width_px: if active { 2.0 } else { 1.5 },
+            dashed: false,
+            on_top: false,
+        });
+    }
+    if !active {
+        return;
+    }
+    let mut handle = palette::display_rgba(palette::HANDLE);
+    handle[3] = 0.9;
+    for spline in &curve.splines {
+        for p in &spline.points {
+            points.push(OverlayPoint {
+                position: at(p.position),
+                color,
+                radius_px: 4.0,
+                shape: MarkerShape::Square,
+                dot: true,
+                on_top: true,
+            });
+            if spline.kind != kreate_scene::curve::SplineKind::Bezier {
+                continue;
+            }
+            for h in [p.left, p.right] {
+                lines.push(OverlayLine {
+                    a: at(p.position),
+                    b: at(h),
+                    color: handle,
+                    width_px: 1.0,
+                    dashed: false,
+                    on_top: true,
+                });
+                points.push(OverlayPoint {
+                    position: at(h),
+                    color: handle,
+                    radius_px: 3.5,
+                    shape: MarkerShape::Ring,
+                    dot: false,
+                    on_top: true,
+                });
+            }
+        }
+    }
 }
 
 /// Blender's octahedral bones: a diamond a tenth of the way up, joined to the
