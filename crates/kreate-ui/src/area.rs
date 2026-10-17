@@ -313,6 +313,20 @@ pub struct Screen {
     /// One counter for both kinds of id, so an area and a split can never be
     /// confused for one another in a saved file or a log line.
     next: u32,
+    /// Areas taken out of the tree to float in windows of their own. Part of
+    /// the layout, so they are saved with it and come back on the next start
+    /// — a panel left floating at quit was otherwise simply gone.
+    floating: Vec<Floating>,
+}
+
+/// An area floating in a window of its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Floating {
+    /// Its id, kept while it floats so it docks back as itself.
+    pub id: AreaId,
+    pub editor: EditorId,
+    /// Where its window is.
+    pub rect: Rect,
 }
 
 /// Where an area ended up.
@@ -356,7 +370,69 @@ impl Screen {
                 editor,
             },
             next: 1,
+            floating: Vec::new(),
         }
+    }
+
+    /// The floating areas.
+    pub fn floating(&self) -> &[Floating] {
+        &self.floating
+    }
+
+    /// Takes `area` out of the tree to float at `rect`. `false` when it is
+    /// not in the tree or is the last area.
+    pub fn float(&mut self, area: AreaId, rect: Rect) -> bool {
+        let Some(editor) = self.editor(area) else {
+            return false;
+        };
+        if !self.close(area) {
+            return false;
+        }
+        self.floating.push(Floating {
+            id: area,
+            editor,
+            rect,
+        });
+        true
+    }
+
+    /// A new floating area showing `editor`: how a saved one comes back.
+    pub fn add_floating(&mut self, editor: EditorId, rect: Rect) -> AreaId {
+        let id = AreaId(self.take_id());
+        self.floating.push(Floating { id, editor, rect });
+        id
+    }
+
+    /// Docks a floating area beside `beside`, on `side`. `false`, and it
+    /// still floats, when it is not floating or `beside` is not there.
+    pub fn dock_floating(&mut self, area: AreaId, beside: AreaId, side: Side, share: f32) -> bool {
+        let Some(at) = self.floating.iter().position(|f| f.id == area) else {
+            return false;
+        };
+        let editor = self.floating[at].editor.clone();
+        if !self.dock(beside, side, share, area, editor) {
+            return false;
+        }
+        self.floating.remove(at);
+        true
+    }
+
+    /// Moves a floating area's window.
+    pub fn set_floating_rect(&mut self, area: AreaId, rect: Rect) -> bool {
+        match self.floating.iter_mut().find(|f| f.id == area) {
+            Some(f) if f.rect != rect => {
+                f.rect = rect;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Closes a floating area, as its window's close button does.
+    pub fn remove_floating(&mut self, area: AreaId) -> bool {
+        let before = self.floating.len();
+        self.floating.retain(|f| f.id != area);
+        self.floating.len() != before
     }
 
     fn take_id(&mut self) -> u32 {
@@ -540,7 +616,11 @@ impl Screen {
         // Trailing nodes mean the file described more than one tree, which is
         // not a layout. Accepting the first and discarding the rest would give
         // the user a screen they did not save.
-        rest.is_empty().then_some(Self { root, next })
+        rest.is_empty().then_some(Self {
+            root,
+            next,
+            floating: Vec::new(),
+        })
     }
 
     /// Where everything goes, given the space the screen has.

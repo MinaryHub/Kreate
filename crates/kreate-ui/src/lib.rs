@@ -42,8 +42,8 @@ pub mod workspace;
 pub mod wsfile;
 
 pub use area::{
-    AreaId, AreaRect, Axis, EditorId, EditorInfo, EditorRegistry, Handle, Layout, NodeSpec, Screen,
-    Side, SplitId,
+    AreaId, AreaRect, Axis, EditorId, EditorInfo, EditorRegistry, Floating, Handle, Layout,
+    NodeSpec, Screen, Side, SplitId,
 };
 pub use command::{Command, CommandQueue};
 pub use fonts::{install as install_fonts, prewarm as prewarm_fonts};

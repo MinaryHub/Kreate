@@ -167,8 +167,36 @@ pub fn write(spaces: &Workspaces) -> String {
                 }
             }
         }
+        // The panels floating over it: editor, then the window's corner and
+        // size in points. A build that predates the field ignores it.
+        for f in space.screen.floating() {
+            let r = f.rect;
+            let _ = writeln!(
+                out,
+                "float = \"{} {:.0} {:.0} {:.0} {:.0}\"",
+                f.editor.as_str(),
+                r.min.x,
+                r.min.y,
+                r.width(),
+                r.height()
+            );
+        }
     }
     out
+}
+
+/// A `float` value back: `outliner 900 40 300 400`.
+fn float_from_text(text: &str) -> Option<(EditorId, egui::Rect)> {
+    let mut parts = text.split_whitespace();
+    let editor = EditorId::parse(parts.next()?);
+    let mut n = || parts.next()?.parse::<f32>().ok().filter(|v| v.is_finite());
+    let (x, y, w, h) = (n()?, n()?, n()?, n()?);
+    (w > 0.0 && h > 0.0).then(|| {
+        (
+            editor,
+            egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+        )
+    })
 }
 
 /// Reads a workspace file. Never fails; anything wrong comes back as a problem.
@@ -183,12 +211,24 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
 
     // A workspace under construction: the line its table started on, its name,
     // and the nodes seen so far.
-    let mut current: Option<(usize, Option<String>, Vec<NodeSpec>)> = None;
+    #[allow(clippy::type_complexity)]
+    let mut current: Option<(
+        usize,
+        Option<String>,
+        Vec<NodeSpec>,
+        Vec<(EditorId, egui::Rect)>,
+    )> = None;
 
-    let finish = |current: &mut Option<(usize, Option<String>, Vec<NodeSpec>)>,
+    #[allow(clippy::type_complexity)]
+    let finish = |current: &mut Option<(
+        usize,
+        Option<String>,
+        Vec<NodeSpec>,
+        Vec<(EditorId, egui::Rect)>,
+    )>,
                   loaded: &mut Vec<Workspace>,
                   problems: &mut Vec<Problem>| {
-        let Some((line, name, nodes)) = current.take() else {
+        let Some((line, name, nodes, floats)) = current.take() else {
             return;
         };
         let Some(name) = name else {
@@ -199,7 +239,12 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
         // alternative is handing the user an arrangement they never saved, which
         // they then have to work out how to undo.
         match Screen::from_nodes(&nodes) {
-            Some(screen) => loaded.push(Workspace { name, screen }),
+            Some(mut screen) => {
+                for (editor, rect) in floats {
+                    screen.add_floating(editor, rect);
+                }
+                loaded.push(Workspace { name, screen })
+            }
             None => problems.push(Problem::BrokenLayout { line, name }),
         }
     };
@@ -212,7 +257,7 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
         }
         if trimmed == "[[workspace]]" {
             finish(&mut current, &mut loaded, &mut problems);
-            current = Some((line, None, Vec::new()));
+            current = Some((line, None, Vec::new(), Vec::new()));
             continue;
         }
         let Some((name, value)) = trimmed.split_once('=') else {
@@ -238,8 +283,17 @@ pub fn parse(text: &str) -> (Workspaces, Vec<Problem>) {
                     name: name.to_string(),
                 }),
             },
-            Some((_, space_name, nodes)) => match name {
+            Some((_, space_name, nodes, floats)) => match name {
                 "name" => *space_name = Some(unquote(value)),
+                // A floating panel that does not read is dropped with a word:
+                // the rest of the layout is still the user's.
+                "float" => {
+                    let text = unquote(value);
+                    match float_from_text(&text) {
+                        Some(f) => floats.push(f),
+                        None => problems.push(Problem::UnreadableNode { line, text }),
+                    }
+                }
                 "node" => {
                     let text = unquote(value);
                     match node_from_text(&text) {
@@ -814,5 +868,23 @@ node = \"area outliner\"
                 area.rect
             );
         }
+    }
+
+    #[test]
+    fn a_floating_panel_reads_back_and_a_broken_one_is_dropped() {
+        let text = "schema_version = 1\nactive = \"A\"\n\n[[workspace]]\nname = \"A\"\n\
+                    node = \"split v 0.7000\"\nnode = \"area viewport\"\nnode = \"area properties\"\n\
+                    float = \"outliner 900 40 300 400\"\nfloat = \"outliner nine\"\n";
+        let (spaces, problems) = parse(text);
+        let screen = &spaces.iter().next().unwrap().screen;
+        assert_eq!(screen.area_count(), 2);
+        assert_eq!(screen.floating().len(), 1);
+        let f = &screen.floating()[0];
+        assert_eq!(f.editor, EditorId::OUTLINER);
+        assert_eq!(f.rect.min, egui::pos2(900.0, 40.0));
+        assert_eq!(f.rect.size(), egui::vec2(300.0, 400.0));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        // Written again, the same.
+        assert!(write(&spaces).contains("float = \"outliner 900 40 300 400\""));
     }
 }

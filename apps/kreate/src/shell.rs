@@ -76,8 +76,9 @@ pub struct ShellState {
     /// list while iterating it does. The command queue takes the same shape for
     /// the same reason.
     area_edits: Vec<AreaEdit>,
-    /// Areas taken out of the screen to float in windows of their own.
-    pub floating: Vec<FloatingArea>,
+    /// What a floating area's window is doing this frame: kept apart from the
+    /// layout, which saves, because a drag changes it every frame.
+    float_drag: std::collections::HashMap<kreate_ui::AreaId, FloatDrag>,
     /// Whether the layouts have changed since they were last written.
     ///
     /// Set by any applied layout edit, including a resize — which is why the
@@ -478,17 +479,12 @@ enum AreaEdit {
     Dock(kreate_ui::AreaId, kreate_ui::AreaId, kreate_ui::Side),
 }
 
-/// An area floating in a window of its own: undocked from a workspace's
-/// screen, and docked back by its menu or by dropping it on an area's edge.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FloatingArea {
-    /// The workspace it was taken from, and is shown with.
-    pub workspace: usize,
-    /// The id it had on the screen, kept so it docks back as itself.
-    pub id: kreate_ui::AreaId,
-    pub editor: kreate_ui::EditorId,
-    /// Where its window is.
-    pub rect: egui::Rect,
+/// A floating area's window in motion. The area itself — editor, place —
+/// is the layout's: see [`kreate_ui::Floating`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FloatDrag {
+    /// Where its window was last frame.
+    pub rect: Option<egui::Rect>,
     /// Its window is being dragged: where it would dock is shown, and it
     /// docks there when let go.
     pub dragging: bool,
@@ -574,7 +570,7 @@ impl ShellState {
 
     /// Whether an area is floating rather than on the screen.
     pub fn is_floating(&self, area: kreate_ui::AreaId) -> bool {
-        self.floating.iter().any(|f| f.id == area)
+        self.screen().floating().iter().any(|f| f.id == area)
     }
 
     /// Where a floating area docks from its menu: on the right of the first
@@ -738,44 +734,38 @@ impl ShellState {
                     self.workspaces.switch_to(index);
                 }
                 AreaEdit::Undock(area, rect, follow) => {
-                    let Some(editor) = self.screen().editor(area) else {
-                        continue;
+                    // A little in from where it was, so it is seen to lift
+                    // off; a tear-off is moved by the drag.
+                    let at = if follow.is_some() {
+                        rect
+                    } else {
+                        rect.translate(egui::vec2(24.0, 24.0))
                     };
-                    if self.screen_mut().close(area) {
-                        self.floating.push(FloatingArea {
-                            workspace: self.workspaces.active_index(),
-                            id: area,
-                            editor,
-                            // A little in from where it was, so it is seen
-                            // to lift off; a tear-off is moved by the drag.
-                            rect: if follow.is_some() {
-                                rect
-                            } else {
-                                rect.translate(egui::vec2(24.0, 24.0))
+                    if self.screen_mut().float(area, at) && follow.is_some() {
+                        self.float_drag.insert(
+                            area,
+                            FloatDrag {
+                                rect: Some(at),
+                                dragging: true,
+                                follow,
                             },
-                            dragging: follow.is_some(),
-                            follow,
-                        });
+                        );
                     }
                 }
                 AreaEdit::Dock(area, beside, side) => {
-                    let Some(at) = self.floating.iter().position(|f| f.id == area) else {
-                        continue;
-                    };
-                    let editor = self.floating[at].editor.clone();
-                    let mut docked =
-                        self.screen_mut()
-                            .dock(beside, side, DOCK_SHARE, area, editor.clone());
+                    let mut docked = self
+                        .screen_mut()
+                        .dock_floating(area, beside, side, DOCK_SHARE);
                     // Beside what is gone: where its menu would put it.
                     if !docked {
                         if let Some((beside, side)) = self.default_dock() {
                             docked = self
                                 .screen_mut()
-                                .dock(beside, side, DOCK_SHARE, area, editor);
+                                .dock_floating(area, beside, side, DOCK_SHARE);
                         }
                     }
                     if docked {
-                        self.floating.remove(at);
+                        self.float_drag.remove(&area);
                     }
                 }
             }
@@ -831,7 +821,7 @@ impl Default for ShellState {
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
             area_edits: Vec::new(),
-            floating: Vec::new(),
+            float_drag: Default::default(),
             layout_dirty: false,
             dragging: None,
             egui_wants_keyboard: false,
@@ -2569,17 +2559,13 @@ pub fn draw(
     // Areas floating in windows of their own, over the screen. Dragged by
     // the title onto an area's edge, one docks there when let go.
     let ctx = ui.ctx().clone();
-    let space = state.workspaces.active_index();
-    let floating: Vec<FloatingArea> = state
-        .floating
-        .iter()
-        .filter(|f| f.workspace == space)
-        .cloned()
-        .collect();
+    let floating: Vec<kreate_ui::Floating> = state.screen().floating().to_vec();
     let pointer = ctx.input(|i| i.pointer.interact_pos());
     let (down, released) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_released()));
     let accent = kreate_ui::theme::from_ui(ui).accent;
     for f in floating {
+        let drag = state.float_drag.get(&f.id).copied().unwrap_or_default();
+        let last = drag.rect.unwrap_or(f.rect);
         let title = state
             .editors
             .get(&f.editor)
@@ -2590,7 +2576,7 @@ pub fn draw(
             .id(egui::Id::new(("floating-area", f.id.0)))
             .default_rect(f.rect);
         // A tear-off follows the pointer until it is let go.
-        if let (Some(grab), Some(p), true) = (f.follow, pointer, down) {
+        if let (Some(grab), Some(p), true) = (drag.follow, pointer, down) {
             window = window.current_pos(p - grab);
         }
         let shown = window
@@ -2626,7 +2612,9 @@ pub fn draw(
             });
         if !open {
             // Closed with its window: gone, as a closed area is.
-            state.floating.retain(|g| g.id != f.id);
+            state.screen_mut().remove_floating(f.id);
+            state.float_drag.remove(&f.id);
+            state.layout_dirty = true;
             continue;
         }
         let Some(shown) = shown else { continue };
@@ -2634,8 +2622,8 @@ pub fn draw(
         state.viewport_blockers.push(rect);
         // Moved, not resized: its title is being dragged.
         let moved =
-            (rect.min - f.rect.min).length() > 0.5 && (rect.size() - f.rect.size()).length() < 0.5;
-        let dragging = down && (f.dragging || moved || f.follow.is_some());
+            (rect.min - last.min).length() > 0.5 && (rect.size() - last.size()).length() < 0.5;
+        let dragging = down && (drag.dragging || moved || drag.follow.is_some());
         let zone = pointer.and_then(|p| dock_zone(&screen_areas, p));
         if dragging {
             if let Some((_, _, highlight)) = zone {
@@ -2646,17 +2634,23 @@ pub fn draw(
                 .rect_filled(highlight, 4.0, accent.gamma_multiply(0.35));
             }
         }
-        if f.dragging && released {
+        if drag.dragging && released {
             if let Some((beside, side, _)) = zone {
                 state.dock_area(f.id, beside, side);
             }
         }
-        if let Some(g) = state.floating.iter_mut().find(|g| g.id == f.id) {
-            g.rect = rect;
-            g.dragging = dragging;
-            if !down {
-                g.follow = None;
-            }
+        state.float_drag.insert(
+            f.id,
+            FloatDrag {
+                rect: Some(rect),
+                dragging,
+                follow: drag.follow.filter(|_| down),
+            },
+        );
+        // Settled somewhere new: into the layout, to be saved. Not during the
+        // drag, which would write the file every frame.
+        if !down && state.screen_mut().set_floating_rect(f.id, rect) {
+            state.layout_dirty = true;
         }
     }
     state.apply_area_edits();
@@ -14980,11 +14974,17 @@ mod tests {
         let before = state.screen().area_count();
         let at = egui::Rect::from_min_size(egui::pos2(900.0, 40.0), egui::vec2(300.0, 400.0));
         state.undock_area(outliner, at);
-        assert!(state.floating.is_empty(), "deferred to the frame's end");
+        assert!(
+            state.screen().floating().is_empty(),
+            "deferred to the frame's end"
+        );
         state.apply_area_edits();
         assert_eq!(state.screen().area_count(), before - 1);
         assert!(state.is_floating(outliner));
-        assert_eq!(state.floating[0].editor, kreate_ui::EditorId::OUTLINER);
+        assert_eq!(
+            state.screen().floating()[0].editor,
+            kreate_ui::EditorId::OUTLINER
+        );
         // Dropped on the viewport's left edge.
         state.dock_area(outliner, viewport, kreate_ui::Side::Left);
         state.apply_area_edits();
@@ -15018,13 +15018,81 @@ mod tests {
         state.tear_off_area(properties, at, egui::vec2(40.0, 12.0));
         state.apply_area_edits();
         let f = state
-            .floating
+            .screen()
+            .floating()
             .iter()
             .find(|f| f.id == properties)
+            .cloned()
             .expect("floating");
-        assert_eq!(f.follow, Some(egui::vec2(40.0, 12.0)));
-        assert!(f.dragging, "already being dragged");
         assert_eq!(f.rect, at, "where the pointer took it, not nudged");
+        let drag = state
+            .float_drag
+            .get(&properties)
+            .copied()
+            .expect("in motion");
+        assert_eq!(drag.follow, Some(egui::vec2(40.0, 12.0)));
+        assert!(drag.dragging, "already being dragged");
+    }
+
+    /// Left floating at quit, there again on the next start: written into
+    /// the workspace file and read back where it was.
+    #[test]
+    fn a_floating_panel_survives_a_restart() {
+        let mut state = ShellState::default();
+        let outliner = state
+            .screen()
+            .areas()
+            .into_iter()
+            .find(|(_, k)| *k == kreate_ui::EditorId::OUTLINER)
+            .map(|(id, _)| id)
+            .expect("an outliner");
+        let at = egui::Rect::from_min_size(egui::pos2(900.0, 40.0), egui::vec2(300.0, 400.0));
+        state.undock_area(outliner, at);
+        state.apply_area_edits();
+        assert!(state.layout_needs_saving(), "the change is to be saved");
+
+        // Quit: the file as it would be written. Start: read back.
+        let file = kreate_ui::wsfile::write(&state.workspaces);
+        assert!(file.contains("float = \"outliner "), "{file}");
+        let (spaces, problems) = kreate_ui::wsfile::parse(&file);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut again = ShellState {
+            workspaces: spaces,
+            ..ShellState::default()
+        };
+        let floating = again.screen().floating();
+        assert_eq!(floating.len(), 1);
+        assert_eq!(floating[0].editor, kreate_ui::EditorId::OUTLINER);
+        let moved_in = at.translate(egui::vec2(24.0, 24.0));
+        assert!((floating[0].rect.min - moved_in.min).length() < 1.0);
+        assert!((floating[0].rect.size() - moved_in.size()).length() < 1.0);
+        assert_eq!(
+            again
+                .screen()
+                .areas()
+                .iter()
+                .filter(|(_, k)| *k == kreate_ui::EditorId::OUTLINER)
+                .count(),
+            0,
+            "floating, not docked as well"
+        );
+        // And it docks back from there.
+        let id = floating[0].id;
+        let viewport = again
+            .screen()
+            .areas()
+            .into_iter()
+            .find(|(_, k)| *k == kreate_ui::EditorId::VIEWPORT)
+            .unwrap()
+            .0;
+        again.dock_area(id, viewport, kreate_ui::Side::Right);
+        again.apply_area_edits();
+        assert!(again.screen().floating().is_empty());
+        assert!(again
+            .screen()
+            .areas()
+            .iter()
+            .any(|(a, k)| *a == id && *k == kreate_ui::EditorId::OUTLINER));
     }
 
     #[test]
