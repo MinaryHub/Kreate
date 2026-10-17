@@ -54,6 +54,7 @@ fn measure(clusters: bool, instances: usize, distance: f64) -> Option<Result> {
     // Only the solid pass is under test. The overlays would dominate the frame
     // and swamp the difference.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.show_elements = false;
 

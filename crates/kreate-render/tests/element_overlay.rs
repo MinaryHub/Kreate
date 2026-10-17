@@ -112,6 +112,7 @@ fn render(
     // exactly the sort of thing that makes a pixel test pass for the wrong
     // reason.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
 
     let cpu = RenderMeshCpu::extract(mesh);
@@ -255,6 +256,7 @@ fn render_preview_full(
     let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
     viewport.show_elements = true;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
 
     let cpu = RenderMeshCpu::extract(mesh);

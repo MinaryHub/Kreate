@@ -109,6 +109,7 @@ fn render_sequence(
     // comparison would be a pixel that matches for reasons unrelated to the
     // claim.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.show_elements = false;
     viewport.background = wgpu::Color::BLACK;
@@ -469,6 +470,7 @@ fn counted_run(
         viewport.cluster_path = true;
         viewport.occlusion_culling = occlusion;
         viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
         viewport.show_wireframe = false;
         viewport.show_elements = false;
 

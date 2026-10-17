@@ -42,6 +42,7 @@ fn shoot(gpu: &Gpu, shading: ShadingMode, wireframe: bool) -> Vec<[u8; 4]> {
     viewport.set_render_size(DRAWN.0, DRAWN.1);
     viewport.shading = shading;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = wireframe;
     viewport.set_world([1.0; 3]);
     viewport.set_display(

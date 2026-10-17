@@ -362,6 +362,7 @@ const APP_ACTIONS: &[&str] = &[
     "view.select_mode",
     "view.toggle_auto_depth",
     "view.toggle_grid",
+    "view.toggle_ground_shadow",
     "view.toggle_wireframe",
     "view.toggle_sidebar",
     "view.cycle_shading",

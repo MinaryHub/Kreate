@@ -71,6 +71,7 @@ fn render_as(doc: &Document, camera: &Camera, edit_mode: bool) -> Option<Vec<[u8
     // The grid is anchored to the world, which would let it mask a change in the
     // geometry; these tests are about the objects.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_elements = edit_mode;
 
     let mut uploaded: Vec<(kreate_scene::document::MeshId, GpuMesh)> = Vec::new();
@@ -1002,6 +1003,7 @@ fn a_moved_mesh_is_drawn_where_it_moved_to() {
     let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
     // The grid is anchored to the world and would mask a change in the geometry.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
 
     let mut doc = Document::new();
     doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
@@ -1085,6 +1087,7 @@ fn a_moved_mesh_brings_its_normals_with_it() {
     });
     let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
 
     let mut doc = Document::new();
     doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));

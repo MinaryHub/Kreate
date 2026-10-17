@@ -65,6 +65,7 @@ fn pick(
     // writes its own depth from the ray hit, and it would occlude an element
     // lying on the ground plane.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
 
     let uploaded: Vec<(GpuMesh, DAffine3, u32)> = objects
         .iter()

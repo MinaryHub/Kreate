@@ -102,6 +102,7 @@ fn a_second_viewport_draws_the_first_ones_meshes_through_its_own_camera() {
     for v in [&mut first, &mut second] {
         v.shading = ShadingMode::Studio;
         v.show_grid = false;
+        v.show_ground_shadow = false;
     }
     // A long bar along X: from the front it is wide, from the side a square.
     let mut bar = kreate_mesh::primitives::cube(1.0);

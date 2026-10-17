@@ -602,6 +602,7 @@ fn shoot_with(
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     // A plain white environment, so what reaches the camera is the surface's
     // own colour rather than a lamp's angle. Every texel of the quad faces the

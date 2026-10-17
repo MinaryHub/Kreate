@@ -771,6 +771,10 @@ const OBJECT_SIZE: u64 = 80;
 
 pub const MAX_SHADOWS: usize = 16;
 
+/// The layer the ground shadow's map is drawn into: the last, kept from the
+/// lights, so the floor has its shadow however many lamps take theirs.
+pub const GROUND_LAYER: usize = MAX_SHADOWS - 1;
+
 /// One draw into a shadow map: which object slot, its geometry, and — for a
 /// cut-out — its UVs.
 pub struct ShadowDraw<'a> {

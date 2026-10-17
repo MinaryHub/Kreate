@@ -102,6 +102,7 @@ fn shoot_graph(
     // The grid and the wireframe are interface, and this test is about the
     // shading. Left on, they would be the brightest thing in the frame.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
 
     let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
@@ -591,6 +592,7 @@ fn shadow_frames(gpu: &Gpu, scenes: &[ShadowScene]) -> Vec<ShadowShot> {
     viewport.shading = ShadingMode::Rendered;
     viewport.set_display(&gpu.queue, FRAMED);
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
 
     // The geometry is built once for every frame this call renders, so the
@@ -991,9 +993,10 @@ fn more_casters_than_layers_are_dropped_and_not_wrapped() {
             ..ShadowScene::default()
         },
     );
+    // The lights' share of the layers: the last is the ground shadow's.
     assert_eq!(
         crowd.passes,
-        kreate_render::shadow::MAX_SHADOWS,
+        kreate_render::shadow::GROUND_LAYER,
         "{} maps for eighteen frames",
         crowd.passes
     );
@@ -1530,11 +1533,12 @@ fn a_light_denied_a_face_is_lit_where_it_has_none() {
             ..ShadowScene::default()
         },
     );
-    // Fifteen suns took their layer each before the lamp asked, so one face of
-    // its cube is drawn and five are denied. That is the arrangement, and it is
+    // Twelve suns' cascades took the lights' layers before the lamp asked —
+    // all but the last, which is the ground shadow's — so few faces of its
+    // cube are drawn and the rest are denied. That is the arrangement, and it is
     // worth pinning because it is the only one that reaches the decision below
     // across enough of the picture to be measurable.
-    assert_eq!(shadowed.passes, kreate_render::shadow::MAX_SHADOWS);
+    assert_eq!(shadowed.passes, kreate_render::shadow::GROUND_LAYER);
 
     // The one face it was given points away from most of the scene, so it casts
     // almost nothing — and that is the point rather than a disappointment: five
@@ -1891,6 +1895,7 @@ fn light_past_white_glows_and_the_rest_does_not() {
         viewport.shading = ShadingMode::Rendered;
         viewport.show_bloom = bloom;
         viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
         viewport.show_wireframe = false;
         viewport.set_display(&gpu.queue, FRAMED);
         let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
@@ -2008,6 +2013,7 @@ fn a_mirror_floor_reflects_what_stands_on_it() {
         viewport.show_bloom = false;
         viewport.ambient_occlusion = false;
         viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
         viewport.show_wireframe = false;
         viewport.set_display(&gpu.queue, FRAMED);
         let cube = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
@@ -2209,6 +2215,7 @@ fn traced_scene(
     viewport.show_reflections = false;
     viewport.ambient_occlusion = false;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.set_display(&gpu.queue, FRAMED);
     let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
@@ -2791,6 +2798,7 @@ fn studio_frames(gpu: &Gpu, cameras: &[Camera], temporal: bool) -> Vec<[f32; 4]>
     viewport.temporal_aa = temporal;
     viewport.ambient_occlusion = false;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.show_outline = false;
     let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
@@ -2901,6 +2909,7 @@ fn orbit_frames(gpu: &Gpu, cameras: &[Camera]) -> Vec<[f32; 4]> {
     viewport.show_bloom = false;
     viewport.ambient_occlusion = false;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.set_display(&gpu.queue, FRAMED);
     let cube_cpu = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(1.0));
@@ -3093,6 +3102,7 @@ fn a_renders_passes_read_back_with_depth_and_normals() {
     let (rw, rh) = (SIZE - 14, SIZE - 22);
     viewport.set_render_size(rw, rh);
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.set_display(&gpu.queue, FRAMED);
     let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
@@ -3199,6 +3209,7 @@ fn glowing_panel_patch_sided(
     viewport.ambient_occlusion = false;
     viewport.contact_shadows = false;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.set_display(&gpu.queue, FRAMED);
     viewport.set_world([0.0; 3]);
@@ -3349,6 +3360,7 @@ fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32>
     viewport.ambient_occlusion = false;
     viewport.contact_shadows = false;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.set_display(&gpu.queue, FRAMED);
     viewport.set_environment(&gpu.device, &gpu.queue, w, h, sky);
@@ -3485,6 +3497,7 @@ fn floor_shot(gpu: &Gpu, graph: &kreate_scene::shader::ShaderGraph, traced: bool
     viewport.show_reflections = false;
     viewport.ambient_occlusion = false;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.set_display(&gpu.queue, FRAMED);
     graph_material(gpu, &mut viewport, graph);
@@ -3698,6 +3711,7 @@ fn a_flat_texture_is_the_right_way_up_and_studio_shows_none() {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Flat;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     let side = 64usize;
     let mut pixels = vec![0u8; side * side * 4];
@@ -3785,6 +3799,7 @@ fn a_solid_cut_out_is_cut_where_its_picture_is_clear() {
         let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
         viewport.shading = shading;
         viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
         viewport.show_wireframe = false;
         viewport.set_solid_images(
             &gpu.device,
@@ -3844,6 +3859,7 @@ fn a_cut_out_casts_only_its_opaque_part() {
         let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
         viewport.shading = ShadingMode::Rendered;
         viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
         viewport.show_wireframe = false;
         viewport.show_bloom = false;
         viewport.show_reflections = false;

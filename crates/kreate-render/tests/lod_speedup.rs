@@ -49,6 +49,7 @@ fn measure(budget: Budget, distance: f64) -> Option<(f64, u32)> {
     viewport.show_elements = true;
     viewport.show_wireframe = true;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.lod_budget = budget;
 
     // A quarter of a million vertices and half a million edges, framed to fill

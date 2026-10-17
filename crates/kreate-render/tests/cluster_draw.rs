@@ -65,6 +65,7 @@ fn render(
     // off: a grid line or a vertex dot in the comparison would be a pixel that
     // matches for reasons unrelated to the claim.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
     viewport.show_elements = false;
     // Black, so "lit" means "something was drawn". The default background is a

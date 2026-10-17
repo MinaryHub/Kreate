@@ -1314,6 +1314,7 @@ pub struct Overlays {
     /// the studio's lights.
     pub flat: bool,
     pub grid: bool,
+    pub ground_shadow: bool,
     pub wireframe: bool,
     pub face_orientation: bool,
     pub statistics: bool,
@@ -1788,6 +1789,7 @@ struct Labels {
     view_sidebar: String,
     overlays: String,
     overlay_grid: String,
+    overlay_ground_shadow: String,
     overlay_wireframe: String,
     overlay_face_orientation: String,
     overlay_textures: String,
@@ -2190,6 +2192,7 @@ impl Labels {
             view_sidebar: t("view-sidebar"),
             overlays: t("overlays"),
             overlay_grid: t("overlay-grid"),
+            overlay_ground_shadow: t("overlay-ground-shadow"),
             overlay_wireframe: t("overlay-wireframe"),
             overlay_face_orientation: t("overlay-face-orientation"),
             overlay_textures: t("overlay-textures"),
@@ -5437,6 +5440,11 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     ui.menu_button(&l.overlays, |ui| {
         for (op, label, checked) in [
             ("view.toggle_grid", &l.overlay_grid, on.grid),
+            (
+                "view.toggle_ground_shadow",
+                &l.overlay_ground_shadow,
+                on.ground_shadow,
+            ),
             ("view.toggle_wireframe", &l.overlay_wireframe, on.wireframe),
             (
                 "view.toggle_face_orientation",
@@ -5876,21 +5884,26 @@ pub fn bone_under(
     best
 }
 
-/// The tool column down the left of the viewport. Returns its rectangle so the
-/// view text can start beside it rather than under it.
-///
-/// Every click goes out through `Dispatch`, the door a key press uses: Move
-/// from the column starts the drag G starts, and Extrude runs the same
-/// operator E does with the same defaults. The column teaches the keys — each
-/// tooltip carries one — which is how a toolbar stops being needed.
+/// Where the tool column stood: its tools now live in the ribbon's first
+/// group, as Fusion's do, so the picture is the model's alone. An empty
+/// rectangle at the viewport's corner, for what lays itself out beside it.
 fn draw_toolbar(
-    ui: &mut Ui,
-    state: &mut ShellState,
-    mode: kreate_ops::operator::Mode,
+    _ui: &mut Ui,
+    _state: &mut ShellState,
+    _mode: kreate_ops::operator::Mode,
     viewport: egui::Rect,
 ) -> egui::Rect {
-    use kreate_ui::toolbar::{tool_button, Tool, WIDTH};
-    let theme = kreate_ui::theme::from_ui(ui);
+    egui::Rect::from_min_size(viewport.min, egui::Vec2::ZERO)
+}
+
+/// The tools, in a row: the ribbon's first group.
+///
+/// Every click goes out through `Dispatch`, the door a key press uses: Move
+/// starts the drag G starts, and Extrude runs the same operator E does with
+/// the same defaults. Each tooltip carries its key, which is how a toolbar
+/// stops being needed.
+fn draw_tool_buttons(ui: &mut Ui, state: &mut ShellState, mode: kreate_ops::operator::Mode) {
+    use kreate_ui::toolbar::{tool_button, Tool};
     // A skeleton being built has one tool of its own after the common ones:
     // Extrude, which is most of what building one is.
     let bones = mode.acts_on() == kreate_ops::mode::ActsOn::BoneJoints;
@@ -5914,37 +5927,10 @@ fn draw_toolbar(
     } else {
         Tool::COMMON.to_vec()
     };
-    let pad = 4.0;
-    let button = WIDTH - 6.0;
     let gap = 2.0;
     // A gap between the common group and the edit group, the way Blender
     // separates its tool groups: the eye finds the boundary before it reads.
-    let groups_gap = if !sculpt && tools.len() > Tool::COMMON.len() {
-        8.0
-    } else {
-        0.0
-    };
-    let height = pad * 2.0 + tools.len() as f32 * (button + gap) - gap + groups_gap;
-    let rect = egui::Rect::from_min_size(
-        viewport.min + egui::vec2(8.0, 8.0),
-        egui::vec2(WIDTH, height.min(viewport.height() - 16.0)),
-    );
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return egui::Rect::NOTHING;
-    }
-    // Over the picture, so it takes the pointer: a click on a tool must not
-    // also select what is behind it.
-    state.viewport_blockers.push(rect);
-    let painter = ui.painter().with_clip_rect(viewport);
-    let radius = egui::CornerRadius::same(theme.radius + 1);
-    painter.rect_filled(rect, radius, theme.raised.gamma_multiply(0.96));
-    painter.rect_stroke(
-        rect,
-        radius,
-        egui::Stroke::new(1.0, theme.border),
-        egui::StrokeKind::Inside,
-    );
-
+    let groups_gap = 8.0;
     // The lit tool is the transform in progress, if any; otherwise Select,
     // which is what a click does when nothing else is going on. The header
     // says which gesture is running, so that is what is read.
@@ -5958,106 +5944,90 @@ fn draw_toolbar(
             .unwrap_or(Tool::Select)
     };
 
-    ui.scope_builder(
-        egui::UiBuilder::new().max_rect(rect.shrink(pad)).id_salt((
-            "toolbar",
-            viewport.min.x as i32,
-            viewport.min.y as i32,
-        )),
-        |ui| {
-            ui.set_clip_rect(rect);
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, gap);
-            ui.vertical(|ui| {
-                for (i, tool) in tools.iter().enumerate() {
-                    if !sculpt && i == Tool::COMMON.len() {
-                        ui.add_space(groups_gap - gap);
-                    }
-                    let name = state.catalog.get(tool.label_key());
-                    let op = match tool {
-                        Tool::Select => None,
-                        // The mode's own G, R and S: one table, the one the
-                        // modal transform reads too, so the tooltip names the
-                        // operator the key actually runs.
-                        Tool::Move => Some(mode.info().transform[0]),
-                        Tool::Rotate => Some(mode.info().transform[1]),
-                        Tool::Scale => Some(mode.info().transform[2]),
-                        Tool::Extrude if bones => Some("armature.extrude"),
-                        Tool::Extrude => Some("mesh.extrude_region"),
-                        Tool::Inset => Some("mesh.inset"),
-                        Tool::Bevel => Some("mesh.bevel"),
-                        Tool::LoopCut => Some("mesh.loop_cut"),
-                        t if t.is_sculpt() => None,
-                        _ => None,
-                    };
-                    let tip = match op.and_then(|id| state.command_info.get(id)) {
-                        Some(info) if !info.shortcut.is_empty() => {
-                            // i18n-exempt: a name and a key, both already translated
-                            format!(
-                                "{name}
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
+        for (i, tool) in tools.iter().enumerate() {
+            if !sculpt && i == Tool::COMMON.len() {
+                ui.add_space(groups_gap - gap);
+            }
+            let name = state.catalog.get(tool.label_key());
+            let op = match tool {
+                Tool::Select => None,
+                // The mode's own G, R and S: one table, the one the
+                // modal transform reads too, so the tooltip names the
+                // operator the key actually runs.
+                Tool::Move => Some(mode.info().transform[0]),
+                Tool::Rotate => Some(mode.info().transform[1]),
+                Tool::Scale => Some(mode.info().transform[2]),
+                Tool::Extrude if bones => Some("armature.extrude"),
+                Tool::Extrude => Some("mesh.extrude_region"),
+                Tool::Inset => Some("mesh.inset"),
+                Tool::Bevel => Some("mesh.bevel"),
+                Tool::LoopCut => Some("mesh.loop_cut"),
+                t if t.is_sculpt() => None,
+                _ => None,
+            };
+            let tip = match op.and_then(|id| state.command_info.get(id)) {
+                Some(info) if !info.shortcut.is_empty() => {
+                    // i18n-exempt: a name and a key, both already translated
+                    format!(
+                        "{name}
 {}",
-                                info.shortcut
-                            )
-                        }
-                        _ => name.clone(),
-                    };
-                    let response = if *tool == Tool::Select {
-                        // Which shape a drag selects with, and a click for
-                        // the next: box, lasso, circle.
-                        let shape = state.tools.select_tool.min(2);
-                        let names = ["select-tool-box", "select-tool-lasso", "select-tool-circle"];
-                        // i18n-exempt: translated names joined
-                        let tip = format!(
-                            "{}\n{}",
-                            state.catalog.get(names[shape as usize]),
-                            state.catalog.get("select-tool-hint")
-                        );
-                        kreate_ui::toolbar::select_button(ui, shape, *tool == active)
-                            .on_hover_text(tip)
-                    } else {
-                        tool_button(ui, *tool, *tool == active).on_hover_text(tip)
-                    };
-                    if response.clicked() {
-                        match tool {
-                            Tool::Select => {
-                                state.tools.select_tool = (state.tools.select_tool + 1) % 3
-                            }
-                            Tool::Move | Tool::Rotate | Tool::Scale => {
-                                if let Some(op) = op {
-                                    state.queue.dispatch(op, PropertyMap::new());
-                                }
-                            }
-                            // Through the key's door, so the drag that places
-                            // the new bones starts as E starts it.
-                            Tool::Extrude if bones => {
-                                state.queue.dispatch("armature.extrude", PropertyMap::new())
-                            }
-                            // Through the key's door, so the tool drags the new
-                            // faces out as E does.
-                            Tool::Extrude => state
-                                .queue
-                                .dispatch("mesh.extrude_region", PropertyMap::new()),
-                            // Like the extrude, through the keys' door: the
-                            // pointer then sets how much.
-                            Tool::Inset => state.queue.dispatch("mesh.inset", PropertyMap::new()),
-                            Tool::Bevel => state.queue.dispatch("mesh.bevel", PropertyMap::new()),
-                            Tool::LoopCut => {
-                                state.queue.dispatch("mesh.loop_cut", PropertyMap::new())
-                            }
-                            // The brush the next stroke uses: the same
-                            // setting as the header's brush menu.
-                            t if t.is_sculpt() => {
-                                if let Some(i) = Tool::SCULPT.iter().position(|t| t == tool) {
-                                    state.sculpt.brush = i as u32;
-                                }
-                            }
-                            _ => {}
+                        info.shortcut
+                    )
+                }
+                _ => name.clone(),
+            };
+            let response = if *tool == Tool::Select {
+                // Which shape a drag selects with, and a click for
+                // the next: box, lasso, circle.
+                let shape = state.tools.select_tool.min(2);
+                let names = ["select-tool-box", "select-tool-lasso", "select-tool-circle"];
+                // i18n-exempt: translated names joined
+                let tip = format!(
+                    "{}\n{}",
+                    state.catalog.get(names[shape as usize]),
+                    state.catalog.get("select-tool-hint")
+                );
+                kreate_ui::toolbar::select_button(ui, shape, *tool == active).on_hover_text(tip)
+            } else {
+                tool_button(ui, *tool, *tool == active).on_hover_text(tip)
+            };
+            if response.clicked() {
+                match tool {
+                    Tool::Select => state.tools.select_tool = (state.tools.select_tool + 1) % 3,
+                    Tool::Move | Tool::Rotate | Tool::Scale => {
+                        if let Some(op) = op {
+                            state.queue.dispatch(op, PropertyMap::new());
                         }
                     }
+                    // Through the key's door, so the drag that places
+                    // the new bones starts as E starts it.
+                    Tool::Extrude if bones => {
+                        state.queue.dispatch("armature.extrude", PropertyMap::new())
+                    }
+                    // Through the key's door, so the tool drags the new
+                    // faces out as E does.
+                    Tool::Extrude => state
+                        .queue
+                        .dispatch("mesh.extrude_region", PropertyMap::new()),
+                    // Like the extrude, through the keys' door: the
+                    // pointer then sets how much.
+                    Tool::Inset => state.queue.dispatch("mesh.inset", PropertyMap::new()),
+                    Tool::Bevel => state.queue.dispatch("mesh.bevel", PropertyMap::new()),
+                    Tool::LoopCut => state.queue.dispatch("mesh.loop_cut", PropertyMap::new()),
+                    // The brush the next stroke uses: the same
+                    // setting as the header's brush menu.
+                    t if t.is_sculpt() => {
+                        if let Some(i) = Tool::SCULPT.iter().position(|t| t == tool) {
+                            state.sculpt.brush = i as u32;
+                        }
+                    }
+                    _ => {}
                 }
-            });
-        },
-    );
-    rect
+            }
+        }
+    });
 }
 
 /// Sculpt mode's other settings, in the header's drop-downs as Blender keeps
@@ -13389,8 +13359,25 @@ fn draw_ribbon(
                             ui.add_space(10.0);
                         }
                     });
-                    // The groups.
+                    // The groups, the tools first.
                     ui.horizontal(|ui| {
+                        // As wide as its buttons: a centred column would
+                        // take the whole row.
+                        ui.vertical(|ui| {
+                            ui.set_min_height(64.0);
+                            ui.add_space(6.0);
+                            draw_tool_buttons(ui, state, mode);
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    state.catalog.get("ribbon-tools").to_uppercase(),
+                                )
+                                .small()
+                                .strong()
+                                .color(theme.text_dim),
+                            );
+                        });
+                        ui.separator();
                         let menus = viewport_menus(l, mode, state.select_mode);
                         for (i, menu) in menus.iter().enumerate() {
                             if i > 0 {
@@ -15597,6 +15584,7 @@ mod tests {
             "view-sidebar",
             "overlays",
             "overlay-grid",
+            "overlay-ground-shadow",
             "overlay-wireframe",
             "transform-move",
             "transform-rotate",

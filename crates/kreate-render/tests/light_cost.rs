@@ -85,6 +85,7 @@ fn measure_lights(gpu: &Gpu, lights: &[PlacedLight]) -> f64 {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
 
     let floor = RenderMeshCpu::extract(&kreate_mesh::primitives::plane(24.0));

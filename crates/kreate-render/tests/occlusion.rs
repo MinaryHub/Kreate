@@ -55,6 +55,7 @@ impl Scene {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
         viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
         viewport.show_wireframe = false;
         viewport.show_elements = false;
 

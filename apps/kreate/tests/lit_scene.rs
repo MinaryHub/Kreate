@@ -119,6 +119,7 @@ fn shoot_mode(
     };
     viewport.path_trace = traced;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
 
     // The same three calls `main` makes, in the same order, from the same
@@ -430,6 +431,7 @@ fn shoot_path(gpu: &Gpu, doc: &Document, cameras: &[Camera]) -> Vec<[f32; 4]> {
     let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
     viewport.shading = ShadingMode::Rendered;
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.show_wireframe = false;
 
     // The same three calls `main` makes, in the same order, from the same

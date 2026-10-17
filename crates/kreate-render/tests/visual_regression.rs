@@ -225,6 +225,7 @@ impl Harness {
         // The grid would be most of every image and would change with the
         // camera, which is a lot of pixels of noise around the thing under test.
         viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
 
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("visual regression readback"),

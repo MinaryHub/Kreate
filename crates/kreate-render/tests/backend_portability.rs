@@ -52,6 +52,10 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
     vec![
         ("solid", include_str!("../src/shaders/solid.wgsl").into()),
         ("grid", include_str!("../src/shaders/grid.wgsl").into()),
+        (
+            "ground_shadow",
+            include_str!("../src/shaders/ground_shadow.wgsl").into(),
+        ),
         ("id", include_str!("../src/shaders/id.wgsl").into()),
         (
             "overlay_edge",
@@ -129,6 +133,68 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
     ]
 }
 
+/// A material reading every node kind there is, each wired where the
+/// surface takes its type: what the Metal translation of a graph built in
+/// the node editor has to survive.
+fn every_node_material() -> String {
+    use kreate_scene::shader::{Link, Node, NodeKind, Socket};
+    let mut g = kreate_scene::shader::ShaderGraph::standard(
+        "every",
+        kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
+        0.0,
+        0.5,
+    );
+    let wire = |g: &mut kreate_scene::shader::ShaderGraph, from, socket, to, at| {
+        let _ = g.link(Link {
+            from_node: from,
+            from_socket: socket,
+            to_node: to,
+            to_socket: at,
+        });
+    };
+    // Into a chain of mixes, so every colour, number and point is read.
+    for tag in NodeKind::ADDABLE {
+        let Some(kind) = NodeKind::new_of(tag) else {
+            continue;
+        };
+        let outputs = kind.outputs().to_vec();
+        let inputs = kind.inputs().to_vec();
+        let Some(n) = g.add_node(Node::new(tag, kind)) else {
+            continue;
+        };
+        if inputs.first() == Some(&Socket::Coordinate) {
+            if let Some(t) = g.add_node(Node::new("T", NodeKind::TexCoord)) {
+                wire(&mut g, t, 0, n, 0);
+            }
+        }
+        let mix = g
+            .add_node(Node::new("M", NodeKind::MixColor { factor: 0.5 }))
+            .expect("a mix");
+        match outputs.first() {
+            Some(Socket::Color) => wire(&mut g, n, 0, mix, 1),
+            Some(Socket::Scalar) => wire(&mut g, n, 0, mix, 0),
+            Some(Socket::Coordinate) => {
+                if let Some(noise) = g.add_node(Node::new("N", NodeKind::new_of("noise").unwrap()))
+                {
+                    wire(&mut g, n, 0, noise, 4);
+                    wire(&mut g, noise, 0, mix, 0);
+                }
+            }
+            Some(Socket::Vector) => wire(&mut g, n, 0, 0, 3),
+            None => {}
+        }
+        // The chain: this mix into the surface's colour, the last one into
+        // this one's second colour.
+        if let Some(previous) = g.incoming(0, 0).map(|l| l.from_node) {
+            wire(&mut g, previous, 0, mix, 2);
+        }
+        wire(&mut g, mix, 0, 0, 0);
+    }
+    kreate_shader::compile(&g)
+        .expect("every node compiles")
+        .wgsl
+}
+
 /// A plain grey material, compiled.
 ///
 /// Through the real compiler, so that what is translated to HLSL, Metal and
@@ -143,6 +209,39 @@ fn a_material() -> String {
     kreate_shader::compile(&graph)
         .expect("a standard surface compiles")
         .wgsl
+}
+
+/// A name a Metal function declares twice, which its compiler refuses
+/// though naga writes it: a value read beside an early return once came out
+/// as two `const auto _tmp`s in the ground shadow, and the pipeline failed
+/// on the user's machine and nowhere here.
+fn declared_twice(msl: &str) -> Option<String> {
+    // One set of names per open brace: a name again in an inner block is
+    // legal C++, the same block twice is not.
+    let mut scopes: Vec<std::collections::HashSet<String>> = vec![Default::default()];
+    for line in msl.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("const auto ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if let Some(scope) = scopes.last_mut() {
+                if !name.is_empty() && !scope.insert(name.clone()) {
+                    return Some(name);
+                }
+            }
+        }
+        for c in line.chars() {
+            match c {
+                '{' => scopes.push(Default::default()),
+                '}' if scopes.len() > 1 => {
+                    scopes.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// Parses and validates, returning what the back ends need.
@@ -171,8 +270,11 @@ fn every_shader_translates_to_metal() {
             ..msl::Options::default()
         };
         let pipeline = msl::PipelineOptions::default();
-        msl::write_string(&module, &info, &options, &pipeline)
+        let (text, _) = msl::write_string(&module, &info, &options, &pipeline)
             .unwrap_or_else(|e| panic!("{name} does not translate to Metal: {e:?}"));
+        if let Some(twice) = declared_twice(&text) {
+            panic!("{name}: the Metal text declares `{twice}` twice in one function");
+        }
     }
 }
 
@@ -243,4 +345,28 @@ fn the_shader_list_covers_every_shader_in_the_directory() {
         on_disk, listed,
         "the shader list in this file is out of step with src/shaders"
     );
+}
+
+#[test]
+fn a_material_of_every_node_translates_to_metal() {
+    // Not in the list above, which is the shader directory's files: this is
+    // one the node editor builds, and the place the Metal compiler once met
+    // a name declared twice — which naga writes without complaint.
+    let source = kreate_render::shading::rendered_source_with(&every_node_material());
+    let (module, info) = front("rendered, every node", &source);
+    let options = msl::Options {
+        lang_version: MSL_FLOOR,
+        ..msl::Options::default()
+    };
+    let (text, _) = msl::write_string(&module, &info, &options, &msl::PipelineOptions::default())
+        .expect("translates to Metal");
+    assert_eq!(declared_twice(&text), None);
+}
+
+#[test]
+fn a_name_declared_twice_in_one_block_is_caught_and_in_two_is_not() {
+    let twice = "void f() {\n    const auto _tmp = a;\n    const auto _tmp = b;\n}\n";
+    assert_eq!(declared_twice(twice), Some("_tmp".to_string()));
+    let apart = "void f() {\n    if (x) {\n        const auto _tmp = a;\n    }\n    const auto _tmp = b;\n}\n";
+    assert_eq!(declared_twice(apart), None);
 }

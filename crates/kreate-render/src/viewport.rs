@@ -57,6 +57,11 @@ pub enum ShadingMode {
 /// Which wires are drawn: every mesh's edges, and the objects drawn only as
 /// wire (a boolean's cutters). The rendered view shows none — it is the
 /// picture as it will be rendered, and a render has no wireframe.
+/// How much of the light canvas's light a grid line keeps in the lit views:
+/// dark enough to read through the display transform, light enough to stay
+/// a floor and not a drawing.
+const LIT_LIGHT_GRID_SHARE: f32 = 0.45;
+
 pub fn wires_shown(shading: ShadingMode, overlay: bool) -> (bool, bool) {
     match shading {
         ShadingMode::Rendered => (false, false),
@@ -241,6 +246,45 @@ struct IdObject {
     /// lets an untouched id pixel mean a miss rather than object zero.
     ids: [u32; 4],
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GroundGlobals {
+    view_proj: [[f32; 4]; 4],
+    inv_view_row0: [f32; 4],
+    inv_view_row1: [f32; 4],
+    inv_view_row2: [f32; 4],
+    eye_and_tan: [f32; 4],
+    /// Aspect, perspective or not, the floor's eye-relative height, and how
+    /// dark the darkest shadow is.
+    params: [f32; 4],
+    light_view_proj: [[f32; 4]; 4],
+    /// Metres per unit of stored depth, metres per texel, the layer, and the
+    /// height over which a shadow fades.
+    light: [f32; 4],
+    /// How far the shadow spreads from the footprint, in metres.
+    extra: [f32; 4],
+}
+
+/// The floor the ground shadow lies on and the map that casts onto it.
+#[derive(Clone, Copy, Debug)]
+struct GroundFrame {
+    view: crate::shadow::ShadowView,
+    /// The floor's height, eye-relative.
+    floor: f32,
+    /// How tall what stands on it is, for how far up a shadow still falls.
+    height: f32,
+    /// How far the soft edge reaches out from the footprint, in metres.
+    spread: f32,
+}
+
+/// How dark the ground shadow is where a part stands on the floor: enough to
+/// set it down, not so much that it reads as a hole.
+const GROUND_SHADOW_OPACITY: f32 = 0.5;
+
+/// How far above the floor a draw's top must reach to cast onto it, in
+/// metres: a millimetre, so a plane lying on the floor is floor.
+const GROUND_CLEARANCE: f32 = 1e-3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -1443,6 +1487,15 @@ pub struct Viewport {
     globals_bind: wgpu::BindGroup,
     grid_buf: wgpu::Buffer,
     grid_bind: wgpu::BindGroup,
+    /// The ground shadow: drawn over the floor, read from the shadow maps'
+    /// last layer, which is kept for it.
+    ground_pipeline: wgpu::RenderPipeline,
+    ground_buf: wgpu::Buffer,
+    ground_bind: wgpu::BindGroup,
+    /// This frame's floor and map, when there is a shadow to draw.
+    ground: Option<GroundFrame>,
+    /// Which draws cast onto that floor, by draw index.
+    ground_casters: Vec<bool>,
     edges: wgpu::RenderPipeline,
     edge_globals_buf: wgpu::Buffer,
     /// The markers, lamp and camera glyphs, drawn over the picture against
@@ -1672,6 +1725,9 @@ pub struct Viewport {
     pub point_size: f32,
     /// Wireframe line width, in pixels.
     pub wireframe_width: f32,
+    /// Whether to draw the model's shadow on the floor, as Fusion does by
+    /// default. In every view but the rendered one, which has its lights'.
+    pub show_ground_shadow: bool,
     /// Whether to draw the ground grid. A user-facing toggle, and what lets a
     /// test compare geometry without the world-anchored lattice in the way.
     pub show_grid: bool,
@@ -2527,6 +2583,90 @@ impl Viewport {
             cache: None,
         });
 
+        // The ground shadow: the grid's way of drawing a floor, and the
+        // shadow maps' array to read what stands on it.
+        let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ground shadow"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX.union(wgpu::ShaderStages::FRAGMENT),
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let ground_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ground shadow globals"),
+            size: std::mem::size_of::<GroundGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let ground_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ground shadow"),
+            layout: &ground_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ground_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(shadows_0.array_view()),
+                },
+            ],
+        });
+        let ground_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ground shadow"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ground_shadow.wgsl").into()),
+        });
+        let ground_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ground shadow layout"),
+            bind_group_layouts: &[Some(&ground_layout)],
+            immediate_size: 0,
+        });
+        let ground_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ground shadow"),
+            layout: Some(&ground_pl),
+            vertex: wgpu::VertexState {
+                module: &ground_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ground_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            // Tested, not written, as the grid: hidden by what stands in front
+            // of it, hiding nothing drawn after.
+            depth_stencil: Some(gpu::depth_read_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let cluster_globals_bind_0 = cluster_globals_bind(
             device,
             &cluster_globals_layout,
@@ -2694,6 +2834,12 @@ impl Viewport {
             background: palette::clear(palette::VIEWPORT),
             grid_line: palette::GRID_LINE,
             show_grid: true,
+            show_ground_shadow: true,
+            ground_pipeline,
+            ground_buf,
+            ground_bind,
+            ground: None,
+            ground_casters: Vec::new(),
             sample_cap: None,
             face_orientation: false,
             cluster_path: false,
@@ -2827,6 +2973,24 @@ impl Viewport {
     /// Whether the light canvas is on.
     pub fn is_light(&self) -> bool {
         self.grid_line == palette::GRID_LINE_LIGHT
+    }
+
+    /// The grid's line colour as the pass draws it.
+    ///
+    /// On the light canvas in the lit views the background goes through the
+    /// display transform with the grid, and the transform's shoulder pressed
+    /// the step between them flat: the lines vanished against the floor and
+    /// showed only over a white model. There the line is a share of the
+    /// background's own light instead — the transform keeps order, so a
+    /// line that much darker stays darker.
+    fn grid_line_color(&self) -> [f32; 4] {
+        if self.shading.lit() && self.is_light() {
+            let [r, g, b, _] = palette::display_rgba(palette::VIEWPORT_LIGHT);
+            let k = LIT_LIGHT_GRID_SHARE;
+            [r * k, g * k, b * k, 1.0]
+        } else {
+            palette::display_rgba(self.grid_line)
+        }
     }
 
     pub fn aspect(&self) -> f64 {
@@ -3094,30 +3258,27 @@ impl Viewport {
             // the ortho path is written properly.
             Projection::Orthographic => (camera.ortho_height() * 0.5) as f32,
         };
-        queue.write_buffer(
-            &self.grid_buf,
-            0,
-            bytemuck::bytes_of(&GridGlobals {
-                view_proj: view_proj.to_cols_array_2d(),
-                inv_view_row0: inv_view.row(0).to_array(),
-                inv_view_row1: inv_view.row(1).to_array(),
-                inv_view_row2: inv_view.row(2).to_array(),
-                eye_and_tan: [eye.x, eye.y, eye.z, tan_half],
-                params: [
-                    aspect as f32,
-                    if camera.projection == Projection::Perspective {
-                        1.0
-                    } else {
-                        0.0
-                    },
-                    0.0,
-                    0.0,
-                ],
-                line_color: palette::display_rgba(self.grid_line),
-                axis_x_color: palette::display_rgba(palette::AXIS_X),
-                axis_y_color: palette::display_rgba(palette::AXIS_Y),
-            }),
-        );
+        let grid_globals = GridGlobals {
+            view_proj: view_proj.to_cols_array_2d(),
+            inv_view_row0: inv_view.row(0).to_array(),
+            inv_view_row1: inv_view.row(1).to_array(),
+            inv_view_row2: inv_view.row(2).to_array(),
+            eye_and_tan: [eye.x, eye.y, eye.z, tan_half],
+            params: [
+                aspect as f32,
+                if camera.projection == Projection::Perspective {
+                    1.0
+                } else {
+                    0.0
+                },
+                0.0,
+                0.0,
+            ],
+            line_color: self.grid_line_color(),
+            axis_x_color: palette::display_rgba(palette::AXIS_X),
+            axis_y_color: palette::display_rgba(palette::AXIS_Y),
+        };
+        queue.write_buffer(&self.grid_buf, 0, bytemuck::bytes_of(&grid_globals));
 
         queue.write_buffer(
             &self.edge_globals_buf,
@@ -3207,6 +3368,8 @@ impl Viewport {
         // What the shadows will be fitted to, accumulated as the draws are
         // written rather than in a pass of its own.
         let mut drawn = self.extra_bounds;
+        // Each draw's box, for which of them cast onto the floor.
+        let mut each = Vec::with_capacity(draws.len());
 
         // One slot per draw, not per mesh. Two linked duplicates share a single
         // datablock and differ only here, so a buffer owned by the mesh would let
@@ -3282,7 +3445,9 @@ impl Viewport {
                 self.accum_samples,
                 Self::cut_of(draw),
             );
-            drawn = drawn.union(transformed_bounds(&m, draw.mesh.bounds));
+            let placed = transformed_bounds(&m, draw.mesh.bounds);
+            drawn = drawn.union(placed);
+            each.push(placed);
             queue.write_buffer(
                 &self.rendered_objects.buffer,
                 self.rendered_objects.offset(i) as u64,
@@ -3346,7 +3511,20 @@ impl Viewport {
                 aspect,
                 near: camera.near() as f32,
             },
+            // The grid's plane, world zero, eye-relative.
+            -camera.eye().z as f32,
         );
+        // What casts onto the floor: everything that rises above it. A floor
+        // of the user's own, a plane lying on the ground, would otherwise
+        // shadow itself everywhere it is.
+        self.ground_casters = match self.ground {
+            Some(frame) => each
+                .iter()
+                .map(|b| !b.is_empty() && b.max.z > frame.floor + GROUND_CLEARANCE)
+                .collect(),
+            None => Vec::new(),
+        };
+        self.write_ground(queue, &grid_globals);
     }
 
     /// Works out which lights reach which square of the screen.
@@ -3415,12 +3593,14 @@ impl Viewport {
         queue: &wgpu::Queue,
         bounds: kreate_math::Aabb,
         camera: crate::shadow::CameraFrustum,
+        floor: f32,
     ) {
         // Every light starts casting nothing, and a light whose frustum sees
         // nothing keeps that entry — which is what stops a matrix from an
         // earlier frame shadowing this one.
         self.shadow_entries.clear();
         self.shadow_views.clear();
+        self.ground = self.fit_ground(queue, bounds, floor);
         if !self.shading.lit() {
             // The other modes light themselves. Fitting frames for lights
             // nothing reads would be a pass per lamp for no picture at all.
@@ -3439,7 +3619,7 @@ impl Viewport {
             // and not in lights: one lamp in a room is six of them.
             frames.clear();
             for (face, view) in crate::shadow::shadow_views(&light, bounds, Some(camera)) {
-                if self.shadow_views.len() >= crate::shadow::MAX_SHADOWS {
+                if self.shadow_views.len() >= crate::shadow::GROUND_LAYER {
                     // Out of layers. The faces already taken still shadow, and
                     // the rest of this light does not — which is the same
                     // partial answer a light past the cap gets, and better than
@@ -3463,6 +3643,114 @@ impl Viewport {
                 bytemuck::cast_slice(&self.shadow_entries),
             );
         }
+    }
+
+    /// The ground shadow's frame: a map looking straight up under what is
+    /// drawn and a margin round it for the soft edge, onto a floor at the
+    /// grid's height — or under the model, when it reaches below the grid,
+    /// as Fusion sets its floor at the part's foot.
+    fn fit_ground(
+        &self,
+        queue: &wgpu::Queue,
+        bounds: kreate_math::Aabb,
+        grid: f32,
+    ) -> Option<GroundFrame> {
+        if !self.show_ground_shadow
+            || matches!(self.shading, ShadingMode::Rendered | ShadingMode::Wireframe)
+            || bounds.is_empty()
+        {
+            return None;
+        }
+        let floor = grid.min(bounds.min.z);
+        let height = (bounds.max.z - floor).max(1e-3);
+        // What the shadow can spread over: its widest is about a third of
+        // the height out from the footprint.
+        let size = bounds.size();
+        let spread = size.x.max(size.y).max(height) * 0.35 + 0.05;
+        let pad = spread * 1.1;
+        let framed = kreate_math::Aabb::new(
+            kreate_math::Vec3::new(bounds.min.x - pad, bounds.min.y - pad, floor),
+            kreate_math::Vec3::new(bounds.max.x + pad, bounds.max.y + pad, bounds.max.z),
+        );
+        // Up from under the floor, so the map keeps undersides: see
+        // `ground_shadow.wgsl`.
+        let view = crate::shadow::sun_view_of(
+            kreate_math::Vec3::Z,
+            &framed.corners(),
+            framed,
+            crate::shadow::SourceSize::Angular(0.0),
+        )?;
+        self.shadows
+            .set_view(queue, crate::shadow::GROUND_LAYER, &view);
+        Some(GroundFrame {
+            view,
+            floor,
+            height,
+            spread,
+        })
+    }
+
+    /// The ground shadow's uniforms, from the grid's: the same camera and
+    /// the same floor-finding rays.
+    fn write_ground(&self, queue: &wgpu::Queue, grid: &GridGlobals) {
+        let Some(frame) = self.ground else {
+            return;
+        };
+        let mut params = grid.params;
+        params[2] = frame.floor;
+        params[3] = GROUND_SHADOW_OPACITY;
+        queue.write_buffer(
+            &self.ground_buf,
+            0,
+            bytemuck::bytes_of(&GroundGlobals {
+                view_proj: grid.view_proj,
+                inv_view_row0: grid.inv_view_row0,
+                inv_view_row1: grid.inv_view_row1,
+                inv_view_row2: grid.inv_view_row2,
+                eye_and_tan: grid.eye_and_tan,
+                params,
+                light_view_proj: frame.view.view_proj.to_cols_array_2d(),
+                light: [
+                    (frame.view.far - frame.view.near).max(1e-6),
+                    frame.view.texel_world,
+                    crate::shadow::GROUND_LAYER as f32,
+                    // Gone by about the model's own height: a part resting on
+                    // the floor is dark under it, a lamp hung over it is not.
+                    (frame.height * 0.9).clamp(0.05, 50.0),
+                ],
+                extra: [frame.spread, 0.0, 0.0, 0.0],
+            }),
+        );
+    }
+
+    /// Renders the ground shadow's map: everything that casts, from above.
+    fn encode_ground_layer(&self, encoder: &mut wgpu::CommandEncoder, draws: &[Draw]) {
+        if self.ground.is_none() {
+            return;
+        }
+        self.shadows.encode(
+            encoder,
+            crate::shadow::GROUND_LAYER,
+            &self.solid_textures.bind,
+            draws.iter().enumerate().filter_map(|(i, draw)| {
+                let see_through = self.see_through(draw);
+                if draw.mesh.counts.triangles == 0
+                    || see_through >= 1.0
+                    || draw.wire_only
+                    || !self.ground_casters.get(i).copied().unwrap_or(false)
+                {
+                    return None;
+                }
+                Some(crate::shadow::ShadowDraw {
+                    index: i as u32,
+                    positions: &draw.mesh.positions,
+                    indices: &draw.mesh.indices,
+                    triangles: draw.mesh.counts.triangles,
+                    see_through: see_through > 0.0,
+                    uvs: None,
+                })
+            }),
+        );
     }
 
     /// Points the overlays at what a rubber-band drag would select.
@@ -4503,6 +4791,12 @@ impl Viewport {
         // The rendered view is the picture as it will be rendered: no floor
         // grid, and no lamps or cameras drawn as lines (below).
         let rendered = self.shading == ShadingMode::Rendered;
+        // The shadow on the floor, under the grid's lines.
+        if self.ground.is_some() {
+            pass.set_pipeline(&self.ground_pipeline);
+            pass.set_bind_group(0, &self.ground_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
         if self.show_grid && !rendered {
             pass.set_pipeline(&self.grid);
             pass.set_bind_group(0, &self.grid_bind, &[]);
@@ -4663,6 +4957,7 @@ impl Viewport {
         target: &wgpu::TextureView,
         draws: &[Draw],
     ) {
+        self.encode_ground_layer(encoder, draws);
         if self.shading.lit() {
             self.render_lit(encoder, target, draws);
             return;

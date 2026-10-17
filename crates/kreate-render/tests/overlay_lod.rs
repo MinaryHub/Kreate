@@ -119,6 +119,7 @@ fn render(scene: &Scene) -> Option<Vec<[u8; 4]>> {
     // The grid would cover the frame in lines and make every pixel count
     // meaningless.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     viewport.background = wgpu::Color::BLACK;
     viewport.lod_budget = scene.budget;
 

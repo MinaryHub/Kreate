@@ -2293,6 +2293,7 @@ impl App {
             ("view.toggle_projection", &[]),
             ("view.toggle_sidebar", &[]),
             ("view.toggle_grid", &[]),
+            ("view.toggle_ground_shadow", &[]),
             ("view.toggle_wireframe", &[]),
             ("app.search", &[]),
             ("edit.copy_script", &[]),
@@ -11149,6 +11150,7 @@ impl App {
         let overlays = kreate::shell::Overlays {
             flat: gfx.viewport.shading == kreate_render::ShadingMode::Flat,
             grid: gfx.viewport.show_grid,
+            ground_shadow: gfx.viewport.show_ground_shadow,
             wireframe: gfx.viewport.show_wireframe,
             face_orientation: gfx.viewport.face_orientation,
             statistics: self.ui.show_stats,
@@ -11658,6 +11660,7 @@ impl App {
             v.contact_shadows = main.contact_shadows;
             v.ambient_occlusion = main.ambient_occlusion;
             v.show_grid = main.show_grid;
+            v.show_ground_shadow = main.show_ground_shadow;
             v.show_wireframe = main.show_wireframe;
             v.show_elements = main.show_elements;
             v.show_outline = main.show_outline;
@@ -12679,6 +12682,12 @@ impl App {
             "view.toggle_grid" => {
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.viewport.show_grid = !gfx.viewport.show_grid;
+                    self.redraw.set(RedrawReason::SETTINGS);
+                }
+            }
+            "view.toggle_ground_shadow" => {
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.show_ground_shadow = !gfx.viewport.show_ground_shadow;
                     self.redraw.set(RedrawReason::SETTINGS);
                 }
             }

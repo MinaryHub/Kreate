@@ -75,6 +75,7 @@ fn select_with(
     // The grid writes its own depth and would occlude geometry on the ground
     // plane, which has nothing to do with what is being tested here.
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
 
     let uploaded: Vec<(GpuMesh, DAffine3, u32)> = objects
         .iter()
@@ -563,6 +564,7 @@ fn a_second_drag_does_not_inherit_the_first() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut viewport = Viewport::new(&gpu.device, format, SIZE, SIZE);
     viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
     let colour = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("headless colour"),
         size: wgpu::Extent3d {
