@@ -5567,7 +5567,6 @@ fn draw_viewport(
         );
     }
     let toolbar = draw_toolbar(ui, state, mode, rect);
-    draw_sculpt_box(ui, state, mode, rect, toolbar);
     draw_view_info(ui, state, doc, mode, l, rect, toolbar);
     draw_select_band(ui, state, rect);
     draw_modal_header(ui, state, rect);
@@ -6301,50 +6300,18 @@ fn draw_sculpt_menus(ui: &mut Ui, state: &mut ShellState) {
     }
 }
 
-/// Sculpt mode's brush settings, in a box under the brush column: where the
-/// hand already is, and on screen however narrow the viewport — the header
-/// has them too, but a narrow header scrolls them out of sight.
-fn draw_sculpt_box(
-    ui: &mut Ui,
-    state: &mut ShellState,
-    mode: kreate_ops::operator::Mode,
-    viewport: egui::Rect,
-    toolbar: egui::Rect,
-) {
-    if mode.acts_on() != kreate_ops::mode::ActsOn::Sculpt || toolbar == egui::Rect::NOTHING {
-        return;
-    }
+/// Sculpt mode's brush settings, in the ribbon beside the brushes: where
+/// the hand already is, and off the picture, where a box over the corner
+/// covered the view's own words.
+fn draw_sculpt_ribbon(ui: &mut Ui, state: &mut ShellState) {
     let theme = kreate_ui::theme::from_ui(ui);
-    let width = 132.0;
-    let height = 112.0;
-    let rect = egui::Rect::from_min_size(
-        toolbar.left_bottom() + egui::vec2(0.0, 8.0),
-        egui::vec2(width, height),
-    );
-    if rect.bottom() > viewport.bottom() - 8.0 || rect.right() > viewport.right() - 8.0 {
-        return;
-    }
-    state.viewport_blockers.push(rect);
-    let radius = egui::CornerRadius::same(theme.radius + 1);
-    let painter = ui.painter().with_clip_rect(viewport);
-    painter.rect_filled(rect, radius, theme.raised.gamma_multiply(0.96));
-    painter.rect_stroke(
-        rect,
-        radius,
-        egui::Stroke::new(1.0, theme.border),
-        egui::StrokeKind::Inside,
-    );
-    ui.scope_builder(
-        egui::UiBuilder::new().max_rect(rect.shrink(8.0)).id_salt((
-            "sculpt-box",
-            viewport.min.x as i32,
-            viewport.min.y as i32,
-        )),
-        |ui| {
-            ui.set_clip_rect(rect);
-            egui::Grid::new(("sculpt-box-grid", viewport.min.x as i32))
+    ui.vertical(|ui| {
+        ui.set_min_height(64.0);
+        // Side by side, so the group is no taller than the others.
+        ui.horizontal(|ui| {
+            egui::Grid::new("sculpt-ribbon-grid")
                 .num_columns(2)
-                .spacing([6.0, 6.0])
+                .spacing([6.0, 2.0])
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(state.catalog.get("paint-radius")).small());
                     ui.add(
@@ -6363,13 +6330,18 @@ fn draw_sculpt_box(
                     );
                     ui.end_row();
                 });
-            ui.add_space(2.0);
             ui.checkbox(
                 &mut state.sculpt.mirror_x,
                 egui::RichText::new(state.catalog.get("sculpt-mirror-x")).small(),
             );
-        },
-    );
+        });
+        ui.label(
+            egui::RichText::new(state.catalog.get("ribbon-brush").to_uppercase())
+                .small()
+                .strong()
+                .color(theme.text_dim),
+        );
+    });
 }
 
 /// The view information in the viewport's top-left corner.
@@ -13628,6 +13600,10 @@ fn draw_ribbon(
                             );
                         });
                         ui.separator();
+                        if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+                            draw_sculpt_ribbon(ui, state);
+                            ui.separator();
+                        }
                         let menus = viewport_menus(l, mode, state.select_mode);
                         for (i, menu) in menus.iter().enumerate() {
                             if i > 0 {

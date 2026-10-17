@@ -194,6 +194,7 @@ menu-inset = Inset
 menu-bridge = Bridge
 menu-loop-cut = Loop Cut
 ribbon-tools = Tools
+ribbon-brush = Brush
 menu-edge-slide = Edge Slide
 menu-symmetrize = Symmetrize
 menu-shade-smooth = Smooth

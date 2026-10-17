@@ -194,6 +194,7 @@ menu-inset = 인셋
 menu-bridge = 브리지
 menu-loop-cut = 루프 컷
 ribbon-tools = 도구
+ribbon-brush = 브러시
 menu-edge-slide = 엣지 슬라이드
 menu-symmetrize = 대칭화
 menu-shade-smooth = 부드럽게
