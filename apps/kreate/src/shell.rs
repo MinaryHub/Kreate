@@ -1793,6 +1793,9 @@ struct Labels {
     view_user_perspective: String,
     view_user_orthographic: String,
     panel_transform: String,
+    panel_follow_path: String,
+    follow_path: String,
+    follow_path_clear: String,
     panel_surface: String,
     panel_light: String,
     menu_object: String,
@@ -1936,6 +1939,9 @@ impl Labels {
             recent_none: t("recent-none"),
             menu_show_hide: t("menu-show-hide"),
             reveal_hidden: t("reveal-hidden"),
+            panel_follow_path: t("panel-follow-path"),
+            follow_path: t("menu-follow-path"),
+            follow_path_clear: t("menu-follow-path-clear"),
             file_save: t("menu-file-save"),
             file_save_as: t("menu-file-save-as"),
             file_import_menu: t("menu-file-import-menu"),
@@ -4545,6 +4551,7 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "rectangle",
                         "circle",
                         "arc",
+                        "spline",
                         "pattern",
                         "point",
                         "trim",
@@ -5306,6 +5313,11 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
                     op("object.unbind_armature", &[]),
                 ),
             ],
+        ),
+        entry(
+            "object.follow_path",
+            &l.follow_path,
+            op("object.follow_path", &[]),
         ),
         MenuNode::Sub(
             l.menu_show_hide.clone(),
@@ -10823,6 +10835,7 @@ fn draw_object_tab(
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
+    draw_follow_path_panel(ui, state, doc, registry, l, active);
     draw_robot_panel(ui, state, doc, object);
     draw_physical_panel(ui, state, doc, registry);
     draw_mesh_check_panel(ui, state, doc, object);
@@ -11639,6 +11652,57 @@ fn draw_data_tab(
 
 /// The sketch: its constraints with their dimensions, buttons that add one
 /// on what is selected in edit mode, and the solid it becomes.
+/// What an object following a curve follows, and how: shown while it does,
+/// with the way to stop.
+fn draw_follow_path_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+    object: &kreate_scene::document::Object,
+) {
+    let Some(path) = &object.path else {
+        return;
+    };
+    let Some(info) = registry.get("object.follow_path_set") else {
+        return;
+    };
+    let mut params =
+        kreate_reflect::OpParams::to_map(&kreate_ops::ops::curve::follow_params(doc, path));
+    let (open, closed) = kreate_ui::panel::section_closable(
+        ui,
+        &l.panel_follow_path,
+        true,
+        &l.follow_path_clear,
+        |ui| {
+            let text = field_menu_text(&state.catalog);
+            let out = kreate_ui::property_editor_full(
+                ui,
+                &state.catalog,
+                info.id,
+                info.schema,
+                &mut params,
+                |_| true,
+                |_| None,
+                &l.key_property,
+                |_| None,
+                &text,
+            );
+            if out.changed {
+                let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                send_edit(state, "object.follow_path_set", params.clone(), dragging);
+            }
+        },
+    );
+    let _ = open;
+    if closed {
+        state
+            .queue
+            .run("object.follow_path_clear", PropertyMap::new());
+    }
+}
+
 /// A curve object's panel: how it is shown, its splines, and the way out
 /// to a plain mesh.
 fn draw_curve_panel(
@@ -13346,13 +13410,14 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 20] = [
+const SKETCH_TOOLS: [&str; 21] = [
     "select",
     "pattern",
     "line",
     "rectangle",
     "circle",
     "arc",
+    "spline",
     "point",
     "trim",
     "dimension",
@@ -15383,6 +15448,9 @@ mod tests {
             "menu-add-camera",
             "menu-add-empty",
             "menu-add-curve",
+            "panel-follow-path",
+            "menu-follow-path",
+            "menu-follow-path-clear",
             "menu-add-curve-bezier",
             "menu-add-curve-circle",
             "menu-add-curve-path",

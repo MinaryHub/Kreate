@@ -364,6 +364,9 @@ pub struct ObjectRecord {
     /// Its curve, when it is a curve object. See `kreate_scene::curve`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curve: Option<CurveObjectRecord>,
+    /// The curve it follows as the clock runs, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<FollowPathRecord>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -1600,6 +1603,21 @@ fn world_from_record(record: &WorldRecord, document: &Document) -> kreate_scene:
     }
 }
 
+/// An object's path to follow, as the file holds it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FollowPathRecord {
+    /// The curve object, by identity.
+    pub curve: u64,
+    pub start: f64,
+    pub frames: f64,
+    #[serde(default)]
+    pub offset: f64,
+    #[serde(default = "yes")]
+    pub follow: bool,
+    #[serde(default)]
+    pub cyclic: bool,
+}
+
 /// A curve object's curve, as the file holds it. (An animation curve is a
 /// [`CurveRecord`].)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2176,6 +2194,14 @@ pub fn write(
                 physics: crate::physics_record::write(&object.physics),
                 robot: object.robot.as_ref().map(RobotRecord::write),
                 curve: object.curve.as_ref().map(CurveObjectRecord::write),
+                path: object.path.as_ref().map(|p| FollowPathRecord {
+                    curve: p.curve.raw(),
+                    start: p.start,
+                    frames: p.frames,
+                    offset: p.offset,
+                    follow: p.follow,
+                    cyclic: p.cyclic,
+                }),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -2231,14 +2257,7 @@ pub fn write(
                 sketch: object
                     .sketch
                     .iter()
-                    .map(|c| {
-                        (
-                            c.tag().to_string(),
-                            c.points(),
-                            c.value().unwrap_or(0.0),
-                            c.at(),
-                        )
-                    })
+                    .map(|c| (c.tag().to_string(), c.parts().0, c.parts().1, c.at()))
                     .collect(),
                 sketch_lines: object.sketch_lines.clone(),
                 features: object.features.iter().map(feature_record).collect(),
@@ -2904,6 +2923,18 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         }
         object.robot = record.robot.as_ref().map(RobotRecord::read);
         object.curve = record.curve.as_ref().map(CurveObjectRecord::read);
+        object.path = record
+            .path
+            .as_ref()
+            .filter(|p| p.start.is_finite() && p.frames.is_finite() && p.offset.is_finite())
+            .map(|p| kreate_scene::curve::FollowPath {
+                curve: kreate_scene::Uid::from_raw(p.curve),
+                start: p.start,
+                frames: p.frames,
+                offset: p.offset,
+                follow: p.follow,
+                cyclic: p.cyclic,
+            });
         object.linkage = match &record.linked {
             None => Linkage::Local,
             Some([library, name]) => Linkage::Linked {

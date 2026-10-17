@@ -27,6 +27,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Circle>();
     registry.register::<Arc>();
     registry.register::<Point>();
+    registry.register::<Spline>();
     registry.register::<Constrain>();
     registry.register::<MovePoints>();
     registry.register::<Delete>();
@@ -804,6 +805,107 @@ impl Operator for Arc {
         ring.push(place(&mut pts, to, to_join));
         let lines = ring.windows(2).map(|w| [w[0], w[1]]).collect();
         commit(doc, id, pts, lines, vec![Constraint::Arc { centre, ring }])
+    }
+}
+
+// --- splines -----------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SplineParams {
+    /// The points it passes through, in order, as x, y pairs.
+    #[param(hidden)]
+    pub points: Vec<f64>,
+    /// For each point, the existing point it lands on, plus one.
+    #[param(hidden)]
+    pub joins: Vec<u32>,
+    /// Back round to the first point at the end.
+    pub closed: bool,
+    /// Points along the curve between each pair it passes through.
+    #[param(min = 1, max = 64, unit = "count")]
+    pub segments: u32,
+}
+
+impl Default for SplineParams {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            joins: Vec::new(),
+            closed: false,
+            segments: 8,
+        }
+    }
+}
+
+/// A smooth curve through the points given — Fusion's fit-point spline —
+/// held to them: move one and the curve follows.
+pub struct Spline;
+
+impl Operator for Spline {
+    type Params = SplineParams;
+    fn id() -> &'static str {
+        "sketch.spline"
+    }
+    fn label() -> &'static str {
+        "Spline"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_sketch(doc.document())?;
+        let count = params.points.len() / 2;
+        if count < 2 {
+            return Err(OpError::Failed("a spline needs two points or more".into()));
+        }
+        let mut pts = points(doc.document(), id);
+        let through: Vec<u32> = (0..count)
+            .filter_map(|i| {
+                let at = pair(&params.points, i)?;
+                Some(place(&mut pts, at, params.joins.get(i)))
+            })
+            .collect();
+        if through.len() < 2 {
+            return Err(OpError::Failed("a spline needs two points or more".into()));
+        }
+        let positions: Vec<DVec2> = through.iter().map(|v| pts[*v as usize]).collect();
+        let per = params.segments.clamp(1, 64) as usize;
+        let spans = if params.closed {
+            through.len()
+        } else {
+            through.len() - 1
+        };
+        let ring_at = kreate_scene::sketch::spline_ring(&positions, spans * per, params.closed);
+        let ring: Vec<u32> = ring_at
+            .iter()
+            .map(|p| {
+                pts.push(*p);
+                pts.len() as u32 - 1
+            })
+            .collect();
+        // Lines: through, its ring, the next through — round the loop when
+        // closed.
+        let mut lines = Vec::new();
+        for s in 0..spans {
+            let mut run = vec![through[s]];
+            run.extend_from_slice(&ring[s * per..(s + 1) * per]);
+            run.push(through[(s + 1) % through.len()]);
+            lines.extend(run.windows(2).map(|w| [w[0], w[1]]));
+        }
+        commit(
+            doc,
+            id,
+            pts,
+            lines,
+            vec![Constraint::Spline {
+                through,
+                ring,
+                closed: params.closed,
+            }],
+        )
     }
 }
 
@@ -1675,6 +1777,75 @@ mod tests {
             o.sketch_lines
         );
         assert!(o.sketch.iter().all(|c| c.points().iter().all(|v| *v < n)));
+    }
+
+    /// A spline through three points is held to them: move the middle one
+    /// and the ring follows; closed, it is a region.
+    #[test]
+    fn a_spline_follows_the_points_it_passes_through() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let id = active_sketch(&doc).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.spline",
+            &[
+                (
+                    "points",
+                    PropertyValue::Floats(vec![0.0, 0.0, 1.0, 1.0, 2.0, 0.0]),
+                ),
+                ("joins", PropertyValue::Ints(vec![1, 0, 0])),
+                ("segments", PropertyValue::Int(4)),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(id).unwrap();
+        // Through the origin and two points, 4 ring points a span: 2 spans.
+        assert_eq!(points(&doc, id).len(), 1 + 2 + 8);
+        assert_eq!(o.sketch_lines.len(), 10);
+        let spline = o
+            .sketch
+            .iter()
+            .find(|c| matches!(c, Constraint::Spline { .. }))
+            .expect("a spline");
+        let Constraint::Spline { through, ring, .. } = spline.clone() else {
+            unreachable!()
+        };
+        assert_eq!((through.len(), ring.len()), (3, 8));
+        // The middle point moved up: the ring near it goes up with it.
+        let before = points(&doc, id)[ring[3] as usize];
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.move",
+            &[
+                ("points", PropertyValue::Ints(vec![through[1]])),
+                ("offset", PropertyValue::Vec3([0.0, 1.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let after = points(&doc, id)[ring[3] as usize];
+        assert!(after.y > before.y + 0.5, "{before:?} -> {after:?}");
+        // Closed: one region to extrude.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.spline",
+            &[
+                (
+                    "points",
+                    PropertyValue::Floats(vec![5.0, 0.0, 6.0, 0.0, 6.0, 1.0, 5.0, 1.0]),
+                ),
+                ("closed", PropertyValue::Bool(true)),
+            ],
+        )
+        .unwrap();
+        let regions = kreate_scene::feature::sketch_regions(&doc, id);
+        assert!(!regions.is_empty(), "a closed spline encloses a region");
     }
 
     #[test]

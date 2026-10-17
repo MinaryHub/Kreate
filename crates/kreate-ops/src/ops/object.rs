@@ -3479,6 +3479,9 @@ pub struct AddSweepParams {
     /// Close the ends of an open path.
     pub caps: bool,
     pub location: [f64; 3],
+    /// A curve object to sweep along instead of `path`, by name: its first
+    /// spline, as it is sampled, closed when it is.
+    pub curve: String,
 }
 
 impl Default for AddSweepParams {
@@ -3494,6 +3497,7 @@ impl Default for AddSweepParams {
             scale_end: 1.0,
             caps: true,
             location: [0.0; 3],
+            curve: String::new(),
         }
     }
 }
@@ -3517,7 +3521,31 @@ impl Operator for AddSweep {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        if params.path.len() < 6 || params.path.len() % 3 != 0 {
+        // Along a curve object: its sampled points, straight between them,
+        // in the world less where the sweep is put.
+        let from_curve = if params.curve.trim().is_empty() {
+            None
+        } else {
+            let d = doc.document();
+            let name = params.curve.trim();
+            let (id, o) = d
+                .objects()
+                .find(|(_, o)| o.name == name && o.curve.is_some())
+                .ok_or_else(|| OpError::Failed(format!("no curve object called {name:?}")))?;
+            let world = d.world_transform(id);
+            let (pts, closed) = o
+                .curve
+                .as_ref()
+                .and_then(|c| c.sampled().into_iter().next())
+                .ok_or_else(|| OpError::Failed("the curve has no points".into()))?;
+            let at = DVec3::from_array(params.location);
+            let path: Vec<glam::Vec3> = pts
+                .iter()
+                .map(|p| (world.transform_point3(p.position) - at).as_vec3())
+                .collect();
+            Some((path, closed))
+        };
+        if from_curve.is_none() && (params.path.len() < 6 || params.path.len() % 3 != 0) {
             return Err(OpError::Failed(
                 "path wants x, y, z triples: at least two points".into(),
             ));
@@ -3528,11 +3556,18 @@ impl Operator for AddSweep {
                 "profile wants x, y pairs: at least three points".into(),
             ));
         }
-        let path: Vec<glam::Vec3> = params
-            .path
-            .chunks(3)
-            .map(|p| glam::Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
-            .collect();
+        let (path, closed, resolution) = match from_curve {
+            Some((path, closed)) => (path, closed, 1),
+            None => (
+                params
+                    .path
+                    .chunks(3)
+                    .map(|p| glam::Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32))
+                    .collect(),
+                params.closed,
+                params.resolution,
+            ),
+        };
         let profile: Vec<glam::Vec2> = if params.profile.is_empty() {
             kreate_mesh::primitives::circle_profile(params.radius as f32, params.segments)
         } else {
@@ -3545,8 +3580,8 @@ impl Operator for AddSweep {
         let mesh = kreate_mesh::primitives::sweep(&kreate_mesh::primitives::Sweep {
             path: &path,
             profile: &profile,
-            resolution: params.resolution,
-            closed: params.closed,
+            resolution,
+            closed,
             scale: (params.scale_start as f32, params.scale_end as f32),
             caps: params.caps,
         });

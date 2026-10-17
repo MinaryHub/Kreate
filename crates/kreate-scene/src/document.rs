@@ -228,6 +228,9 @@ pub struct Object {
     /// What makes it a curve object: the splines it shows as a wire, a tube
     /// or a ribbon, in place of its mesh. See [`crate::curve`].
     pub curve: Option<crate::curve::Curve>,
+    /// Carried along a curve object as the clock runs. See
+    /// [`crate::curve::FollowPath`].
+    pub path: Option<crate::curve::FollowPath>,
 }
 
 impl Object {
@@ -263,6 +266,7 @@ impl Object {
             physics: crate::physics::ObjectPhysics::default(),
             robot: None,
             curve: None,
+            path: None,
         }
     }
 

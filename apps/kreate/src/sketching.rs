@@ -22,6 +22,8 @@ pub enum Tool {
     Circle,
     Arc,
     Point,
+    /// A smooth curve through the points clicked: Fusion's fit-point spline.
+    Spline,
     /// Click a line, circle or arc to take out the piece between the
     /// crossings either side.
     Trim,
@@ -45,6 +47,7 @@ impl Tool {
             "circle" => Tool::Circle,
             "arc" => Tool::Arc,
             "point" => Tool::Point,
+            "spline" => Tool::Spline,
             "trim" => Tool::Trim,
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
@@ -71,6 +74,7 @@ impl Tool {
             Tool::Circle => "circle",
             Tool::Arc => "arc",
             Tool::Point => "point",
+            Tool::Spline => "spline",
             Tool::Trim => "trim",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
@@ -85,7 +89,7 @@ impl Tool {
     pub fn draws(self) -> bool {
         matches!(
             self,
-            Tool::Line | Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Point
+            Tool::Line | Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Point | Tool::Spline
         )
     }
 }
@@ -126,6 +130,9 @@ pub struct Geometry {
     /// Centre, ring, and whether it goes all the way round (a circle) or
     /// not (an arc).
     pub rounds: Vec<(u32, Vec<u32>, bool)>,
+    /// Points that lie along a spline between the points it passes through:
+    /// not picked as points, as a circle's ring is not.
+    pub along: Vec<u32>,
 }
 
 impl Geometry {
@@ -146,17 +153,29 @@ impl Geometry {
                 _ => None,
             })
             .collect();
+        let along = constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Spline { ring, .. } => Some(ring.iter().copied()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
         Self {
             points,
             screen,
             lines,
             rounds,
+            along,
         }
     }
 
     /// Whether a point is a ring point of a circle or arc but not an end of
     /// one: what a click on a curve should not pick as a point.
     fn inner_ring_point(&self, v: u32) -> bool {
+        if self.along.contains(&v) {
+            return true;
+        }
         self.rounds.iter().any(|(_, ring, closed)| {
             if *closed {
                 ring.contains(&v)
@@ -644,6 +663,13 @@ pub fn other_points(
                         }
                     }
                 }
+                Constraint::Spline { ring, .. } => {
+                    for v in ring {
+                        if let Some(a) = along.get_mut(*v as usize) {
+                            *a = true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -767,6 +793,7 @@ pub fn view(
         constraints.iter().any(|c| match c {
             Constraint::Circle { ring, .. } => ring.contains(&v),
             Constraint::Arc { ring, .. } => ring.len() > 2 && ring[1..ring.len() - 1].contains(&v),
+            Constraint::Spline { ring, .. } => ring.contains(&v),
             _ => false,
         })
     };
@@ -910,6 +937,20 @@ pub fn view(
                 pts.push(next);
                 view.preview.push(polyline(pts));
             }
+            // The curve so far and on to the pointer, smooth through them.
+            (Tool::Spline, [_, ..]) => {
+                let mut pts = clicks.clone();
+                pts.push(h);
+                let ring = kreate_scene::sketch::spline_ring(&pts, (pts.len() - 1) * 8, false);
+                let mut line = Vec::with_capacity(pts.len() + ring.len());
+                for (i, p) in pts.iter().enumerate() {
+                    line.push(*p);
+                    if i + 1 < pts.len() {
+                        line.extend_from_slice(&ring[i * 8..(i + 1) * 8]);
+                    }
+                }
+                view.preview.push(polyline(line));
+            }
             (Tool::Rectangle, [a]) => {
                 let b = match typed.as_slice() {
                     [w, hh, ..] => corner(*a, h, *w, *hh),
@@ -980,6 +1021,8 @@ pub fn view(
         view.axis = ui.axis;
     }
     let prompt_key = match (ui.tool, ui.clicks.len()) {
+        (Tool::Spline, 0) => "sketch-prompt-spline-start",
+        (Tool::Spline, _) => "sketch-prompt-spline-next",
         (Tool::Line, 0) => "sketch-prompt-line-start",
         (Tool::Line, _) => "sketch-prompt-line-next",
         (Tool::Rectangle, 0) => "sketch-prompt-corner",

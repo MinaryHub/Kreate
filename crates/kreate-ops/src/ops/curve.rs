@@ -20,6 +20,9 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<PointRemove>();
     registry.register::<SplineSet>();
     registry.register::<ToMesh>();
+    registry.register::<FollowPath>();
+    registry.register::<FollowPathSet>();
+    registry.register::<FollowPathClear>();
 }
 
 /// The active object, when it is a curve object.
@@ -535,6 +538,207 @@ impl Operator for ToMesh {
     }
 }
 
+// --- following a curve -------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct FollowPathParams {
+    /// The curve object, by name; empty for the active object, which the
+    /// other selected objects then follow — Blender's Ctrl+P ▸ Follow Path.
+    pub curve: String,
+    /// The frame the run starts on.
+    pub start: f64,
+    /// How many frames the whole curve takes.
+    #[param(min = 1.0, soft_max = 1000.0)]
+    pub frames: f64,
+    /// Where along the curve to begin, as a fraction.
+    #[param(min = -1.0, max = 1.0)]
+    pub offset: f64,
+    /// Turned to face along the curve.
+    pub follow: bool,
+    /// Round again past the end.
+    pub cyclic: bool,
+}
+
+impl Default for FollowPathParams {
+    fn default() -> Self {
+        let d = kreate_scene::curve::FollowPath::default();
+        Self {
+            curve: String::new(),
+            start: d.start,
+            frames: d.frames,
+            offset: d.offset,
+            follow: d.follow,
+            cyclic: d.cyclic,
+        }
+    }
+}
+
+/// The settings as a follower has them: what the panel starts from.
+pub fn follow_params(doc: &Document, path: &kreate_scene::curve::FollowPath) -> FollowPathParams {
+    FollowPathParams {
+        curve: doc
+            .object_by_uid(path.curve)
+            .and_then(|id| doc.object(id))
+            .map(|o| o.name.clone())
+            .unwrap_or_default(),
+        start: path.start,
+        frames: path.frames,
+        offset: path.offset,
+        follow: path.follow,
+        cyclic: path.cyclic,
+    }
+}
+
+fn path_from(
+    params: &FollowPathParams,
+    curve: kreate_scene::Uid,
+) -> kreate_scene::curve::FollowPath {
+    kreate_scene::curve::FollowPath {
+        curve,
+        start: params.start,
+        frames: params.frames.max(1.0),
+        offset: params.offset,
+        follow: params.follow,
+        cyclic: params.cyclic,
+    }
+}
+
+/// Sets the selected objects to follow a curve as the clock runs.
+pub struct FollowPath;
+
+impl Operator for FollowPath {
+    type Params = FollowPathParams;
+    fn id() -> &'static str {
+        "object.follow_path"
+    }
+    fn label() -> &'static str {
+        "Follow Path"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let name = params.curve.trim();
+        let curve = if name.is_empty() {
+            active_curve(d).ok_or_else(|| {
+                OpError::Failed(
+                    "make the curve the active object, with the followers selected".into(),
+                )
+            })?
+        } else {
+            d.objects()
+                .find(|(_, o)| o.name == name && o.curve.is_some())
+                .map(|(id, _)| id)
+                .ok_or_else(|| OpError::Failed(format!("no curve object called {name:?}")))?
+        };
+        let followers: Vec<ObjectId> = d
+            .selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| *id != curve)
+            .collect();
+        if followers.is_empty() {
+            return Err(OpError::Failed("select what is to follow the curve".into()));
+        }
+        let uid = d.object_uid(curve).expect("an object");
+        let path = path_from(params, uid);
+        let d = doc.document_mut();
+        for id in followers {
+            if let Some(o) = d.object_mut(id) {
+                o.path = Some(path.clone());
+            }
+        }
+        d.follow_paths();
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Changes how the active object follows its curve.
+pub struct FollowPathSet;
+
+impl Operator for FollowPathSet {
+    type Params = FollowPathParams;
+    fn id() -> &'static str {
+        "object.follow_path_set"
+    }
+    fn label() -> &'static str {
+        "Follow Path Settings"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .active
+            .and_then(|id| doc.object(id))
+            .is_some_and(|o| o.path.is_some())
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let id = d
+            .selection
+            .active
+            .filter(|id| d.object(*id).is_some_and(|o| o.path.is_some()))
+            .ok_or_else(|| OpError::Failed("the active object follows no curve".into()))?;
+        let current = d.object(id).and_then(|o| o.path.clone()).expect("checked");
+        let name = params.curve.trim();
+        let curve = if name.is_empty() {
+            current.curve
+        } else {
+            d.objects()
+                .find(|(_, o)| o.name == name && o.curve.is_some())
+                .and_then(|(c, _)| d.object_uid(c))
+                .ok_or_else(|| OpError::Failed(format!("no curve object called {name:?}")))?
+        };
+        let path = path_from(params, curve);
+        let d = doc.document_mut();
+        d.object_mut(id).expect("checked").path = Some(path);
+        d.follow_paths();
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct FollowPathClearParams {}
+
+/// Stops the selected objects following their curves, where they are.
+pub struct FollowPathClear;
+
+impl Operator for FollowPathClear {
+    type Params = FollowPathClearParams;
+    fn id() -> &'static str {
+        "object.follow_path_clear"
+    }
+    fn label() -> &'static str {
+        "Clear Follow Path"
+    }
+    fn execute(
+        _params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let ids: Vec<ObjectId> = doc.document().selection.objects.clone();
+        let d = doc.document_mut();
+        let mut cleared = 0;
+        for id in ids {
+            if let Some(o) = d.object_mut(id) {
+                if o.path.take().is_some() {
+                    cleared += 1;
+                }
+            }
+        }
+        Ok(if cleared > 0 {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +912,80 @@ mod tests {
             "the tube, not the empty mesh it holds"
         );
         assert!(kreate_mesh::measure::is_closed(&shown));
+    }
+
+    #[test]
+    fn a_follower_is_carried_along_the_curve_by_the_clock() {
+        let mut b = bench();
+        // A path from x = -1 to x = 1, and a cube to follow it.
+        run(
+            &mut b,
+            "object.add_curve",
+            &[("shape", PropertyValue::Enum(2))],
+        )
+        .unwrap();
+        let curve = active_curve(&b.2).unwrap();
+        let cube =
+            b.2.add_mesh_object("Cube", kreate_mesh::primitives::cube(0.1));
+        b.2.selection.clear();
+        b.2.selection.add(cube);
+        b.2.selection.add(curve);
+        b.2.selection.active = Some(curve);
+        run(
+            &mut b,
+            "object.follow_path",
+            &[
+                ("start", PropertyValue::Float(1.0)),
+                ("frames", PropertyValue::Float(100.0)),
+            ],
+        )
+        .unwrap();
+        let at = |d: &Document| d.object(cube).unwrap().transform.translation;
+        assert!(
+            (at(&b.2) - DVec3::new(-1.0, 0.0, 0.0)).length() < 1e-9,
+            "{:?}",
+            at(&b.2)
+        );
+        b.2.playback.frame = 51.0;
+        b.2.follow_paths();
+        assert!(at(&b.2).x.abs() < 1e-9, "halfway: {:?}", at(&b.2));
+        // Facing along: Y along +X.
+        let y = b.2.object(cube).unwrap().transform.rotation * DVec3::Y;
+        assert!((y - DVec3::X).length() < 1e-9, "{y:?}");
+        b.2.playback.frame = 500.0;
+        b.2.follow_paths();
+        assert!((at(&b.2).x - 1.0).abs() < 1e-9, "held at the end");
+        // Cyclic: round again.
+        b.2.selection.clear();
+        b.2.selection.add(cube);
+        b.2.selection.active = Some(cube);
+        run(
+            &mut b,
+            "object.follow_path_set",
+            &[
+                ("start", PropertyValue::Float(1.0)),
+                ("frames", PropertyValue::Float(100.0)),
+                ("cyclic", PropertyValue::Bool(true)),
+            ],
+        )
+        .unwrap();
+        b.2.playback.frame = 126.0;
+        b.2.follow_paths();
+        assert!(
+            (at(&b.2).x + 0.5).abs() < 1e-6,
+            "a quarter round again: {:?}",
+            at(&b.2)
+        );
+        // In the file and back.
+        let bytes = kreate_io::container::write(&b.2, &Default::default(), &[]).unwrap();
+        let back = kreate_io::container::read(std::io::Cursor::new(bytes))
+            .unwrap()
+            .document;
+        let (_, o) = back.objects().find(|(_, o)| o.name == "Cube").unwrap();
+        assert!(o.path.as_ref().is_some_and(|p| p.cyclic));
+        // Cleared: stays where it is.
+        run(&mut b, "object.follow_path_clear", &[]).unwrap();
+        assert!(b.2.object(cube).unwrap().path.is_none());
     }
 
     #[test]

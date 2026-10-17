@@ -2247,6 +2247,7 @@ impl App {
             ("object.add_camera", &[]),
             ("object.add_empty", &[]),
             ("object.add_curve", &[]),
+            ("object.follow_path", &[]),
             ("object.add_armature", &[]),
             (
                 "object.bind_armature",
@@ -4559,8 +4560,10 @@ impl App {
         // outline is, so nothing above can find it — and an outline begun
         // in the open could not be closed.
         let first = self.sketching.clicks.first().copied();
-        let closing = self.sketching.tool == kreate::sketching::Tool::Line
-            && self.sketching.clicks.len() >= 3
+        let closing = matches!(
+            self.sketching.tool,
+            kreate::sketching::Tool::Line | kreate::sketching::Tool::Spline
+        ) && self.sketching.clicks.len() >= 3
             && first.is_some_and(|(p, _)| {
                 self.sketch_screen(p)
                     .zip(self.sketch_cursor())
@@ -4824,6 +4827,30 @@ impl App {
         self.sketch_tool_done();
     }
 
+    /// A spline tool's points so far, run as one stroke.
+    fn commit_sketch_spline(&mut self, closed: bool) {
+        let clicks = std::mem::take(&mut self.sketching.clicks);
+        if clicks.len() >= 2 {
+            self.run_op_with(
+                "sketch.spline",
+                &[
+                    (
+                        "points",
+                        PropertyValue::Floats(
+                            clicks.iter().flat_map(|(p, _)| [p.x, p.y]).collect(),
+                        ),
+                    ),
+                    (
+                        "joins",
+                        PropertyValue::Ints(clicks.iter().map(|(_, j)| *j).collect()),
+                    ),
+                    ("closed", PropertyValue::Bool(closed)),
+                ],
+            );
+        }
+        self.sketch_tool_done();
+    }
+
     /// The sketch mouse: returns whether the press or release was the tools'.
     fn sketch_mouse(&mut self, button: MouseButton, pressed: bool) -> bool {
         use kreate::sketching::{Pick, Tool};
@@ -4835,6 +4862,8 @@ impl App {
                 }
                 if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
                     self.commit_sketch_line(false);
+                } else if tool == Tool::Spline && self.sketching.clicks.len() >= 2 {
+                    self.commit_sketch_spline(false);
                 } else if !self.sketching.clicks.is_empty() || !self.sketching.picks.is_empty() {
                     self.sketch_tool_done();
                 } else {
@@ -4915,6 +4944,14 @@ impl App {
                             self.sketching.clicks.pop();
                             self.commit_sketch_line(true);
                         }
+                    }
+                    Tool::Spline => {
+                        if self.sketching.closing {
+                            self.commit_sketch_spline(true);
+                            return true;
+                        }
+                        self.sketching.clicks.push((p, join));
+                        self.sketching.typed.clear();
                     }
                     Tool::Rectangle | Tool::Circle | Tool::Arc => {
                         self.sketching.clicks.push((p, join));
@@ -5195,6 +5232,7 @@ impl App {
                         self.sketching.typed.clear();
                     }
                     (Tool::Line, []) => self.commit_sketch_line(false),
+                    (Tool::Spline, []) => self.commit_sketch_spline(false),
                     (Tool::Rectangle, [w, h, ..]) => {
                         let first = self.sketching.clicks[0];
                         let far = kreate::sketching::corner(first.0, toward, *w, *h);
@@ -5233,6 +5271,8 @@ impl App {
                     // Put back, nothing else.
                 } else if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
                     self.commit_sketch_line(false);
+                } else if tool == Tool::Spline && self.sketching.clicks.len() >= 2 {
+                    self.commit_sketch_spline(false);
                 } else if !self.sketching.clicks.is_empty()
                     || !self.sketching.picks.is_empty()
                     || !self.sketching.seeds.is_empty()
@@ -7249,6 +7289,10 @@ impl App {
             return;
         }
         self.doc.animate(frame);
+        // What follows a curve moves with the clock whether or not anything
+        // is keyed: put where this frame has it, not left to the drivers'
+        // next run.
+        self.doc.follow_paths();
         if let Some(time) = kreate_math::SceneTime::new(frame, self.doc.playback.fps) {
             // The modifier stack's time too, so anything that reads the clock
             // is evaluated at the frame on screen.

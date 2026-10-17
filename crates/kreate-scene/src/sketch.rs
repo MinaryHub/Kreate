@@ -57,10 +57,58 @@ pub enum Constraint {
         centre: u32,
         on: u32,
     },
+    /// A smooth curve through `through`, in order: `ring` are the points
+    /// along it between each pair, evenly by parameter — Fusion's fit-point
+    /// spline. Closed, it comes back round to the first.
+    Spline {
+        through: Vec<u32>,
+        ring: Vec<u32>,
+        closed: bool,
+    },
+}
+
+/// Where a fit-point spline's ring points lie: `count` points spread evenly
+/// by parameter along a Catmull-Rom through `through`, between each pair of
+/// its points — what the ring is held to.
+pub fn spline_ring(through: &[DVec2], count: usize, closed: bool) -> Vec<DVec2> {
+    let n = through.len();
+    if n < 2 || count == 0 {
+        return Vec::new();
+    }
+    let spans = if closed { n } else { n - 1 };
+    let per = count / spans;
+    let at = |i: isize| -> DVec2 {
+        if closed {
+            through[i.rem_euclid(n as isize) as usize]
+        } else {
+            through[i.clamp(0, n as isize - 1) as usize]
+        }
+    };
+    let mut out = Vec::with_capacity(count);
+    for s in 0..spans {
+        let (p0, p1, p2, p3) = (
+            at(s as isize - 1),
+            at(s as isize),
+            at(s as isize + 1),
+            at(s as isize + 2),
+        );
+        for j in 1..=per {
+            let t = j as f64 / (per + 1) as f64;
+            let (t2, t3) = (t * t, t * t * t);
+            out.push(
+                (p1 * 2.0
+                    + (p2 - p0) * t
+                    + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2
+                    + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * t3)
+                    * 0.5,
+            );
+        }
+    }
+    out
 }
 
 /// The kinds, in the order the operators number them.
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "distance",
     "horizontal",
     "vertical",
@@ -74,6 +122,7 @@ pub const KINDS: [&str; 13] = [
     "circle",
     "arc",
     "tangent",
+    "spline",
 ];
 
 impl Constraint {
@@ -97,6 +146,7 @@ impl Constraint {
             Constraint::Circle { .. } => 10,
             Constraint::Arc { .. } => 11,
             Constraint::Tangent { .. } => 12,
+            Constraint::Spline { .. } => 13,
         }
     }
 
@@ -119,6 +169,9 @@ impl Constraint {
                     .collect()
             }
             Constraint::Tangent { a, b, centre, on } => vec![*a, *b, *centre, *on],
+            Constraint::Spline { through, ring, .. } => {
+                through.iter().chain(ring.iter()).copied().collect()
+            }
         }
     }
 
@@ -160,6 +213,11 @@ impl Constraint {
                 *b = map(*b);
                 *centre = map(*centre);
                 *on = map(*on);
+            }
+            Constraint::Spline { through, ring, .. } => {
+                for v in through.iter_mut().chain(ring.iter_mut()) {
+                    *v = map(*v);
+                }
             }
         }
         out
@@ -252,8 +310,39 @@ impl Constraint {
                 centre: get(2)?,
                 on: get(3)?,
             },
+            // How many points it passes through, then those, then the ring;
+            // `value` says whether it closes.
+            "spline" => {
+                let n = get(0)? as usize;
+                let through = p.get(1..1 + n).filter(|t| t.len() >= 2)?.to_vec();
+                let ring = p.get(1 + n..).unwrap_or(&[]).to_vec();
+                Constraint::Spline {
+                    through,
+                    ring,
+                    closed: value != 0.0,
+                }
+            }
             _ => return None,
         })
+    }
+
+    /// What `from_parts` reads back as this one: the points as it lists
+    /// them, and the value.
+    pub fn parts(&self) -> (Vec<u32>, f64) {
+        match self {
+            Constraint::Spline {
+                through,
+                ring,
+                closed,
+            } => (
+                std::iter::once(through.len() as u32)
+                    .chain(through.iter().copied())
+                    .chain(ring.iter().copied())
+                    .collect(),
+                if *closed { 1.0 } else { 0.0 },
+            ),
+            other => (other.points(), other.value().unwrap_or(0.0)),
+        }
     }
 
     /// Where a Fixed one holds its point.
@@ -308,6 +397,17 @@ impl Constraint {
                 let u = line(a, b);
                 let off = u.perp_dot(p(centre) - p(a)).abs() / u.length().max(1e-12);
                 out.push(off - (p(on) - p(centre)).length());
+            }
+            Constraint::Spline {
+                ref through,
+                ref ring,
+                closed,
+            } => {
+                let pts: Vec<DVec2> = through.iter().map(|v| p(*v)).collect();
+                for (v, want) in ring.iter().zip(spline_ring(&pts, ring.len(), closed)) {
+                    let d = p(*v) - want;
+                    out.extend([d.x, d.y]);
+                }
             }
             Constraint::Distance { a, b, value } => out.push(line(a, b).length() - value),
             Constraint::Horizontal { a, b } => out.push(line(a, b).y),

@@ -231,6 +231,69 @@ fn bezier(p0: DVec3, p1: DVec3, p2: DVec3, p3: DVec3, t: f64) -> DVec3 {
     p0 * (u * u * u) + p1 * (3.0 * u * u * t) + p2 * (3.0 * u * t * t) + p3 * (t * t * t)
 }
 
+/// An object carried along a curve object as the clock runs: Blender's
+/// Follow Path. From `start`, the whole curve takes `frames` frames;
+/// `offset` shifts where along it the object is, as a fraction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FollowPath {
+    /// The curve object, by identity.
+    pub curve: kreate_reflect::Uid,
+    pub start: f64,
+    pub frames: f64,
+    pub offset: f64,
+    /// Turned to face along the curve: its Y along the tangent.
+    pub follow: bool,
+    /// Round again past the end, rather than stopping there.
+    pub cyclic: bool,
+}
+
+impl Default for FollowPath {
+    fn default() -> Self {
+        Self {
+            curve: kreate_reflect::Uid::NONE,
+            start: 1.0,
+            frames: 100.0,
+            offset: 0.0,
+            follow: true,
+            cyclic: false,
+        }
+    }
+}
+
+impl Curve {
+    /// Where the curve is `t` of the way along, by length, with the tangent
+    /// there: what a follower is put at. Over the first spline.
+    pub fn along(&self, t: f64) -> Option<(DVec3, DVec3)> {
+        let (pts, closed) = self.sampled().into_iter().next()?;
+        let mut positions: Vec<DVec3> = pts.iter().map(|p| p.position).collect();
+        if closed && positions.len() > 1 {
+            positions.push(positions[0]);
+        }
+        if positions.len() < 2 {
+            return Some((positions.first().copied()?, DVec3::Y));
+        }
+        let lengths: Vec<f64> = positions.windows(2).map(|w| w[0].distance(w[1])).collect();
+        let total: f64 = lengths.iter().sum();
+        if total <= 0.0 {
+            return Some((positions[0], DVec3::Y));
+        }
+        let mut want = t.clamp(0.0, 1.0) * total;
+        for (i, len) in lengths.iter().enumerate() {
+            if want <= *len || i + 1 == lengths.len() {
+                let f = if *len > 0.0 {
+                    (want / len).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let tangent = (positions[i + 1] - positions[i]).normalize_or(DVec3::Y);
+                return Some((positions[i].lerp(positions[i + 1], f), tangent));
+            }
+            want -= len;
+        }
+        None
+    }
+}
+
 /// The curve, and how it is shown.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Curve {

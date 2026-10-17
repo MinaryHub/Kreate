@@ -29,6 +29,7 @@
 
 use crate::document::{Document, ObjectId};
 use crate::expression::{self, ExprError};
+use kreate_math::DVec3;
 use kreate_reflect::Uid;
 
 /// One driven component.
@@ -176,6 +177,86 @@ impl Document {
         .map_err(DriverError::Expression)
     }
 
+    /// Puts every object that follows a curve where the clock has it. Like
+    /// the drivers, not an edit. Returns how many moved.
+    pub fn follow_paths(&mut self) -> usize {
+        let frame = self.playback.frame;
+        let followers: Vec<ObjectId> = self
+            .objects()
+            .filter(|(_, o)| o.path.is_some())
+            .map(|(id, _)| id)
+            .collect();
+        let mut moved = 0;
+        for id in followers {
+            let Some(path) = self.object(id).and_then(|o| o.path.clone()) else {
+                continue;
+            };
+            let Some(curve_id) = self.object_by_uid(path.curve) else {
+                continue;
+            };
+            let Some(curve) = self.object(curve_id).and_then(|o| o.curve.as_ref()) else {
+                continue;
+            };
+            let frames = if path.frames.abs() < 1e-9 {
+                1.0
+            } else {
+                path.frames
+            };
+            let mut t = (frame - path.start) / frames + path.offset;
+            t = if path.cyclic {
+                t.rem_euclid(1.0)
+            } else {
+                t.clamp(0.0, 1.0)
+            };
+            let Some((at, tangent)) = curve.along(t) else {
+                continue;
+            };
+            let curve_world = self.world_transform(curve_id);
+            let world_at = curve_world.transform_point3(at);
+            let world_tangent = curve_world
+                .transform_vector3(tangent)
+                .normalize_or(DVec3::Y);
+            // Into the follower's parent's space, where its transform is.
+            let parent_world = self
+                .object(id)
+                .and_then(|o| o.parent)
+                .map(|p| self.world_transform(p))
+                .unwrap_or(kreate_math::DAffine3::IDENTITY);
+            let local_at = parent_world.inverse().transform_point3(world_at);
+            let rotation = path.follow.then(|| {
+                let y = parent_world
+                    .inverse()
+                    .transform_vector3(world_tangent)
+                    .normalize_or(DVec3::Y);
+                let up = if y.z.abs() > 0.99 { DVec3::Y } else { DVec3::Z };
+                let x = y.cross(up).normalize_or(DVec3::X);
+                let z = x.cross(y);
+                kreate_math::DQuat::from_mat3(&kreate_math::DMat3::from_cols(x, y, z))
+            });
+            let Some(o) = self.object_untouched_mut(id) else {
+                continue;
+            };
+            let mut changed = false;
+            if (o.transform.translation - local_at).length() > 1e-12 {
+                o.transform.translation = local_at;
+                changed = true;
+            }
+            if let Some(q) = rotation {
+                if q.dot(o.transform.rotation).abs() < 1.0 - 1e-12 {
+                    o.transform.rotation = q;
+                    changed = true;
+                }
+            }
+            if changed {
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            self.touch_version();
+        }
+        moved
+    }
+
     /// Runs every driver, in dependency order, writing what each gives.
     ///
     /// A driver that cannot be evaluated leaves its property as it was. Not an
@@ -184,7 +265,7 @@ impl Document {
     /// how many objects moved.
     pub fn drive(&mut self) -> usize {
         let order = self.driver_order().0;
-        let mut moved = 0;
+        let mut moved = self.follow_paths();
         for object in order {
             let count = self.object(object).map(|o| o.drivers.len()).unwrap_or(0);
             for i in 0..count {
