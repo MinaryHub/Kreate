@@ -471,8 +471,9 @@ enum AreaEdit {
     /// Switch to another workspace. Deferred like the rest, because the frame
     /// is drawing tabs and areas from the list this changes.
     Switch(usize),
-    /// Take an area out of the screen into a window of its own, where it was.
-    Undock(kreate_ui::AreaId, egui::Rect),
+    /// Take an area out of the screen into a window of its own, where it was
+    /// — or under the pointer, held where it was grabbed, for a tear-off.
+    Undock(kreate_ui::AreaId, egui::Rect, Option<egui::Vec2>),
     /// Put a floating area back, beside another, on a side.
     Dock(kreate_ui::AreaId, kreate_ui::AreaId, kreate_ui::Side),
 }
@@ -491,6 +492,9 @@ pub struct FloatingArea {
     /// Its window is being dragged: where it would dock is shown, and it
     /// docks there when let go.
     pub dragging: bool,
+    /// Torn off by dragging its header: the window follows the pointer,
+    /// held this far from its corner, until the button is let go.
+    pub follow: Option<egui::Vec2>,
 }
 
 /// How much of the area it docks beside an area takes.
@@ -548,7 +552,14 @@ impl ShellState {
 
     /// Asks for an area to float in a window of its own, at `rect`.
     pub fn undock_area(&mut self, area: kreate_ui::AreaId, rect: egui::Rect) {
-        self.area_edits.push(AreaEdit::Undock(area, rect));
+        self.area_edits.push(AreaEdit::Undock(area, rect, None));
+    }
+
+    /// Tears an area off by its header: it floats under the pointer, held
+    /// `grab` from its window's corner, and follows the drag.
+    pub fn tear_off_area(&mut self, area: kreate_ui::AreaId, rect: egui::Rect, grab: egui::Vec2) {
+        self.area_edits
+            .push(AreaEdit::Undock(area, rect, Some(grab)));
     }
 
     /// Asks for a floating area to be docked beside `beside`, on `side`.
@@ -726,7 +737,7 @@ impl ShellState {
                 AreaEdit::Switch(index) => {
                     self.workspaces.switch_to(index);
                 }
-                AreaEdit::Undock(area, rect) => {
+                AreaEdit::Undock(area, rect, follow) => {
                     let Some(editor) = self.screen().editor(area) else {
                         continue;
                     };
@@ -736,9 +747,14 @@ impl ShellState {
                             id: area,
                             editor,
                             // A little in from where it was, so it is seen
-                            // to lift off.
-                            rect: rect.translate(egui::vec2(24.0, 24.0)),
-                            dragging: false,
+                            // to lift off; a tear-off is moved by the drag.
+                            rect: if follow.is_some() {
+                                rect
+                            } else {
+                                rect.translate(egui::vec2(24.0, 24.0))
+                            },
+                            dragging: follow.is_some(),
+                            follow,
                         });
                     }
                 }
@@ -2570,9 +2586,14 @@ pub fn draw(
             .map(|info| state.catalog.format(info.name_key, TextKind::Ui, &[]))
             .unwrap_or_else(|| f.editor.as_str().to_string());
         let mut open = true;
-        let shown = egui::Window::new(title)
+        let mut window = egui::Window::new(title)
             .id(egui::Id::new(("floating-area", f.id.0)))
-            .default_rect(f.rect)
+            .default_rect(f.rect);
+        // A tear-off follows the pointer until it is let go.
+        if let (Some(grab), Some(p), true) = (f.follow, pointer, down) {
+            window = window.current_pos(p - grab);
+        }
+        let shown = window
             .min_size(egui::vec2(220.0, 160.0))
             .resizable(true)
             .collapsible(false)
@@ -2614,7 +2635,7 @@ pub fn draw(
         // Moved, not resized: its title is being dragged.
         let moved =
             (rect.min - f.rect.min).length() > 0.5 && (rect.size() - f.rect.size()).length() < 0.5;
-        let dragging = down && (f.dragging || moved);
+        let dragging = down && (f.dragging || moved || f.follow.is_some());
         let zone = pointer.and_then(|p| dock_zone(&screen_areas, p));
         if dragging {
             if let Some((_, _, highlight)) = zone {
@@ -2633,6 +2654,9 @@ pub fn draw(
         if let Some(g) = state.floating.iter_mut().find(|g| g.id == f.id) {
             g.rect = rect;
             g.dragging = dragging;
+            if !down {
+                g.follow = None;
+            }
         }
     }
     state.apply_area_edits();
@@ -3105,6 +3129,40 @@ fn draw_area(
         egui::Stroke::new(1.0, theme.border),
         egui::StrokeKind::Inside,
     );
+
+    // The header's empty part is a grip: dragged far enough, the area tears
+    // off into a window that follows the pointer and docks where it is let
+    // go. Sensed before the header's own widgets, so they still take their
+    // clicks; the viewport stays, and so does the last area.
+    let can_tear = !state.is_floating(area.id)
+        && area.editor != kreate_ui::EditorId::VIEWPORT
+        && state.screen().area_count() > 1;
+    if can_tear {
+        let grip = ui.interact(
+            header,
+            egui::Id::new(("area-grip", area.id.0)),
+            egui::Sense::drag(),
+        );
+        if grip.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if grip.dragged() {
+            let (origin, now) = ui
+                .ctx()
+                .input(|i| (i.pointer.press_origin(), i.pointer.interact_pos()));
+            if let (Some(origin), Some(now)) = (origin, now) {
+                if origin.distance(now) > 12.0 {
+                    // Held where it was taken, below the window's title.
+                    let grab = egui::vec2(
+                        (origin.x - area.rect.min.x).clamp(16.0, area.rect.width() - 16.0),
+                        12.0,
+                    );
+                    let at = egui::Rect::from_min_size(now - grab, area.rect.size());
+                    state.tear_off_area(area.id, at, grab);
+                }
+            }
+        }
+    }
 
     // The header, in its own strip. Inset so the combo box does not sit on the
     // border.
@@ -14922,6 +14980,7 @@ mod tests {
         let before = state.screen().area_count();
         let at = egui::Rect::from_min_size(egui::pos2(900.0, 40.0), egui::vec2(300.0, 400.0));
         state.undock_area(outliner, at);
+        assert!(state.floating.is_empty(), "deferred to the frame's end");
         state.apply_area_edits();
         assert_eq!(state.screen().area_count(), before - 1);
         assert!(state.is_floating(outliner));
@@ -14941,6 +15000,31 @@ mod tests {
         ));
         let rect = |id| layout.areas.iter().find(|a| a.id == id).unwrap().rect;
         assert!(rect(outliner).center().x < rect(viewport).center().x);
+    }
+
+    /// Torn off by its header: floating at once, following the drag, so
+    /// letting go over an edge docks it in the same gesture.
+    #[test]
+    fn an_area_torn_off_by_its_header_follows_the_drag() {
+        let mut state = ShellState::default();
+        let properties = state
+            .screen()
+            .areas()
+            .into_iter()
+            .find(|(_, k)| *k == kreate_ui::EditorId::PROPERTIES)
+            .map(|(id, _)| id)
+            .expect("properties");
+        let at = egui::Rect::from_min_size(egui::pos2(500.0, 300.0), egui::vec2(300.0, 400.0));
+        state.tear_off_area(properties, at, egui::vec2(40.0, 12.0));
+        state.apply_area_edits();
+        let f = state
+            .floating
+            .iter()
+            .find(|f| f.id == properties)
+            .expect("floating");
+        assert_eq!(f.follow, Some(egui::vec2(40.0, 12.0)));
+        assert!(f.dragging, "already being dragged");
+        assert_eq!(f.rect, at, "where the pointer took it, not nudged");
     }
 
     #[test]
