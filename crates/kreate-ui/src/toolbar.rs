@@ -153,6 +153,11 @@ pub fn select_button(ui: &mut Ui, shape: u32, active: bool) -> Response {
     }
     let ink = if active { theme.accent } else { theme.text };
     let area = Rect::from_center_size(rect.center(), Vec2::splat(GLYPH));
+    paint_select_shape(ui, shape, area, ink);
+    response
+}
+
+fn paint_select_shape(ui: &Ui, shape: u32, area: Rect, ink: Color32) {
     let at = |x: f32, y: f32| {
         Pos2::new(
             area.min.x + x * area.width(),
@@ -180,10 +185,20 @@ pub fn select_button(ui: &mut Ui, shape: u32, active: bool) -> Response {
         _ => dashed_rect(ui, Rect::from_min_max(at(0.08, 0.08), at(0.72, 0.72)), thin),
     }
     arrow_cursor(ui, at(0.55, 0.55), area.width() * 0.42, ink);
-    response
 }
 
 /// The picture for each tool, in a unit square scaled to `area`.
+/// A tool's picture in `area`, for a button drawn elsewhere — the ribbon's,
+/// which puts the tool's name under it.
+pub fn paint_tool(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
+    paint(ui, tool, area, ink);
+}
+
+/// The Select tool's picture for a shape, for the same.
+pub fn paint_select(ui: &Ui, shape: u32, area: Rect, ink: Color32) {
+    paint_select_shape(ui, shape, area, ink);
+}
+
 fn paint(ui: &Ui, tool: Tool, area: Rect, ink: Color32) {
     let p = ui.painter();
     let at = |x: f32, y: f32| {

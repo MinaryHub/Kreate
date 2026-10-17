@@ -5896,6 +5896,73 @@ fn draw_toolbar(
     egui::Rect::from_min_size(viewport.min, egui::Vec2::ZERO)
 }
 
+/// How wide a ribbon button is: wide enough for its name, from `least` up
+/// to a limit past which the name is cut — so "Clear Mask" reads whole and a
+/// long one does not push the row off the window.
+fn ribbon_button_width(ui: &Ui, name: &str, least: f32) -> f32 {
+    let text = ui
+        .painter()
+        .layout_no_wrap(
+            name.to_string(),
+            egui::FontId::proportional(10.0),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x;
+    (text + 10.0).clamp(least, 84.0)
+}
+
+/// One tool in the ribbon: its picture and, under it, its name — as every
+/// other ribbon button has, so a tool is read rather than guessed.
+fn ribbon_tool(
+    ui: &mut Ui,
+    name: &str,
+    active: bool,
+    paint: impl FnOnce(&Ui, egui::Rect, egui::Color32),
+) -> egui::Response {
+    let theme = kreate_ui::theme::from_ui(ui);
+    let size = egui::vec2(ribbon_button_width(ui, name, 48.0), 40.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if active {
+        ui.painter()
+            .rect_filled(rect, 5.0, theme.accent.gamma_multiply(0.25));
+        ui.painter().rect_stroke(
+            rect.shrink(0.5),
+            5.0,
+            egui::Stroke::new(1.0, theme.accent),
+            egui::StrokeKind::Inside,
+        );
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 5.0, theme.border);
+    }
+    let picture = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 13.0),
+        egui::vec2(18.0, 18.0),
+    );
+    paint(ui, picture, if active { theme.accent } else { theme.text });
+    // The name, cut to the button's width.
+    let font = egui::FontId::proportional(10.0);
+    let fits = |t: &str| {
+        ui.painter()
+            .layout_no_wrap(t.to_string(), font.clone(), theme.text)
+            .size()
+            .x
+            <= size.x - 4.0
+    };
+    let mut text = name.to_string();
+    while !fits(&text) && text.chars().count() > 1 {
+        text.pop();
+    }
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.bottom() - 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        text,
+        font,
+        theme.text,
+    );
+    response
+}
+
 /// The tools, in a row: the ribbon's first group.
 ///
 /// Every click goes out through `Dispatch`, the door a key press uses: Move
@@ -5903,7 +5970,7 @@ fn draw_toolbar(
 /// the same defaults. Each tooltip carries its key, which is how a toolbar
 /// stops being needed.
 fn draw_tool_buttons(ui: &mut Ui, state: &mut ShellState, mode: kreate_ops::operator::Mode) {
-    use kreate_ui::toolbar::{tool_button, Tool};
+    use kreate_ui::toolbar::Tool;
     // A skeleton being built has one tool of its own after the common ones:
     // Extrude, which is most of what building one is.
     let bones = mode.acts_on() == kreate_ops::mode::ActsOn::BoneJoints;
@@ -5989,9 +6056,15 @@ fn draw_tool_buttons(ui: &mut Ui, state: &mut ShellState, mode: kreate_ops::oper
                     state.catalog.get(names[shape as usize]),
                     state.catalog.get("select-tool-hint")
                 );
-                kreate_ui::toolbar::select_button(ui, shape, *tool == active).on_hover_text(tip)
+                ribbon_tool(ui, &name, *tool == active, |ui, area, ink| {
+                    kreate_ui::toolbar::paint_select(ui, shape, area, ink)
+                })
+                .on_hover_text(tip)
             } else {
-                tool_button(ui, *tool, *tool == active).on_hover_text(tip)
+                ribbon_tool(ui, &name, *tool == active, |ui, area, ink| {
+                    kreate_ui::toolbar::paint_tool(ui, *tool, area, ink)
+                })
+                .on_hover_text(tip)
             };
             if response.clicked() {
                 match tool {
@@ -12827,6 +12900,20 @@ enum RibbonIcon {
     SkFinish,
     SkSelect,
     SkPattern,
+    SelectAll,
+    SelectNone,
+    SelectInvert,
+    Fillet,
+    Chamfer,
+    Shell,
+    Ik,
+    ClearPose,
+    VertexGroup,
+    Normalize,
+    MaskClear,
+    MaskInvert,
+    Remesh,
+    NewTexture,
 }
 
 impl RibbonIcon {
@@ -12866,6 +12953,26 @@ impl RibbonIcon {
         if id == "app.finish_sketch" {
             return Some(Self::SkFinish);
         }
+        let flag = |name: &str| {
+            entry.variant.iter().find_map(|(n, v)| match v {
+                V::Bool(b) if *n == name => Some(*b),
+                _ => None,
+            })
+        };
+        // Select All, None and Invert, in every mode that has them. The edit
+        // mode's invert is its third action; the others' a toggle comes first.
+        if matches!(
+            id,
+            "object.select_all" | "mesh.select" | "armature.select_all" | "pose.select_all"
+        ) {
+            let invert = if id == "mesh.select" { 2 } else { 3 };
+            return match variant("action")? {
+                0 => Some(Self::SelectAll),
+                1 => Some(Self::SelectNone),
+                a if a == invert => Some(Self::SelectInvert),
+                _ => None,
+            };
+        }
         Some(match id {
             "object.add_primitive" => match variant("shape")? {
                 0 => Self::Plane,
@@ -12885,6 +12992,22 @@ impl RibbonIcon {
             "mesh.merge" => Self::Merge,
             "uv.unwrap" => Self::Unwrap,
             "anim.keyframe_insert" => Self::Key,
+            // The body's, not the edge menu's: there the loop cut and the
+            // subdivision are what the group's three buttons are for.
+            "feature.round" if flag("chamfer") == Some(true) => Self::Chamfer,
+            "feature.round" => Self::Fillet,
+            "feature.shell" | "mesh.shell" => Self::Shell,
+            "pose.ik_add" => Self::Ik,
+            "pose.clear_transform" if variant("what") == Some(0) => Self::ClearPose,
+            "object.vertex_group_add" => Self::VertexGroup,
+            "paint.weights_normalize" => Self::Normalize,
+            "sculpt.mask" => match variant("action")? {
+                0 => Self::MaskClear,
+                1 => Self::MaskInvert,
+                _ => return None,
+            },
+            "sculpt.remesh" | "sculpt.quad" => Self::Remesh,
+            "paint.new_texture" => Self::NewTexture,
             _ if id.starts_with("mesh.extrude") || id == "armature.extrude" => Self::Extrude,
             _ if id.ends_with(".translate") => Self::Move,
             _ if id.ends_with(".rotate") => Self::Rotate,
@@ -12923,7 +13046,12 @@ impl RibbonIcon {
             | Self::Knife
             | Self::Subdivide
             | Self::Merge
-            | Self::Unwrap => theme.info,
+            | Self::Unwrap
+            | Self::Fillet
+            | Self::Chamfer
+            | Self::Shell
+            | Self::Remesh => theme.info,
+            Self::NewTexture | Self::VertexGroup | Self::Ik => theme.accent,
             _ => theme.text,
         }
     }
@@ -13211,6 +13339,129 @@ impl RibbonIcon {
             Self::SkFinish => {
                 line(vec![p(0.15, 0.55), p(0.4, 0.8), p(0.88, 0.22)]);
             }
+            // A selection box: full, empty, half and half.
+            Self::SelectAll => {
+                closed(vec![
+                    p(0.15, 0.15),
+                    p(0.85, 0.15),
+                    p(0.85, 0.85),
+                    p(0.15, 0.85),
+                ]);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(p(0.3, 0.3), p(0.7, 0.7)),
+                    1.0,
+                    colour,
+                );
+            }
+            Self::SelectNone => {
+                for (a, b) in [
+                    ((0.15, 0.15), (0.4, 0.15)),
+                    ((0.6, 0.15), (0.85, 0.15)),
+                    ((0.85, 0.15), (0.85, 0.4)),
+                    ((0.85, 0.6), (0.85, 0.85)),
+                    ((0.85, 0.85), (0.6, 0.85)),
+                    ((0.4, 0.85), (0.15, 0.85)),
+                    ((0.15, 0.85), (0.15, 0.6)),
+                    ((0.15, 0.4), (0.15, 0.15)),
+                ] {
+                    line(vec![p(a.0, a.1), p(b.0, b.1)]);
+                }
+            }
+            Self::SelectInvert => {
+                closed(vec![
+                    p(0.15, 0.15),
+                    p(0.85, 0.15),
+                    p(0.85, 0.85),
+                    p(0.15, 0.85),
+                ]);
+                painter.add(Shape::convex_polygon(
+                    vec![p(0.15, 0.15), p(0.85, 0.15), p(0.15, 0.85)],
+                    colour,
+                    Stroke::NONE,
+                ));
+            }
+            // A corner, rounded and cut.
+            Self::Fillet => {
+                line(vec![p(0.2, 0.9), p(0.2, 0.55)]);
+                line(ellipse(0.55, 0.55, 0.35, 0.35, pi, pi * 1.5));
+                line(vec![p(0.55, 0.2), p(0.9, 0.2)]);
+            }
+            Self::Chamfer => {
+                line(vec![p(0.2, 0.9), p(0.2, 0.5), p(0.5, 0.2), p(0.9, 0.2)]);
+            }
+            // A box with a wall: hollowed.
+            Self::Shell => {
+                closed(vec![
+                    p(0.12, 0.12),
+                    p(0.88, 0.12),
+                    p(0.88, 0.88),
+                    p(0.12, 0.88),
+                ]);
+                closed(vec![p(0.3, 0.3), p(0.7, 0.3), p(0.7, 0.88), p(0.3, 0.88)]);
+            }
+            // Two bones reaching for a target.
+            Self::Ik => {
+                line(vec![p(0.15, 0.85), p(0.45, 0.45), p(0.75, 0.6)]);
+                painter.circle_filled(p(0.45, 0.45), 0.06 * s, colour);
+                painter.circle_stroke(p(0.8, 0.25), 0.1 * s, stroke);
+                line(vec![p(0.75, 0.6), p(0.8, 0.35)]);
+            }
+            // Back to the rest pose: a turn round to where it began.
+            Self::ClearPose => {
+                line(ellipse(0.5, 0.5, 0.32, 0.32, -pi * 0.2, pi * 1.5));
+                line(vec![p(0.5, 0.06), p(0.5, 0.18), p(0.62, 0.18)]);
+            }
+            // Three points joined: a group.
+            Self::VertexGroup => {
+                closed(vec![p(0.2, 0.8), p(0.5, 0.2), p(0.8, 0.8)]);
+                for (x, y) in [(0.2, 0.8), (0.5, 0.2), (0.8, 0.8)] {
+                    painter.circle_filled(p(x, y), 0.08 * s, colour);
+                }
+            }
+            // Bars of one height.
+            Self::Normalize => {
+                for x in [0.25, 0.5, 0.75] {
+                    line(vec![p(x, 0.85), p(x, 0.3)]);
+                }
+                line(vec![p(0.12, 0.3), p(0.88, 0.3)]);
+            }
+            // A brush's disc, emptied or turned over.
+            Self::MaskClear => {
+                painter.circle_stroke(p(0.5, 0.5), 0.35 * s, stroke);
+                line(vec![p(0.25, 0.75), p(0.75, 0.25)]);
+            }
+            Self::MaskInvert => {
+                painter.circle_stroke(p(0.5, 0.5), 0.35 * s, stroke);
+                let mut half = ellipse(0.5, 0.5, 0.35, 0.35, -pi * 0.5, pi * 0.5);
+                half.push(p(0.5, 0.15));
+                painter.add(Shape::convex_polygon(half, colour, Stroke::NONE));
+            }
+            // An even mesh of squares.
+            Self::Remesh => {
+                for k in 0..4 {
+                    let t = 0.15 + k as f32 * (0.7 / 3.0);
+                    line(vec![p(t, 0.15), p(t, 0.85)]);
+                    line(vec![p(0.15, t), p(0.85, t)]);
+                }
+            }
+            // A picture, and a plus for a new one.
+            Self::NewTexture => {
+                closed(vec![
+                    p(0.1, 0.25),
+                    p(0.75, 0.25),
+                    p(0.75, 0.85),
+                    p(0.1, 0.85),
+                ]);
+                line(vec![
+                    p(0.15, 0.78),
+                    p(0.35, 0.55),
+                    p(0.5, 0.7),
+                    p(0.6, 0.6),
+                    p(0.72, 0.78),
+                ]);
+                line(vec![p(0.82, 0.05), p(0.82, 0.35)]);
+                line(vec![p(0.67, 0.2), p(0.97, 0.2)]);
+            }
         }
     }
 }
@@ -13365,9 +13616,8 @@ fn draw_ribbon(
                         // take the whole row.
                         ui.vertical(|ui| {
                             ui.set_min_height(64.0);
-                            ui.add_space(6.0);
                             draw_tool_buttons(ui, state, mode);
-                            ui.add_space(8.0);
+                            ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(
                                     state.catalog.get("ribbon-tools").to_uppercase(),
@@ -13435,7 +13685,11 @@ fn draw_tool_group(
     };
     // As wide as its buttons, its name centred under them; a group with no
     // buttons is its name alone, at the buttons' height.
-    let width = (buttons.len() as f32 * 52.0).max(56.0);
+    let widths: Vec<f32> = buttons
+        .iter()
+        .map(|(entry, _)| ribbon_button_width(ui, &entry.label, 52.0))
+        .collect();
+    let width = widths.iter().sum::<f32>().max(56.0);
     let layout = egui::Layout::top_down(egui::Align::Center);
     ui.allocate_ui_with_layout(egui::vec2(width, 64.0), layout, |ui| {
         if buttons.is_empty() {
@@ -13443,8 +13697,8 @@ fn draw_tool_group(
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            for (entry, icon) in &buttons {
-                let size = egui::vec2(52.0, 40.0);
+            for ((entry, icon), w) in buttons.iter().zip(&widths) {
+                let size = egui::vec2(*w, 40.0);
                 let sense = if entry.enabled {
                     egui::Sense::click()
                 } else {
@@ -16303,6 +16557,36 @@ mod tests {
                 );
             }
             other => panic!("ran {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod ribbon {
+    use super::*;
+
+    /// Every group of the ribbon, in every mode, shows at least one button:
+    /// a group that was its name alone was a feature found only by opening
+    /// it, and the ribbon is there so it need not be.
+    #[test]
+    fn every_ribbon_group_in_every_mode_has_a_button() {
+        fn any_icon(nodes: &[MenuNode]) -> bool {
+            nodes.iter().any(|n| match n {
+                MenuNode::Entry(e) => RibbonIcon::of(e).is_some(),
+                MenuNode::Sub(_, children) => any_icon(children),
+                _ => false,
+            })
+        }
+        let catalog = load_catalog("en");
+        let l = Labels::new(&catalog);
+        for mode in kreate_ops::operator::Mode::ALL {
+            for menu in viewport_menus(&l, mode, 0) {
+                assert!(
+                    any_icon(&menu.nodes),
+                    "{mode:?}: the {} group has no button",
+                    menu.label
+                );
+            }
         }
     }
 }
