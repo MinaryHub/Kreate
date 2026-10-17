@@ -716,6 +716,13 @@ pub fn feature_rows(
                 amount,
                 symmetric,
                 cut: f.operation == kreate_scene::feature::Operation::Cut,
+                expression: doc
+                    .design
+                    .binding(&kreate_scene::design::Bound::FeatureAmount {
+                        body: o.uid,
+                        order: f.order,
+                    })
+                    .map(|b| b.expression.clone()),
             });
         }
     }
@@ -741,6 +748,7 @@ pub fn feature_rows(
             amount: 0.0,
             symmetric: false,
             cut: false,
+            expression: None,
         });
     }
     rows.sort_by_key(|r| r.order);
@@ -789,6 +797,15 @@ pub fn view(
     let lines = object.sketch_lines.clone();
     let to_world = |p: DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
     let pin = |v: u32| pinned.get(v as usize).copied().unwrap_or(false);
+    // A dimension held to the parameters shows what holds it.
+    let bound = |index: usize| {
+        doc.design
+            .binding(&kreate_scene::design::Bound::SketchDimension {
+                sketch: object.uid,
+                index: index as u32,
+            })
+            .map(|b| b.expression.clone())
+    };
     let ring_point = |v: u32| {
         constraints.iter().any(|c| match c {
             Constraint::Circle { ring, .. } => ring.contains(&v),
@@ -889,6 +906,12 @@ pub fn view(
                 } else {
                     middle + side * (span * 0.12).max(extent * 0.3).max(1e-6)
                 };
+                let expression = bound(index);
+                let text = match &expression {
+                    // i18n-exempt: an expression and its value
+                    Some(e) => format!("{e} = {text}"),
+                    None => text,
+                };
                 view.dims.push(SketchDim {
                     index,
                     at: to_world(label),
@@ -896,17 +919,25 @@ pub fn view(
                     text,
                     shown,
                     kind,
+                    expression,
                 });
             }
             Constraint::Angle { a, b, c, d, value } => {
                 let deg = value.to_degrees();
+                let expression = bound(index);
+                let text = match &expression {
+                    // i18n-exempt: an expression and its value
+                    Some(e) => format!("{e} = {deg:.1}°"),
+                    None => format!("{deg:.1}°"),
+                };
                 view.dims.push(SketchDim {
                     index,
                     at: to_world((mid(*a, *b) + mid(*c, *d)) * 0.5),
                     ends: [to_world(at(*b)), to_world(at(*c))],
-                    text: format!("{deg:.1}°"),
+                    text,
                     shown: deg,
                     kind: DimKind::Angle,
+                    expression,
                 });
             }
             _ => {}

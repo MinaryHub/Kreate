@@ -792,6 +792,14 @@ pub struct DesignRecord {
     /// The section view, when it is on: axis, offset, flip, cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<(u32, f64, bool, bool)>,
+    /// The named parameters: name, expression, last value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<(String, String, f64)>,
+    /// What is held to an expression: `sketch` with the sketch's identity
+    /// and the constraint's index, or `feature` with the body's identity
+    /// and the feature's order; then the expression.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<(String, u64, u64, String)>,
 }
 
 /// The scene's render settings. See `kreate_scene::render`.
@@ -1932,6 +1940,31 @@ pub fn write(
                 .design
                 .section
                 .map(|s| (s.axis, s.offset, s.flip, s.cap)),
+            parameters: document
+                .design
+                .parameters
+                .iter()
+                .map(|p| (p.name.clone(), p.expression.clone(), p.value))
+                .collect(),
+            bindings: document
+                .design
+                .bindings
+                .iter()
+                .map(|b| match b.target {
+                    kreate_scene::design::Bound::SketchDimension { sketch, index } => (
+                        "sketch".to_string(),
+                        sketch.raw(),
+                        u64::from(index),
+                        b.expression.clone(),
+                    ),
+                    kreate_scene::design::Bound::FeatureAmount { body, order } => (
+                        "feature".to_string(),
+                        body.raw(),
+                        order,
+                        b.expression.clone(),
+                    ),
+                })
+                .collect(),
         });
         scene.collections = document
             .collections()
@@ -2681,6 +2714,40 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
         if let Some(density) = d.density.filter(|x| x.is_finite() && *x >= 0.0) {
             document.design.density = density;
         }
+        document.design.parameters = d
+            .parameters
+            .iter()
+            .filter(|(name, _, _)| kreate_scene::design::valid_parameter_name(name))
+            .map(
+                |(name, expression, value)| kreate_scene::design::Parameter {
+                    name: name.clone(),
+                    expression: expression.clone(),
+                    value: if value.is_finite() { *value } else { 0.0 },
+                },
+            )
+            .collect();
+        document.design.bindings = d
+            .bindings
+            .iter()
+            .filter_map(|(kind, a, b, expression)| {
+                let target = match kind.as_str() {
+                    "sketch" => kreate_scene::design::Bound::SketchDimension {
+                        sketch: kreate_scene::Uid::from_raw(*a),
+                        index: u32::try_from(*b).ok()?,
+                    },
+                    "feature" => kreate_scene::design::Bound::FeatureAmount {
+                        body: kreate_scene::Uid::from_raw(*a),
+                        order: *b,
+                    },
+                    _ => return None,
+                };
+                Some(kreate_scene::design::Binding {
+                    target,
+                    expression: expression.clone(),
+                })
+            })
+            .collect();
+        document.design.evaluate_parameters();
         document.design.section =
             d.section
                 .filter(|s| s.0 <= 3 && s.1.is_finite())

@@ -375,6 +375,10 @@ pub struct ShellState {
     pub sketch_lines: Vec<([kreate_math::DVec3; 2], u8)>,
     /// A dimension being typed into: its constraint's index and the text.
     pub sketch_dim_edit: Option<(usize, String)>,
+    /// Parameter expressions being typed, by name, until they are entered.
+    pub param_edits: std::collections::HashMap<String, String>,
+    /// A parameter being added: its name and expression so far.
+    pub param_new: (String, String),
     /// The extrude and revolve dialog's settings, kept between uses.
     pub solid_dialog: SolidDialog,
     /// The sketch pattern's settings, while its tool is in hand.
@@ -877,6 +881,8 @@ impl Default for ShellState {
             length_unit: 0.001,
             sketch_lines: Vec::new(),
             sketch_dim_edit: None,
+            param_edits: Default::default(),
+            param_new: Default::default(),
             solid_dialog: SolidDialog::default(),
             pattern_dialog: PatternDialog::default(),
             fits: FitsDialog::default(),
@@ -1872,6 +1878,13 @@ struct Labels {
     dissolve_limited: String,
     edges_to_sketch: String,
     design_section: String,
+    design_parameters: String,
+    param_name: String,
+    param_expression: String,
+    param_value: String,
+    param_add: String,
+    param_remove: String,
+    param_hint: String,
     world_image: String,
     duplicate: String,
     object_copy: String,
@@ -2263,6 +2276,13 @@ impl Labels {
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
             design_section: t("design-section"),
+            design_parameters: t("design-parameters"),
+            param_name: t("param-name"),
+            param_expression: t("param-expression"),
+            param_value: t("param-value"),
+            param_add: t("param-add"),
+            param_remove: t("param-remove"),
+            param_hint: t("param-hint"),
             world_image: t("world-image"),
             duplicate: t("menu-duplicate"),
             object_copy: t("object-copy"),
@@ -7526,6 +7546,10 @@ fn draw_render_tab(
             send_edit(state, "scene.units_set", params, false);
         }
     }
+    // The parameters: the numbers the design is set up by.
+    ui.separator();
+    ui.strong(&l.design_parameters);
+    draw_parameters(ui, state, doc, l);
     // The section view: a plane through the scene, its far side cut away.
     ui.separator();
     ui.strong(&l.design_section);
@@ -11703,6 +11727,88 @@ fn draw_follow_path_panel(
     }
 }
 
+/// The named parameters: each its name, its expression to edit, and what
+/// it comes to; a row to add one; a button to take one away.
+fn draw_parameters(ui: &mut Ui, state: &mut ShellState, doc: &Document, l: &Labels) {
+    use kreate_reflect::PropertyValue as V;
+    let unit = doc.design.length_unit.symbol();
+    let mut run: Vec<(&'static str, PropertyMap)> = Vec::new();
+    egui::Grid::new("design-parameters")
+        .num_columns(4)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            ui.weak(&l.param_name);
+            ui.weak(&l.param_expression);
+            ui.weak(&l.param_value);
+            ui.label("");
+            ui.end_row();
+            for p in &doc.design.parameters {
+                // i18n-exempt: the parameter's own name
+                ui.label(&p.name);
+                let buffer = state
+                    .param_edits
+                    .entry(p.name.clone())
+                    .or_insert_with(|| p.expression.clone());
+                let field = ui.add(egui::TextEdit::singleline(buffer).desired_width(110.0));
+                let done = field.lost_focus()
+                    || (field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                if done {
+                    let typed = buffer.trim().to_string();
+                    if !typed.is_empty() && typed != p.expression {
+                        let mut m = PropertyMap::new();
+                        m.set("name", V::Text(p.name.clone()));
+                        m.set("expression", V::Text(typed));
+                        run.push(("design.parameter_set", m));
+                    }
+                    state.param_edits.remove(&p.name);
+                }
+                // i18n-exempt: a number and the scene's unit
+                ui.label(format!("{:.3} {unit}", p.value));
+                if ui
+                    .small_button("✕")
+                    .on_hover_text(&l.param_remove)
+                    .clicked()
+                {
+                    let mut m = PropertyMap::new();
+                    m.set("name", V::Text(p.name.clone()));
+                    run.push(("design.parameter_remove", m));
+                }
+                ui.end_row();
+            }
+            // A new one.
+            let (name, expression) = &mut state.param_new;
+            ui.add(
+                egui::TextEdit::singleline(name)
+                    .hint_text(&l.param_name)
+                    .desired_width(70.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(expression)
+                    .hint_text(&l.param_expression)
+                    .desired_width(110.0),
+            );
+            ui.label("");
+            let ready = kreate_scene::design::valid_parameter_name(name.trim())
+                && !expression.trim().is_empty();
+            if ui
+                .add_enabled(ready, egui::Button::new(&l.param_add))
+                .clicked()
+            {
+                let mut m = PropertyMap::new();
+                m.set("name", V::Text(name.trim().to_string()));
+                m.set("expression", V::Text(expression.trim().to_string()));
+                run.push(("design.parameter_set", m));
+                name.clear();
+                expression.clear();
+            }
+            ui.end_row();
+        });
+    ui.weak(&l.param_hint);
+    for (op, m) in run {
+        state.queue.run(op, m);
+    }
+}
+
 /// A curve object's panel: how it is shown, its splines, and the way out
 /// to a plain mesh.
 fn draw_curve_panel(
@@ -13526,6 +13632,8 @@ pub struct SketchDim {
     /// diameter; radians for an angle).
     pub shown: f64,
     pub kind: DimKind,
+    /// What holds it to the parameters, when something does.
+    pub expression: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13638,6 +13746,8 @@ pub struct FeatureRow {
     pub amount: f64,
     pub symmetric: bool,
     pub cut: bool,
+    /// What holds its amount to the parameters, when something does.
+    pub expression: Option<String>,
 }
 
 /// A feature open for editing from the list.
@@ -13646,6 +13756,9 @@ pub struct FeatureEdit {
     pub row: FeatureRow,
     /// As shown: the distance in the scene's unit, or the angle in degrees.
     pub amount: f64,
+    /// An expression of the parameters to hold the amount to; empty for
+    /// the number alone.
+    pub expression: String,
 }
 
 fn tool_label(state: &ShellState, name: &str) -> String {
@@ -13816,7 +13929,12 @@ fn draw_sketches(
         );
         // A double click on the number opens it for typing.
         if double && pointer.is_some_and(|p| r.expand(4.0).contains(p) && inner.contains(p)) {
-            state.sketch_dim_edit = Some((d.index, format!("{:.3}", d.shown)));
+            state.sketch_dim_edit = Some((
+                d.index,
+                d.expression
+                    .clone()
+                    .unwrap_or_else(|| format!("{:.3}", d.shown)),
+            ));
         }
     }
     // What the tool would draw, and where the pointer has caught.
@@ -14085,16 +14203,36 @@ fn draw_dimension_edit(
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if enter {
-                    if let Ok(v) = text.trim().parse::<f64>() {
+                    use kreate_reflect::PropertyValue as V;
+                    let typed = text.trim();
+                    if let Ok(v) = typed.parse::<f64>() {
+                        // A number: the dimension is set, and let go of the
+                        // parameters if it was held.
                         if v.is_finite() && v != 0.0 {
+                            if dim.expression.is_some() {
+                                let mut p = PropertyMap::new();
+                                p.set("kind", V::Enum(0));
+                                p.set("index", V::Int(index as i64));
+                                state.queue.run("design.unbind", p);
+                            }
                             let mut p = PropertyMap::new();
-                            p.set("index", kreate_reflect::PropertyValue::Int(index as i64));
-                            p.set(
-                                "value",
-                                kreate_reflect::PropertyValue::Float(dim.value_of(v, view.unit.0)),
-                            );
+                            p.set("index", V::Int(index as i64));
+                            p.set("value", V::Float(dim.value_of(v, view.unit.0)));
                             state.queue.run("sketch.constraint_set", p);
                         }
+                    } else if !typed.is_empty() {
+                        // An expression: held to the parameters. A diameter
+                        // is typed as one and held as the radius.
+                        let expression = if dim.kind == DimKind::Diameter {
+                            format!("({typed}) / 2")
+                        } else {
+                            typed.to_string()
+                        };
+                        let mut p = PropertyMap::new();
+                        p.set("kind", V::Enum(0));
+                        p.set("index", V::Int(index as i64));
+                        p.set("expression", V::Text(expression));
+                        state.queue.run("design.bind", p);
                     }
                     keep = false;
                 }
@@ -14268,6 +14406,7 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                                     } else {
                                         row.amount / unit.max(1e-12)
                                     },
+                                    expression: row.expression.clone().unwrap_or_default(),
                                     row: row.clone(),
                                 });
                             }
@@ -14316,6 +14455,13 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                     ui.label(state.catalog.get("feature-cut"));
                     ui.checkbox(&mut edit.row.cut, "");
                     ui.end_row();
+                    ui.label(state.catalog.get("feature-expression"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut edit.expression)
+                            .hint_text(state.catalog.get("feature-expression-hint"))
+                            .desired_width(120.0),
+                    );
+                    ui.end_row();
                 });
             ui.horizontal(|ui| {
                 if ui.button(&cancel).clicked() {
@@ -14335,6 +14481,23 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                     p.set("symmetric", V::Bool(edit.row.symmetric));
                     p.set("operation", V::Enum(u32::from(edit.row.cut)));
                     state.queue.run("feature.set", p);
+                    // Then held to the parameters, or let go.
+                    let order = edit.row.order / 2;
+                    let expression = edit.expression.trim().to_string();
+                    if !expression.is_empty() {
+                        let mut p = PropertyMap::new();
+                        p.set("kind", V::Enum(1));
+                        p.set("object", V::Text(edit.row.body.clone()));
+                        p.set("index", V::Int(order as i64));
+                        p.set("expression", V::Text(expression));
+                        state.queue.run("design.bind", p);
+                    } else if edit.row.expression.is_some() {
+                        let mut p = PropertyMap::new();
+                        p.set("kind", V::Enum(1));
+                        p.set("object", V::Text(edit.row.body.clone()));
+                        p.set("index", V::Int(order as i64));
+                        state.queue.run("design.unbind", p);
+                    }
                     keep = false;
                 }
             });
@@ -15448,6 +15611,15 @@ mod tests {
             "menu-add-camera",
             "menu-add-empty",
             "menu-add-curve",
+            "design-parameters",
+            "param-name",
+            "param-expression",
+            "param-value",
+            "param-add",
+            "param-remove",
+            "param-hint",
+            "feature-expression",
+            "feature-expression-hint",
             "panel-follow-path",
             "menu-follow-path",
             "menu-follow-path-clear",

@@ -15,6 +15,269 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Mate>();
     registry.register::<MeasureAdd>();
     registry.register::<MeasureRemove>();
+    registry.register::<ParameterSet>();
+    registry.register::<ParameterRemove>();
+    registry.register::<Bind>();
+    registry.register::<Unbind>();
+}
+
+// --- parameters --------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ParameterSetParams {
+    /// The parameter's name: letters, digits and underscores, starting
+    /// with a letter.
+    pub name: String,
+    /// What it is: a number, or an expression of other parameters —
+    /// `40`, `width / 2`, `2 * pi`. Lengths in the scene's unit, angles in
+    /// degrees.
+    pub expression: String,
+}
+
+/// Makes or changes a named parameter, and puts everything bound to the
+/// parameters where they now have it. Fusion's Change Parameters.
+pub struct ParameterSet;
+
+impl Operator for ParameterSet {
+    type Params = ParameterSetParams;
+    fn id() -> &'static str {
+        "design.parameter_set"
+    }
+    fn label() -> &'static str {
+        "Set Parameter"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let name = params.name.trim();
+        if !kreate_scene::design::valid_parameter_name(name) {
+            return Err(OpError::Failed(format!(
+                "{name:?} cannot name a parameter: letters, digits and underscores, starting with a letter"
+            )));
+        }
+        let expression = params.expression.trim();
+        if expression.is_empty() {
+            return Err(OpError::Failed(
+                "a parameter needs a value or an expression".into(),
+            ));
+        }
+        let d = doc.document_mut();
+        // Read now, with the others, so a bad expression is refused rather
+        // than kept and complained about on every frame.
+        let mut trial = d.design.clone();
+        match trial.parameters.iter_mut().find(|p| p.name == name) {
+            Some(p) => p.expression = expression.to_string(),
+            None => trial.parameters.push(kreate_scene::design::Parameter {
+                name: name.to_string(),
+                expression: expression.to_string(),
+                value: 0.0,
+            }),
+        }
+        let problems = trial.evaluate_parameters();
+        if let Some((_, why)) = problems.iter().find(|(n, _)| n == name) {
+            return Err(OpError::Failed(format!("{name} = {expression}: {why}")));
+        }
+        d.design = trial;
+        d.apply_parameters();
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ParameterRemoveParams {
+    pub name: String,
+}
+
+/// Takes a parameter away. Refused while another parameter reads it, as
+/// Fusion refuses; a dimension bound to it alone is let go and keeps its
+/// last value.
+pub struct ParameterRemove;
+
+impl Operator for ParameterRemove {
+    type Params = ParameterRemoveParams;
+    fn id() -> &'static str {
+        "design.parameter_remove"
+    }
+    fn label() -> &'static str {
+        "Remove Parameter"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let name = params.name.trim();
+        let d = doc.document();
+        if !d.design.parameters.iter().any(|p| p.name == name) {
+            return Err(OpError::Failed(format!("no parameter called {name:?}")));
+        }
+        // Another parameter that reads this one would be left reading
+        // nothing: refused, and said which.
+        let mut without = d.design.clone();
+        without.parameters.retain(|p| p.name != name);
+        let readers: Vec<String> = without
+            .parameters
+            .iter()
+            .filter(|p| without.evaluate(&p.expression).is_err())
+            .map(|p| p.name.clone())
+            .collect();
+        if !readers.is_empty() {
+            return Err(OpError::Failed(format!(
+                "{name} is read by {}: change or remove that first",
+                readers.join(", ")
+            )));
+        }
+        // A binding that only this parameter could read is let go: the
+        // dimension stays as it is, free again.
+        let kept: Vec<bool> = without
+            .bindings
+            .iter()
+            .map(|b| without.evaluate(&b.expression).is_ok())
+            .collect();
+        let mut keep = kept.into_iter();
+        without.bindings.retain(|_| keep.next().unwrap_or(false));
+        let d = doc.document_mut();
+        d.design = without;
+        d.apply_parameters();
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct BindParams {
+    /// A sketch's constraint or a body's feature.
+    #[param(variants("sketch", "feature"))]
+    pub kind: u32,
+    /// The sketch or body, by name; empty for the active object.
+    pub object: String,
+    /// The constraint's place in the sketch's list, or the feature's order.
+    pub index: u32,
+    /// What holds it: an expression of the parameters, or a number.
+    pub expression: String,
+}
+
+/// Holds a dimension or a feature's amount to an expression of the
+/// parameters: typing `width / 2` into a dimension.
+pub struct Bind;
+
+impl Operator for Bind {
+    type Params = BindParams;
+    fn id() -> &'static str {
+        "design.bind"
+    }
+    fn label() -> &'static str {
+        "Bind to Parameters"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let expression = params.expression.trim().to_string();
+        d.design
+            .evaluate(&expression)
+            .map_err(|e| OpError::Failed(format!("{expression}: {e}")))?;
+        let name = params.object.trim();
+        let id = if name.is_empty() {
+            d.selection.active
+        } else {
+            d.objects().find(|(_, o)| o.name == name).map(|(id, _)| id)
+        }
+        .ok_or_else(|| OpError::Failed("no such object".into()))?;
+        let uid = d.object_uid(id).expect("an object");
+        let o = d.object(id).expect("an object");
+        let target = match params.kind {
+            0 => {
+                let c = o
+                    .sketch
+                    .get(params.index as usize)
+                    .ok_or_else(|| OpError::Failed("no such constraint".into()))?;
+                if !matches!(
+                    c,
+                    kreate_scene::sketch::Constraint::Distance { .. }
+                        | kreate_scene::sketch::Constraint::Angle { .. }
+                ) {
+                    return Err(OpError::Failed("only a dimension can be bound".into()));
+                }
+                kreate_scene::design::Bound::SketchDimension {
+                    sketch: uid,
+                    index: params.index,
+                }
+            }
+            _ => {
+                let order = u64::from(params.index);
+                if !o.features.iter().any(|f| f.order == order) {
+                    return Err(OpError::Failed("no such feature".into()));
+                }
+                kreate_scene::design::Bound::FeatureAmount { body: uid, order }
+            }
+        };
+        let d = doc.document_mut();
+        d.design.bindings.retain(|b| b.target != target);
+        d.design
+            .bindings
+            .push(kreate_scene::design::Binding { target, expression });
+        d.apply_parameters();
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct UnbindParams {
+    #[param(variants("sketch", "feature"))]
+    pub kind: u32,
+    pub object: String,
+    pub index: u32,
+}
+
+/// Lets a dimension go: it keeps its value and can be changed again.
+pub struct Unbind;
+
+impl Operator for Unbind {
+    type Params = UnbindParams;
+    fn id() -> &'static str {
+        "design.unbind"
+    }
+    fn label() -> &'static str {
+        "Unbind from Parameters"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let name = params.object.trim();
+        let id = if name.is_empty() {
+            d.selection.active
+        } else {
+            d.objects().find(|(_, o)| o.name == name).map(|(id, _)| id)
+        }
+        .ok_or_else(|| OpError::Failed("no such object".into()))?;
+        let uid = d.object_uid(id).expect("an object");
+        let target = if params.kind == 0 {
+            kreate_scene::design::Bound::SketchDimension {
+                sketch: uid,
+                index: params.index,
+            }
+        } else {
+            kreate_scene::design::Bound::FeatureAmount {
+                body: uid,
+                order: u64::from(params.index),
+            }
+        };
+        let d = doc.document_mut();
+        let before = d.design.bindings.len();
+        d.design.bindings.retain(|b| b.target != target);
+        Ok(if d.design.bindings.len() < before {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -350,6 +613,192 @@ mod tests {
     use super::*;
     use crate::history::History;
     use crate::{OperatorRegistry, PropertyMap, PropertyValue};
+
+    /// `width = 40` holds a sketch's side and an extrude's height; change
+    /// it and both follow, through the file as well.
+    #[test]
+    fn parameters_hold_dimensions_and_features_and_follow_a_change() {
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let mut doc = Document::new();
+        doc.design.length_unit = kreate_scene::design::LengthUnit::Millimetres;
+        let history = std::cell::RefCell::new(History::new());
+        let ctx = Context::default();
+        let run = |doc: &mut Document, id: &str, pairs: &[(&'static str, PropertyValue)]| {
+            let mut p = PropertyMap::new();
+            for (k, v) in pairs {
+                p.set(k, v.clone());
+            }
+            history.borrow_mut().dispatch(&registry, doc, &ctx, id, &p)
+        };
+        let v = |x: f64| PropertyValue::Float(x);
+        let t = |x: &str| PropertyValue::Text(x.to_string());
+        // A 30 x 20 mm plate, its width dimensioned.
+        run(&mut doc, "sketch.new", &[]).unwrap();
+        let sketch = doc.selection.active.unwrap();
+        run(
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([0.03, 0.02, 0.0])),
+                ("join", PropertyValue::Int(1)),
+            ],
+        )
+        .unwrap();
+        run(
+            &mut doc,
+            "sketch.constrain",
+            &[
+                ("kind", PropertyValue::Enum(0)),
+                ("points", PropertyValue::Ints(vec![0, 1])),
+                ("value", v(0.03)),
+            ],
+        )
+        .unwrap();
+        let dim = doc.object(sketch).unwrap().sketch.len() as i64 - 1;
+        run(
+            &mut doc,
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.01, 0.01])),
+                ("distance", v(0.01)),
+            ],
+        )
+        .unwrap();
+        let body = doc
+            .objects()
+            .find(|(_, o)| !o.features.is_empty())
+            .map(|(id, _)| id)
+            .unwrap();
+        let body_name = doc.object(body).unwrap().name.clone();
+        let order = doc.object(body).unwrap().features[0].order;
+
+        // The parameters, and what is held to them.
+        run(
+            &mut doc,
+            "design.parameter_set",
+            &[("name", t("width")), ("expression", t("40"))],
+        )
+        .unwrap();
+        run(
+            &mut doc,
+            "design.parameter_set",
+            &[("name", t("height")), ("expression", t("width / 4"))],
+        )
+        .unwrap();
+        assert!(run(
+            &mut doc,
+            "design.parameter_set",
+            &[("name", t("2bad")), ("expression", t("1"))]
+        )
+        .is_err());
+        assert!(run(
+            &mut doc,
+            "design.parameter_set",
+            &[("name", t("loop")), ("expression", t("nope + 1"))]
+        )
+        .is_err());
+        doc.selection.clear();
+        doc.selection.add(sketch);
+        doc.selection.active = Some(sketch);
+        run(
+            &mut doc,
+            "design.bind",
+            &[
+                ("kind", PropertyValue::Enum(0)),
+                ("index", PropertyValue::Int(dim)),
+                ("expression", t("width")),
+            ],
+        )
+        .unwrap();
+        run(
+            &mut doc,
+            "design.bind",
+            &[
+                ("kind", PropertyValue::Enum(1)),
+                ("object", t(&body_name)),
+                ("index", PropertyValue::Int(order as i64)),
+                ("expression", t("height")),
+            ],
+        )
+        .unwrap();
+        let width = |d: &Document| {
+            let p = crate::ops::sketch_draw::points(d, sketch);
+            (p[1] - p[0]).length()
+        };
+        let height = |d: &Document| match d.object(body).unwrap().features[0].shape {
+            kreate_scene::feature::Shape::Extrude { distance, .. } => distance,
+            _ => unreachable!(),
+        };
+        assert!((width(&doc) - 0.04).abs() < 1e-6, "40 mm: {}", width(&doc));
+        assert!(
+            (height(&doc) - 0.01).abs() < 1e-9,
+            "10 mm: {}",
+            height(&doc)
+        );
+
+        // Changed: both follow.
+        run(
+            &mut doc,
+            "design.parameter_set",
+            &[("name", t("width")), ("expression", t("60"))],
+        )
+        .unwrap();
+        assert!((width(&doc) - 0.06).abs() < 1e-6, "{}", width(&doc));
+        assert!((height(&doc) - 0.015).abs() < 1e-9, "{}", height(&doc));
+        // Undone: back, as one step.
+        assert!(history.borrow_mut().undo(&mut doc));
+        doc.apply_parameters();
+        assert!((width(&doc) - 0.04).abs() < 1e-6, "{}", width(&doc));
+
+        // Through the file.
+        let bytes = kreate_io::container::write(&doc, &Default::default(), &[]).unwrap();
+        let back = kreate_io::container::read(std::io::Cursor::new(bytes))
+            .unwrap()
+            .document;
+        assert_eq!(back.design.parameters.len(), 2);
+        assert_eq!(back.design.bindings.len(), 2);
+        assert!((back.design.parameters[1].value - 10.0).abs() < 1e-9);
+
+        // Let go: a number typed sets it and it no longer follows.
+        run(
+            &mut doc,
+            "design.unbind",
+            &[
+                ("kind", PropertyValue::Enum(0)),
+                ("index", PropertyValue::Int(dim)),
+            ],
+        )
+        .unwrap();
+        run(
+            &mut doc,
+            "design.parameter_set",
+            &[("name", t("width")), ("expression", t("80"))],
+        )
+        .unwrap();
+        assert!(
+            (width(&doc) - 0.04).abs() < 1e-6,
+            "left alone: {}",
+            width(&doc)
+        );
+        // Removed: refused while `height` reads it; `height` gone, the
+        // extrude is let go with its last height, and then `width` may go.
+        assert!(run(&mut doc, "design.parameter_remove", &[("name", t("width"))]).is_err());
+        run(
+            &mut doc,
+            "design.parameter_remove",
+            &[("name", t("height"))],
+        )
+        .unwrap();
+        assert!(
+            doc.design.bindings.is_empty(),
+            "the extrude read height, so it was let go"
+        );
+        assert!((height(&doc) - 0.02).abs() < 1e-9, "{}", height(&doc));
+        run(&mut doc, "design.parameter_remove", &[("name", t("width"))]).unwrap();
+        assert!(doc.design.parameters.is_empty());
+    }
 
     #[test]
     fn measurements_are_added_and_removed() {

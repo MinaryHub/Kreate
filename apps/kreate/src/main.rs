@@ -7231,6 +7231,10 @@ impl App {
         if self.doc.sync_robot_rigs() > 0 {
             self.redraw.set(RedrawReason::SCENE_CHANGED);
         }
+        // What the parameters hold, where they have it, after whatever moved.
+        if self.doc.apply_parameters() > 0 {
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+        }
         if self.solve_active_sketch() {
             self.redraw.set(RedrawReason::SCENE_CHANGED);
         }
