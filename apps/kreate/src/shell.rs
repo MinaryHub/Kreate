@@ -1205,6 +1205,10 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
         ModifierKind::Bevel(_) => "object.modifier_set_bevel",
         ModifierKind::Boolean(_) => "object.modifier_set_boolean",
         ModifierKind::PathArray(_) => "object.modifier_set_path_array",
+        ModifierKind::Triangulate => "object.modifier_set_triangulate",
+        ModifierKind::Weld(_) => "object.modifier_set_weld",
+        ModifierKind::Displace(_) => "object.modifier_set_displace",
+        ModifierKind::SimpleDeform(_) => "object.modifier_set_simple_deform",
     }
 }
 

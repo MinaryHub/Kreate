@@ -556,6 +556,23 @@ pub struct ModifierRecord {
     /// A boolean's other object, by its identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operand: Option<u64>,
+    /// A weld's distance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f32>,
+    /// A displace's strength, noise and scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    /// A simple deform's mode, axis and amount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     /// A path array's step and start along its path, its offset from it,
@@ -599,6 +616,18 @@ fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<Modif
         K::Solidify(p) => {
             r.thickness = Some(p.thickness);
             r.offset = Some(p.offset);
+        }
+        K::Triangulate => {}
+        K::Weld(p) => r.distance = Some(p.distance),
+        K::Displace(p) => {
+            r.strength = Some(p.strength);
+            r.noise = Some(p.noise);
+            r.scale = Some(p.scale);
+        }
+        K::SimpleDeform(p) => {
+            r.mode = Some(p.mode.tag().to_string());
+            r.axis = Some(p.axis);
+            r.amount = Some(p.amount);
         }
         K::Bevel(p) => {
             r.width = Some(p.width);
@@ -690,6 +719,33 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
                     offset: v3(r.shift, d.offset),
                     align: r.align.unwrap_or(d.align),
                 },
+            })
+        }
+        "triangulate" => K::Triangulate,
+        "weld" => {
+            let d = WeldParams::default();
+            K::Weld(WeldParams {
+                distance: r.distance.unwrap_or(d.distance),
+            })
+        }
+        "displace" => {
+            let d = DisplaceParams::default();
+            K::Displace(DisplaceParams {
+                strength: r.strength.unwrap_or(d.strength),
+                noise: r.noise.unwrap_or(d.noise),
+                scale: r.scale.unwrap_or(d.scale),
+            })
+        }
+        "simple_deform" => {
+            let d = SimpleDeformParams::default();
+            K::SimpleDeform(SimpleDeformParams {
+                mode: r
+                    .mode
+                    .as_deref()
+                    .and_then(DeformMode::from_tag)
+                    .unwrap_or(d.mode),
+                axis: r.axis.unwrap_or(d.axis).min(2),
+                amount: r.amount.unwrap_or(d.amount),
             })
         }
         "boolean" => K::Boolean(BooleanModifier {

@@ -55,8 +55,9 @@ use std::sync::Arc;
 
 use kreate_math::SceneTime;
 use kreate_mesh::modifiers::{
-    array, bevel, mirror, solidify, subdivide, ArrayParams, BevelParams, BooleanOp, MirrorParams,
-    SolidifyParams, SubdivideParams,
+    array, bevel, displace, mirror, simple_deform, solidify, subdivide, triangulate, weld,
+    ArrayParams, BevelParams, BooleanOp, DisplaceParams, MirrorParams, SimpleDeformParams,
+    SolidifyParams, SubdivideParams, WeldParams,
 };
 use kreate_mesh::MeshData;
 use kreate_reflect::Uid;
@@ -114,6 +115,14 @@ pub enum ModifierKind {
     /// Copies set along another object's edges or sketch lines; read as a
     /// boolean reads its cutter.
     PathArray(PathArrayModifier),
+    /// Every face cut into triangles.
+    Triangulate,
+    /// Vertices closer than a distance merged.
+    Weld(WeldParams),
+    /// Vertices pushed along their normals, roughened by noise.
+    Displace(DisplaceParams),
+    /// Twisted, bent, tapered or stretched along an axis.
+    SimpleDeform(SimpleDeformParams),
     /// A modifier that moves the mesh according to the clock.
     ///
     /// Exists so that the cache's time-keyed path can be driven, and only in a
@@ -142,6 +151,10 @@ impl ModifierKind {
             ModifierKind::Bevel(_) => "bevel",
             ModifierKind::Boolean(_) => "boolean",
             ModifierKind::PathArray(_) => "path_array",
+            ModifierKind::Triangulate => "triangulate",
+            ModifierKind::Weld(_) => "weld",
+            ModifierKind::Displace(_) => "displace",
+            ModifierKind::SimpleDeform(_) => "simple_deform",
             #[cfg(test)]
             ModifierKind::Drift(_) => "drift",
         }
@@ -160,6 +173,10 @@ impl ModifierKind {
             ModifierKind::Bevel(_) => "modifier-bevel",
             ModifierKind::Boolean(_) => "modifier-boolean",
             ModifierKind::PathArray(_) => "modifier-path-array",
+            ModifierKind::Triangulate => "modifier-triangulate",
+            ModifierKind::Weld(_) => "modifier-weld",
+            ModifierKind::Displace(_) => "modifier-displace",
+            ModifierKind::SimpleDeform(_) => "modifier-simple-deform",
             #[cfg(test)]
             ModifierKind::Drift(_) => "modifier-drift",
         }
@@ -183,7 +200,11 @@ impl ModifierKind {
             | ModifierKind::Solidify(_)
             | ModifierKind::Bevel(_)
             | ModifierKind::Boolean(_)
-            | ModifierKind::PathArray(_) => false,
+            | ModifierKind::PathArray(_)
+            | ModifierKind::Triangulate
+            | ModifierKind::Weld(_)
+            | ModifierKind::Displace(_)
+            | ModifierKind::SimpleDeform(_) => false,
             #[cfg(test)]
             ModifierKind::Drift(_) => true,
         }
@@ -201,6 +222,10 @@ impl ModifierKind {
             ModifierKind::Array(p) => array(input, p),
             ModifierKind::Solidify(p) => solidify(input, p),
             ModifierKind::Bevel(p) => bevel(input, p),
+            ModifierKind::Triangulate => triangulate(input),
+            ModifierKind::Weld(p) => weld(input, p),
+            ModifierKind::Displace(p) => displace(input, p),
+            ModifierKind::SimpleDeform(p) => simple_deform(input, p),
             ModifierKind::Boolean(b) => match operands.iter().find(|o| o.uid == b.operand) {
                 Some(operand) => {
                     let mut cutter = (*operand.mesh).clone();

@@ -20,7 +20,8 @@
 //! looking at one stack.
 
 use kreate_mesh::modifiers::{
-    ArrayParams, BevelParams, BooleanOp, MirrorParams, SolidifyParams, SubdivideParams,
+    ArrayParams, BevelParams, BooleanOp, DeformMode, DisplaceParams, MirrorParams,
+    SimpleDeformParams, SolidifyParams, SubdivideParams, WeldParams,
 };
 use kreate_ops_derive::OpParams;
 use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
@@ -37,6 +38,10 @@ pub const KINDS: &[&str] = &[
     "bevel",
     "boolean",
     "path_array",
+    "triangulate",
+    "weld",
+    "displace",
+    "simple_deform",
 ];
 
 fn kind_of(index: u32) -> ModifierKind {
@@ -47,6 +52,10 @@ fn kind_of(index: u32) -> ModifierKind {
         4 => ModifierKind::Bevel(BevelParams::default()),
         5 => ModifierKind::Boolean(BooleanModifier::default()),
         6 => ModifierKind::PathArray(kreate_scene::modifier::PathArrayModifier::default()),
+        7 => ModifierKind::Triangulate,
+        8 => ModifierKind::Weld(WeldParams::default()),
+        9 => ModifierKind::Displace(DisplaceParams::default()),
+        10 => ModifierKind::SimpleDeform(SimpleDeformParams::default()),
         _ => ModifierKind::Array(ArrayParams::default()),
     }
 }
@@ -82,7 +91,11 @@ pub struct AddParams {
         "solidify",
         "bevel",
         "boolean",
-        "path_array"
+        "path_array",
+        "triangulate",
+        "weld",
+        "displace",
+        "simple_deform"
     ))]
     pub kind: u32,
 }
@@ -408,6 +421,39 @@ pub fn setter_params(
             );
             p.set("align", kreate_reflect::PropertyValue::Bool(m.params.align));
         }
+        ModifierKind::Triangulate => {}
+        ModifierKind::Weld(w) => {
+            p.set(
+                "distance",
+                kreate_reflect::PropertyValue::Float(w.distance as f64),
+            );
+        }
+        ModifierKind::Displace(d) => {
+            p.set(
+                "strength",
+                kreate_reflect::PropertyValue::Float(d.strength as f64),
+            );
+            p.set(
+                "noise",
+                kreate_reflect::PropertyValue::Float(d.noise as f64),
+            );
+            p.set(
+                "scale",
+                kreate_reflect::PropertyValue::Float(d.scale as f64),
+            );
+        }
+        ModifierKind::SimpleDeform(s) => {
+            let mode = DeformMode::ALL
+                .iter()
+                .position(|m| *m == s.mode)
+                .unwrap_or(0) as u32;
+            p.set("mode", kreate_reflect::PropertyValue::Enum(mode));
+            p.set("axis", kreate_reflect::PropertyValue::Enum(s.axis.min(2)));
+            p.set(
+                "amount",
+                kreate_reflect::PropertyValue::Float(s.amount as f64),
+            );
+        }
         ModifierKind::Array(a) => {
             p.set("count", kreate_reflect::PropertyValue::Int(a.count as i64));
             p.set(
@@ -728,6 +774,222 @@ impl Operator for SetSolidify {
             ModifierKind::Solidify(SolidifyParams {
                 thickness: params.thickness as f32,
                 offset: params.offset as f32,
+            }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetTriangulateParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+}
+
+/// A triangulate modifier has nothing to set; this is its panel's empty
+/// page, so every kind has one.
+pub struct SetTriangulate;
+
+impl Operator for SetTriangulate {
+    type Params = SetTriangulateParams;
+    fn id() -> &'static str {
+        "object.modifier_set_triangulate"
+    }
+    fn label() -> &'static str {
+        "Triangulate Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        set_kind(doc, params.index, ModifierKind::Triangulate)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetWeldParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// Vertices nearer than this become one.
+    #[param(min = 0.0, soft_max = 0.01, unit = "length")]
+    pub distance: f64,
+}
+
+impl Default for SetWeldParams {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            distance: WeldParams::default().distance as f64,
+        }
+    }
+}
+
+/// Sets a weld modifier's parameters.
+pub struct SetWeld;
+
+impl Operator for SetWeld {
+    type Params = SetWeldParams;
+    fn id() -> &'static str {
+        "object.modifier_set_weld"
+    }
+    fn label() -> &'static str {
+        "Weld Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "weld")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Weld(WeldParams {
+                distance: params.distance.max(0.0) as f32,
+            }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetDisplaceParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// How far along the normals; negative sinks the surface.
+    #[param(soft_min = -1.0, soft_max = 1.0, unit = "length")]
+    pub strength: f64,
+    /// How much of it is noise: 0 a plain push, 1 all noise.
+    #[param(min = 0.0, max = 1.0, step = 0.05)]
+    pub noise: f64,
+    /// How big the noise's lumps are.
+    #[param(min = 0.0001, soft_max = 10.0, unit = "length")]
+    pub scale: f64,
+}
+
+impl Default for SetDisplaceParams {
+    fn default() -> Self {
+        let d = DisplaceParams::default();
+        Self {
+            index: 0,
+            strength: d.strength as f64,
+            noise: d.noise as f64,
+            scale: d.scale as f64,
+        }
+    }
+}
+
+/// Sets a displace modifier's parameters.
+pub struct SetDisplace;
+
+impl Operator for SetDisplace {
+    type Params = SetDisplaceParams;
+    fn id() -> &'static str {
+        "object.modifier_set_displace"
+    }
+    fn label() -> &'static str {
+        "Displace Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "displace")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::Displace(DisplaceParams {
+                strength: params.strength as f32,
+                noise: params.noise.clamp(0.0, 1.0) as f32,
+                scale: params.scale.max(1e-6) as f32,
+            }),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetSimpleDeformParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    #[param(variants("twist", "bend", "taper", "stretch"))]
+    pub mode: u32,
+    #[param(variants("x", "y", "z"))]
+    pub axis: u32,
+    /// Radians for a twist or a bend; a factor for a taper (1 is a point)
+    /// or a stretch (1 is twice as long).
+    #[param(soft_min = -6.3, soft_max = 6.3)]
+    pub amount: f64,
+}
+
+impl Default for SetSimpleDeformParams {
+    fn default() -> Self {
+        let d = SimpleDeformParams::default();
+        Self {
+            index: 0,
+            mode: 0,
+            axis: d.axis,
+            amount: d.amount as f64,
+        }
+    }
+}
+
+/// Sets a simple deform modifier's parameters.
+pub struct SetSimpleDeform;
+
+impl Operator for SetSimpleDeform {
+    type Params = SetSimpleDeformParams;
+    fn id() -> &'static str {
+        "object.modifier_set_simple_deform"
+    }
+    fn label() -> &'static str {
+        "Simple Deform Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "simple_deform")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::SimpleDeform(SimpleDeformParams {
+                mode: DeformMode::ALL
+                    .get(params.mode as usize)
+                    .copied()
+                    .unwrap_or_default(),
+                axis: params.axis.min(2),
+                amount: params.amount as f32,
             }),
         )
     }
@@ -1122,6 +1384,10 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetBevel>();
     registry.register::<SetBoolean>();
     registry.register::<SetPathArray>();
+    registry.register::<SetTriangulate>();
+    registry.register::<SetWeld>();
+    registry.register::<SetDisplace>();
+    registry.register::<SetSimpleDeform>();
     registry.register::<Add>();
     registry.register::<Apply>();
     registry.register::<Remove>();
@@ -1140,6 +1406,81 @@ mod tests {
     use crate::{PropertyMap, PropertyValue};
     use kreate_scene::document::{Object, ObjectData};
     use kreate_scene::ModifierCache;
+
+    /// The four plain-mesh modifiers: added by index, set, evaluated, and
+    /// read back from the file as they were.
+    #[test]
+    fn triangulate_weld_displace_and_simple_deform_are_added_set_and_saved() {
+        let (r, mut h, mut doc, id, c) = setup();
+        let kinds = ["triangulate", "weld", "displace", "simple_deform"];
+        for kind in kinds {
+            let index = KINDS.iter().position(|k| *k == kind).unwrap() as u32;
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                &c,
+                "object.modifier_add",
+                &[("kind", PropertyValue::Enum(index))],
+            );
+        }
+        let ids: Vec<&str> = doc
+            .object(id)
+            .unwrap()
+            .modifiers
+            .iter()
+            .map(|m| m.kind.id())
+            .collect();
+        assert_eq!(ids, kinds);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            &c,
+            "object.modifier_set_displace",
+            &[
+                ("index", PropertyValue::Int(2)),
+                ("strength", PropertyValue::Float(0.25)),
+                ("noise", PropertyValue::Float(0.0)),
+                ("scale", PropertyValue::Float(1.0)),
+            ],
+        );
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            &c,
+            "object.modifier_set_simple_deform",
+            &[
+                ("index", PropertyValue::Int(3)),
+                ("mode", PropertyValue::Enum(0)),
+                ("axis", PropertyValue::Enum(2)),
+                ("amount", PropertyValue::Float(1.0)),
+            ],
+        );
+        // Evaluated: triangles, pushed out a quarter, twisted.
+        let mut cache = ModifierCache::new();
+        let shown = cache
+            .evaluated(&doc, id, &kreate_scene::modifier::EvalCtx::still())
+            .unwrap();
+        assert!(shown.faces().all(|f| f.len() == 3));
+        assert!(shown.positions().iter().all(|p| p.length() > 1.73 * 0.99));
+        // Through the file, each kind with its numbers.
+        let bytes = kreate_io::container::write(&doc, &Default::default(), &[]).unwrap();
+        let back = kreate_io::container::read(std::io::Cursor::new(bytes))
+            .unwrap()
+            .document;
+        let (_, o) = back.objects().next().unwrap();
+        assert_eq!(o.modifiers.len(), 4);
+        assert_eq!(
+            o.modifiers[2].kind,
+            doc.object(id).unwrap().modifiers[2].kind
+        );
+        assert_eq!(
+            o.modifiers[3].kind,
+            doc.object(id).unwrap().modifiers[3].kind
+        );
+    }
 
     /// A registry, a history and a document holding one selected cube.
     fn setup() -> (OperatorRegistry, History, Document, ObjectId, Context) {
@@ -1469,7 +1810,7 @@ mod tests {
     fn the_add_menu_and_the_kind_list_agree() {
         // The variant list drives the dropdown; `kind_of` turns the choice into a
         // modifier. They are two lists and would otherwise drift apart silently.
-        assert_eq!(KINDS.len(), 7);
+        assert_eq!(KINDS.len(), 11);
         for (i, name) in KINDS.iter().enumerate() {
             assert_eq!(kind_of(i as u32).id(), *name);
         }

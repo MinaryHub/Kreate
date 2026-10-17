@@ -27,18 +27,26 @@ pub mod array;
 pub mod bevel;
 pub mod boolean;
 pub mod catmull_clark;
+pub mod displace;
 pub mod mirror;
 pub mod path_array;
+pub mod simple_deform;
 pub mod solidify;
 pub mod subdivide;
+pub mod triangulate;
+pub mod weld;
 
 pub use array::{array, ArrayParams};
 pub use bevel::{bevel, BevelParams};
 pub use boolean::{boolean, BooleanOp};
+pub use displace::{displace, DisplaceParams};
 pub use mirror::{mirror, MirrorParams};
 pub use path_array::{path_array, path_chain, PathArrayParams};
+pub use simple_deform::{simple_deform, DeformMode, SimpleDeformParams};
 pub use solidify::{solidify, SolidifyParams};
 pub use subdivide::{subdivide, SubdivideParams};
+pub use triangulate::triangulate;
+pub use weld::{weld, WeldParams};
 
 use crate::attribute::{AttributeStore, Domain};
 use crate::MeshData;
