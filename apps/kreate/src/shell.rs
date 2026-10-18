@@ -7118,10 +7118,46 @@ pub struct RenderResultView {
     pub size: (u32, u32),
     /// What happened: where the file went, or why it did not.
     pub message: String,
+    /// The files the render wrote: a picture, a video, or an animation's
+    /// frames in order. Empty when it wrote none.
+    pub files: Vec<std::path::PathBuf>,
+    /// The scene's frame rate, for playing frames.
+    pub fps: f64,
+    /// Frames being played in the window.
+    pub player: Option<crate::playback::Player>,
+}
+
+impl RenderResultView {
+    /// Whether the render was a video.
+    fn video(&self) -> bool {
+        self.files.len() == 1
+            && self.files[0]
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+    }
+
+    /// Whether the render was frames this window can play: pictures it can
+    /// read, which an EXR is not.
+    fn playable_frames(&self) -> bool {
+        self.files.len() > 1
+            && self.files.iter().all(|f| {
+                f.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    matches!(
+                        e.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "webp"
+                    )
+                })
+            })
+    }
 }
 
 fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
-    let Some(result) = &state.render_result else {
+    let play = state.catalog.get("render-play");
+    let pause = state.catalog.get("render-pause");
+    let open_file = state.catalog.get("render-open-file");
+    let open_folder = state.catalog.get("render-open-folder");
+    let loading = state.catalog.get("render-loading");
+    let Some(result) = &mut state.render_result else {
         return;
     };
     let mut open = true;
@@ -7139,9 +7175,69 @@ fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(screen.center())
         .show(ctx, |ui| {
-            ui.add(egui::Image::new(&result.texture).fit_to_exact_size(shown));
+            // The frame being played, or the picture the render finished on.
+            let texture = result
+                .player
+                .as_mut()
+                .and_then(|p| p.texture(ui.ctx()))
+                .unwrap_or_else(|| result.texture.clone());
+            ui.add(egui::Image::new(&texture).fit_to_exact_size(shown));
             // i18n-exempt: composed by the application from translated parts and a path
             ui.label(&result.message);
+            if result.files.is_empty() {
+                return;
+            }
+            ui.horizontal(|ui| {
+                if result.video() {
+                    // A video plays in the system's player.
+                    if ui.button(&play).clicked() {
+                        crate::desktop::open(&result.files[0]);
+                    }
+                } else if result.playable_frames() {
+                    let playing = result.player.as_ref().is_some_and(|p| p.playing);
+                    let label = if playing { pause.clone() } else { play.clone() };
+                    if ui.button(label).clicked() {
+                        match result.player.as_mut() {
+                            Some(p) => p.toggle(),
+                            None => {
+                                let wake = ui.ctx().clone();
+                                result.player = Some(crate::playback::Player::new(
+                                    result.files.clone(),
+                                    result.fps,
+                                    move || wake.request_repaint(),
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(p) = result.player.as_mut() {
+                        let mut frame = p.frame();
+                        let last = p.len().saturating_sub(1);
+                        if ui
+                            .add(egui::Slider::new(&mut frame, 0..=last).show_value(true))
+                            .changed()
+                        {
+                            p.seek(frame);
+                        }
+                        let (read, count) = p.progress();
+                        if read < count {
+                            // i18n-exempt: a translated word and two counts
+                            ui.label(format!("{loading} {read}/{count}"));
+                        }
+                    }
+                } else if ui.button(&open_file).clicked() {
+                    crate::desktop::open(&result.files[0]);
+                }
+                if ui.button(&open_folder).clicked() {
+                    crate::desktop::show_in_folder(&result.files[0]);
+                }
+            });
+            // Frames keep coming while playing.
+            if result.player.as_ref().is_some_and(|p| p.playing) {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(
+                        (1000.0 / result.fps.max(1.0)) as u64,
+                    ));
+            }
         });
     if !open {
         state.render_result = None;

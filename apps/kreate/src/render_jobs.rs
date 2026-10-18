@@ -473,6 +473,10 @@ impl App {
                 *path = message.to_string();
             }
         }
+        // What the render wrote, for the result window to open and play.
+        if !job.written.is_empty() {
+            self.last_render_files = std::mem::take(&mut job.written);
+        }
         self.show_last_render();
         if job.written.is_empty() {
             if let Some(view) = &mut self.ui.render_result {
@@ -497,6 +501,9 @@ impl App {
             texture,
             size: (*w, *h),
             message: message.clone(),
+            files: self.last_render_files.clone(),
+            fps: self.doc.playback.fps,
+            player: None,
         });
         self.redraw.set(RedrawReason::UI);
     }

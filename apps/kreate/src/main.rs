@@ -916,6 +916,8 @@ struct App {
     render_job: Option<RenderJob>,
     /// The last render's picture, for View Render.
     last_render: Option<(u32, u32, Vec<u8>, String)>,
+    /// The files the last render wrote, in order.
+    last_render_files: Vec<std::path::PathBuf>,
     /// A capture or a render is waiting on the viewport: draw it even when
     /// the window is hidden and there is no frame to show it in.
     capturing: bool,
@@ -1192,6 +1194,7 @@ impl App {
             rendering_still: false,
             render_job: None,
             last_render: None,
+            last_render_files: Vec::new(),
             capturing: false,
             next_shape: 1,
             extrude_along_normals: false,
