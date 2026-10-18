@@ -913,7 +913,7 @@ pub struct RenderRecord {
     pub width: u32,
     pub height: u32,
     pub samples: u32,
-    /// `png` or `exr`; anything else reads as PNG.
+    /// `png`, `exr` or `mp4`; anything else reads as PNG.
     pub format: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output: String,
@@ -2874,10 +2874,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             width: r.width.clamp(16, 16384),
             height: r.height.clamp(16, 16384),
             samples: r.samples.clamp(1, 65536),
-            format: if r.format == "exr" {
-                OutputFormat::Exr
-            } else {
-                OutputFormat::Png
+            format: match r.format.as_str() {
+                "exr" => OutputFormat::Exr,
+                "mp4" => OutputFormat::Mp4,
+                _ => OutputFormat::Png,
             },
             output: r.output.clone(),
             denoise: r.denoise,

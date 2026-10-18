@@ -48,6 +48,7 @@ pub mod update;
 pub mod uvmodal;
 pub mod uvview;
 pub mod version;
+pub mod video;
 pub mod walk;
 pub mod youtube;
 

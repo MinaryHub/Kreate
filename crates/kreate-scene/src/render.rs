@@ -14,16 +14,20 @@ pub enum OutputFormat {
     /// Half floats, scene-linear before the view transform, with the render
     /// passes beside the picture: what is composited.
     Exr,
+    /// An animation as one H.264 video: what is played and shared. A still
+    /// rendered with it set is written as a PNG.
+    Mp4,
 }
 
 impl OutputFormat {
-    pub const ALL: [OutputFormat; 2] = [OutputFormat::Png, OutputFormat::Exr];
+    pub const ALL: [OutputFormat; 3] = [OutputFormat::Png, OutputFormat::Exr, OutputFormat::Mp4];
 
     /// The file extension, without the dot.
     pub fn extension(self) -> &'static str {
         match self {
             OutputFormat::Png => "png",
             OutputFormat::Exr => "exr",
+            OutputFormat::Mp4 => "mp4",
         }
     }
 }
@@ -88,7 +92,11 @@ impl RenderSettings {
     /// The file a still goes to: `output` if it names a file, with the
     /// format's extension, or `render.<ext>` in it if it names a folder.
     pub fn still_path(&self, folder: &std::path::Path) -> std::path::PathBuf {
-        let ext = self.format.extension();
+        // A video of one frame is a picture.
+        let ext = match self.format {
+            OutputFormat::Mp4 => "png",
+            f => f.extension(),
+        };
         if self.output.is_empty() {
             return folder.join(format!("render.{ext}"));
         }
@@ -101,10 +109,51 @@ impl RenderSettings {
     }
 }
 
+impl RenderSettings {
+    /// The file an animation goes to as a video: `output` if it names a
+    /// file, made `.mp4`; `render.mp4` in `output` if it names a folder, or
+    /// in `folder` if it is empty.
+    pub fn video_path(&self, folder: &std::path::Path) -> std::path::PathBuf {
+        if self.output.is_empty() {
+            return folder.join("render.mp4");
+        }
+        let output = std::path::Path::new(&self.output);
+        if self.output.ends_with(['/', '\\']) || output.is_dir() || output.extension().is_none() {
+            output.join("render.mp4")
+        } else {
+            output.with_extension("mp4")
+        }
+    }
+
+    /// Whether an animation is written as one video rather than a frame a
+    /// file.
+    pub fn video(&self) -> bool {
+        self.format == OutputFormat::Mp4
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn a_video_goes_to_one_file_and_its_still_to_a_png() {
+        let mut s = RenderSettings {
+            format: OutputFormat::Mp4,
+            ..RenderSettings::default()
+        };
+        assert_eq!(s.video_path(Path::new("/r")), Path::new("/r/render.mp4"));
+        assert_eq!(s.still_path(Path::new("/r")), Path::new("/r/render.png"));
+        s.output = "/out/walk.mov".into();
+        assert_eq!(s.video_path(Path::new("/r")), Path::new("/out/walk.mp4"));
+        s.output = "/out/shots/".into();
+        assert_eq!(
+            s.video_path(Path::new("/r")),
+            Path::new("/out/shots/render.mp4")
+        );
+        assert!(s.video());
+    }
 
     #[test]
     fn frames_are_numbered_beside_a_file_name_or_inside_a_folder() {

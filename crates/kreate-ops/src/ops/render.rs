@@ -86,7 +86,7 @@ pub struct SetRenderSettingsParams {
     pub samples: i64,
     /// PNG for a picture to look at, EXR for scene-linear values and render
     /// passes to composite.
-    #[param(variants("png", "exr"))]
+    #[param(variants("png", "exr", "mp4"))]
     pub format: u32,
     /// Where renders go: a file, or a folder for an animation's frames.
     /// Empty is the pictures folder.

@@ -35,6 +35,11 @@ tracing-subscriber.workspace = true
 # An environment reaches the renderer as `Rgba16Float`, which is what the
 # datablock holds and what a sky needs. See `environment::pixels_of`.
 half = "2"
+# Animation renders as MP4: H.264 from Cisco's OpenH264, built from its source,
+# and the MP4 container around it.
+openh264 = "0.9"
+mp4 = "0.14"
+bytes = "1"
 # The connector's wire, and the viewport capture it hands back as PNG.
 serde_json.workspace = true
 # The bridge's token: the operating system's secure random source.

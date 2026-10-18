@@ -69,6 +69,7 @@ impl App {
             ids: None,
             blur: None,
             written: Vec::new(),
+            video: None,
         });
         // Motion blur: the shutter, as a fraction of a frame, from the
         // camera; a closed one has nothing to smear.
@@ -207,6 +208,33 @@ impl App {
             }
         }
         let job = self.render_job.as_ref().expect("checked");
+        // An animation as a video: this frame into the one file.
+        if frames.is_some() && job.settings.video() {
+            let path = job.settings.video_path(&job.folder);
+            if let Err(e) = self.write_video_frame(&path) {
+                let message = self.ui.catalog.format(
+                    "render-failed",
+                    kreate_i18n::TextKind::Ui,
+                    &[("why", &e)],
+                );
+                self.finish_render_job(&message);
+                return;
+            }
+            if let Some((f, end)) = frames {
+                if f < end {
+                    self.next_render_frame(f, end);
+                    return;
+                }
+            }
+            // The last frame: the file finished in `finish_render_job`.
+            let message = self.ui.catalog.format(
+                "render-saved",
+                kreate_i18n::TextKind::Ui,
+                &[("path", &path.display().to_string())],
+            );
+            self.finish_render_job(&message);
+            return;
+        }
         let path = match frames {
             Some((f, _)) => job.settings.frame_path(&job.folder, f),
             None => job.settings.still_path(&job.folder),
@@ -230,20 +258,7 @@ impl App {
         }
         if let Some((f, end)) = frames {
             if f < end {
-                self.set_frame((f + 1) as f64);
-                if let Some(job) = self.render_job.as_mut() {
-                    job.frames = Some((f + 1, end));
-                    job.drawn = 0;
-                    job.ids = None;
-                    if let Some(blur) = job.blur.as_mut() {
-                        blur.step = 0;
-                        blur.base = (f + 1) as f64;
-                        blur.sum.clear();
-                        let t = Blur::time(blur.base, blur.shutter, 0);
-                        self.set_frame(t);
-                        return;
-                    }
-                }
+                self.next_render_frame(f, end);
                 return;
             }
         }
@@ -262,13 +277,49 @@ impl App {
         self.finish_render_job(&message);
     }
 
-    /// Writes the picture on screen to `path`: the display's PNG, or an EXR
-    /// of the scene-linear picture with its depth and normal passes.
-    pub(super) fn write_render(
-        &mut self,
-        path: &std::path::Path,
-        format: kreate_scene::render::OutputFormat,
-    ) -> Result<(), String> {
+    /// Moves an animation's render on from frame `f`, of `end`.
+    fn next_render_frame(&mut self, f: i32, end: i32) {
+        self.set_frame((f + 1) as f64);
+        if let Some(job) = self.render_job.as_mut() {
+            job.frames = Some((f + 1, end));
+            job.drawn = 0;
+            job.ids = None;
+            if let Some(blur) = job.blur.as_mut() {
+                blur.step = 0;
+                blur.base = (f + 1) as f64;
+                blur.sum.clear();
+                let t = Blur::time(blur.base, blur.shutter, 0);
+                self.set_frame(t);
+            }
+        }
+    }
+
+    /// Adds the picture on screen to the animation's video, opening it at
+    /// the first frame.
+    fn write_video_frame(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let (w, h, png, _) = self.rendered_picture()?;
+        let rgba = image::load_from_memory(&png)
+            .map_err(|e| e.to_string())?
+            .to_rgba8()
+            .into_raw();
+        let fps = self.doc.playback.fps;
+        let job = self.render_job.as_mut().ok_or("the render stopped")?;
+        if job.video.is_none() {
+            job.video = Some(kreate::video::Video::new(path, w, h, fps)?);
+            job.written.push(path.to_path_buf());
+        }
+        job.video
+            .as_mut()
+            .expect("opened above")
+            .push(&rgba, w, h)?;
+        self.last_render = Some((w, h, rgba, path.display().to_string()));
+        Ok(())
+    }
+
+    /// The picture on screen as a PNG, its size, and — for a motion-blurred
+    /// one — the scene-linear mean it was made from.
+    #[allow(clippy::type_complexity)]
+    fn rendered_picture(&self) -> Result<(u32, u32, Vec<u8>, Option<Vec<[f32; 4]>>), String> {
         // A motion-blurred picture is the mean of the shutter's moments,
         // shown through the same view transform on the CPU; any other is the
         // one on screen.
@@ -309,11 +360,25 @@ impl App {
             }
             None => self.read_target_png()?,
         };
+        Ok((w, h, png, blurred))
+    }
+
+    /// Writes the picture on screen to `path`: the display's PNG, or an EXR
+    /// of the scene-linear picture with its depth and normal passes.
+    pub(super) fn write_render(
+        &mut self,
+        path: &std::path::Path,
+        format: kreate_scene::render::OutputFormat,
+    ) -> Result<(), String> {
+        let (w, h, png, blurred) = self.rendered_picture()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         let bytes = match format {
-            kreate_scene::render::OutputFormat::Png => png.clone(),
+            // A still with the video format set is written as its picture.
+            kreate_scene::render::OutputFormat::Png | kreate_scene::render::OutputFormat::Mp4 => {
+                png.clone()
+            }
             kreate_scene::render::OutputFormat::Exr => {
                 let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot)
                     .exposure as f32;
@@ -358,9 +423,25 @@ impl App {
     /// Ends the render, done or stopped: the view goes back as it was and the
     /// last picture is shown.
     pub(super) fn finish_render_job(&mut self, message: &str) {
-        let Some(job) = self.render_job.take() else {
+        let Some(mut job) = self.render_job.take() else {
             return;
         };
+        // A video's index, which is what makes it play: done, or stopped
+        // part way, it holds the frames it was given.
+        let mut message = message.to_string();
+        if let Some(video) = job.video.take() {
+            let path = video.path().display().to_string();
+            if let Err(e) = video.finish() {
+                message = self.ui.catalog.format(
+                    "render-failed",
+                    kreate_i18n::TextKind::Ui,
+                    &[("why", &e)],
+                );
+            } else if let Some((_, _, _, shown)) = &mut self.last_render {
+                *shown = path;
+            }
+        }
+        let message = message.as_str();
         let saved = job.saved;
         self.rendering_still = false;
         self.capturing = false;

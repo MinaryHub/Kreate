@@ -13957,6 +13957,8 @@ struct RenderJob {
     /// open: the picture as the mean of pictures across the shutter.
     blur: Option<Blur>,
     written: Vec<std::path::PathBuf>,
+    /// An animation being written as one MP4, opened at its first frame.
+    video: Option<kreate::video::Video>,
 }
 
 /// Motion blur in progress: which moment of the shutter is being drawn, and
