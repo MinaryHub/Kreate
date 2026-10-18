@@ -39,7 +39,14 @@ pub struct Video {
 impl Video {
     /// Starts a video of `width` by `height` frames at `fps`, to be written
     /// at `path`.
-    pub fn new(path: &Path, width: u32, height: u32, fps: f64) -> Result<Self, String> {
+    /// `quality` is 0 for a small file, 1 balanced, 2 high.
+    pub fn new(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps: f64,
+        quality: u32,
+    ) -> Result<Self, String> {
         let (width, height) = (width & !1, height & !1);
         if width < 16 || height < 16 {
             return Err(format!("{width} by {height} is too small for a video"));
@@ -49,9 +56,14 @@ impl Video {
         } else {
             24.0
         };
-        // Enough bits that a render's detail survives: about a sixth of a
-        // bit per pixel per frame, which is a high-quality H.264 rate.
-        let bits = (width as f64 * height as f64 * fps * 0.18).clamp(2.0e6, 80.0e6) as u32;
+        // Bits per pixel per frame: a sixth of one keeps a render's detail,
+        // which is a high-quality H.264 rate; a twentieth is a small file.
+        let per_pixel = match quality {
+            0 => 0.05,
+            1 => 0.1,
+            _ => 0.18,
+        };
+        let bits = (width as f64 * height as f64 * fps * per_pixel).clamp(0.5e6, 80.0e6) as u32;
         let config = EncoderConfig::new()
             .rate_control_mode(RateControlMode::Quality)
             .bitrate(BitRate::from_bps(bits))
@@ -233,7 +245,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kreate-video-{}", std::process::id()));
         let path = dir.join("test.mp4");
         let (w, h) = (64u32, 48u32);
-        let mut video = Video::new(&path, w, h, 24.0).expect("starts");
+        let mut video = Video::new(&path, w, h, 24.0, 2).expect("starts");
         for f in 0..12u32 {
             let rgba: Vec<u8> = (0..w * h)
                 .flat_map(|i| {
@@ -259,7 +271,7 @@ mod tests {
     fn an_odd_size_is_cropped_to_even() {
         let dir = std::env::temp_dir().join(format!("kreate-video-odd-{}", std::process::id()));
         let path = dir.join("odd.mp4");
-        let mut video = Video::new(&path, 65, 49, 30.0).expect("starts");
+        let mut video = Video::new(&path, 65, 49, 30.0, 0).expect("starts");
         let rgba = vec![128u8; 65 * 49 * 4];
         video.push(&rgba, 65, 49).expect("encodes");
         assert_eq!(video.finish().expect("finishes"), 1);

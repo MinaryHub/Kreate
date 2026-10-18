@@ -172,6 +172,9 @@ pub struct ShellState {
     pub about_open: bool,
     /// The last render, shown in its own window until closed.
     pub render_result: Option<RenderResultView>,
+    /// A render under way: what it is doing, and how far through it is, zero
+    /// to one. Set by the application each frame of the render.
+    pub render_progress: Option<(String, f32)>,
     /// Which material slot the Material tab is editing.
     ///
     /// **Interface state, not document state.** Blender keeps this on the
@@ -830,6 +833,7 @@ impl Default for ShellState {
             collab_view: None,
             about_open: false,
             render_result: None,
+            render_progress: None,
             queue: CommandQueue::new(),
             adjust_params: None,
             workspaces: kreate_ui::Workspaces::default(),
@@ -1887,6 +1891,7 @@ struct Labels {
     menu_render: String,
     render_image: String,
     render_animation: String,
+    render_stop: String,
     render_view: String,
     render_result_title: String,
     render_hint: String,
@@ -2288,6 +2293,7 @@ impl Labels {
             render_image: t("render-image"),
             render_animation: t("render-animation"),
             render_view: t("render-view"),
+            render_stop: t("render-stop"),
             render_result_title: t("render-result-title"),
             render_hint: t("render-hint"),
             design_units: t("design-units"),
@@ -4413,6 +4419,7 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                     &l.render_animation,
                     dispatch("render.animation"),
                 ),
+                entry("render.stop", &l.render_stop, dispatch("render.stop")),
                 Separator,
                 entry("render.view", &l.render_view, dispatch("render.view")),
             ],
@@ -6950,6 +6957,7 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         &crate::version::platform(),
     );
     draw_render_result(ctx, state, l);
+    draw_render_progress(ctx, state);
     draw_fits(ctx, state, l);
 }
 
@@ -7148,6 +7156,42 @@ impl RenderResultView {
                     )
                 })
             })
+    }
+}
+
+/// A render under way, at the top of the window: what it is doing, a bar for
+/// how far it has got, and a button that stops it — what Escape does, where
+/// it can be seen.
+fn draw_render_progress(ctx: &egui::Context, state: &mut ShellState) {
+    let Some((text, fraction)) = &state.render_progress else {
+        return;
+    };
+    let stop = state.catalog.get("render-stop");
+    let screen = ctx.content_rect();
+    let mut stopped = false;
+    egui::Area::new(egui::Id::new("render-progress"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::CENTER_TOP)
+        .fixed_pos(egui::pos2(screen.center().x, screen.top() + 96.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(360.0);
+                // i18n-exempt: composed by the application
+                ui.label(text);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                            .desired_width(270.0)
+                            .show_percentage(),
+                    );
+                    if ui.button(&stop).clicked() {
+                        stopped = true;
+                    }
+                });
+            });
+        });
+    if stopped {
+        state.queue.dispatch("render.stop", PropertyMap::new());
     }
 }
 
@@ -7792,6 +7836,24 @@ fn draw_render_tab(
     });
     ui.weak(&l.render_hint);
     ui.separator();
+    // The quality in one choice: samples, bounces and the denoiser together.
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("render-quality"));
+        let current = kreate_scene::render::QualityPreset::of(&doc.render);
+        for (i, preset) in kreate_scene::render::QualityPreset::ALL.iter().enumerate() {
+            let name = state
+                .catalog
+                .get(&format!("render-quality-{}", preset.tag()));
+            if ui
+                .selectable_label(current == Some(*preset), name)
+                .clicked()
+            {
+                let mut m = PropertyMap::new();
+                m.set("quality", kreate_reflect::PropertyValue::Enum(i as u32));
+                state.queue.run("render.set_quality", m);
+            }
+        }
+    });
     let Some(info) = registry.get("render.set_settings") else {
         return;
     };

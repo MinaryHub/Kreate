@@ -316,6 +316,7 @@ const APP_ACTIONS: &[&str] = &[
     // F12 and Ctrl+F12: a render, which the application runs frame by frame.
     "render.image",
     "render.animation",
+    "render.stop",
     "render.view",
     // C: the selection brush, which is the application's until a stroke ends.
     "view.circle_select",

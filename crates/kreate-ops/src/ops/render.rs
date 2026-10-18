@@ -9,6 +9,7 @@ use crate::OpParams;
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetRenderSettings>();
+    registry.register::<SetRenderQuality>();
     registry.register::<SetFrameRange>();
 }
 
@@ -95,6 +96,13 @@ pub struct SetRenderSettingsParams {
     pub denoise: bool,
     /// Smear what moves across the camera's shutter.
     pub motion_blur: bool,
+    /// How many times light bounces before a path stops: more reaches
+    /// further into corners and through glass, and is slower.
+    #[param(min = 1.0, max = 64.0, soft_max = 16.0)]
+    pub bounces: i64,
+    /// How much detail a video keeps: a smaller file, or a sharper one.
+    #[param(variants("small", "balanced", "high"))]
+    pub video_quality: u32,
 }
 
 impl Default for SetRenderSettingsParams {
@@ -117,6 +125,8 @@ pub fn render_params(doc: &Document) -> SetRenderSettingsParams {
         output: r.output.clone(),
         denoise: r.denoise,
         motion_blur: r.motion_blur,
+        bounces: r.bounces as i64,
+        video_quality: r.video_quality.min(2),
     }
 }
 
@@ -149,12 +159,88 @@ impl Operator for SetRenderSettings {
             output: params.output.trim().to_string(),
             denoise: params.denoise,
             motion_blur: params.motion_blur,
+            bounces: params.bounces.clamp(1, 64) as u32,
+            video_quality: params.video_quality.min(2),
         };
         if doc.document().render == next {
             return Ok(OpResult::Cancelled);
         }
         doc.document_mut().render = next;
         Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetRenderQualityParams {
+    /// Draft for a quick look, Preview to check, High to show, Final for
+    /// the picture that goes out.
+    #[param(variants("draft", "preview", "high", "final"))]
+    pub quality: u32,
+}
+
+/// Sets the render's samples, bounces and denoiser to a quality at once.
+pub struct SetRenderQuality;
+
+impl Operator for SetRenderQuality {
+    type Params = SetRenderQualityParams;
+
+    fn id() -> &'static str {
+        "render.set_quality"
+    }
+    fn label() -> &'static str {
+        "Render Quality"
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(preset) = kreate_scene::render::QualityPreset::ALL
+            .get(params.quality as usize)
+            .copied()
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        let next = preset.apply(&doc.document().render);
+        if doc.document().render == next {
+            return Ok(OpResult::Cancelled);
+        }
+        doc.document_mut().render = next;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    use crate::operator::OperatorRegistry;
+    use kreate_reflect::{PropertyMap, PropertyValue};
+
+    #[test]
+    fn a_quality_sets_samples_and_bounces_and_keeps_the_rest() {
+        let mut registry = OperatorRegistry::new();
+        register(&mut registry);
+        let mut history = crate::history::History::new();
+        let mut doc = Document::new();
+        doc.render.width = 640;
+        let mut params = PropertyMap::new();
+        params.set("quality", PropertyValue::Enum(3));
+        history
+            .dispatch(
+                &registry,
+                &mut doc,
+                &Context::default(),
+                "render.set_quality",
+                &params,
+            )
+            .unwrap();
+        assert_eq!((doc.render.samples, doc.render.bounces), (1024, 8));
+        assert_eq!(doc.render.width, 640);
+        assert_eq!(
+            kreate_scene::render::QualityPreset::of(&doc.render),
+            Some(kreate_scene::render::QualityPreset::Final)
+        );
     }
 }
 

@@ -49,6 +49,7 @@ impl App {
             v.face_orientation = false;
             v.sample_cap = Some(settings.samples);
             v.path_trace_denoise = settings.denoise;
+            v.path_trace_bounces = settings.bounces;
         }
         self.rendering_still = true;
         self.capturing = true;
@@ -163,6 +164,21 @@ impl App {
                 }
                 None => format!("rendering: {samples}/{total} samples"),
             };
+            // How far through, for the bar: the frames done and this one's
+            // share of its samples.
+            let share = (samples as f32 / total.max(1) as f32).min(1.0);
+            let fraction = match frames {
+                Some((f, end)) => {
+                    let start = self.doc.playback.start;
+                    let count = (end - start + 1).max(1) as f32;
+                    ((f - start) as f32 + share) / count
+                }
+                None => share,
+            };
+            self.ui.render_progress = Some((
+                format!("{progress}, {:.0} s", started.elapsed().as_secs_f32()),
+                fraction,
+            ));
             self.status(&format!(
                 "{progress}, {:.0} s (Esc stops)",
                 started.elapsed().as_secs_f32()
@@ -305,7 +321,8 @@ impl App {
         let fps = self.doc.playback.fps;
         let job = self.render_job.as_mut().ok_or("the render stopped")?;
         if job.video.is_none() {
-            job.video = Some(kreate::video::Video::new(path, w, h, fps)?);
+            let quality = job.settings.video_quality;
+            job.video = Some(kreate::video::Video::new(path, w, h, fps, quality)?);
             job.written.push(path.to_path_buf());
         }
         job.video
@@ -426,6 +443,7 @@ impl App {
         let Some(mut job) = self.render_job.take() else {
             return;
         };
+        self.ui.render_progress = None;
         // A video's index, which is what makes it play: done, or stopped
         // part way, it holds the frames it was given.
         let mut message = message.to_string();
@@ -458,6 +476,7 @@ impl App {
                 v.sample_cap,
                 v.path_trace_denoise,
             ) = saved.look;
+            v.path_trace_bounces = 4;
         }
         self.camera = saved.camera;
         self.motion = saved.motion;

@@ -1236,6 +1236,8 @@ fn the_render_settings_survive_a_save() {
         output: "C:/renders/shot".into(),
         denoise: false,
         motion_blur: true,
+        bounces: 7,
+        video_quality: 1,
     };
     let after = round_trip(&doc).document;
     assert_eq!(after.render, doc.render);

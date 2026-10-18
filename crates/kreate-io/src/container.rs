@@ -920,6 +920,19 @@ pub struct RenderRecord {
     pub denoise: bool,
     #[serde(default)]
     pub motion_blur: bool,
+    /// Absent in files from before it was a setting: the four it always was.
+    #[serde(default = "default_bounces")]
+    pub bounces: u32,
+    #[serde(default = "default_video_quality")]
+    pub video_quality: u32,
+}
+
+fn default_bounces() -> u32 {
+    4
+}
+
+fn default_video_quality() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -2095,6 +2108,8 @@ pub fn write(
                     output: r.output.clone(),
                     denoise: r.denoise,
                     motion_blur: r.motion_blur,
+                    bounces: r.bounces,
+                    video_quality: r.video_quality,
                 }
             });
         scene.playback =
@@ -2882,6 +2897,8 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             output: r.output.clone(),
             denoise: r.denoise,
             motion_blur: r.motion_blur,
+            bounces: r.bounces.clamp(1, 64),
+            video_quality: r.video_quality.min(2),
         };
     }
     if let Some(p) = scene.playback {

@@ -1608,6 +1608,9 @@ pub struct Viewport {
     denoise: crate::denoise::Denoise,
     /// Whether the path tracer's picture is denoised.
     pub path_trace_denoise: bool,
+    /// How many times the path tracer's paths bounce: the render's setting
+    /// while one runs, four otherwise.
+    pub path_trace_bounces: u32,
     /// Adaptive sampling: a pixel stops taking samples once the standard
     /// error of its mean is under this fraction of it. Zero traces every
     /// pixel every sample.
@@ -2823,6 +2826,7 @@ impl Viewport {
             path_trace_lens: None,
             denoise: crate::denoise::Denoise::new(device, width.max(1), height.max(1)),
             path_trace_denoise: true,
+            path_trace_bounces: 4,
             path_trace_noise_threshold: 0.01,
             ssr: crate::ssr::Ssr::new(device, width.max(1), height.max(1)),
             show_reflections: true,
@@ -3177,6 +3181,7 @@ impl Viewport {
         if self.path_tracing() {
             if let Some(n) = self.frame_sample {
                 self.pathtracer.noise_threshold = self.path_trace_noise_threshold;
+                self.pathtracer.max_bounces = self.path_trace_bounces;
                 self.pathtracer.prepare(
                     device,
                     queue,

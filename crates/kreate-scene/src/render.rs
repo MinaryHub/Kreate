@@ -49,6 +49,12 @@ pub struct RenderSettings {
     pub denoise: bool,
     /// Motion blur: whether moving objects smear across the shutter.
     pub motion_blur: bool,
+    /// How many times a path bounces off surfaces before it stops: more is
+    /// light reaching further into corners and through glass, slower.
+    pub bounces: u32,
+    /// How much detail a video keeps, as its bit rate: 0 small, 1 balanced,
+    /// 2 high.
+    pub video_quality: u32,
 }
 
 impl Default for RenderSettings {
@@ -61,7 +67,66 @@ impl Default for RenderSettings {
             output: String::new(),
             denoise: true,
             motion_blur: false,
+            bounces: 4,
+            video_quality: 2,
         }
+    }
+}
+
+/// A render quality, as one choice: the samples, the bounces and the
+/// denoiser together, from a quick look to the finished picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualityPreset {
+    Draft,
+    Preview,
+    High,
+    Final,
+}
+
+impl QualityPreset {
+    pub const ALL: [QualityPreset; 4] = [
+        QualityPreset::Draft,
+        QualityPreset::Preview,
+        QualityPreset::High,
+        QualityPreset::Final,
+    ];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            QualityPreset::Draft => "draft",
+            QualityPreset::Preview => "preview",
+            QualityPreset::High => "high",
+            QualityPreset::Final => "final",
+        }
+    }
+
+    /// Samples and bounces.
+    pub fn values(self) -> (u32, u32) {
+        match self {
+            QualityPreset::Draft => (16, 2),
+            QualityPreset::Preview => (64, 4),
+            QualityPreset::High => (256, 6),
+            QualityPreset::Final => (1024, 8),
+        }
+    }
+
+    /// The settings with this quality: everything else as it was, and the
+    /// denoiser on, which every one of them wants.
+    pub fn apply(self, settings: &RenderSettings) -> RenderSettings {
+        let (samples, bounces) = self.values();
+        RenderSettings {
+            samples,
+            bounces,
+            denoise: true,
+            ..settings.clone()
+        }
+    }
+
+    /// The preset the settings are, if they are one.
+    pub fn of(settings: &RenderSettings) -> Option<QualityPreset> {
+        Self::ALL
+            .into_iter()
+            .find(|p| p.values() == (settings.samples, settings.bounces) && settings.denoise)
     }
 }
 

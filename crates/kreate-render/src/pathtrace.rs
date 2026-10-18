@@ -346,6 +346,8 @@ pub struct PathTracer {
     /// error of its mean is under this fraction of the mean. Zero traces
     /// every pixel every sample.
     pub noise_threshold: f32,
+    /// How many times a path bounces before it stops.
+    pub max_bounces: u32,
     /// A baked gas the paths travel through: group 1.
     volume: PtVolumeGpu,
 }
@@ -777,6 +779,7 @@ impl PathTracer {
             size: (0, 0),
             sample: 0,
             noise_threshold: 0.01,
+            max_bounces: 4,
             volume,
         }
     }
@@ -1367,7 +1370,7 @@ impl PathTracer {
             size: [region.0, region.1],
             sample: self.sample,
             light_count,
-            max_bounces: 4,
+            max_bounces: self.max_bounces.clamp(1, 64),
             emitter_count: self.scene.as_ref().map_or(0, |s| s.emitter_count),
             emitter_total: self.scene.as_ref().map_or(0.0, |s| s.emitter_total),
             noise_threshold: self.noise_threshold.max(0.0),

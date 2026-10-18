@@ -12722,6 +12722,14 @@ impl App {
             "render.image" => self.start_render_job(false),
             "render.animation" => self.start_render_job(true),
             "render.view" => self.show_last_render(),
+            // The render window's Stop, and the menu's: what Escape does.
+            "render.stop" => {
+                if self.render_job.is_some() {
+                    self.finish_render_job("render stopped");
+                } else {
+                    self.status("nothing is rendering");
+                }
+            }
             // The sidebar's View tab: the viewport's focal length, in mm.
             "view.set_lens" => {
                 if let Some(PropertyValue::Float(mm)) = action.params.get("lens") {
