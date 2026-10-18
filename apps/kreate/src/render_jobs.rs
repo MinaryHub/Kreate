@@ -86,17 +86,18 @@ impl App {
             let base = frames.map_or(self.doc.playback.frame, |(first, _)| first as f64);
             let samples = self.doc.render.samples;
             if let Some(gfx) = self.gfx.as_mut() {
-                gfx.viewport.sample_cap = Some((samples / Blur::STEPS).max(1));
+                gfx.viewport.sample_cap = Some(Blur::samples_each(samples));
             }
             if let Some(job) = self.render_job.as_mut() {
                 job.blur = Some(Blur {
                     step: 0,
+                    steps: Blur::steps_for(samples),
                     shutter,
                     base,
                     sum: Vec::new(),
                 });
             }
-            self.set_frame(Blur::time(base, shutter, 0));
+            self.set_frame(Blur::time(base, shutter, 0, Blur::steps_for(samples)));
         }
         self.aim_render_camera();
         self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -144,7 +145,7 @@ impl App {
         let total = job.settings.samples;
         // A motion-blurred picture is drawn moment by moment across the
         // shutter, each with its share of the samples.
-        let moment = job.blur.as_ref().map(|b| b.step);
+        let moment = job.blur.as_ref().map(|b| (b.step, b.steps));
         // The first frames of a picture still carry the last one's state —
         // the old size, the old frame — so they are drawn and not judged.
         if drawn <= 3 {
@@ -161,9 +162,8 @@ impl App {
             && !v.accumulating()
             && ((traced && samples > 0) || (!traced && started.elapsed().as_secs() >= 5));
         if !settled {
-            let steps = Blur::STEPS;
             let detail = match moment {
-                Some(m) => format!("shutter {}/{steps}", m + 1),
+                Some((m, steps)) => format!("shutter {}/{steps}", m + 1),
                 None => format!("{samples}/{total} samples"),
             };
             let progress = match frames {
@@ -173,7 +173,7 @@ impl App {
             // How far through, for the bar: the frames done and this one's
             // share of its samples, or of its shutter.
             let share = match moment {
-                Some(m) => m as f32 / steps as f32,
+                Some((m, steps)) => m as f32 / steps.max(1) as f32,
                 None => (samples as f32 / total.max(1) as f32).min(1.0),
             };
             let fraction = match frames {
@@ -200,8 +200,14 @@ impl App {
             let forward = (self.camera.pivot - self.camera.eye())
                 .normalize_or_zero()
                 .as_vec3();
-            let exposure =
-                scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot).exposure as f32;
+            // The exposure the picture is shown at, whatever set it: the
+            // scene's meter, or the studio's own when it lights the scene.
+            // Metered here, a scene with no lamp read as an unlit one and
+            // was shown stops too bright.
+            let exposure = self
+                .gfx
+                .as_ref()
+                .map_or(0.0, |g| g.viewport.display().exposure);
             let passes = self
                 .gfx
                 .as_ref()
@@ -225,8 +231,8 @@ impl App {
                 }
             }
             blur.step += 1;
-            if blur.step < Blur::STEPS {
-                let t = Blur::time(blur.base, blur.shutter, blur.step);
+            if blur.step < blur.steps {
+                let t = Blur::time(blur.base, blur.shutter, blur.step, blur.steps);
                 job.drawn = 0;
                 self.set_frame(t);
                 return;
@@ -313,7 +319,7 @@ impl App {
                 blur.step = 0;
                 blur.base = (f + 1) as f64;
                 blur.sum.clear();
-                let t = Blur::time(blur.base, blur.shutter, 0);
+                let t = Blur::time(blur.base, blur.shutter, 0, blur.steps);
                 self.set_frame(t);
             }
         }
@@ -354,12 +360,13 @@ impl App {
             .as_ref()
             .and_then(|j| j.blur.as_ref())
             .map(|b| {
-                let n = Blur::STEPS as f32;
+                let n = b.steps.max(1) as f32;
                 b.sum
                     .iter()
                     .map(|c| [c[0] / n, c[1] / n, c[2] / n, 1.0])
                     .collect()
             });
+
         let (w, h, png) = match &blurred {
             Some(mean) => {
                 let (w, h) = self
@@ -367,7 +374,17 @@ impl App {
                     .as_ref()
                     .map(|g| g.viewport.render_size())
                     .ok_or("the window closed")?;
-                let view = kreate_math::DisplayTransform::agx(0.0);
+                // The look the picture is shown in; its exposure is in the
+                // mean already.
+                let view = kreate_math::DisplayTransform {
+                    view: self
+                        .gfx
+                        .as_ref()
+                        .map_or(kreate_math::ViewTransform::AgX, |g| {
+                            g.viewport.display().view
+                        }),
+                    exposure: 0.0,
+                };
                 let mut rgba = Vec::with_capacity(mean.len() * 4);
                 for c in mean {
                     let s = view

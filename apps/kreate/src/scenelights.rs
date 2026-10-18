@@ -69,24 +69,35 @@ fn studio(yaw: f32) -> Preview {
 /// about up, as Blender's preview light does, so the key is always over the
 /// viewer's left shoulder and the side being looked at is lit.
 pub fn material_preview(view: glam::DQuat) -> Preview {
-    let ahead = view.as_quat() * -glam::Vec3::Z;
-    // The studio is laid out for a viewer looking along +Y.
-    let yaw = if ahead.truncate().length_squared() > 1e-8 {
+    studio(yaw_of(view.as_quat() * -glam::Vec3::Z))
+}
+
+/// How far a view looking along `ahead` is turned about up from +Y, which
+/// is what the studio is laid out for.
+fn yaw_of(ahead: glam::Vec3) -> f32 {
+    if ahead.truncate().length_squared() > 1e-8 {
         (-ahead.x).atan2(ahead.y)
     } else {
         0.0
-    };
-    studio(yaw)
+    }
 }
 
 /// The studio the rendered view uses when the scene brings no light of its
 /// own: fixed in the world, so turning round a part shows its other side
 /// in shadow, as a real room would.
-pub fn rendered_studio() -> Preview {
-    // Turned to the default view, which looks across the diagonal: laid out
-    // for a view along +Y, the key stood almost behind that viewer and every
-    // shadow fell out of sight behind its part.
-    studio(DEFAULT_VIEW_YAW)
+pub fn rendered_studio(doc: &Document) -> Preview {
+    // Turned to the scene's camera, so the shot it renders has the key over
+    // its left shoulder whichever way it looks — fixed to the default view,
+    // a camera on the far side shot the part against its own key, dark. With
+    // no camera, the default view, which looks across the diagonal.
+    let camera = doc
+        .objects()
+        .find(|(_, o)| matches!(o.data, kreate_scene::document::ObjectData::Camera(_)))
+        .map(|(id, _)| doc.world_transform(id));
+    let yaw = camera.map_or(DEFAULT_VIEW_YAW, |t| {
+        yaw_of(t.matrix3.as_mat3() * -glam::Vec3::Z)
+    });
+    studio(yaw)
 }
 
 /// The default view's turn about up from +Y, as `material_preview` measures

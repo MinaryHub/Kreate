@@ -11193,7 +11193,7 @@ impl App {
                 Some(scenelights::material_preview(self.camera.rotation))
             }
             kreate_render::ShadingMode::Rendered if scenelights::uses_studio(&self.doc) => {
-                Some(scenelights::rendered_studio())
+                Some(scenelights::rendered_studio(&self.doc))
             }
             _ => None,
         };
@@ -13984,6 +13984,8 @@ struct RenderJob {
 /// the sum of those drawn so far.
 struct Blur {
     step: u32,
+    /// How many moments this render takes: see `Blur::steps_for`.
+    steps: u32,
     /// How long the shutter is open, as a fraction of a frame.
     shutter: f64,
     /// The frame the shutter is centred on.
@@ -13992,14 +13994,33 @@ struct Blur {
 }
 
 impl Blur {
-    /// Moments across the shutter. Each gets an equal share of the samples,
-    /// so the render costs what it did without blur.
+    /// The most moments across the shutter. Each gets an equal share of the
+    /// samples, so the render costs what it did without blur.
     const STEPS: u32 = 16;
 
-    /// The time of moment `step`: the middles of equal slices of the shutter,
-    /// centred on `base`.
-    fn time(base: f64, shutter: f64, step: u32) -> f64 {
-        base + shutter * ((step as f64 + 0.5) / Self::STEPS as f64 - 0.5)
+    /// The fewest samples a moment gets: what the denoiser needs to clean
+    /// a picture, which it does from the samples' own spread. Sixteen
+    /// moments of one sample each averaged to sixteen samples of noise no
+    /// denoiser had seen whole.
+    const MIN_SAMPLES: u32 = 16;
+
+    /// How many moments a render of `samples` takes: four to sixteen, each
+    /// with a share of the samples where they are many enough.
+    fn steps_for(samples: u32) -> u32 {
+        (samples / Self::MIN_SAMPLES).clamp(4, Self::STEPS)
+    }
+
+    /// How many samples each moment of a render of `samples` takes: its
+    /// share, and never fewer than the denoiser needs — so a draft with
+    /// motion blur costs more than one without, rather than speckling.
+    fn samples_each(samples: u32) -> u32 {
+        (samples / Self::steps_for(samples)).max(Self::MIN_SAMPLES)
+    }
+
+    /// The time of moment `step` of `steps`: the middles of equal slices of
+    /// the shutter, centred on `base`.
+    fn time(base: f64, shutter: f64, step: u32, steps: u32) -> f64 {
+        base + shutter * ((step as f64 + 0.5) / steps.max(1) as f64 - 0.5)
     }
 }
 
