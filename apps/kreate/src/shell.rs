@@ -302,6 +302,10 @@ pub struct ShellState {
     pub document_title: String,
     /// Whether the last operation's dialog shows its fields.
     pub adjust_open: bool,
+    /// The operation whose adjust panel was put away — by Escape or a click
+    /// elsewhere — as its place in the history and its id. The next one
+    /// brings the panel back.
+    adjust_dismissed: Option<(usize, String)>,
     /// The chrome's appearance, as the preferences set it.
     pub appearance: kreate_ui::Appearance,
     /// Whether the remapping panel is open.
@@ -862,6 +866,7 @@ impl Default for ShellState {
             trace_when_still: true,
             document_title: "untitled".into(),
             adjust_open: false,
+            adjust_dismissed: None,
             appearance: kreate_ui::Appearance::Dark,
             capturing: None,
             palette: Default::default(),
@@ -10624,12 +10629,20 @@ fn draw_adjust_float(
     history: &History,
     viewport: egui::Rect,
 ) {
-    let Some(info) = history.last().and_then(|entry| registry.get(&entry.op_id)) else {
+    let Some(entry) = history.last() else {
+        return;
+    };
+    let Some(info) = registry.get(&entry.op_id) else {
         return;
     };
     // An operation with nothing to adjust — a selection, a paste — has no
     // panel, as in Blender.
     if info.schema.iter().all(|d| d.hidden) {
+        return;
+    }
+    // Put away for this operation; the next brings it back.
+    let which = (history.cursor() + history.evicted(), entry.op_id.clone());
+    if state.adjust_dismissed.as_ref() == Some(&which) {
         return;
     }
     let label = state.catalog.format(&info.name_key(), TextKind::Ui, &[]);
@@ -10679,7 +10692,22 @@ fn draw_adjust_float(
         });
     });
     // Over the picture: a click on the panel must not select what is behind.
-    state.viewport_blockers.push(shown.response.rect);
+    let rect = shown.response.rect;
+    state.viewport_blockers.push(rect);
+    // Put away by Escape — unless a field has the keyboard, where Escape is
+    // the field's — or by a press anywhere else, as a popup is.
+    let (escape, pressed_elsewhere) = ui.input(|i| {
+        let elsewhere = i.pointer.any_pressed()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|at| !rect.contains(at));
+        (i.key_pressed(egui::Key::Escape), elsewhere)
+    });
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    if (escape && !typing) || pressed_elsewhere {
+        state.adjust_dismissed = Some(which);
+        state.adjust_open = false;
+    }
 }
 
 fn draw_adjust_panel(
