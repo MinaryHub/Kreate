@@ -13800,9 +13800,17 @@ impl ApplicationHandler for App {
                 if self.redraw.any() {
                     self.restart_mean_if_changed();
                     self.render();
-                    self.advance_render_job();
+                    // Cleared before the render job steps, not after: the
+                    // step moves the clock on to the next frame, or the next
+                    // moment of a blurred one, and asks for that to be drawn.
+                    // Cleared after, the ask was wiped, and a render whose
+                    // last picture had all its samples waited for some other
+                    // event to wake it — a mouse move — between every frame.
                     self.redraw.clear();
-                    if self.gfx.as_ref().is_some_and(|g| g.viewport.accumulating()) {
+                    self.advance_render_job();
+                    if self.render_job.is_some()
+                        || self.gfx.as_ref().is_some_and(|g| g.viewport.accumulating())
+                    {
                         self.redraw.set(RedrawReason::ACCUMULATE);
                     }
                 }

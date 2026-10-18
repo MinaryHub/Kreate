@@ -142,6 +142,9 @@ impl App {
         );
         let frames = job.frames;
         let total = job.settings.samples;
+        // A motion-blurred picture is drawn moment by moment across the
+        // shutter, each with its share of the samples.
+        let moment = job.blur.as_ref().map(|b| b.step);
         // The first frames of a picture still carry the last one's state —
         // the old size, the old frame — so they are drawn and not judged.
         if drawn <= 3 {
@@ -158,15 +161,21 @@ impl App {
             && !v.accumulating()
             && ((traced && samples > 0) || (!traced && started.elapsed().as_secs() >= 5));
         if !settled {
+            let steps = Blur::STEPS;
+            let detail = match moment {
+                Some(m) => format!("shutter {}/{steps}", m + 1),
+                None => format!("{samples}/{total} samples"),
+            };
             let progress = match frames {
-                Some((f, end)) => {
-                    format!("rendering frame {f} of {end}: {samples}/{total} samples")
-                }
-                None => format!("rendering: {samples}/{total} samples"),
+                Some((f, end)) => format!("rendering frame {f} of {end}: {detail}"),
+                None => format!("rendering: {detail}"),
             };
             // How far through, for the bar: the frames done and this one's
-            // share of its samples.
-            let share = (samples as f32 / total.max(1) as f32).min(1.0);
+            // share of its samples, or of its shutter.
+            let share = match moment {
+                Some(m) => m as f32 / steps as f32,
+                None => (samples as f32 / total.max(1) as f32).min(1.0),
+            };
             let fraction = match frames {
                 Some((f, end)) => {
                     let start = self.doc.playback.start;
