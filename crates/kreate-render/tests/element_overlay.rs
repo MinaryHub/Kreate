@@ -634,3 +634,51 @@ fn only_the_edited_mesh_shows_its_elements() {
         "the mesh not being edited shows its elements"
     );
 }
+
+/// With the wireframe overlay off, the mesh being edited still shows its
+/// selected edges — and only those, and only on that mesh. Before, an edge
+/// selection could be seen in the wireframe view and nowhere else.
+#[test]
+fn selected_edges_show_with_the_wireframe_overlay_off() {
+    let with_edges = |selected: bool| {
+        let mut mesh = kreate_mesh::primitives::cube(1.0);
+        let edges = mesh.num_edges() as usize;
+        mesh.attributes_mut().insert(
+            names::SELECT_EDGE,
+            Domain::Edge,
+            AttrData::Bool(Arc::new((0..edges).map(|_| selected).collect())),
+        );
+        mesh
+    };
+    PAIR.with(|p| p.set(true));
+    let none = render(&with_edges(false), true, |_, _| {});
+    let all = render(&with_edges(true), true, |_, _| {});
+    PAIR.with(|p| p.set(false));
+    let (Some(none), Some(all)) = (none, all) else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let half = |pixels: &[[u8; 4]], right: bool| -> Vec<[u8; 4]> {
+        pixels
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| ((*i as u32 % SIZE) >= SIZE / 2) == right)
+            .map(|(_, p)| *p)
+            .collect()
+    };
+    let (edited_none, edited_all) = (
+        selected_pixels(&half(&none, false)),
+        selected_pixels(&half(&all, false)),
+    );
+    assert!(
+        edited_all > edited_none + 100,
+        "the selected edges do not show: {edited_none} without, {edited_all} with"
+    );
+    // Nothing selected, nothing in the selection colour.
+    assert!(
+        edited_none < 20,
+        "a selection colour with nothing selected: {edited_none}"
+    );
+    // The mesh beside it, not edited, shows no selection at all.
+    assert_eq!(selected_pixels(&half(&all, true)), 0);
+}

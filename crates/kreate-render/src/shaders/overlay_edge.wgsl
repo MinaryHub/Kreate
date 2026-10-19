@@ -33,6 +33,9 @@ struct EdgeObject {
     // x: boundary highlight, y: non-manifold highlight, z: object selected,
     // w: the rubber-band preview applies to this draw.
     flags_params: vec4<f32>,
+    // x: draw only the selected edges — the wireframe overlay is off and the
+    // mesh is being edited.
+    show: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: EdgeGlobals;
@@ -141,6 +144,12 @@ fn vs_main(
         out.flags = out.flags | FLAG_SELECTED;
     } else {
         out.flags = out.flags & ~FLAG_SELECTED;
+    }
+    // Only the selection: every other edge collapses, as a hidden one does.
+    if (object.show.x > 0.5 && (out.flags & FLAG_SELECTED) == 0u) {
+        out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        out.across_px = 0.0;
+        return out;
     }
 
     let a_world = object.model * vec4<f32>(position_of(edge_verts[2u * ei]), 1.0);

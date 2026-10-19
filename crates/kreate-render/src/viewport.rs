@@ -203,6 +203,19 @@ struct EdgeObject {
     base_color: [f32; 4],
     selected_color: [f32; 4],
     flags_params: [f32; 4],
+    /// x: only the selected edges (see [`EdgeShow::Selected`]).
+    show: [f32; 4],
+}
+
+/// Which of a draw's edges the wireframe pass draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EdgeShow {
+    None,
+    All,
+    /// The wireframe overlay is off, but the mesh is being edited: its
+    /// selected edges still show — what is selected has to be seen, or an
+    /// edge selection is invisible in every view but the wireframe one.
+    Selected,
 }
 
 #[repr(C)]
@@ -3527,6 +3540,12 @@ impl Viewport {
                         f32::from(u8::from(draw.selected)),
                         f32::from(u8::from(draw.preview)),
                     ],
+                    show: [
+                        f32::from(u8::from(self.edge_show(draw) == EdgeShow::Selected)),
+                        0.0,
+                        0.0,
+                        0.0,
+                    ],
                 }),
             );
         }
@@ -4812,6 +4831,20 @@ impl Viewport {
         pass
     }
 
+    /// Which of `draw`'s edges the wireframe pass draws: all of them when
+    /// the wireframe shows; else, on a mesh being edited with its elements
+    /// shown, the selected ones.
+    fn edge_show(&self, draw: &Draw) -> EdgeShow {
+        let (all_wires, wire_only) = wires_shown(self.shading, self.show_wireframe);
+        if all_wires || (wire_only && draw.wire_only) {
+            EdgeShow::All
+        } else if self.show_elements && draw.editing {
+            EdgeShow::Selected
+        } else {
+            EdgeShow::None
+        }
+    }
+
     /// Draws every overlay: selected faces, the wireframe, vertex points, grid.
     ///
     /// Split out of [`Self::render`] so the two-pass scheme can draw them once,
@@ -4880,23 +4913,22 @@ impl Viewport {
 
         // Wireframe over the solid pass, before the grid, so geometry occludes
         // the grid but its own edges sit on top of it.
-        let (all_wires, wire_only) = wires_shown(self.shading, self.show_wireframe);
-        if all_wires || (wire_only && draws.iter().any(|d| d.wire_only)) {
+        if draws.iter().any(|d| self.edge_show(d) != EdgeShow::None) {
             pass.set_pipeline(&self.edges);
             pass.set_bind_group(0, &self.edge_globals_bind, &[]);
             for (i, draw) in draws.iter().enumerate() {
                 let mesh = draw.mesh;
+                let show = self.edge_show(draw);
+                if show == EdgeShow::None || mesh.counts.edges == 0 || !draw.detail.draw {
+                    continue;
+                }
                 // A fully faded wireframe is skipped rather than drawn
                 // transparent: at that density the draw is millions of
                 // instances, and the point of the fade is not to pay for them.
-                if mesh.counts.edges == 0
-                    || !draw.detail.draw
-                    || wire_alpha(self.shading, draw.wire_only, draw.detail) <= 0.0
+                // A selection does not fade.
+                if show == EdgeShow::All
+                    && wire_alpha(self.shading, draw.wire_only, draw.detail) <= 0.0
                 {
-                    continue;
-                }
-                // With the wireframe overlay off, only the wire-only draws.
-                if !all_wires && !(wire_only && draw.wire_only) {
                     continue;
                 }
                 pass.set_bind_group(1, &mesh.edge_bind, &[]);
