@@ -576,6 +576,16 @@ impl Gesture {
         self.falloff = curve;
     }
 
+    /// The axis a transform is held to, when it is one of the objects' own:
+    /// what the operators take to apply each along its own axes. Not an
+    /// extrude's normal frame, which is the faces', not the objects'.
+    fn local_axis(&self) -> Option<Axis> {
+        let axis = self.axis?;
+        (self.orientation == Orientation::Local
+            && matches!(self.kind, Kind::Move | Kind::Rotate | Kind::Scale))
+        .then_some(axis)
+    }
+
     /// The constrained direction in world space.
     fn axis_direction(&self, axis: Axis) -> Vec3 {
         match self.orientation {
@@ -966,6 +976,16 @@ impl Gesture {
                     "translation",
                     PropertyValue::Vec3([offset.x, offset.y, offset.z]),
                 );
+                // Held to a local axis: the distance along it, for each
+                // object to take along its own — the world offset is only the
+                // active object's.
+                if let Some(axis) = self.local_axis() {
+                    let along = offset.dot(self.axis_direction(axis).as_dvec3());
+                    let mut own = [0.0; 3];
+                    own[axis.index() as usize] = along;
+                    params.set("orientation", PropertyValue::Enum(1));
+                    params.set("local_translation", PropertyValue::Vec3(own));
+                }
             }
             Kind::Extrude => {
                 params.set(
@@ -1031,6 +1051,10 @@ impl Gesture {
                 };
                 params.set("angle", PropertyValue::Float(angle));
                 params.set("axis", PropertyValue::Enum(axis.index()));
+                // About each object's own axis when held to a local one.
+                if self.local_axis().is_some() {
+                    params.set("orientation", PropertyValue::Enum(1));
+                }
             }
             Kind::Scale => {
                 let factor = match self.typed() {
@@ -1052,6 +1076,11 @@ impl Gesture {
                     Some(Axis::Z) => [1.0, 1.0, factor],
                 };
                 params.set("scale", PropertyValue::Vec3(scale));
+                // Along each object's own axes when held to a local one; the
+                // world's otherwise, which is the operators' default.
+                if self.local_axis().is_some() {
+                    params.set("orientation", PropertyValue::Enum(1));
+                }
             }
         }
         // Carried on every transform, so an operator that supports it sees it and

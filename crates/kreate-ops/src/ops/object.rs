@@ -2462,6 +2462,16 @@ pub struct TranslateParams {
     /// Offset applied to every selected object, in metres.
     #[param(unit = "length")]
     pub translation: [f64; 3],
+    /// The axes the transform is measured along: the world's, or each
+    /// object's own — a part turned on its own moves, turns and stretches
+    /// along its own axes, each by the same amount.
+    /// Hidden, as a gesture's: what a drag held to a local axis fills in.
+    #[param(variants("global", "local"), hidden)]
+    pub orientation: u32,
+    /// With the local orientation: the offset along each object's own axes,
+    /// in place of `translation`.
+    #[param(unit = "length", hidden)]
+    pub local_translation: [f64; 3],
     /// Key what this changed, at `key_frame`: auto-keying, filled in by the
     /// application when its record button is on. Hidden, because it is the
     /// application's state and not a choice about this operation — but a
@@ -2499,11 +2509,18 @@ impl Operator for Translate {
             return Ok(OpResult::Cancelled);
         }
         let offset = DVec3::from_array(params.translation);
+        let along_own = DVec3::from_array(params.local_translation);
         let d = doc.document_mut();
         // The move is in the world: each object takes it in its parent's
         // space, so a child of a turned or scaled parent goes as far and the
         // same way as the rest; one under a selected parent goes with it.
         for id in movable(d, &targets) {
+            // Local: the same distance along this object's own axes.
+            let offset = if params.orientation == 1 {
+                world_turn(d, id) * along_own
+            } else {
+                offset
+            };
             let local = d.above(id).inverse().transform_vector3(offset);
             if let Some(o) = d.object_mut(id) {
                 o.transform.translation += local;
@@ -2652,6 +2669,11 @@ pub struct RotateParams {
     /// What the rotation happens about.
     #[param(variants("median", "individual", "active", "world_origin", "cursor"))]
     pub pivot: u32,
+    /// The axes the transform is measured along: the world's, or each
+    /// object's own — a part turned on its own moves, turns and stretches
+    /// along its own axes, each by the same amount.
+    #[param(variants("global", "local"))]
+    pub orientation: u32,
     /// Key what this changed, at `key_frame`: auto-keying, filled in by the
     /// application when its record button is on. Hidden, because it is the
     /// application's state and not a choice about this operation — but a
@@ -2693,11 +2715,18 @@ impl Operator for Rotate {
             1 => DVec3::Y,
             _ => DVec3::Z,
         };
-        let rotation = DQuat::from_axis_angle(axis, params.angle);
+        let world_rotation = DQuat::from_axis_angle(axis, params.angle);
         let pivot = pivot_point(doc.document(), &targets, params.pivot);
 
         let d = doc.document_mut();
         for id in movable(d, &targets) {
+            // Local: about this object's own axis.
+            let rotation = if params.orientation == 1 {
+                let own = (world_turn(d, id) * axis).normalize_or(axis);
+                DQuat::from_axis_angle(own, params.angle)
+            } else {
+                world_rotation
+            };
             let at = d.world_transform(id).translation;
             // `individual` rotates each object about its own origin, so there is
             // no orbiting component.
@@ -2736,6 +2765,11 @@ pub struct ScaleParams {
     /// What the scaling happens about.
     #[param(variants("median", "individual", "active", "world_origin", "cursor"))]
     pub pivot: u32,
+    /// The axes the transform is measured along: the world's, or each
+    /// object's own — a part turned on its own moves, turns and stretches
+    /// along its own axes, each by the same amount.
+    #[param(variants("global", "local"))]
+    pub orientation: u32,
     /// Key what this changed, at `key_frame`: auto-keying, filled in by the
     /// application when its record button is on. Hidden, because it is the
     /// application's state and not a choice about this operation — but a
@@ -2752,6 +2786,7 @@ impl Default for ScaleParams {
         Self {
             scale: [1.0; 3],
             pivot: 0,
+            orientation: 0,
             autokey: false,
             key_frame: 1.0,
         }
@@ -2791,13 +2826,27 @@ impl Operator for Scale {
             let at = d.world_transform(id).translation;
             let about = if params.pivot == 1 { Some(at) } else { pivot };
             let Some(about) = about else { continue };
-            let to = d
-                .above(id)
-                .inverse()
-                .transform_point3(about + (at - about) * factor);
+            let turn = world_turn(d, id);
+            // Where the origin goes, and what the object's own scale becomes.
+            // Local: both along the object's own axes. Global: the offset
+            // along the world's, and each own axis by the world factors it
+            // lies along — an object's scale cannot shear, so a turned one
+            // stretched along a world axis takes the nearest it can.
+            let (moved, own) = if params.orientation == 1 {
+                (turn * (turn.inverse() * (at - about) * factor), factor)
+            } else {
+                let m = glam::DMat3::from_quat(turn);
+                let own = DVec3::new(
+                    axis_factor(m.x_axis, factor),
+                    axis_factor(m.y_axis, factor),
+                    axis_factor(m.z_axis, factor),
+                );
+                ((at - about) * factor, own)
+            };
+            let to = d.above(id).inverse().transform_point3(about + moved);
             if let Some(o) = d.object_mut(id) {
                 o.transform.translation = to;
-                o.transform.scale *= factor;
+                o.transform.scale *= own;
             }
         }
         if params.autokey {
@@ -2806,6 +2855,25 @@ impl Operator for Scale {
         }
         Ok(OpResult::Finished)
     }
+}
+
+/// An object's turn in the world, without its scale: the frame its own
+/// axes are in.
+fn world_turn(doc: &Document, id: ObjectId) -> DQuat {
+    let (_, turn, _) = doc.world_transform(id).to_scale_rotation_translation();
+    turn.normalize()
+}
+
+/// How much an own axis pointing along unit `axis` is stretched by world
+/// factors `factor`: the factors weighted by how much of the axis lies along
+/// each world axis.
+fn axis_factor(axis: DVec3, factor: DVec3) -> f64 {
+    let w = axis * axis;
+    let total = w.x + w.y + w.z;
+    if total <= 0.0 {
+        return 1.0;
+    }
+    (w.x * factor.x + w.y * factor.y + w.z * factor.z) / total
 }
 
 /// The selected objects a transform moves itself: those with no selected
@@ -4108,6 +4176,109 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The local orientation: each object of a selection moves, turns and
+    /// stretches along its own axes; the global, along the world's.
+    #[test]
+    fn local_transforms_follow_each_objects_own_axes() {
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let mesh = || kreate_mesh::primitives::cube(1.0);
+        let a = doc.add_mesh_object("A", mesh());
+        let b = doc.add_mesh_object("B", mesh());
+        // B turned a quarter about Z: its own X is the world's Y.
+        doc.object_mut(b).unwrap().transform.rotation =
+            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        doc.selection.add(a);
+        doc.selection.add(b);
+        let mut h = History::new();
+        let run = |doc: &mut Document,
+                   h: &mut History,
+                   id: &str,
+                   pairs: &[(&'static str, PropertyValue)]| {
+            let mut p = PropertyMap::new();
+            for (k, v) in pairs {
+                p.set(k, v.clone());
+            }
+            h.dispatch(&r, doc, &Context::default(), id, &p).unwrap();
+        };
+        let close = |x: DVec3, y: DVec3| assert!((x - y).length() < 1e-9, "{x} against {y}");
+        // Two metres along each one's own X.
+        run(
+            &mut doc,
+            &mut h,
+            "object.translate",
+            &[
+                ("translation", PropertyValue::Vec3([2.0, 0.0, 0.0])),
+                ("orientation", PropertyValue::Enum(1)),
+                ("local_translation", PropertyValue::Vec3([2.0, 0.0, 0.0])),
+            ],
+        );
+        close(
+            doc.world_transform(a).translation,
+            DVec3::new(2.0, 0.0, 0.0),
+        );
+        close(
+            doc.world_transform(b).translation,
+            DVec3::new(0.0, 2.0, 0.0),
+        );
+        // A quarter turn about each one's own X, each about itself.
+        run(
+            &mut doc,
+            &mut h,
+            "object.rotate",
+            &[
+                ("angle", PropertyValue::Float(std::f64::consts::FRAC_PI_2)),
+                ("axis", PropertyValue::Enum(0)),
+                ("pivot", PropertyValue::Enum(1)),
+                ("orientation", PropertyValue::Enum(1)),
+            ],
+        );
+        // A's own X is still the world's X; B's still the world's Y.
+        let x_of = |doc: &Document, id| doc.world_transform(id).matrix3.x_axis;
+        close(x_of(&doc, a), DVec3::X);
+        close(x_of(&doc, b), DVec3::Y);
+        // And each one's own Z, turned about its own X, now lies across it.
+        let z_of = |doc: &Document, id| doc.world_transform(id).matrix3.z_axis;
+        close(z_of(&doc, a), DVec3::new(0.0, -1.0, 0.0));
+        close(z_of(&doc, b), DVec3::new(1.0, 0.0, 0.0));
+    }
+
+    /// Scaling along a world axis stretches a turned object along whichever
+    /// of its own axes lies there; along a local axis, its own.
+    #[test]
+    fn global_scale_stretches_the_own_axis_that_lies_along_it() {
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let b = doc.add_mesh_object("B", kreate_mesh::primitives::cube(1.0));
+        doc.object_mut(b).unwrap().transform.rotation =
+            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        doc.selection.add(b);
+        let mut h = History::new();
+        let mut p = PropertyMap::new();
+        p.set("scale", PropertyValue::Vec3([2.0, 1.0, 1.0]));
+        p.set("orientation", PropertyValue::Enum(0));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.scale", &p)
+            .unwrap();
+        // The world's X is B's own Y.
+        let scale = doc.object(b).unwrap().transform.scale;
+        assert!(
+            (scale - DVec3::new(1.0, 2.0, 1.0)).length() < 1e-9,
+            "{scale}"
+        );
+        let mut p = PropertyMap::new();
+        p.set("scale", PropertyValue::Vec3([3.0, 1.0, 1.0]));
+        p.set("orientation", PropertyValue::Enum(1));
+        h.dispatch(&r, &mut doc, &Context::default(), "object.scale", &p)
+            .unwrap();
+        let scale = doc.object(b).unwrap().transform.scale;
+        assert!(
+            (scale - DVec3::new(3.0, 2.0, 1.0)).length() < 1e-9,
+            "{scale}"
+        );
+    }
 
     /// Several objects moved, turned or scaled together go together, whatever
     /// their parents: a child of a turned, scaled parent as far and the same

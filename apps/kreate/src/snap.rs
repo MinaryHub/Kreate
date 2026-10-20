@@ -47,17 +47,20 @@ pub enum Mode {
     EdgeMidpoint,
     /// The point on a face under the cursor.
     Face,
+    /// The centre of a face: what centring one part on another wants.
+    FaceCentre,
 }
 
 impl Mode {
     /// Every mode, in the order the header lists them.
-    pub const ALL: [Mode; 6] = [
+    pub const ALL: [Mode; 7] = [
         Mode::Increment,
         Mode::Element,
         Mode::Vertex,
         Mode::Edge,
         Mode::EdgeMidpoint,
         Mode::Face,
+        Mode::FaceCentre,
     ];
 
     /// The catalog key for the header's name of it.
@@ -69,6 +72,7 @@ impl Mode {
             Mode::Edge => "snap-edge",
             Mode::EdgeMidpoint => "snap-midpoint",
             Mode::Face => "snap-face",
+            Mode::FaceCentre => "snap-face-centre",
         }
     }
 
@@ -85,6 +89,7 @@ impl Mode {
             Mode::Edge => "edge",
             Mode::EdgeMidpoint => "midpoint",
             Mode::Face => "face",
+            Mode::FaceCentre => "face centre",
         }
     }
 
@@ -96,7 +101,8 @@ impl Mode {
             Mode::Vertex => Mode::Edge,
             Mode::Edge => Mode::EdgeMidpoint,
             Mode::EdgeMidpoint => Mode::Face,
-            Mode::Face => Mode::Increment,
+            Mode::Face => Mode::FaceCentre,
+            Mode::FaceCentre => Mode::Increment,
         }
     }
 }
@@ -115,6 +121,8 @@ pub struct SnapWorld {
     pub tris: Vec<[DVec3; 3]>,
     /// Each face's centre: the mean of its corners.
     pub centres: Vec<DVec3>,
+    /// Which centre each triangle's face has, by index into `centres`.
+    pub tri_face: Vec<u32>,
 }
 
 impl SnapWorld {
@@ -156,6 +164,7 @@ impl SnapWorld {
                 continue;
             }
             self.centres.push(centre(ring.iter().map(|v| world(*v))));
+            let face_index = self.centres.len() as u32 - 1;
             // A fan, which is enough for a ray test against a planar face and
             // close enough for one that is not. A face being snapped to is being
             // pointed at, so an exact triangulation would buy nothing a user
@@ -163,6 +172,7 @@ impl SnapWorld {
             for i in 1..ring.len() - 1 {
                 self.tris
                     .push([world(ring[0]), world(ring[i]), world(ring[i + 1])]);
+                self.tri_face.push(face_index);
             }
         }
     }
@@ -199,9 +209,11 @@ impl SnapWorld {
                 continue;
             }
             self.centres.push(centre(ring.iter().map(|v| world(*v))));
+            let face_index = self.centres.len() as u32 - 1;
             for i in 1..ring.len() - 1 {
                 self.tris
                     .push([world(ring[0]), world(ring[i]), world(ring[i + 1])]);
+                self.tri_face.push(face_index);
             }
         }
     }
@@ -278,6 +290,14 @@ pub fn resolve(
         }),
         Mode::Edge => nearest_on_edges(world, cursor, camera, viewport),
         Mode::Face => under_cursor(world, cursor, camera, viewport),
+        // The centre nearest the cursor; failing that, the centre of the face
+        // under it, so a large face is caught from anywhere on it.
+        Mode::FaceCentre => nearest_point(world.centres.iter().copied(), cursor, camera, viewport)
+            .or_else(|| centre_under_cursor(world, cursor, camera, viewport))
+            .map(|hit| Hit {
+                element: Element::Centre,
+                ..hit
+            }),
     }
 }
 
@@ -418,6 +438,39 @@ fn under_cursor(
         element: Element::Face,
         // A face hit is under the cursor by construction, so there is no
         // distance to rank it by. Zero, which also means it beats nothing.
+        distance_px: 0.0,
+    })
+}
+
+/// The centre of the face under the cursor: the nearest face a ray through
+/// the cursor meets, wherever on it the cursor is.
+fn centre_under_cursor(
+    world: &SnapWorld,
+    cursor: (f32, f32),
+    camera: &Camera,
+    viewport: (f32, f32),
+) -> Option<Hit> {
+    let aspect = (viewport.0 / viewport.1.max(1.0)) as f64;
+    let ndc = glam::Vec2::new(
+        cursor.0 / viewport.0.max(1.0) * 2.0 - 1.0,
+        1.0 - cursor.1 / viewport.1.max(1.0) * 2.0,
+    );
+    let direction = camera.ray_direction(ndc, aspect);
+    let origin = camera.eye();
+    let direction = DVec3::new(direction.x as f64, direction.y as f64, direction.z as f64);
+    let mut nearest: Option<(f64, usize)> = None;
+    for (i, tri) in world.tris.iter().enumerate() {
+        if let Some(t) = ray_triangle(origin, direction, tri) {
+            if nearest.is_none_or(|(best, _)| t < best) {
+                nearest = Some((t, i));
+            }
+        }
+    }
+    let (_, tri) = nearest?;
+    let face = *world.tri_face.get(tri)? as usize;
+    Some(Hit {
+        point: *world.centres.get(face)?,
+        element: Element::Centre,
         distance_px: 0.0,
     })
 }

@@ -1769,6 +1769,7 @@ struct Labels {
     menu_edit: String,
     menu_help: String,
     help_contact: String,
+    help_donate: String,
     file_collab: String,
     help_about: String,
     contact_title: String,
@@ -2173,6 +2174,7 @@ impl Labels {
             menu_edit: t("menu-edit"),
             menu_help: t("menu-help"),
             help_contact: t("help-contact"),
+            help_donate: t("help-donate"),
             file_collab: t("menu-file-collab"),
             help_about: t("help-about"),
             contact_title: t("contact-title"),
@@ -4434,6 +4436,7 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                     &l.help_contact,
                     Run::Command(Command::OpenContact),
                 ),
+                entry("help.donate", &l.help_donate, Run::Command(Command::Donate)),
                 entry(
                     "help.logs",
                     &l.help_logs,
@@ -6948,14 +6951,17 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         title: l.about_title.clone(),
         version: l.about_version.clone(),
         close: l.contact_close.clone(),
+        donate: l.help_donate.clone(),
     };
-    kreate_ui::contact::about_window(
+    if kreate_ui::contact::about_window(
         ctx,
         &about,
         &mut state.about_open,
         &crate::version::describe(),
         &crate::version::platform(),
-    );
+    ) {
+        state.queue.push(Command::Donate);
+    }
     draw_render_result(ctx, state, l);
     draw_render_progress(ctx, state);
     draw_fits(ctx, state, l);
@@ -16112,6 +16118,7 @@ mod tests {
             "sculpt-coarse",
             "menu-help",
             "help-contact",
+            "help-donate",
             "help-logs",
             "chat-history",
             "chat-export",

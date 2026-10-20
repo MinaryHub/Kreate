@@ -790,7 +790,7 @@ fn run_transform(
     curve: u32,
     needs_extent: bool,
     pivot: Option<glam::DVec3>,
-    place: impl Fn(glam::DVec3, f32, glam::DVec3) -> glam::DVec3,
+    place: impl Fn(glam::DVec3, f32, glam::DVec3, glam::DQuat) -> glam::DVec3,
 ) -> Result<OpResult, OpError> {
     if edit_targets(doc.document()).is_empty() {
         return Err(OpError::Failed("no mesh to edit".into()));
@@ -818,6 +818,9 @@ fn run_transform(
         if !to_local.is_finite() {
             continue;
         }
+        // The object's own axes in the world, for a local transform.
+        let (_, frame, _) = to_world.to_scale_rotation_translation();
+        let frame = frame.normalize();
 
         // `edit_positions` visits the indices in the order given, which is the
         // order the weights are in. Asserted rather than assumed: a change of
@@ -830,7 +833,12 @@ fn run_transform(
                 "a weight was paired with the wrong vertex"
             );
             let world = to_world.transform_point3(p.as_dvec3());
-            let placed = place(world, part.weights[next], pivot.unwrap_or(weighing.pivot));
+            let placed = place(
+                world,
+                part.weights[next],
+                pivot.unwrap_or(weighing.pivot),
+                frame,
+            );
             *p = to_local.transform_point3(placed).as_vec3();
             next += 1;
         })
@@ -870,6 +878,14 @@ pub struct MeshTranslateParams {
     /// How far to move the selection, in object space.
     #[param(unit = "length")]
     pub translation: [f64; 3],
+    /// The axes the move is along: the world's, or each object's own.
+    /// Hidden, as a gesture's: what a drag held to a local axis fills in.
+    #[param(variants("global", "local"), hidden)]
+    pub orientation: u32,
+    /// With the local orientation: the move along the object's own axes, in
+    /// place of `translation`.
+    #[param(unit = "length", hidden)]
+    pub local_translation: [f64; 3],
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
@@ -904,13 +920,22 @@ impl Operator for TranslateSelection {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let offset = glam::DVec3::from_array(params.translation);
+        let along_own = glam::DVec3::from_array(params.local_translation);
         let done = run_transform(
             doc,
             params.proportional_size,
             params.proportional_falloff,
             false,
             None,
-            |p, weight, _| p + offset * weight as f64,
+            |p, weight, _, frame| {
+                // Local: along the object's own axes.
+                let offset = if params.orientation == 1 {
+                    frame * along_own
+                } else {
+                    offset
+                };
+                p + offset * weight as f64
+            },
         )?;
         merge_after(doc, done, params.auto_merge)
     }
@@ -1123,7 +1148,7 @@ impl Operator for MedianSet {
         if !offset.is_finite() || offset.length() < 1e-12 {
             return Ok(OpResult::Cancelled);
         }
-        run_transform(doc, 0.0, 0, false, None, |p, weight, _| {
+        run_transform(doc, 0.0, 0, false, None, |p, weight, _, _| {
             p + offset * weight as f64
         })
     }
@@ -1150,6 +1175,9 @@ pub struct MeshRotateParams {
     /// Which axis to turn about, through the selection's median.
     #[param(variants("x", "y", "z"))]
     pub axis: u32,
+    /// The axis is the world's, or the object's own.
+    #[param(variants("global", "local"))]
+    pub orientation: u32,
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
@@ -1191,7 +1219,7 @@ impl Operator for RotateSelection {
             1 => glam::DVec3::Y,
             _ => glam::DVec3::Z,
         };
-        let rotation = glam::DQuat::from_axis_angle(axis, params.angle);
+        let world_rotation = glam::DQuat::from_axis_angle(axis, params.angle);
         let pivot = (params.pivot == 1).then_some(doc.document().cursor);
         let done = run_transform(
             doc,
@@ -1199,7 +1227,13 @@ impl Operator for RotateSelection {
             params.proportional_falloff,
             true,
             pivot,
-            |p, weight, about| {
+            |p, weight, about, frame| {
+                // Local: about the object's own axis.
+                let rotation = if params.orientation == 1 {
+                    glam::DQuat::from_axis_angle((frame * axis).normalize_or(axis), params.angle)
+                } else {
+                    world_rotation
+                };
                 // The rotation is interpolated towards the identity rather than the
                 // *result* being interpolated towards the original. The two differ:
                 // blending positions drags a partly-weighted vertex along the chord
@@ -1218,6 +1252,9 @@ impl Operator for RotateSelection {
 pub struct MeshScaleParams {
     /// Scale factor per axis, about the selection's median.
     pub scale: [f64; 3],
+    /// The axes are the world's, or the object's own.
+    #[param(variants("global", "local"))]
+    pub orientation: u32,
     /// Proportional editing radius. Zero is off.
     #[param(soft_min = 0.0, soft_max = 10.0, unit = "length")]
     pub proportional_size: f64,
@@ -1237,6 +1274,7 @@ impl Default for MeshScaleParams {
     fn default() -> Self {
         Self {
             scale: [1.0; 3],
+            orientation: 0,
             proportional_size: 0.0,
             proportional_falloff: 0,
             pivot: 0,
@@ -1283,7 +1321,7 @@ impl Operator for ScaleSelection {
             params.proportional_falloff,
             true,
             pivot,
-            |p, weight, about| {
+            |p, weight, about, frame| {
                 // The factor is interpolated towards one.
                 //
                 // Unlike the rotation, this is *not* a correction: scaling is
@@ -1294,7 +1332,12 @@ impl Operator for ScaleSelection {
                 // scaled half as much, rather than dragged half way to where a full
                 // scale would put it.
                 let partial = glam::DVec3::ONE.lerp(factor, weight as f64);
-                about + (p - about) * partial
+                // Local: along the object's own axes.
+                if params.orientation == 1 {
+                    about + frame * ((frame.inverse() * (p - about)) * partial)
+                } else {
+                    about + (p - about) * partial
+                }
             },
         )?;
         merge_after(doc, done, params.auto_merge)
@@ -1377,7 +1420,7 @@ impl Operator for ExtrudeRegion {
         .any(|g| g);
         if grew && along_axis {
             let offset = direction.normalize() * params.offset;
-            run_transform(doc, 0.0, 0, false, None, |p, weight, _| {
+            run_transform(doc, 0.0, 0, false, None, |p, weight, _, _| {
                 p + offset * weight as f64
             })?;
         }
@@ -2142,7 +2185,7 @@ impl Operator for ExtrudeMove {
         }
         let offset = glam::DVec3::from_array(params.translation);
         if offset != glam::DVec3::ZERO {
-            run_transform(doc, 0.0, 0, false, None, |p, weight, _| {
+            run_transform(doc, 0.0, 0, false, None, |p, weight, _, _| {
                 p + offset * weight as f64
             })?;
         }

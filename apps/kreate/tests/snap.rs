@@ -302,17 +302,18 @@ fn candidates_are_in_world_space() {
 fn the_snap_modes_cycle_back_to_where_they_started() {
     let mut mode = Mode::Increment;
     let mut seen = vec![mode];
-    for _ in 0..5 {
+    for _ in 0..6 {
         mode = mode.next();
         seen.push(mode);
     }
     assert_eq!(seen[5], Mode::Face);
+    assert_eq!(seen[6], Mode::FaceCentre);
     assert_eq!(mode.next(), Mode::Increment, "the cycle should close");
     // And every mode is reachable exactly once.
     let mut sorted: Vec<&str> = seen.iter().map(|m| m.label()).collect();
     sorted.sort_unstable();
     sorted.dedup();
-    assert_eq!(sorted.len(), 6);
+    assert_eq!(sorted.len(), 7);
 }
 
 #[test]
@@ -357,6 +358,7 @@ fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
         edges: vec![[a, b], [b, c], [c, a]],
         tris: vec![[a, b, c]],
         centres: vec![(a + b + c) / 3.0],
+        tri_face: vec![0],
     };
     let hit =
         |p: DVec3| snap::resolve(&world, Mode::Element, at_point(p), &camera(), VIEWPORT).unwrap();
@@ -396,4 +398,25 @@ fn element_snapping_takes_a_vertex_then_an_edge_then_a_face() {
 
     let far = at_point(DVec3::new(4.0, 0.0, 3.0));
     assert!(snap::resolve(&world, Mode::Element, far, &camera(), VIEWPORT).is_none());
+}
+
+/// Face centre: the centre of the face under the cursor, wherever on the
+/// face the cursor is — a large face is centred on from anywhere on it.
+#[test]
+fn a_face_centre_is_caught_from_anywhere_on_the_face() {
+    let mut world = SnapWorld::default();
+    let plane = kreate_mesh::primitives::plane(8.0);
+    // Turned to face the test camera, which looks along +Y.
+    let turn = DAffine3::from_rotation_x(std::f64::consts::FRAC_PI_2);
+    world.add_mesh(&plane, &turn, &[]);
+    // Well off the middle, far from any corner or centre in pixels.
+    let aim = DVec3::new(2.5, 0.0, 1.5);
+    let hit = snap::resolve(&world, Mode::FaceCentre, at_point(aim), &camera(), VIEWPORT)
+        .expect("the cursor is over the face");
+    assert!(
+        hit.point.length() < 1e-6,
+        "caught {:?}, not the centre",
+        hit.point
+    );
+    assert_eq!(hit.element, snap::Element::Centre);
 }

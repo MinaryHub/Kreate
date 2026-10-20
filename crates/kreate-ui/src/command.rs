@@ -238,6 +238,8 @@ pub enum Command {
     OpenContact,
     /// Help ▸ About Kreate.
     OpenAbout,
+    /// Help ▸ Support Kreate: the sponsors' page, in the browser.
+    Donate,
     /// From the contact form: send this to the developers. `kind` is one of
     /// `contact::KINDS`.
     ContactSend {

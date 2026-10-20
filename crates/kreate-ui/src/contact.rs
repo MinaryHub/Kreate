@@ -185,18 +185,22 @@ pub struct AboutText {
     pub title: String,
     pub version: String,
     pub close: String,
+    /// The button that opens the sponsors' page.
+    pub donate: String,
 }
 
 /// Help ▸ About: the name, the version and the commit.
+/// Returns whether the donate button was pressed.
 pub fn about_window(
     ctx: &egui::Context,
     text: &AboutText,
     open: &mut bool,
     version: &str,
     platform: &str,
-) {
+) -> bool {
+    let mut donate = false;
     if !*open {
-        return;
+        return false;
     }
     let mut still = true;
     egui::Window::new(&text.title)
@@ -220,11 +224,17 @@ pub fn about_window(
                 ui.end_row();
             });
             ui.add_space(4.0);
-            if ui.button(&text.close).clicked() {
-                *open = false;
-            }
+            ui.horizontal(|ui| {
+                if ui.button(&text.donate).clicked() {
+                    donate = true;
+                }
+                if ui.button(&text.close).clicked() {
+                    *open = false;
+                }
+            });
         });
     if !still {
         *open = false;
     }
+    donate
 }

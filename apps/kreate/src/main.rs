@@ -2466,6 +2466,7 @@ impl App {
             .edits_elements()
             .then(|| kreate_ops::ops::mesh::target_mesh(&self.doc))
             .flatten();
+        let moving = self.moving_objects();
 
         for (id, mesh) in &self.evaluated {
             let object = self.doc.object(*id);
@@ -2483,9 +2484,10 @@ impl App {
                 } else {
                     Vec::new()
                 }
-            } else if self.doc.selection.objects.contains(id) {
-                // In object mode a selected object moves entirely, so none of it
-                // is a candidate.
+            } else if moving.contains(id) {
+                // In object mode a selected object moves entirely, and every
+                // object under it with it, so none of them is a candidate:
+                // a part snapped to its own child is snapped to itself.
                 continue;
             } else {
                 Vec::new()
@@ -2501,6 +2503,7 @@ impl App {
     /// edit mode — where a move's snap base is picked from.
     fn build_own_snap_world(&self) -> kreate::snap::SnapWorld {
         let mut world = kreate::snap::SnapWorld::default();
+        let moving = self.moving_objects();
         let edited = self
             .op_ctx
             .mode
@@ -2520,11 +2523,24 @@ impl App {
                     let selected = kreate_ops::ops::mesh::selection_vertices(mesh);
                     world.add_mesh_only(mesh, &to_world, &selected);
                 }
-            } else if self.doc.selection.objects.contains(id) {
+            } else if moving.contains(id) {
                 world.add_mesh(mesh, &to_world, &[]);
             }
         }
         world
+    }
+
+    /// The objects a move in object mode carries: the selected ones and
+    /// every object under them.
+    fn moving_objects(&self) -> std::collections::HashSet<kreate_scene::document::ObjectId> {
+        let selected = &self.doc.selection.objects;
+        self.doc
+            .objects()
+            .map(|(id, _)| id)
+            .filter(|id| {
+                selected.contains(id) || selected.iter().any(|s| self.doc.is_ancestor(*s, *id))
+            })
+            .collect()
     }
 
     /// Takes the snap base under the pointer and goes on moving, with what
@@ -2578,7 +2594,7 @@ impl App {
                 );
             }
         } else if self.op_ctx.mode.info().acts_on == kreate_ops::mode::ActsOn::Objects {
-            for id in &self.doc.selection.objects {
+            for id in &self.moving_objects() {
                 let to_world = self.doc.world_transform(*id);
                 match self.evaluated.iter().find(|(e, _)| e == id) {
                     Some((_, mesh)) => {
@@ -6237,6 +6253,11 @@ impl App {
                 Command::CollabJoin { name, address, key } => self.collab_join(name, address, key),
                 Command::CollabLeave => self.collab_leave(),
                 Command::OpenAbout => self.ui.about_open = true,
+                Command::Donate => {
+                    kreate::desktop::open_url(kreate::desktop::SPONSORS_URL);
+                    let message = self.ui.catalog.get("donate-opened");
+                    self.status(&message);
+                }
                 Command::ContactSend {
                     kind,
                     name,
@@ -17093,5 +17114,33 @@ kreate.ops.object.add_primitive()" }),
             Some("view.dolly"),
             "releasing one button ended another's drag"
         );
+    }
+    /// A part moved with its children carries them: none of them is a place
+    /// to snap to, and all of them are places to take the snap base from.
+    #[test]
+    fn a_selected_parents_children_move_with_it_for_snapping() {
+        let mut app = app();
+        let parent = app
+            .doc
+            .add_mesh_object("Body", kreate_mesh::primitives::cube(1.0));
+        let child = app
+            .doc
+            .add_mesh_object("Leg", kreate_mesh::primitives::cube(0.5));
+        let other = app
+            .doc
+            .add_mesh_object("Floor", kreate_mesh::primitives::plane(4.0));
+        app.doc.set_parent(child, Some(parent)).unwrap();
+        app.doc.object_mut(child).unwrap().transform.translation = DVec3::new(3.0, 0.0, 0.0);
+        app.doc.object_mut(other).unwrap().transform.translation = DVec3::new(0.0, 0.0, -5.0);
+        app.doc.selection.clear();
+        app.doc.selection.add(parent);
+        app.evaluate_scene();
+        // Only the floor's four corners to snap to.
+        let targets = app.build_snap_world(kreate::snap::Mode::Element);
+        assert_eq!(targets.verts.len(), 4);
+        assert!(targets.verts.iter().all(|v| (v.z + 5.0).abs() < 1e-9));
+        // The body's and the leg's corners to take the base from.
+        let own = app.build_own_snap_world();
+        assert_eq!(own.verts.len(), 16);
     }
 }
