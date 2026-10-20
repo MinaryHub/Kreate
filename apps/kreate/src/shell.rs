@@ -1619,6 +1619,10 @@ struct Labels {
     time_play: String,
     key_property: String,
     time_autokey: String,
+    marker_add: String,
+    marker_bind_camera: String,
+    marker_remove: String,
+    view_camera_set_active: String,
     sheet_empty: String,
     graph_handles: String,
     handle_auto: String,
@@ -2002,6 +2006,10 @@ impl Labels {
             time_play: t("time-play"),
             key_property: t("key-property"),
             time_autokey: t("time-autokey"),
+            marker_add: t("marker-add"),
+            marker_bind_camera: t("marker-bind-camera"),
+            marker_remove: t("marker-remove"),
+            view_camera_set_active: t("view-camera-set-active"),
             sheet_empty: t("sheet-empty"),
             graph_handles: t("graph-handles"),
             handle_auto: t("handle-auto"),
@@ -4487,6 +4495,11 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
         // Numpad 0 is the key, and a keyboard without a numpad has no other
         // way through the camera.
         entry("view.camera", &l.view_camera, dispatch("view.camera")),
+        entry(
+            "view.camera_set_active",
+            &l.view_camera_set_active,
+            dispatch("view.camera_set_active"),
+        ),
         entry("view.walk", &l.view_walk, dispatch("view.walk")),
         MenuNode::Separator,
         entry("view.measure", &l.view_measure, dispatch("view.measure")),
@@ -8216,6 +8229,9 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
         start: l.time_start.clone(),
         end: l.time_end.clone(),
         autokey: l.time_autokey.clone(),
+        add_marker: l.marker_add.clone(),
+        bind_camera: l.marker_bind_camera.clone(),
+        remove_marker: l.marker_remove.clone(),
     };
     let view = state.timeline.clone();
     let mut panel = state.timeline_views.remove(&area).unwrap_or_default();
@@ -8240,6 +8256,10 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
                 "time.set_range"
             }
             E::ToggleAutokey => "time.toggle_autokey",
+            // The frame is the clock's, filled in by the application.
+            E::AddMarker => "marker.add",
+            E::BindCamera => "marker.camera_bind",
+            E::RemoveMarker => "marker.remove",
         };
         state.queue.dispatch(id, p);
     }
@@ -16062,6 +16082,10 @@ mod tests {
             "view-frame-all",
             "view-frame-selected",
             "view-camera",
+            "view-camera-set-active",
+            "marker-add",
+            "marker-bind-camera",
+            "marker-remove",
             "view-perspective",
             "view-sidebar",
             "overlays",

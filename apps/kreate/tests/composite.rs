@@ -2283,6 +2283,24 @@ fn shot_timeline() {
                 playing: false,
                 autokey: true,
                 keys: vec![1.0, 24.0, 60.0, 96.0],
+                markers: vec![
+                    kreate_ui::timeline::TimelineMarker {
+                        frame: 1,
+                        name: "Wide".into(),
+                        camera: true,
+                    },
+                    kreate_ui::timeline::TimelineMarker {
+                        frame: 48,
+                        name: "Close".into(),
+                        camera: true,
+                    },
+                    kreate_ui::timeline::TimelineMarker {
+                        frame: 80,
+                        name: "F_80".into(),
+                        camera: false,
+                    },
+                ],
+                active_camera: false,
             };
         }) else {
             eprintln!("no GPU; skipping");

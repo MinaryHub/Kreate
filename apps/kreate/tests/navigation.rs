@@ -325,6 +325,7 @@ const APP_ACTIONS: &[&str] = &[
     // Views of the scene, which are the application's and not the document's.
     "view.local_view",
     "view.camera",
+    "view.camera_set_active",
     "view.frame_selected",
     "view.toggle_statistics",
     "view.toggle_dimensions",

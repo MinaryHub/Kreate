@@ -3199,6 +3199,7 @@ impl App {
             cursor: self.doc.cursor,
             plane: (self.ui.tools.orientation == 2).then_some(self.doc.cursor_rotation),
             auto_merge: self.ui.tools.auto_merge,
+            frame: self.doc.playback.frame.round(),
         }
     }
 
@@ -3625,6 +3626,15 @@ impl App {
         if !same_view(&self.camera, &pose) {
             return leave(self);
         }
+        // A marker cuts to another camera: the view cuts with it, as the
+        // render will.
+        let object = match self.doc.marker_camera(self.doc.playback.frame) {
+            Some(cut) if cut != object => {
+                self.camera_view_object = Some(cut);
+                cut
+            }
+            _ => object,
+        };
         let now = self.view_through(object);
         if !same_view(&now, &pose) {
             self.camera = now;
@@ -3634,8 +3644,9 @@ impl App {
         }
     }
 
-    /// The camera object to look through: the one called `name`, or else the
-    /// active object when it is a camera, or else the first camera.
+    /// The camera object to look through: the one called `name`; or else
+    /// the one the markers cut to at this frame, or the scene camera; or
+    /// else the active object when it is a camera, or else the first camera.
     fn scene_camera(&self, name: Option<&str>) -> Option<kreate_scene::document::ObjectId> {
         let is_camera = |id: kreate_scene::document::ObjectId| {
             self.doc
@@ -3648,6 +3659,9 @@ impl App {
                 .objects()
                 .find(|(id, o)| o.name == name && is_camera(*id))
                 .map(|(id, _)| id);
+        }
+        if let Some(chosen) = self.doc.camera_at(self.doc.playback.frame) {
+            return Some(chosen);
         }
         self.doc
             .selection
@@ -7503,6 +7517,21 @@ impl App {
             playing: self.playing.is_some(),
             autokey: self.autokey,
             keys,
+            markers: self
+                .doc
+                .markers
+                .iter()
+                .map(|m| kreate_ui::timeline::TimelineMarker {
+                    frame: m.frame,
+                    name: m.name.clone(),
+                    camera: m.camera.is_some_and(|c| self.doc.is_camera(c)),
+                })
+                .collect(),
+            active_camera: self
+                .doc
+                .selection
+                .active
+                .is_some_and(|a| self.doc.is_camera(a)),
         };
     }
 
@@ -12444,6 +12473,22 @@ impl App {
             }
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
+            // Ctrl+Numpad 0: the active camera becomes the scene's, and the
+            // view goes through it.
+            "view.camera_set_active" => {
+                let Some(active) = self.doc.selection.active.filter(|a| self.doc.is_camera(*a))
+                else {
+                    let message = self.ui.catalog.get("camera-not-active");
+                    self.status(&message);
+                    return;
+                };
+                self.run_op("scene.camera_set", PropertyMap::new());
+                // Out of the camera view, toggling goes in through the scene
+                // camera; through another camera, it goes to the active one.
+                if self.camera_view_object != Some(active) {
+                    self.toggle_camera_view();
+                }
+            }
             "view.measure" => self.begin_measure(),
             "view.walk" => self.begin_walk(),
             "object.align_faces" => {
@@ -14620,6 +14665,8 @@ struct AppParams {
     plane: Option<kreate_math::DQuat>,
     /// The header's Auto Merge, for the edit mode's move, rotate and scale.
     auto_merge: bool,
+    /// The frame the timeline is on, for the markers' operators.
+    frame: f64,
 }
 
 /// A turn whose Z is `normal` and whose X is level (along the ground) where
@@ -14664,6 +14711,12 @@ impl AppParams {
         if let (Some(offset), None) = (offset, out.get("location")) {
             let at = self.cursor + offset;
             out.set("location", PropertyValue::Vec3(at.to_array()));
+        }
+        // A marker goes on the frame the timeline is on, unless one is named.
+        if matches!(op_id, "marker.add" | "marker.remove" | "marker.camera_bind")
+            && out.get("frame").is_none()
+        {
+            out.set("frame", PropertyValue::Float(self.frame));
         }
         if matches!(op_id, "mesh.translate" | "mesh.rotate" | "mesh.scale")
             && out.get("auto_merge").is_none()
@@ -14815,6 +14868,7 @@ mod tests {
             cursor: DVec3::new(1.0, 2.0, 3.0),
             plane: None,
             auto_merge: false,
+            frame: 12.0,
         };
         let none = PropertyMap::new();
         assert_eq!(

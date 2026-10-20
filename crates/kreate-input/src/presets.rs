@@ -409,6 +409,14 @@ fn common() -> Vec<Binding> {
             Context::Viewport,
             Action::new("view.camera"),
         ),
+        // Blender's Set Active Object as Camera.
+        key(
+            "view.camera_set_active",
+            "Numpad0",
+            Context::Viewport,
+            Action::new("view.camera_set_active"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
         // Blender's Alt+Z: see through the surfaces, and select through them.
         key(
             "view.xray",

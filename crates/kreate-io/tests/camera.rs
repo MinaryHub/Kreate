@@ -201,3 +201,52 @@ fn rewrite_entry(bytes: &[u8], name: &str, f: impl Fn(&str) -> String) -> Vec<u8
     }
     out
 }
+
+#[test]
+fn the_scene_camera_and_the_markers_cutting_between_cameras_survive() {
+    use kreate_scene::animation::Marker;
+    let mut doc = Document::new();
+    let camera = |doc: &mut Document, name: &str| {
+        let lens = doc.add_camera(Camera::new(name));
+        doc.add_object(Object::new(name, ObjectData::Camera(lens)))
+    };
+    let wide = camera(&mut doc, "Wide");
+    let close = camera(&mut doc, "Close");
+    doc.scene_camera = Some(close);
+    doc.set_marker(Marker {
+        frame: 1,
+        name: "Wide".into(),
+        camera: Some(wide),
+    });
+    doc.set_marker(Marker {
+        frame: 48,
+        name: "Close".into(),
+        camera: Some(close),
+    });
+    doc.set_marker(Marker {
+        frame: 96,
+        name: "beat".into(),
+        camera: None,
+    });
+
+    let after = round_trip(&doc);
+    let name = |id| after.object(id).map(|o| o.name.clone());
+    assert_eq!(after.scene_camera.and_then(name).as_deref(), Some("Close"));
+    let markers: Vec<(i32, &str, Option<String>)> = after
+        .markers
+        .iter()
+        .map(|m| (m.frame, m.name.as_str(), m.camera.and_then(name)))
+        .collect();
+    assert_eq!(
+        markers,
+        [
+            (1, "Wide", Some("Wide".to_string())),
+            (48, "Close", Some("Close".to_string())),
+            (96, "beat", None),
+        ]
+    );
+    assert_eq!(
+        after.camera_at(60.0).and_then(name).as_deref(),
+        Some("Close")
+    );
+}

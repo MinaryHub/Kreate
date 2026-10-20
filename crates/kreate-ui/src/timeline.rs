@@ -28,6 +28,19 @@ pub struct TimelineView {
     pub autokey: bool,
     /// Frames the selected objects have keys on.
     pub keys: Vec<f64>,
+    /// The scene's markers, in frame order.
+    pub markers: Vec<TimelineMarker>,
+    /// Whether the active object is a camera, which a marker can be bound to.
+    pub active_camera: bool,
+}
+
+/// A marker as the ruler shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TimelineMarker {
+    pub frame: i32,
+    pub name: String,
+    /// Whether a camera is bound to it: the scene cuts there.
+    pub camera: bool,
 }
 
 /// What the pointer asked for.
@@ -37,8 +50,17 @@ pub enum TimelineEdit {
     TogglePlay,
     JumpStart,
     JumpEnd,
-    SetRange { start: i32, end: i32 },
+    SetRange {
+        start: i32,
+        end: i32,
+    },
     ToggleAutokey,
+    /// A marker on the frame the clock is on.
+    AddMarker,
+    /// The active camera bound to the marker on the clock's frame.
+    BindCamera,
+    /// The marker on the clock's frame taken away.
+    RemoveMarker,
 }
 
 /// The panel's strings.
@@ -50,6 +72,10 @@ pub struct TimelineText {
     pub start: String,
     pub end: String,
     pub autokey: String,
+    /// The ruler's right-click menu.
+    pub add_marker: String,
+    pub bind_camera: String,
+    pub remove_marker: String,
 }
 
 /// What the panel remembers.
@@ -241,6 +267,41 @@ pub fn timeline(
         ));
     }
 
+    // Markers along the foot of the track: a flag and its name, the ones
+    // that cut to a camera in the accent colour, with a faint line up.
+    for marker in &view.markers {
+        let x = frame_to_x(marker.frame as f64, range, track);
+        if x < track.min.x - 1.0 || x > track.max.x + 1.0 {
+            continue;
+        }
+        let ink = if marker.camera {
+            theme.accent
+        } else {
+            theme.text_dim
+        };
+        let foot = track.max.y - 3.0;
+        painter.line_segment(
+            [Pos2::new(x, track.min.y + label_band), Pos2::new(x, foot)],
+            Stroke::new(1.0, ink.gamma_multiply(0.35)),
+        );
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                Pos2::new(x, foot - 9.0),
+                Pos2::new(x + 5.0, foot),
+                Pos2::new(x - 5.0, foot),
+            ],
+            ink,
+            Stroke::NONE,
+        ));
+        painter.text(
+            Pos2::new(x + 7.0, foot),
+            egui::Align2::LEFT_BOTTOM,
+            &marker.name,
+            egui::FontId::proportional(10.0),
+            ink,
+        );
+    }
+
     // The clock: a line through the track and its frame in a box on the ruler.
     let x = frame_to_x(view.frame, range, track);
     painter.line_segment(
@@ -255,6 +316,30 @@ pub fn timeline(
     );
     painter.rect_filled(tag, 3.0, theme.accent);
     painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::BLACK);
+
+    // Right-click: markers, on the frame the clock is on.
+    let here = view.frame.round() as i32;
+    let marked = view.markers.iter().any(|m| m.frame == here);
+    response.context_menu(|ui| {
+        if ui.button(&text.add_marker).clicked() {
+            out.push(TimelineEdit::AddMarker);
+            ui.close();
+        }
+        if ui
+            .add_enabled(view.active_camera, egui::Button::new(&text.bind_camera))
+            .clicked()
+        {
+            out.push(TimelineEdit::BindCamera);
+            ui.close();
+        }
+        if ui
+            .add_enabled(marked, egui::Button::new(&text.remove_marker))
+            .clicked()
+        {
+            out.push(TimelineEdit::RemoveMarker);
+            ui.close();
+        }
+    });
 
     // Scrubbing: press anywhere on the track and drag.
     if response.drag_started() || response.clicked() {
@@ -417,6 +502,13 @@ mod tests {
             playing: false,
             autokey: false,
             keys: vec![10.0],
+            // A marker under the drag: it must not catch the pointer.
+            markers: vec![TimelineMarker {
+                frame: 40,
+                name: "Cam".into(),
+                camera: true,
+            }],
+            active_camera: false,
         };
         let text = TimelineText {
             play: String::new(),
@@ -426,6 +518,9 @@ mod tests {
             start: String::new(),
             end: String::new(),
             autokey: String::new(),
+            add_marker: String::new(),
+            bind_camera: String::new(),
+            remove_marker: String::new(),
         };
         let mut out = Vec::new();
         let mut time = 0.0;

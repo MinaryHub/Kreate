@@ -634,6 +634,12 @@ pub struct Document {
     /// normal; the Cursor orientation constrains to its axes, and new objects
     /// are set square to it. Identity is the ground.
     pub cursor_rotation: kreate_math::DQuat,
+    /// The camera the scene is seen and rendered through, when one is
+    /// chosen (Blender's Set Active Camera). A marker with a camera bound
+    /// overrides it from its frame on; see [`Document::camera_at`].
+    pub scene_camera: Option<ObjectId>,
+    /// The timeline's markers, in frame order, at most one to a frame.
+    pub markers: Vec<crate::animation::Marker>,
     /// The unit it is drawn in, and what else a design keeps. See
     /// [`crate::design`].
     pub design: crate::design::DesignSettings,
@@ -1012,6 +1018,52 @@ impl Document {
     /// Silently orphaning children would leave the hierarchy referring to a dead
     /// id; deleting them recursively is a different operation and should be the
     /// caller's explicit choice.
+    /// Whether `id` is an object that is a camera.
+    pub fn is_camera(&self, id: ObjectId) -> bool {
+        self.object(id)
+            .is_some_and(|o| matches!(o.data, ObjectData::Camera(_)))
+    }
+
+    /// The camera the markers cut to at `frame`: the last marker at or
+    /// before it that has a camera, or — before the first — the first, as
+    /// Blender has it. `None` when no marker has a camera.
+    pub fn marker_camera(&self, frame: f64) -> Option<ObjectId> {
+        // A frame a hair short of a whole one is that one: playback lands
+        // between frames, and 11.9999 is frame 12 to the eye.
+        let at = (frame + 1e-6).floor();
+        let bound = || {
+            self.markers.iter().filter_map(|m| {
+                m.camera
+                    .filter(|c| self.is_camera(*c))
+                    .map(|c| (m.frame, c))
+            })
+        };
+        bound()
+            .filter(|(f, _)| (*f as f64) <= at)
+            .max_by_key(|(f, _)| *f)
+            .or_else(|| bound().min_by_key(|(f, _)| *f))
+            .map(|(_, c)| c)
+    }
+
+    /// The camera the scene is seen through at `frame`: a marker's, else
+    /// the scene camera. `None` when neither is set, and the caller picks.
+    pub fn camera_at(&self, frame: f64) -> Option<ObjectId> {
+        self.marker_camera(frame)
+            .or(self.scene_camera.filter(|c| self.is_camera(*c)))
+    }
+
+    /// Puts a marker in frame order, replacing one on the same frame.
+    pub fn set_marker(&mut self, marker: crate::animation::Marker) {
+        match self
+            .markers
+            .binary_search_by_key(&marker.frame, |m| m.frame)
+        {
+            Ok(i) => self.markers[i] = marker,
+            Err(i) => self.markers.insert(i, marker),
+        }
+        self.touch();
+    }
+
     pub fn remove_object(&mut self, id: ObjectId) -> Option<Object> {
         let removed = self.objects.remove(id)?;
         if self.object_index.get(&removed.uid) == Some(&id) {

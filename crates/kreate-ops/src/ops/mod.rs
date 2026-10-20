@@ -14,6 +14,7 @@ pub mod driver;
 pub mod edges_sketch;
 pub mod feature;
 pub mod geo;
+pub mod marker;
 pub mod mech;
 pub mod mesh;
 pub mod modifier;
@@ -41,6 +42,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     collection::register(registry);
     driver::register(registry);
     geo::register(registry);
+    marker::register(registry);
     mech::register(registry);
     mesh::register(registry);
     modifier::register(registry);

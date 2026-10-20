@@ -58,6 +58,8 @@ impl App {
         if let Some((first, _)) = frames {
             self.set_frame(first as f64);
         }
+        // An animation starts through the camera its first frame is cut to.
+        let camera = self.scene_camera(None).unwrap_or(camera);
         self.wanted_viewport = (settings.width, settings.height);
         self.render_job = Some(RenderJob {
             camera,
@@ -74,14 +76,7 @@ impl App {
         });
         // Motion blur: the shutter, as a fraction of a frame, from the
         // camera; a closed one has nothing to smear.
-        let shutter = self
-            .doc
-            .object(camera)
-            .and_then(|o| match o.data {
-                kreate_scene::document::ObjectData::Camera(c) => self.doc.camera(c),
-                _ => None,
-            })
-            .map_or(0.0, |c| c.shutter);
+        let shutter = self.shutter_of(camera);
         if self.doc.render.motion_blur && shutter > 0.0 {
             let base = frames.map_or(self.doc.playback.frame, |(first, _)| first as f64);
             let samples = self.doc.render.samples;
@@ -308,10 +303,36 @@ impl App {
         self.finish_render_job(&message);
     }
 
+    /// How long a camera's shutter is open, as a fraction of a frame.
+    fn shutter_of(&self, camera: kreate_scene::document::ObjectId) -> f64 {
+        self.doc
+            .object(camera)
+            .and_then(|o| match o.data {
+                kreate_scene::document::ObjectData::Camera(c) => self.doc.camera(c),
+                _ => None,
+            })
+            .map_or(0.0, |c| c.shutter)
+    }
+
     /// Moves an animation's render on from frame `f`, of `end`.
     fn next_render_frame(&mut self, f: i32, end: i32) {
         self.set_frame((f + 1) as f64);
+        // A marker cuts to another camera on this frame: the render cuts
+        // with it. Chosen by the whole frame, not the moments a blurred one
+        // is drawn at, which reach back into the frame before the cut.
+        let cut = self
+            .doc
+            .marker_camera((f + 1) as f64)
+            .map(|c| (c, self.shutter_of(c)));
         if let Some(job) = self.render_job.as_mut() {
+            if let Some((camera, shutter)) = cut {
+                job.camera = camera;
+                if let Some(blur) = job.blur.as_mut() {
+                    // A closed shutter on the new camera is the briefest
+                    // open one: the render's blur was set up at the start.
+                    blur.shutter = shutter.max(1e-3);
+                }
+            }
             job.frames = Some((f + 1, end));
             job.drawn = 0;
             job.ids = None;

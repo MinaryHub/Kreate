@@ -618,6 +618,18 @@ pub struct Playback {
     pub fps: f64,
 }
 
+/// A named frame on the timeline, and the camera the scene cuts to there.
+///
+/// Blender's timeline markers with a camera bound: from a marker's frame on,
+/// the scene is seen through its camera, until the next marker that has one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Marker {
+    pub frame: i32,
+    pub name: String,
+    /// The camera object bound to it, if one is.
+    pub camera: Option<crate::document::ObjectId>,
+}
+
 impl Default for Playback {
     /// Frames 1 to 250 at 24 a second: Blender's defaults, which is to say
     /// ten seconds of film.

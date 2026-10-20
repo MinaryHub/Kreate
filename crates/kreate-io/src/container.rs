@@ -871,6 +871,17 @@ fn full_influence() -> f64 {
     1.0
 }
 
+/// A timeline marker as the file holds it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarkerRecord {
+    pub frame: i32,
+    #[serde(default)]
+    pub name: String,
+    /// The camera bound to it, by its place in `objects`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionRecord {
     pub name: String,
@@ -1536,6 +1547,13 @@ pub struct SceneFile {
     /// The physics world, when it is not the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physics: Option<crate::physics_record::WorldRecord>,
+    /// The camera the scene is seen and rendered through, by its place in
+    /// `objects`, when one is chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_camera: Option<usize>,
+    /// The timeline's markers, when there are any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<MarkerRecord>,
     /// The 3D cursor, when it is anywhere but the world origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<[f64; 3]>,
@@ -2094,6 +2112,18 @@ pub fn write(
                     .iter()
                     .filter_map(|o| index_of.get(o).copied())
                     .collect(),
+            })
+            .collect();
+        scene.scene_camera = document
+            .scene_camera
+            .and_then(|c| index_of.get(&c).copied());
+        scene.markers = document
+            .markers
+            .iter()
+            .map(|m| MarkerRecord {
+                frame: m.frame,
+                name: m.name.clone(),
+                camera: m.camera.and_then(|c| index_of.get(&c).copied()),
             })
             .collect();
         scene.physics = crate::physics_record::write_world(&document.physics);
@@ -3152,6 +3182,28 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     reason: e.to_string(),
                 })?;
         }
+    }
+
+    // A camera index that names no camera is dropped, not trusted: the
+    // markers and the scene camera are read as cameras.
+    let camera = |index: Option<usize>| {
+        index
+            .and_then(|i| object_ids.get(i).copied())
+            .filter(|id| document.is_camera(*id))
+    };
+    let scene_camera = camera(scene.scene_camera);
+    let markers: Vec<_> = scene
+        .markers
+        .iter()
+        .map(|m| kreate_scene::animation::Marker {
+            frame: m.frame,
+            name: m.name.clone(),
+            camera: camera(m.camera),
+        })
+        .collect();
+    document.scene_camera = scene_camera;
+    for marker in markers {
+        document.set_marker(marker);
     }
 
     for record in &scene.collections {
