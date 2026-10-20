@@ -23,6 +23,7 @@ pub mod fonts;
 pub mod graph_editor;
 pub mod icons;
 pub mod keymap_editor;
+pub mod markdown;
 pub mod modifier_stack;
 pub mod nav_gizmo;
 pub mod nla_editor;

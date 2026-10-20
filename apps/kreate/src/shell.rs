@@ -8125,6 +8125,14 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         revert_hint: state
             .catalog
             .format("chat-revert-hint", kreate_i18n::TextKind::Tooltip, &[]),
+        copy: state
+            .catalog
+            .format("chat-copy", kreate_i18n::TextKind::Ui, &[]),
+        tools: state.catalog.format(
+            "chat-tools",
+            kreate_i18n::TextKind::Ui,
+            &[("count", "{count}")],
+        ),
     };
     let mut input = std::mem::take(&mut state.chat_input);
     let mut code = std::mem::take(&mut state.chat_code);
