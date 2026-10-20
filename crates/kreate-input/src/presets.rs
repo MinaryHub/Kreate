@@ -695,6 +695,34 @@ fn common() -> Vec<Binding> {
             Context::Sketch,
             Action::new("app.sketch_tool").with("tool", PropertyValue::Text("revolve".into())),
         ),
+        // Over the timeline, Blender's marker keys: M adds one on the
+        // current frame, Ctrl+B binds the active camera to it, X or Delete
+        // takes it away.
+        key(
+            "marker.add",
+            "M",
+            Context::Timeline,
+            Action::new("marker.add"),
+        ),
+        key(
+            "marker.camera_bind",
+            "B",
+            Context::Timeline,
+            Action::new("marker.camera_bind"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "marker.remove",
+            "X",
+            Context::Timeline,
+            Action::new("marker.remove"),
+        ),
+        key(
+            "marker.remove_delete",
+            "Delete",
+            Context::Timeline,
+            Action::new("marker.remove"),
+        ),
         // X takes what is selected out of the sketch.
         key(
             "sketch.delete_x",

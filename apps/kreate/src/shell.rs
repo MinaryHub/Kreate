@@ -683,6 +683,19 @@ impl ShellState {
     /// ones — `X` is "delete the object" over the viewport, "delete the node"
     /// over the graph and "delete the keys" over the dope sheet, and each
     /// editor handles its own.
+    /// Whether `at` is over a timeline's ruler, where the markers' keys
+    /// apply.
+    pub fn timeline_at(&self, at: egui::Pos2) -> bool {
+        self.screen().areas().into_iter().any(|(id, kind)| {
+            kind == kreate_ui::EditorId::TIMELINE
+                && self
+                    .timeline_views
+                    .get(&id)
+                    .and_then(|s| s.rect)
+                    .is_some_and(|r| r.contains(at))
+        })
+    }
+
     pub fn node_editor_at(&self, at: egui::Pos2) -> bool {
         let over = |rect: Option<egui::Rect>| rect.is_some_and(|r| r.contains(at));
         self.screen().areas().into_iter().any(|(id, kind)| {
@@ -1621,6 +1634,7 @@ struct Labels {
     time_autokey: String,
     marker_add: String,
     marker_bind_camera: String,
+    marker_rename: String,
     marker_remove: String,
     view_camera_set_active: String,
     sheet_empty: String,
@@ -2008,6 +2022,7 @@ impl Labels {
             time_autokey: t("time-autokey"),
             marker_add: t("marker-add"),
             marker_bind_camera: t("marker-bind-camera"),
+            marker_rename: t("marker-rename"),
             marker_remove: t("marker-remove"),
             view_camera_set_active: t("view-camera-set-active"),
             sheet_empty: t("sheet-empty"),
@@ -8231,6 +8246,7 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
         autokey: l.time_autokey.clone(),
         add_marker: l.marker_add.clone(),
         bind_camera: l.marker_bind_camera.clone(),
+        rename_marker: l.marker_rename.clone(),
         remove_marker: l.marker_remove.clone(),
     };
     let view = state.timeline.clone();
@@ -8256,10 +8272,30 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
                 "time.set_range"
             }
             E::ToggleAutokey => "time.toggle_autokey",
-            // The frame is the clock's, filled in by the application.
+            // Without a frame, the clock's, filled in by the application.
             E::AddMarker => "marker.add",
-            E::BindCamera => "marker.camera_bind",
-            E::RemoveMarker => "marker.remove",
+            E::BindCamera { frame } => {
+                if let Some(frame) = frame {
+                    p.set("frame", V::Float(frame as f64));
+                }
+                "marker.camera_bind"
+            }
+            E::RemoveMarker { frame } => {
+                if let Some(frame) = frame {
+                    p.set("frame", V::Float(frame as f64));
+                }
+                "marker.remove"
+            }
+            E::MoveMarker { from, to } => {
+                p.set("frame", V::Float(from as f64));
+                p.set("to", V::Float(to as f64));
+                "marker.move"
+            }
+            E::RenameMarker { frame, name } => {
+                p.set("frame", V::Float(frame as f64));
+                p.set("name", V::Text(name));
+                "marker.rename"
+            }
         };
         state.queue.dispatch(id, p);
     }
@@ -16085,6 +16121,7 @@ mod tests {
             "view-camera-set-active",
             "marker-add",
             "marker-bind-camera",
+            "marker-rename",
             "marker-remove",
             "view-perspective",
             "view-sidebar",

@@ -18,6 +18,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddMarker>();
     registry.register::<RemoveMarker>();
     registry.register::<BindCamera>();
+    registry.register::<MoveMarker>();
+    registry.register::<RenameMarker>();
 }
 
 /// The camera called `name`, or with no name the active object when it is a
@@ -220,6 +222,97 @@ impl Operator for BindCamera {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MoveMarkerParams {
+    /// The frame the marker is on.
+    pub frame: f64,
+    /// The frame it goes to.
+    pub to: f64,
+}
+
+/// Dragging a marker along the timeline: it takes its name and its camera,
+/// and so its cut, with it. Not onto another marker's frame — one to a frame.
+pub struct MoveMarker;
+
+impl Operator for MoveMarker {
+    type Params = MoveMarkerParams;
+    fn id() -> &'static str {
+        "marker.move"
+    }
+    fn label() -> &'static str {
+        "Move Marker"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        !doc.markers.is_empty()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let (Some(from), Some(to)) = (whole(params.frame), whole(params.to)) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let d = doc.document();
+        let Some(i) = d.markers.iter().position(|m| m.frame == from) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if from == to {
+            return Ok(OpResult::Cancelled);
+        }
+        if d.markers.iter().any(|m| m.frame == to) {
+            return Err(OpError::Failed(format!("frame {to} has a marker already")));
+        }
+        let d = doc.document_mut();
+        let mut marker = d.markers.remove(i);
+        marker.frame = to;
+        d.set_marker(marker);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RenameMarkerParams {
+    /// The frame the marker is on.
+    pub frame: f64,
+    pub name: String,
+}
+
+/// Gives a marker a name: what the timeline shows beside its flag.
+pub struct RenameMarker;
+
+impl Operator for RenameMarker {
+    type Params = RenameMarkerParams;
+    fn id() -> &'static str {
+        "marker.rename"
+    }
+    fn label() -> &'static str {
+        "Rename Marker"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        !doc.markers.is_empty()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(frame) = whole(params.frame) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let name = params.name.trim();
+        let d = doc.document_mut();
+        let Some(marker) = d.markers.iter_mut().find(|m| m.frame == frame) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if name.is_empty() || marker.name == name {
+            return Ok(OpResult::Cancelled);
+        }
+        marker.name = name.to_string();
+        Ok(OpResult::Finished)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +390,57 @@ mod tests {
         assert_eq!(doc.camera_at(100.0), Some(a));
         let frames: Vec<i32> = doc.markers.iter().map(|m| m.frame).collect();
         assert_eq!(frames, [10, 20]);
+    }
+
+    #[test]
+    fn a_moved_marker_takes_its_cut_with_it_and_a_renamed_one_keeps_it() {
+        let mut doc = Document::new();
+        let a = camera(&mut doc, "A");
+        let b = camera(&mut doc, "B");
+        run(
+            &mut doc,
+            "marker.camera_bind",
+            &[("frame", V::Float(1.0)), named("A")],
+        )
+        .unwrap();
+        run(
+            &mut doc,
+            "marker.camera_bind",
+            &[("frame", V::Float(40.0)), named("B")],
+        )
+        .unwrap();
+        assert_eq!(doc.camera_at(30.0), Some(a));
+
+        run(
+            &mut doc,
+            "marker.move",
+            &[("frame", V::Float(40.0)), ("to", V::Float(25.0))],
+        )
+        .unwrap();
+        assert_eq!(doc.camera_at(30.0), Some(b), "the cut came earlier");
+        let frames: Vec<i32> = doc.markers.iter().map(|m| m.frame).collect();
+        assert_eq!(frames, [1, 25]);
+        assert!(
+            run(
+                &mut doc,
+                "marker.move",
+                &[("frame", V::Float(25.0)), ("to", V::Float(1.0))]
+            )
+            .is_err(),
+            "not onto another marker"
+        );
+
+        run(
+            &mut doc,
+            "marker.rename",
+            &[
+                ("frame", V::Float(25.0)),
+                ("name", V::Text(" Close-up ".into())),
+            ],
+        )
+        .unwrap();
+        assert_eq!(doc.markers[1].name, "Close-up");
+        assert_eq!(doc.markers[1].camera, Some(b));
     }
 
     #[test]

@@ -11894,6 +11894,9 @@ impl App {
         if self.pointer_in_uv_panel() {
             return KeyContext::UvEditor;
         }
+        if self.pointer_in_timeline() {
+            return KeyContext::Timeline;
+        }
         // Over the shader editor only the global keys — undo, save — reach the
         // keymap. The graph handles its own `X` and `Shift+A`, and the
         // viewport's meaning of them (delete the object, add a cube) is the
@@ -11902,6 +11905,16 @@ impl App {
             return KeyContext::Global;
         }
         mode_key_context(self.op_ctx.mode)
+    }
+
+    /// Whether the pointer is over a timeline.
+    fn pointer_in_timeline(&self) -> bool {
+        let Some((x, y)) = self.input.cursor else {
+            return false;
+        };
+        let scale = f64::from(self.egui_ctx.pixels_per_point().max(0.01));
+        self.ui
+            .timeline_at(egui::pos2((x / scale) as f32, (y / scale) as f32))
     }
 
     /// Whether the pointer is over a shader editor.

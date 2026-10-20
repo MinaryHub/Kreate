@@ -57,10 +57,24 @@ pub enum TimelineEdit {
     ToggleAutokey,
     /// A marker on the frame the clock is on.
     AddMarker,
-    /// The active camera bound to the marker on the clock's frame.
-    BindCamera,
-    /// The marker on the clock's frame taken away.
-    RemoveMarker,
+    /// The active camera bound to the marker on `frame`, or with none on
+    /// the clock's frame.
+    BindCamera {
+        frame: Option<i32>,
+    },
+    /// The marker on `frame`, or with none on the clock's frame, taken away.
+    RemoveMarker {
+        frame: Option<i32>,
+    },
+    /// A marker dragged from one frame to another.
+    MoveMarker {
+        from: i32,
+        to: i32,
+    },
+    RenameMarker {
+        frame: i32,
+        name: String,
+    },
 }
 
 /// The panel's strings.
@@ -75,6 +89,7 @@ pub struct TimelineText {
     /// The ruler's right-click menu.
     pub add_marker: String,
     pub bind_camera: String,
+    pub rename_marker: String,
     pub remove_marker: String,
 }
 
@@ -85,6 +100,33 @@ pub struct TimelineState {
     /// over it.
     pub rect: Option<Rect>,
     scrubbing: bool,
+    /// A marker being dragged: the frame it is on and the one it would go to.
+    dragging: Option<(i32, i32)>,
+    /// The marker the right-click menu is about, when it was opened on one.
+    menu_marker: Option<i32>,
+    /// A marker's name being typed: its frame and the text so far.
+    renaming: Option<(i32, String)>,
+    /// Whether the name field still has to take the keyboard.
+    rename_focus: bool,
+}
+
+/// The flag and name of the marker under `pos`, if any: its frame.
+fn marker_at(pos: Pos2, markers: &[TimelineMarker], range: (f64, f64), track: Rect) -> Option<i32> {
+    let foot = track.max.y - 3.0;
+    markers
+        .iter()
+        .filter_map(|m| {
+            let x = frame_to_x(m.frame as f64, range, track);
+            // The flag, and the name beside it, roughly as wide as drawn.
+            let width = 14.0 + m.name.chars().count() as f32 * 6.0;
+            let hit = Rect::from_min_max(
+                Pos2::new(x - 7.0, foot - 13.0),
+                Pos2::new(x + width, foot + 3.0),
+            );
+            hit.contains(pos).then(|| ((pos.x - x).abs(), m.frame))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, frame)| frame)
 }
 
 /// The frames the ruler spans: the range, with a margin either side so the
@@ -270,7 +312,12 @@ pub fn timeline(
     // Markers along the foot of the track: a flag and its name, the ones
     // that cut to a camera in the accent colour, with a faint line up.
     for marker in &view.markers {
-        let x = frame_to_x(marker.frame as f64, range, track);
+        // One being dragged is drawn where it would go.
+        let frame = match state.dragging {
+            Some((from, to)) if from == marker.frame => to,
+            _ => marker.frame,
+        };
+        let x = frame_to_x(frame as f64, range, track);
         if x < track.min.x - 1.0 || x > track.max.x + 1.0 {
             continue;
         }
@@ -317,9 +364,16 @@ pub fn timeline(
     painter.rect_filled(tag, 3.0, theme.accent);
     painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::BLACK);
 
-    // Right-click: markers, on the frame the clock is on.
+    // Right-click: markers — the one under the pointer, or the one on the
+    // clock's frame.
     let here = view.frame.round() as i32;
-    let marked = view.markers.iter().any(|m| m.frame == here);
+    let hit = |p: Option<Pos2>| p.and_then(|p| marker_at(p, &view.markers, range, track));
+    if response.secondary_clicked() {
+        state.menu_marker = hit(response.interact_pointer_pos());
+    }
+    let target = state
+        .menu_marker
+        .or_else(|| view.markers.iter().any(|m| m.frame == here).then_some(here));
     response.context_menu(|ui| {
         if ui.button(&text.add_marker).clicked() {
             out.push(TimelineEdit::AddMarker);
@@ -329,20 +383,102 @@ pub fn timeline(
             .add_enabled(view.active_camera, egui::Button::new(&text.bind_camera))
             .clicked()
         {
-            out.push(TimelineEdit::BindCamera);
+            out.push(TimelineEdit::BindCamera { frame: target });
             ui.close();
         }
         if ui
-            .add_enabled(marked, egui::Button::new(&text.remove_marker))
+            .add_enabled(target.is_some(), egui::Button::new(&text.rename_marker))
             .clicked()
         {
-            out.push(TimelineEdit::RemoveMarker);
+            if let Some(frame) = target {
+                let name = view
+                    .markers
+                    .iter()
+                    .find(|m| m.frame == frame)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_default();
+                state.renaming = Some((frame, name));
+                state.rename_focus = true;
+            }
+            ui.close();
+        }
+        if ui
+            .add_enabled(target.is_some(), egui::Button::new(&text.remove_marker))
+            .clicked()
+        {
+            out.push(TimelineEdit::RemoveMarker { frame: target });
             ui.close();
         }
     });
 
-    // Scrubbing: press anywhere on the track and drag.
-    if response.drag_started() || response.clicked() {
+    // A marker's name, typed in place of it: Enter or a click away keeps
+    // it, Escape does not.
+    if let Some((frame, name)) = state.renaming.as_mut() {
+        let x = frame_to_x(*frame as f64, range, track);
+        let foot = track.max.y - 3.0;
+        let field = Rect::from_min_size(Pos2::new(x + 5.0, foot - 18.0), Vec2::new(130.0, 18.0));
+        let edit = ui.put(
+            field,
+            egui::TextEdit::singleline(name).font(egui::FontId::proportional(11.0)),
+        );
+        if state.rename_focus {
+            edit.request_focus();
+            state.rename_focus = false;
+        } else if edit.lost_focus() {
+            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                out.push(TimelineEdit::RenameMarker {
+                    frame: *frame,
+                    name: name.trim().to_string(),
+                });
+            }
+            state.renaming = None;
+        }
+    }
+
+    // A double click on a marker names it; a click on one goes to its frame.
+    let pressed_on = hit(ui.input(|i| i.pointer.press_origin()));
+    if response.double_clicked() {
+        if let Some(frame) = hit(response.interact_pointer_pos()) {
+            let name = view
+                .markers
+                .iter()
+                .find(|m| m.frame == frame)
+                .map(|m| m.name.clone())
+                .unwrap_or_default();
+            state.renaming = Some((frame, name));
+            state.rename_focus = true;
+            state.scrubbing = false;
+        }
+    }
+
+    // Dragging a marker moves it, by whole frames; dropped, it is moved.
+    if response.drag_started() {
+        if let Some(frame) = pressed_on {
+            state.dragging = Some((frame, frame));
+        }
+    }
+    if let Some((from, _)) = state.dragging {
+        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            let to = x_to_frame(p.x, range, track).round() as i32;
+            state.dragging = Some((from, to));
+        }
+        if response.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+            if let Some((from, to)) = state.dragging.take() {
+                if from != to {
+                    out.push(TimelineEdit::MoveMarker { from, to });
+                }
+            }
+        }
+        return out;
+    }
+
+    // Scrubbing: press anywhere else on the track and drag. A click on a
+    // marker goes to its frame.
+    if response.clicked() && pressed_on.is_some() {
+        if let Some(frame) = pressed_on.filter(|f| *f as f64 != view.frame) {
+            out.push(TimelineEdit::SetFrame(frame as f64));
+        }
+    } else if response.drag_started() || response.clicked() {
         state.scrubbing = true;
     }
     if state.scrubbing {
@@ -493,6 +629,12 @@ mod tests {
 
     /// Drives the panel with real pointer events, a frame at a time.
     fn scrub(from_frame: f64, to_frame: f64) -> Vec<TimelineEdit> {
+        drag(from_frame, to_frame, false)
+    }
+
+    /// A press at one frame dragged to another: across the middle of the
+    /// track, or along its foot, where the markers' flags are.
+    fn drag(from_frame: f64, to_frame: f64, on_flags: bool) -> Vec<TimelineEdit> {
         let ctx = egui::Context::default();
         let mut state = TimelineState::default();
         let view = TimelineView {
@@ -520,6 +662,7 @@ mod tests {
             autokey: String::new(),
             add_marker: String::new(),
             bind_camera: String::new(),
+            rename_marker: String::new(),
             remove_marker: String::new(),
         };
         let mut out = Vec::new();
@@ -550,7 +693,11 @@ mod tests {
                     range,
                     Rect::from_min_max(Pos2::new(track.min.x, 0.0), Pos2::new(track.max.x, 1.0)),
                 ),
-                track.center().y,
+                if on_flags {
+                    track.max.y - 6.0
+                } else {
+                    track.center().y
+                },
             )
         };
         let button = |pos, pressed| egui::Event::PointerButton {
@@ -596,6 +743,19 @@ mod tests {
         assert!(
             frames.windows(2).all(|w| w[0] <= w[1]),
             "the clock went backwards on a forward drag"
+        );
+    }
+
+    #[test]
+    fn a_marker_dragged_by_its_flag_moves_and_the_clock_stays() {
+        let out = drag(40.0, 60.0, true);
+        assert!(
+            out.contains(&TimelineEdit::MoveMarker { from: 40, to: 60 }),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e, TimelineEdit::SetFrame(_))),
+            "dragging a marker is not scrubbing: {out:?}"
         );
     }
 }

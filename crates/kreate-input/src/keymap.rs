@@ -156,6 +156,9 @@ pub enum Context {
     /// won on every key. Keeping them siblings makes the answer "whichever
     /// panel the pointer is over", which is what the user already believes.
     UvEditor,
+    /// The pointer is over the timeline: its keys are the markers', as in
+    /// Blender's — `M` adds one there and adds a cube nowhere.
+    Timeline,
     /// Inside a running modal tool. First-class so `Transform Modal Map` can
     /// bind keys to *modal events* rather than to operators — the reason
     /// remapping works in Blender and not in most of its clones.
@@ -181,6 +184,7 @@ impl Context {
             Context::Sculpt => &[Context::Sculpt, Context::Viewport, Context::Global],
             Context::Sketch => &[Context::Sketch, Context::Viewport, Context::Global],
             Context::UvEditor => &[Context::UvEditor, Context::Global],
+            Context::Timeline => &[Context::Timeline, Context::Global],
             // A modal tool owns the keyboard: nothing outside it may fire, or a
             // stray `S` would start a scale inside a running transform.
             Context::Modal => &[Context::Modal],
@@ -202,6 +206,7 @@ impl Context {
             Context::Sculpt => "sculpt",
             Context::Sketch => "sketch",
             Context::UvEditor => "uv_editor",
+            Context::Timeline => "timeline",
             Context::Modal => "modal",
         }
     }
@@ -223,6 +228,7 @@ impl Context {
         Context::Sculpt,
         Context::Sketch,
         Context::UvEditor,
+        Context::Timeline,
         Context::Modal,
     ];
 
