@@ -11190,6 +11190,7 @@ impl App {
             face_orientation: gfx.viewport.face_orientation,
             statistics: self.ui.show_stats,
             dimensions: self.ui.show_dimensions,
+            cursor: self.ui.show_cursor,
             ambient_occlusion: gfx.viewport.ambient_occlusion,
             xray: gfx.viewport.xray,
             outline: gfx.viewport.show_outline,
@@ -12501,6 +12502,10 @@ impl App {
             }
             "view.toggle_dimensions" => {
                 self.ui.show_dimensions = !self.ui.show_dimensions;
+                self.redraw.set(RedrawReason::UI);
+            }
+            "view.toggle_cursor" => {
+                self.ui.show_cursor = !self.ui.show_cursor;
                 self.redraw.set(RedrawReason::UI);
             }
             "app.rename" => {

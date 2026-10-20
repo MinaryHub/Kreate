@@ -328,6 +328,7 @@ const APP_ACTIONS: &[&str] = &[
     "view.frame_selected",
     "view.toggle_statistics",
     "view.toggle_dimensions",
+    "view.toggle_cursor",
     // Design tools, the application's until they hand an operator its points.
     "view.measure",
     "view.walk",

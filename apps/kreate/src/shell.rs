@@ -420,6 +420,9 @@ pub struct ShellState {
     /// Whether the dimensions — measurements and sketch dimensions — are
     /// drawn over the picture. They stay in the document either way.
     pub show_dimensions: bool,
+    /// Whether the 3D cursor is drawn. Hidden, it still places new objects
+    /// and parts and still turns things as the pivot.
+    pub show_cursor: bool,
     /// The history's step names and how many are applied, for the Undo
     /// History menu.
     pub history_steps: Vec<String>,
@@ -913,6 +916,7 @@ impl Default for ShellState {
             rename: None,
             show_stats: false,
             show_dimensions: true,
+            show_cursor: true,
             history_steps: Vec::new(),
             history_at: 0,
             pivot: 0,
@@ -1335,6 +1339,7 @@ pub struct Overlays {
     pub face_orientation: bool,
     pub statistics: bool,
     pub dimensions: bool,
+    pub cursor: bool,
     pub ambient_occlusion: bool,
     pub xray: bool,
     pub outline: bool,
@@ -1812,6 +1817,7 @@ struct Labels {
     overlay_textures: String,
     overlay_statistics: String,
     overlay_dimensions: String,
+    overlay_cursor: String,
     overlay_ao: String,
     overlay_xray: String,
     overlay_outline: String,
@@ -2217,6 +2223,7 @@ impl Labels {
             overlay_textures: t("overlay-textures"),
             overlay_statistics: t("overlay-statistics"),
             overlay_dimensions: t("overlay-dimensions"),
+            overlay_cursor: t("overlay-cursor"),
             overlay_ao: t("overlay-ao"),
             overlay_xray: t("overlay-xray"),
             overlay_outline: t("overlay-outline"),
@@ -3329,11 +3336,18 @@ fn draw_area(
                         }
                     }
                     // The 3D cursor: Blender's red and white ring with a cross.
+                    // Faint while it sits where it starts, at the world's
+                    // origin turned square: there it says nothing the axes do
+                    // not, and draws the eye only once it has been put somewhere.
                     if let Some(at) = state
                         .projector
+                        .filter(|_| state.show_cursor)
                         .and_then(|p| p.project(doc.cursor))
                         .filter(|p| inner.contains(*p))
                     {
+                        let resting = doc.cursor == glam::DVec3::ZERO
+                            && doc.cursor_rotation.abs_diff_eq(glam::DQuat::IDENTITY, 1e-9);
+                        let alpha = if resting { 0.3 } else { 1.0 };
                         let painter = ui.painter().with_clip_rect(inner);
                         let r = 9.0;
                         for i in 0..8 {
@@ -3343,7 +3357,8 @@ fn draw_area(
                                 egui::Color32::from_rgb(230, 60, 60)
                             } else {
                                 egui::Color32::WHITE
-                            };
+                            }
+                            .gamma_multiply(alpha);
                             let arc: Vec<egui::Pos2> = (0..=6)
                                 .map(|k| {
                                     let t = a0 + (a1 - a0) * k as f32 / 6.0;
@@ -3352,7 +3367,10 @@ fn draw_area(
                                 .collect();
                             painter.add(egui::Shape::line(arc, egui::Stroke::new(1.5, colour)));
                         }
-                        let cross = egui::Stroke::new(1.0, egui::Color32::from_gray(20));
+                        let cross = egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_gray(20).gamma_multiply(alpha),
+                        );
                         for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
                             painter.line_segment([at + d * (r - 4.0), at + d * (r + 5.0)], cross);
                             painter.line_segment([at - d * (r - 4.0), at - d * (r + 5.0)], cross);
@@ -5509,6 +5527,7 @@ fn draw_overlays_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 &l.overlay_dimensions,
                 on.dimensions,
             ),
+            ("view.toggle_cursor", &l.overlay_cursor, on.cursor),
             ("view.toggle_ao", &l.overlay_ao, on.ambient_occlusion),
             ("view.toggle_xray", &l.overlay_xray, on.xray),
             ("view.toggle_outline", &l.overlay_outline, on.outline),
@@ -16048,6 +16067,7 @@ mod tests {
             "overlays",
             "overlay-grid",
             "overlay-ground-shadow",
+            "overlay-cursor",
             "overlay-wireframe",
             "transform-move",
             "transform-rotate",
