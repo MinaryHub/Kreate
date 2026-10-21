@@ -45,7 +45,7 @@ notes=$(awk '/^## \[Unreleased\]/{p=1; next} /^## \[/{p=0} p' CHANGELOG.md | sed
 [[ -n "$notes" ]] || die "nothing under ## [Unreleased] in CHANGELOG.md"
 
 today=$(date +%Y-%m-%d)
-repo="https://github.com/knoxxr/Kreate"
+repo="https://github.com/MinaryHub/Kreate"
 tmp=$(mktemp)
 awk -v ver="$next" -v today="$today" -v repo="$repo" '
   /^## \[Unreleased\]$/ { print; print ""; print "## [" ver "] - " today; next }
