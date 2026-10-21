@@ -277,7 +277,7 @@ pub fn save_folders(folders: &[PathBuf]) -> Result<(), std::io::Error> {
 /// apart from others.
 fn user_agent() -> String {
     format!(
-        "Kreate/{} (+https://github.com/knoxxr/Kreate)",
+        "Kreate/{} (+https://github.com/MinaryHub/Kreate)",
         crate::version::VERSION
     )
 }
