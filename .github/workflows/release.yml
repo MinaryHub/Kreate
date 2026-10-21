@@ -128,20 +128,3 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
-      # The same release in the public repository installed copies update
-      # from (`update::DEFAULT_REPO`): this one is private, and a private
-      # release cannot be read without signing in. Needs the RELEASES_TOKEN
-      # secret, a token that can write to that repository's contents.
-      - uses: softprops/action-gh-release@v2
-        if: env.RELEASES_TOKEN != ''
-        env:
-          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-        with:
-          repository: knoxxr/Kreate-releases
-          token: ${{ secrets.RELEASES_TOKEN }}
-          tag_name: ${{ github.ref_name }}
-          name: Kreate ${{ github.ref_name }}
-          body_path: notes.md
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
