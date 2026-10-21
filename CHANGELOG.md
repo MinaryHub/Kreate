@@ -173,6 +173,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- Updates now come from the releases of github.com/MinaryHub/Kreate,
+  where the source is too, instead of a separate releases-only repository.
 - A new look, "Graphite Workshop": the chrome is three graphite steps, darker
   than the viewport, so the model is the brightest thing on screen; orange
   marks only what is selected or active. Numbers are set in IBM Plex Mono
@@ -364,7 +366,7 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/knoxxr/Kreate/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/knoxxr/Kreate/releases/tag/v0.3.0
-[0.2.0]: https://github.com/knoxxr/Kreate/releases/tag/v0.2.0
-[0.1.0]: https://github.com/knoxxr/Kreate/commits/main
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.3.0
+[0.2.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.2.0
+[0.1.0]: https://github.com/MinaryHub/Kreate/commits/main
