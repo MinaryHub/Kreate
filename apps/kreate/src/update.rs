@@ -36,10 +36,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-/// Where releases come from, `owner/name` on GitHub: a public repository that
-/// holds only releases, since the source's is private and a request without a
-/// sign-in cannot read it. `KREATE_UPDATE_REPO` overrides it.
-pub const DEFAULT_REPO: &str = "knoxxr/Kreate-releases";
+/// Where releases come from, `owner/name` on GitHub: the source repository
+/// itself, which is public, so a request without a sign-in can read it.
+/// `KREATE_UPDATE_REPO` overrides it.
+pub const DEFAULT_REPO: &str = "MinaryHub/Kreate";
 
 /// The zip this platform's release carries: `kreate-windows-x86_64.zip`,
 /// `kreate-macos-arm64.zip` — the names the release workflow builds under.
