@@ -173,35 +173,17 @@ fn made(name: &'static str, mesh: MeshData, slots: Vec<Slot>) -> Result<Built, O
     Ok(Built { name, mesh, slots })
 }
 
+/// An element's operator: `build` from its parameters, then put it in at
+/// its place keeping its line. The parameters are written out beside each,
+/// not made by this macro — `#[param(...)]` passed through `macro_rules!`
+/// reached the derive as an opaque group and was dropped, limits and units
+/// with it, without a word.
 macro_rules! element {
     (
         $(#[$doc:meta])*
         $op:ident, $params:ident, $id:literal, $label:literal,
-        { $( $(#[$fdoc:meta])* $field:ident : $ty:ty = $default:expr ),* $(,)? },
         |$p:ident| $body:block
     ) => {
-        #[derive(Clone, Debug, PartialEq, OpParams)]
-        pub struct $params {
-            $( $(#[$fdoc])* pub $field: $ty, )*
-            /// Where it stands: the middle of its foot.
-            #[param(unit = "length")]
-            pub location: [f64; 3],
-            /// How it is turned, as Euler XYZ; unturned it runs along X and
-            /// faces −Y.
-            #[param(unit = "angle")]
-            pub rotation: [f64; 3],
-        }
-
-        impl Default for $params {
-            fn default() -> Self {
-                Self {
-                    $( $field: $default, )*
-                    location: [0.0; 3],
-                    rotation: [0.0; 3],
-                }
-            }
-        }
-
         $(#[$doc])*
         pub struct $op;
 
@@ -230,17 +212,38 @@ macro_rules! element {
     };
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddWallParams {
+    #[param(min = 0.01, soft_max = 30.0, unit = "length")]
+    pub length: f64,
+    #[param(min = 0.01, soft_max = 10.0, unit = "length")]
+    pub height: f64,
+    #[param(min = 0.01, soft_max = 1.0, unit = "length")]
+    pub thickness: f64,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddWallParams {
+    fn default() -> Self {
+        Self {
+            length: 4.0,
+            height: 2.7,
+            thickness: 0.2,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A wall: a straight run, standing on the floor.
     AddWall, AddWallParams, "object.add_wall", "Add Wall",
-    {
-        #[param(min = 0.01, soft_max = 30.0, unit = "length")]
-        length: f64 = 4.0,
-        #[param(min = 0.01, soft_max = 10.0, unit = "length")]
-        height: f64 = 2.7,
-        #[param(min = 0.01, soft_max = 1.0, unit = "length")]
-        thickness: f64 = 0.2,
-    },
     |p| {
         sizes(&[("length", p.length), ("height", p.height), ("thickness", p.thickness)])?;
         let m = arch::wall(p.length as f32, p.height as f32, p.thickness as f32);
@@ -248,36 +251,62 @@ element!(
     }
 );
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddDoorParams {
+    /// The opening's width.
+    #[param(min = 0.1, soft_max = 3.0, unit = "length")]
+    pub width: f64,
+    /// The opening's height.
+    #[param(min = 0.1, soft_max = 4.0, unit = "length")]
+    pub height: f64,
+    /// The frame's depth: the wall's thickness.
+    #[param(min = 0.02, soft_max = 1.0, unit = "length")]
+    pub depth: f64,
+    /// The frame's width round the opening.
+    #[param(min = 0.01, soft_max = 0.3, unit = "length")]
+    pub frame: f64,
+    /// The leaf's thickness.
+    #[param(min = 0.01, soft_max = 0.1, unit = "length")]
+    pub leaf_thickness: f64,
+    /// Raised panels on each face; zero for a flush door.
+    #[param(min = 0, max = 8, unit = "count")]
+    pub panels: u32,
+    /// The handles' height above the floor.
+    #[param(min = 0.05, soft_max = 2.0, unit = "length")]
+    pub handle_height: f64,
+    /// Which side the handles are on, seen from the front.
+    #[param(variants("right", "left"))]
+    pub handle_side: u32,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddDoorParams {
+    fn default() -> Self {
+        Self {
+            width: 0.9,
+            height: 2.1,
+            depth: 0.2,
+            frame: 0.06,
+            leaf_thickness: 0.04,
+            panels: 2,
+            handle_height: 1.0,
+            handle_side: 0,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A door in its frame: a panelled leaf with a lever each side. Cut the
     /// wall's opening with a boolean, the opening's size `width` × `height`.
     AddDoor, AddDoorParams, "object.add_door", "Add Door",
-    {
-        /// The opening's width.
-        #[param(min = 0.1, soft_max = 3.0, unit = "length")]
-        width: f64 = 0.9,
-        /// The opening's height.
-        #[param(min = 0.1, soft_max = 4.0, unit = "length")]
-        height: f64 = 2.1,
-        /// The frame's depth: the wall's thickness.
-        #[param(min = 0.02, soft_max = 1.0, unit = "length")]
-        depth: f64 = 0.2,
-        /// The frame's width round the opening.
-        #[param(min = 0.01, soft_max = 0.3, unit = "length")]
-        frame: f64 = 0.06,
-        /// The leaf's thickness.
-        #[param(min = 0.01, soft_max = 0.1, unit = "length")]
-        leaf_thickness: f64 = 0.04,
-        /// Raised panels on each face; zero for a flush door.
-        #[param(min = 0, max = 8, unit = "count")]
-        panels: u32 = 2,
-        /// The handles' height above the floor.
-        #[param(min = 0.05, soft_max = 2.0, unit = "length")]
-        handle_height: f64 = 1.0,
-        /// Which side the handles are on, seen from the front.
-        #[param(variants("right", "left"))]
-        handle_side: u32 = 0,
-    },
     |p| {
         sizes(&[("width", p.width), ("height", p.height), ("depth", p.depth), ("frame", p.frame)])?;
         let m = arch::door(&arch::Door {
@@ -302,38 +331,66 @@ element!(
     }
 );
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddWindowParams {
+    #[param(min = 0.1, soft_max = 5.0, unit = "length")]
+    pub width: f64,
+    #[param(min = 0.1, soft_max = 4.0, unit = "length")]
+    pub height: f64,
+    /// The frame's depth.
+    #[param(min = 0.02, soft_max = 1.0, unit = "length")]
+    pub depth: f64,
+    /// The frame's width.
+    #[param(min = 0.01, soft_max = 0.3, unit = "length")]
+    pub frame: f64,
+    /// How high its bottom is above the floor.
+    #[param(min = 0.0, soft_max = 3.0, unit = "length")]
+    pub sill_height: f64,
+    /// Panes across.
+    #[param(min = 1, max = 12, unit = "count")]
+    pub columns: u32,
+    /// Panes up.
+    #[param(min = 1, max = 12, unit = "count")]
+    pub rows: u32,
+    /// The bars between the panes.
+    #[param(min = 0.005, soft_max = 0.2, unit = "length")]
+    pub bar_width: f64,
+    #[param(min = 0.001, soft_max = 0.05, unit = "length")]
+    pub glass_thickness: f64,
+    /// How far the sill stands out in front; zero for none.
+    #[param(min = 0.0, soft_max = 0.3, unit = "length")]
+    pub sill_depth: f64,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddWindowParams {
+    fn default() -> Self {
+        Self {
+            width: 1.2,
+            height: 1.4,
+            depth: 0.15,
+            frame: 0.06,
+            sill_height: 0.9,
+            columns: 2,
+            rows: 1,
+            bar_width: 0.036,
+            glass_thickness: 0.008,
+            sill_depth: 0.04,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A window: a frame divided into panes of glass, on a sill.
     AddWindow, AddWindowParams, "object.add_window", "Add Window",
-    {
-        #[param(min = 0.1, soft_max = 5.0, unit = "length")]
-        width: f64 = 1.2,
-        #[param(min = 0.1, soft_max = 4.0, unit = "length")]
-        height: f64 = 1.4,
-        /// The frame's depth.
-        #[param(min = 0.02, soft_max = 1.0, unit = "length")]
-        depth: f64 = 0.15,
-        /// The frame's width.
-        #[param(min = 0.01, soft_max = 0.3, unit = "length")]
-        frame: f64 = 0.06,
-        /// How high its bottom is above the floor.
-        #[param(min = 0.0, soft_max = 3.0, unit = "length")]
-        sill_height: f64 = 0.9,
-        /// Panes across.
-        #[param(min = 1, max = 12, unit = "count")]
-        columns: u32 = 2,
-        /// Panes up.
-        #[param(min = 1, max = 12, unit = "count")]
-        rows: u32 = 1,
-        /// The bars between the panes.
-        #[param(min = 0.005, soft_max = 0.2, unit = "length")]
-        bar_width: f64 = 0.036,
-        #[param(min = 0.001, soft_max = 0.05, unit = "length")]
-        glass_thickness: f64 = 0.008,
-        /// How far the sill stands out in front; zero for none.
-        #[param(min = 0.0, soft_max = 0.3, unit = "length")]
-        sill_depth: f64 = 0.04,
-    },
     |p| {
         sizes(&[("width", p.width), ("height", p.height), ("depth", p.depth), ("frame", p.frame)])?;
         if 2.0 * p.frame >= p.width.min(p.height) {
@@ -359,27 +416,51 @@ element!(
     }
 );
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddStairsParams {
+    #[param(min = 0.1, soft_max = 5.0, unit = "length")]
+    pub width: f64,
+    /// The height it climbs: floor to floor.
+    #[param(min = 0.05, soft_max = 10.0, unit = "length")]
+    pub height: f64,
+    /// How far it runs.
+    #[param(min = 0.05, soft_max = 20.0, unit = "length")]
+    pub length: f64,
+    /// How many steps; fifteen of 18 cm suit a storey.
+    #[param(min = 1, max = 200, unit = "count")]
+    pub steps: u32,
+    /// A solid stack under the treads, or open treads.
+    pub solid: bool,
+    /// An open tread's thickness.
+    #[param(min = 0.005, soft_max = 0.2, unit = "length")]
+    pub tread_thickness: f64,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddStairsParams {
+    fn default() -> Self {
+        Self {
+            width: 1.0,
+            height: 2.7,
+            length: 3.6,
+            steps: 15,
+            solid: true,
+            tread_thickness: 0.04,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A straight flight of stairs, climbing along +Y.
     AddStairs, AddStairsParams, "object.add_stairs", "Add Stairs",
-    {
-        #[param(min = 0.1, soft_max = 5.0, unit = "length")]
-        width: f64 = 1.0,
-        /// The height it climbs: floor to floor.
-        #[param(min = 0.05, soft_max = 10.0, unit = "length")]
-        height: f64 = 2.7,
-        /// How far it runs.
-        #[param(min = 0.05, soft_max = 20.0, unit = "length")]
-        length: f64 = 3.6,
-        /// How many steps; fifteen of 18 cm suit a storey.
-        #[param(min = 1, max = 200, unit = "count")]
-        steps: u32 = 15,
-        /// A solid stack under the treads, or open treads.
-        solid: bool = true,
-        /// An open tread's thickness.
-        #[param(min = 0.005, soft_max = 0.2, unit = "length")]
-        tread_thickness: f64 = 0.04,
-    },
     |p| {
         sizes(&[("width", p.width), ("height", p.height), ("length", p.length)])?;
         let m = arch::stairs(&arch::Stairs {
@@ -394,25 +475,49 @@ element!(
     }
 );
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddColumnParams {
+    #[param(min = 0.02, soft_max = 2.0, unit = "length")]
+    pub diameter: f64,
+    #[param(min = 0.1, soft_max = 20.0, unit = "length")]
+    pub height: f64,
+    /// Round, or square.
+    pub round: bool,
+    /// A square base and capital.
+    pub base: bool,
+    /// How much wider than the shaft they are.
+    #[param(min = 1.0, soft_max = 3.0)]
+    pub base_scale: f64,
+    /// Sides round a round shaft.
+    #[param(min = 3, max = 256, unit = "count")]
+    pub segments: u32,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddColumnParams {
+    fn default() -> Self {
+        Self {
+            diameter: 0.3,
+            height: 2.7,
+            round: true,
+            base: true,
+            base_scale: 1.35,
+            segments: 32,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A column, round or square, with a square base and capital.
     AddColumn, AddColumnParams, "object.add_column", "Add Column",
-    {
-        #[param(min = 0.02, soft_max = 2.0, unit = "length")]
-        diameter: f64 = 0.3,
-        #[param(min = 0.1, soft_max = 20.0, unit = "length")]
-        height: f64 = 2.7,
-        /// Round, or square.
-        round: bool = true,
-        /// A square base and capital.
-        base: bool = true,
-        /// How much wider than the shaft they are.
-        #[param(min = 1.0, soft_max = 3.0)]
-        base_scale: f64 = 1.35,
-        /// Sides round a round shaft.
-        #[param(min = 3, max = 256, unit = "count")]
-        segments: u32 = 32,
-    },
     |p| {
         sizes(&[("diameter", p.diameter), ("height", p.height)])?;
         let m = arch::column(&arch::Column {
@@ -427,25 +532,49 @@ element!(
     }
 );
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddRailingParams {
+    #[param(min = 0.2, soft_max = 30.0, unit = "length")]
+    pub length: f64,
+    #[param(min = 0.2, soft_max = 3.0, unit = "length")]
+    pub height: f64,
+    /// About how far apart the balusters stand.
+    #[param(min = 0.03, soft_max = 1.0, unit = "length")]
+    pub spacing: f64,
+    #[param(min = 0.005, soft_max = 0.3, unit = "length")]
+    pub post_width: f64,
+    #[param(min = 0.002, soft_max = 0.1, unit = "length")]
+    pub baluster_width: f64,
+    /// The top rail's width.
+    #[param(min = 0.01, soft_max = 0.3, unit = "length")]
+    pub rail_width: f64,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddRailingParams {
+    fn default() -> Self {
+        Self {
+            length: 3.0,
+            height: 1.0,
+            spacing: 0.12,
+            post_width: 0.06,
+            baluster_width: 0.02,
+            rail_width: 0.07,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A railing: posts at its ends, a top and a bottom rail, balusters.
     AddRailing, AddRailingParams, "object.add_railing", "Add Railing",
-    {
-        #[param(min = 0.2, soft_max = 30.0, unit = "length")]
-        length: f64 = 3.0,
-        #[param(min = 0.2, soft_max = 3.0, unit = "length")]
-        height: f64 = 1.0,
-        /// About how far apart the balusters stand.
-        #[param(min = 0.03, soft_max = 1.0, unit = "length")]
-        spacing: f64 = 0.12,
-        #[param(min = 0.005, soft_max = 0.3, unit = "length")]
-        post_width: f64 = 0.06,
-        #[param(min = 0.002, soft_max = 0.1, unit = "length")]
-        baluster_width: f64 = 0.02,
-        /// The top rail's width.
-        #[param(min = 0.01, soft_max = 0.3, unit = "length")]
-        rail_width: f64 = 0.07,
-    },
     |p| {
         sizes(&[("length", p.length), ("height", p.height), ("spacing", p.spacing)])?;
         let m = arch::railing(&arch::Railing {
@@ -460,17 +589,38 @@ element!(
     }
 );
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddSlabParams {
+    #[param(min = 0.1, soft_max = 50.0, unit = "length")]
+    pub width: f64,
+    #[param(min = 0.1, soft_max = 50.0, unit = "length")]
+    pub length: f64,
+    #[param(min = 0.01, soft_max = 1.0, unit = "length")]
+    pub thickness: f64,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddSlabParams {
+    fn default() -> Self {
+        Self {
+            width: 4.0,
+            length: 4.0,
+            thickness: 0.2,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A floor slab, its top at its origin: the level it is the floor of.
     AddSlab, AddSlabParams, "object.add_slab", "Add Floor Slab",
-    {
-        #[param(min = 0.1, soft_max = 50.0, unit = "length")]
-        width: f64 = 4.0,
-        #[param(min = 0.1, soft_max = 50.0, unit = "length")]
-        length: f64 = 4.0,
-        #[param(min = 0.01, soft_max = 1.0, unit = "length")]
-        thickness: f64 = 0.2,
-    },
     |p| {
         sizes(&[("width", p.width), ("length", p.length), ("thickness", p.thickness)])?;
         let m = arch::slab(p.width as f32, p.length as f32, p.thickness as f32);
@@ -478,29 +628,53 @@ element!(
     }
 );
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AddRoofParams {
+    /// Its shape.
+    #[param(variants("gable", "hip", "shed", "flat"))]
+    pub kind: u32,
+    /// The plan across the slopes.
+    #[param(min = 0.1, soft_max = 50.0, unit = "length")]
+    pub width: f64,
+    /// The plan along the ridge.
+    #[param(min = 0.1, soft_max = 50.0, unit = "length")]
+    pub length: f64,
+    /// From the eaves line up to the ridge.
+    #[param(min = 0.01, soft_max = 10.0, unit = "length")]
+    pub rise: f64,
+    #[param(min = 0.01, soft_max = 1.0, unit = "length")]
+    pub thickness: f64,
+    /// How far it reaches past the walls.
+    #[param(min = 0.0, soft_max = 2.0, unit = "length")]
+    pub overhang: f64,
+    /// Where it stands: the middle of its foot.
+    #[param(unit = "length")]
+    pub location: [f64; 3],
+    /// How it is turned, as Euler XYZ; unturned it runs along X and
+    /// faces −Y.
+    #[param(unit = "angle")]
+    pub rotation: [f64; 3],
+}
+
+impl Default for AddRoofParams {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            width: 6.0,
+            length: 8.0,
+            rise: 2.0,
+            thickness: 0.15,
+            overhang: 0.3,
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+    }
+}
+
 element!(
     /// A roof over a plan — gable, hip, shed or flat — its eaves at its
     /// origin's height: set it on the walls' tops.
     AddRoof, AddRoofParams, "object.add_roof", "Add Roof",
-    {
-        /// Its shape.
-        #[param(variants("gable", "hip", "shed", "flat"))]
-        kind: u32 = 0,
-        /// The plan across the slopes.
-        #[param(min = 0.1, soft_max = 50.0, unit = "length")]
-        width: f64 = 6.0,
-        /// The plan along the ridge.
-        #[param(min = 0.1, soft_max = 50.0, unit = "length")]
-        length: f64 = 8.0,
-        /// From the eaves line up to the ridge.
-        #[param(min = 0.01, soft_max = 10.0, unit = "length")]
-        rise: f64 = 2.0,
-        #[param(min = 0.01, soft_max = 1.0, unit = "length")]
-        thickness: f64 = 0.15,
-        /// How far it reaches past the walls.
-        #[param(min = 0.0, soft_max = 2.0, unit = "length")]
-        overhang: f64 = 0.3,
-    },
     |p| {
         sizes(&[("width", p.width), ("length", p.length), ("rise", p.rise), ("thickness", p.thickness)])?;
         let kind = match p.kind {
@@ -542,13 +716,22 @@ fn build_line(op_id: &str, map: &PropertyMap) -> Result<Built, OpError> {
 pub fn read_line(line: &str) -> Result<crate::script::Call, OpError> {
     let mut registry = crate::operator::OperatorRegistry::new();
     register(&mut registry);
-    let call =
+    let mut call =
         crate::script::parse_call(&registry, line).map_err(|e| OpError::Failed(e.to_string()))?;
     if !ELEMENTS.contains(&call.op_id) {
         return Err(OpError::Failed(format!(
             "`{}` is not an architectural element",
             call.op_id
         )));
+    }
+    // A line from a file is held to the operator's own limits before
+    // anything is built from it, as the panel holds what is typed.
+    if let Some(info) = registry.get(call.op_id) {
+        for desc in info.schema {
+            if let Some(value) = call.params.get(desc.name).cloned() {
+                call.params.set(desc.name, desc.clamp(value));
+            }
+        }
     }
     Ok(call)
 }
@@ -743,6 +926,15 @@ mod tests {
         assert!(h.undo(&mut doc));
         let (lo, hi) = doc.object_world_bounds(id).unwrap();
         assert!((hi.x - lo.x - 1.02).abs() < 1e-4, "undone: {lo} {hi}");
+    }
+
+    /// A line from a file with sizes past the limits is held to them.
+    #[test]
+    fn a_line_past_its_limits_is_held_to_them() {
+        let call = read_line("kreate.ops.object.add_door(height=0.001, panels=99)").unwrap();
+        assert_eq!(call.params.get("height"), Some(&PropertyValue::Float(0.1)));
+        assert_eq!(call.params.get("panels"), Some(&PropertyValue::Int(8)));
+        assert!(build_line(call.op_id, &call.params).is_ok());
     }
 
     /// A line naming something else is refused, and nothing changes.

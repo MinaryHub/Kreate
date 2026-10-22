@@ -105,6 +105,19 @@ impl Pieces {
     }
 }
 
+/// `x` kept between `lo` and `hi`, never failing: parameters come from
+/// files and scripts, and a bound worked out from them — a handle's height
+/// under a door 5 cm tall — can fall below the other. `f32::clamp` stops the
+/// program then; this gives `lo`, as it does for a value that is not a
+/// number.
+fn within(x: f32, lo: f32, hi: f32) -> f32 {
+    if hi >= lo {
+        x.max(lo).min(hi)
+    } else {
+        lo
+    }
+}
+
 fn v(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, y, z)
 }
@@ -166,7 +179,7 @@ pub fn door(d: &Door) -> MeshData {
     p.cuboid(v(-w, -dd, height), v(w, dd, height + f), 1);
     // The leaf, a few millimetres clear of the frame and the floor.
     let gap = 0.003;
-    let l = d.leaf.clamp(0.005, d.depth.max(0.006)) * 0.5;
+    let l = within(d.leaf, 0.005, d.depth) * 0.5;
     p.cuboid(v(-w + gap, -l, gap), v(w - gap, l, height - gap), 0);
     // Raised panels, both faces, stacked with rails between them; two are
     // a short one below and a tall one above, as a panelled door has.
@@ -198,7 +211,7 @@ pub fn door(d: &Door) -> MeshData {
     // A lever each side, near the edge away from the hinges, pointing in.
     let side = if d.handle_right { 1.0 } else { -1.0 };
     let hx = side * (w - 0.07).max(0.0);
-    let hz = d.handle_height.clamp(0.05, height - 0.05);
+    let hz = within(d.handle_height, 0.05, height - 0.05);
     for s in [-1.0f32, 1.0] {
         let rose_y = s * (l + 0.012);
         p.cuboid(
@@ -288,7 +301,7 @@ pub fn window(s: &Window) -> MeshData {
         p.cuboid(v(ix0, -bd, z - bar * 0.5), v(ix1, bd, z + bar * 0.5), 0);
     }
     // The panes: one sheet each, between the bars.
-    let g = (s.glass * 0.5).clamp(0.0005, bd);
+    let g = within(s.glass * 0.5, 0.0005, bd);
     for c in 0..cols {
         for r in 0..rows {
             let x0 = ix0 + col_w * c as f32 + if c > 0 { bar * 0.5 } else { 0.0 };
@@ -342,7 +355,7 @@ pub fn stairs(s: &Stairs) -> MeshData {
         let bottom = if s.solid {
             0.0
         } else {
-            (top - s.tread.clamp(0.005, rise.max(0.006))).max(0.0)
+            (top - within(s.tread, 0.005, rise)).max(0.0)
         };
         p.cuboid(v(-w, y0, bottom), v(w, y0 + run, top), 0);
     }
@@ -429,7 +442,7 @@ impl Default for Railing {
 pub fn railing(r: &Railing) -> MeshData {
     let mut p = Pieces::default();
     let l = r.length * 0.5;
-    let post = r.post.clamp(0.005, r.length * 0.4);
+    let post = within(r.post, 0.005, r.length * 0.4);
     let rail_h = 0.05f32.min(r.height * 0.2);
     let bal = r.baluster.max(0.002);
     let rail = r.rail.max(0.01) * 0.5;
@@ -604,6 +617,68 @@ mod tests {
         assert!(mp.closed, "every piece closed");
         assert!(mp.volume > 0.0, "faces out: {}", mp.volume);
         mp.volume
+    }
+
+    /// Sizes that leave no room — a door lower than its handle, a window
+    /// thinner than its glass, a railing shorter than its posts — and values
+    /// that are not numbers make some shape or none, never a crash: they can
+    /// come from a file.
+    #[test]
+    fn sizes_that_leave_no_room_do_not_crash() {
+        let nan = f32::NAN;
+        door(&Door {
+            height: 0.05,
+            ..Door::default()
+        });
+        door(&Door {
+            height: 0.01,
+            depth: 0.001,
+            leaf: nan,
+            handle_height: nan,
+            ..Door::default()
+        });
+        window(&Window {
+            depth: 0.0001,
+            glass: 1.0,
+            ..Window::default()
+        });
+        window(&Window {
+            depth: nan,
+            frame: nan,
+            bar: nan,
+            ..Window::default()
+        });
+        railing(&Railing {
+            length: 0.001,
+            post: 1.0,
+            ..Railing::default()
+        });
+        railing(&Railing {
+            length: nan,
+            post: nan,
+            spacing: nan,
+            ..Railing::default()
+        });
+        stairs(&Stairs {
+            height: 0.0001,
+            solid: false,
+            tread: 1.0,
+            ..Stairs::default()
+        });
+        column(&Column {
+            height: nan,
+            diameter: nan,
+            base_scale: nan,
+            ..Column::default()
+        });
+        roof(&Roof {
+            width: nan,
+            rise: nan,
+            ..Roof::default()
+        });
+        assert_eq!(within(nan, 1.0, 2.0), 1.0);
+        assert_eq!(within(5.0, 1.0, 0.5), 1.0);
+        assert_eq!(within(1.5, 1.0, 2.0), 1.5);
     }
 
     #[test]
