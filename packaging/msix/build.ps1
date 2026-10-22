@@ -7,6 +7,12 @@
   manifest and the tile images, and packs them with MakeAppx into
   dist\Kreate_<version>_x64.msix.
 
+  Each run raises the version first: the last number of the workspace
+  version in Cargo.toml goes up by one (0.3.0 -> 0.3.1), so every package
+  made is newer than the one before, as the Store requires of an upload,
+  and the application reports the same number. A failed build puts the
+  old version back. -NoBump builds the version as it stands.
+
   The package is unsigned: the Store signs what is uploaded to it. To
   install it on this machine before uploading, pass -CertificatePath with a
   .pfx whose subject is the manifest's Publisher (and trust that
@@ -18,18 +24,36 @@
 param(
     [string]$CertificatePath,
     [string]$CertificatePassword,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$NoBump
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Resolve-Path (Join-Path $here '..\..')
 
-# The Store wants four numbers and the fourth zero: 0.3.0 -> 0.3.0.0.
-$cargo = Get-Content (Join-Path $repo 'Cargo.toml') -Raw
-if ($cargo -notmatch '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)') {
-    throw 'no version in Cargo.toml'
+# The workspace version, raised by one unless -NoBump. Read and written as
+# the file's own text, so nothing but the number changes: no byte-order
+# mark, the same line endings.
+$cargoPath = Join-Path $repo 'Cargo.toml'
+$noBom = New-Object System.Text.UTF8Encoding($false)
+$original = [System.IO.File]::ReadAllText($cargoPath)
+$pattern = '(?m)^(version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")'
+$found = [regex]::Match($original, $pattern)
+if (-not $found.Success) { throw 'no version in Cargo.toml' }
+$major = [int]$found.Groups[2].Value
+$minor = [int]$found.Groups[3].Value
+$patch = [int]$found.Groups[4].Value
+$bumped = $false
+if (-not $NoBump) {
+    $patch += 1
+    $line = $found.Groups[1].Value + "$major.$minor.$patch" + $found.Groups[5].Value
+    $text = $original.Substring(0, $found.Index) + $line +
+        $original.Substring($found.Index + $found.Length)
+    [System.IO.File]::WriteAllText($cargoPath, $text, $noBom)
+    $bumped = $true
 }
-$version = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+# The Store wants four numbers and the fourth zero: 0.3.1 -> 0.3.1.0.
+$version = "$major.$minor.$patch.0"
 Write-Host "Kreate $version"
 
 # The newest SDK that has MakeAppx.
@@ -51,7 +75,11 @@ try {
         cargo build --release -p kreate -p kreate-mcp 2>&1 | ForEach-Object { "$_" }
         $built = $LASTEXITCODE
         $ErrorActionPreference = 'Stop'
-        if ($built -ne 0) { throw 'cargo build failed' }
+        if ($built -ne 0) {
+            # Nothing was made at the new number: it goes back.
+            if ($bumped) { [System.IO.File]::WriteAllText($cargoPath, $original, $noBom) }
+            throw 'cargo build failed'
+        }
     }
 
     $layout = Join-Path $repo 'target\msix\layout'

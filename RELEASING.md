@@ -65,6 +65,24 @@ newer, and puts it in place the next time it starts (`apps/kreate/src/update.rs`
 - A build run from a `target` folder never updates itself (set `KREATE_UPDATE=1`
   to try it); `KREATE_NO_UPDATE=1` turns updates off.
 
+## The Microsoft Store
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\msix\build.ps1
+```
+
+builds `dist\Kreate_X.Y.Z.0_x64.msix` for upload to Partner Center (the
+identity is `minary.Kreate`). **Each run raises PATCH first**, because the Store
+refuses a package that is not newer than the last one; a failed build puts
+the number back, and `-NoBump` builds the number as it stands. The raise is
+left uncommitted: commit it (or cut the release with `scripts/release.sh`,
+which then starts from it) so the number in the Store and the one in the
+repository agree.
+
+A copy installed from the Store never updates itself: its folder is under
+`WindowsApps`, which the updater recognises, and the Store delivers the next
+package.
+
 ## When a release goes wrong
 
 A tag that has been pushed is never moved. Fix forward: the fix goes under
