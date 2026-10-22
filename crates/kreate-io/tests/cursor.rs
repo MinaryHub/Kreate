@@ -272,3 +272,15 @@ fn geometry_nodes_are_saved_with_their_object() {
     let (_, o) = back.objects().find(|(_, o)| o.name == "Body").unwrap();
     assert_eq!(o.geometry_nodes.as_ref(), Some(&graph));
 }
+
+/// An element's line is saved with it, so it can be changed after a reopen.
+#[test]
+fn an_objects_generator_line_is_saved_with_it() {
+    let mut doc = Document::new();
+    let id = doc.add_mesh_object("Door", kreate_mesh::primitives::cube(1.0));
+    let line = "kreate.ops.object.add_door(width=1.2, panels=4)";
+    doc.object_mut(id).unwrap().generator = Some(line.into());
+    let back = round_trip(&doc);
+    let o = back.objects().find(|(_, o)| o.name == "Door").unwrap().1;
+    assert_eq!(o.generator.as_deref(), Some(line));
+}

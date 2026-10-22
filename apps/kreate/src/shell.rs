@@ -6622,6 +6622,52 @@ fn draw_view_info(
 /// What the active object weighs: its volume, surface and middle as it is
 /// evaluated, in the world and the scene's unit, and its mass at the scene's
 /// density, which is edited here.
+/// An architectural element's parameters, read back from the line that
+/// made it: changed here, the element is made again in place
+/// (`object.arch_set`), a drag one undo step.
+fn draw_arch_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    registry: &OperatorRegistry,
+    object: &kreate_scene::document::Object,
+) {
+    let Some(line) = &object.generator else {
+        return;
+    };
+    let Ok(call) = kreate_ops::ops::arch::read_line(line) else {
+        return;
+    };
+    let Some(info) = registry.get(call.op_id) else {
+        return;
+    };
+    // What the line leaves out is its default.
+    let mut params = info.defaults();
+    for (name, value) in call.params.iter() {
+        params.set(name, value.clone());
+    }
+    let title = state.catalog.get("panel-architecture");
+    let mut changed = false;
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        changed = kreate_ui::property_editor_where(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+            |name| name != "location" && name != "rotation",
+        );
+    });
+    if changed {
+        let mut p = PropertyMap::new();
+        p.set(
+            "call",
+            kreate_reflect::PropertyValue::Text(params.to_script_call(info.id)),
+        );
+        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        send_edit(state, "object.arch_set", p, dragging);
+    }
+}
+
 fn draw_physical_panel(
     ui: &mut Ui,
     state: &mut ShellState,
@@ -11381,6 +11427,7 @@ fn draw_object_tab(
     kreate_ui::panel::section(ui, &l.panel_transform, true, |ui| {
         draw_object_transform(ui, state, doc, info, object, params, l);
     });
+    draw_arch_panel(ui, state, registry, active);
     draw_follow_path_panel(ui, state, doc, registry, l, active);
     draw_robot_panel(ui, state, doc, object);
     draw_physical_panel(ui, state, doc, registry);
@@ -16404,6 +16451,7 @@ mod tests {
             "menu-add-empty",
             "menu-add-text",
             "menu-add-manufacturing",
+            "panel-architecture",
             "menu-add-architecture",
             "menu-add-wall",
             "menu-add-door",

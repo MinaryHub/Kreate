@@ -367,6 +367,10 @@ pub struct ObjectRecord {
     /// The curve it follows as the clock runs, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<FollowPathRecord>,
+    /// The script line that made its mesh, for its parameters to be changed
+    /// after. See `Object::generator`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
     /// Per-slot materials that win over the mesh's, as indices into
     /// [`SceneFile::materials`].
     ///
@@ -2385,6 +2389,7 @@ pub fn write(
                     follow: p.follow,
                     cyclic: p.cyclic,
                 }),
+                generator: object.generator.clone(),
                 material_overrides: object
                     .material_overrides
                     .iter()
@@ -3141,6 +3146,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             object.physics = crate::physics_record::read(p);
         }
         object.robot = record.robot.as_ref().map(RobotRecord::read);
+        object.generator = record.generator.clone();
         object.curve = record.curve.as_ref().map(CurveObjectRecord::read);
         object.path = record
             .path

@@ -231,6 +231,11 @@ pub struct Object {
     /// Carried along a curve object as the clock runs. See
     /// [`crate::curve::FollowPath`].
     pub path: Option<crate::curve::FollowPath>,
+    /// The script line that made its mesh — `object.add_door(width=0.9, …)`
+    /// — kept so its parameters can be changed after (the Properties
+    /// editor's Architecture panel), which makes the mesh again. Where it
+    /// stands is not in it: that is the object's transform.
+    pub generator: Option<String>,
 }
 
 impl Object {
@@ -267,6 +272,7 @@ impl Object {
             robot: None,
             curve: None,
             path: None,
+            generator: None,
         }
     }
 
