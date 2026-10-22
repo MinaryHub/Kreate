@@ -64,10 +64,23 @@ pub fn enabled(exe: &Path) -> bool {
     if std::env::var_os("KREATE_NO_UPDATE").is_some_and(|v| v != "0") {
         return false;
     }
+    // Installed from an MSIX package — the Microsoft Store's — the Store
+    // updates it. Its folder is read-only besides, and an update staged
+    // beside it would run a second copy outside the package.
+    if packaged(exe) {
+        return false;
+    }
     if std::env::var_os("KREATE_UPDATE").is_some_and(|v| v == "1") {
         return true;
     }
     !exe.components().any(|c| c.as_os_str() == "target")
+}
+
+/// Whether `exe` runs from an MSIX package: Windows installs every package
+/// under a `WindowsApps` folder, and nothing else lives there.
+pub fn packaged(exe: &Path) -> bool {
+    exe.components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
 }
 
 /// `%LOCALAPPDATA%\Kreate\update`, beside the autosaves: machine-local and
@@ -363,6 +376,19 @@ mod tests {
             "not twice"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A copy installed from the Store is updated by the Store, never by
+    /// itself; a copy unpacked anywhere else updates itself.
+    #[test]
+    fn a_packaged_copy_does_not_update_itself() {
+        let store = Path::new(
+            r"C:\Program Files\WindowsApps\minary.Kreate_0.3.0.0_x64__ws153ybhdqgam\kreate.exe",
+        );
+        assert!(packaged(store));
+        assert!(!enabled(store));
+        let unpacked = Path::new(r"C:\Users\me\Apps\Kreate\kreate.exe");
+        assert!(!packaged(unpacked));
     }
 
     #[test]

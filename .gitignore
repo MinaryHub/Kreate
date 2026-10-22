@@ -9,3 +9,4 @@
 # the .dc.html sources beside it by the design tooling.
 /design/*.html
 !/design/*.dc.html
+/dist
