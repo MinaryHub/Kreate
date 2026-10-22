@@ -378,11 +378,12 @@ fn unit_expr(field: &Field) -> Result<String, String> {
         "angle" => "Unit::Angle",
         "factor" => "Unit::Factor",
         "count" => "Unit::Count",
+        "font" => "Unit::Font",
         other => {
             return Err(format!(
-                "unknown unit {other:?} on `{}`; expected none, length, angle, factor or count",
-                field.name
-            ))
+            "unknown unit {other:?} on `{}`; expected none, length, angle, factor, count or font",
+            field.name
+        ))
         }
     }
     .to_string())

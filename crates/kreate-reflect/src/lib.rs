@@ -181,6 +181,8 @@ pub enum Unit {
     Factor,
     /// A count.
     Count,
+    /// A font, by its name: text offered as the fonts this computer has.
+    Font,
 }
 
 /// The unit lengths are shown and typed in — the scene's, as Blender keeps it.

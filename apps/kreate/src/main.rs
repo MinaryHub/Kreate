@@ -1011,6 +1011,8 @@ struct App {
     chat_record: Option<kreate::chatlog::Record>,
     /// Waiting for a click on a flat face, to start a sketch on it.
     sketch_face_pick: bool,
+    /// Waiting for a click on a surface, or the floor, to put text there.
+    text_place: bool,
     /// The sketch the camera was last turned to face, so entering turns it
     /// once and leaves the user's own orbit alone after.
     sketch_faced: Option<kreate_scene::Uid>,
@@ -1238,6 +1240,7 @@ impl App {
             sketch_waiting: false,
             chat_record: None,
             sketch_face_pick: false,
+            text_place: false,
             sketch_faced: None,
             sketch_pinned: (0, Vec::new()),
             measure: None,
@@ -2072,7 +2075,7 @@ impl App {
                 let other = vec![
                     row(self, t("menu-add-camera"), "object.add_camera", &[]),
                     row(self, t("menu-add-empty"), "object.add_empty", &[]),
-                    row(self, t("menu-add-text"), "object.add_text", &[]),
+                    row(self, t("menu-add-text"), "app.place_text", &[]),
                     row(self, t("menu-add-armature"), "object.add_armature", &[]),
                 ];
                 vec![
@@ -3462,6 +3465,75 @@ impl App {
         if kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_none() {
             self.sketch_waiting = false;
         }
+    }
+
+    /// Puts text where the pointer is: on the surface under it, lying on that
+    /// face and reading along it level; past every surface, on the floor;
+    /// and with the floor out of sight, on the plane through the 3D cursor
+    /// facing the view. One `object.add_text`, its place and turn given, so
+    /// it is one undo step and replays where it went.
+    fn place_text_under_cursor(&mut self) {
+        self.text_place = false;
+        let Some(ndc) = self.cursor_ndc() else { return };
+        let aspect = self.viewport_aspect();
+        self.evaluate_scene();
+        let eye = self.camera.eye();
+        let dir = self.camera.ray_direction(ndc, aspect).as_dvec3();
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect);
+        let (at, normal) = match hit {
+            Some(hit) => {
+                let normal = self
+                    .surface_normal(hit.object, hit.face)
+                    .unwrap_or(DVec3::Z);
+                // The face's front: text on the side the view is on.
+                let normal = if normal.dot(dir) > 0.0 {
+                    -normal
+                } else {
+                    normal
+                };
+                (hit.point, normal)
+            }
+            None if dir.z.abs() > 1e-9 && -eye.z / dir.z > 0.0 => {
+                (eye + dir * (-eye.z / dir.z), DVec3::Z)
+            }
+            None => {
+                let normal = self.camera.forward();
+                let denom = dir.dot(normal);
+                if denom.abs() < 1e-9 {
+                    return;
+                }
+                let at = eye + dir * ((self.doc.cursor - eye).dot(normal) / denom);
+                (at, -normal)
+            }
+        };
+        let turn = work_plane_turn(normal);
+        let mut params = PropertyMap::new();
+        params.set("location", PropertyValue::Vec3(at.to_array()));
+        params.set(
+            "rotation",
+            PropertyValue::Vec3(kreate_scene::animation::to_euler(turn).to_array()),
+        );
+        self.status("");
+        self.run_op("object.add_text", params);
+    }
+
+    /// The outward normal, in the world, of face `face` of object `id`'s
+    /// evaluated mesh — the face a pick names.
+    fn surface_normal(&self, id: ObjectId, face: u32) -> Option<DVec3> {
+        let mesh = &self.evaluated.iter().find(|(o, _)| *o == id)?.1;
+        let corners = mesh.faces().nth(face as usize)?;
+        let p = mesh.positions();
+        let mut n = DVec3::ZERO;
+        for i in 0..corners.len() {
+            let a = p.get(corners[i] as usize)?.as_dvec3();
+            let b = p.get(corners[(i + 1) % corners.len()] as usize)?.as_dvec3();
+            n += a.cross(b);
+        }
+        let world = self.doc.world_transform(id);
+        let n = world.matrix3.inverse().transpose() * n;
+        (n.length() > 1e-12).then(|| n.normalize())
     }
 
     /// Shift+Right-click: the 3D cursor onto whatever is under the pointer, or
@@ -5243,6 +5315,12 @@ impl App {
                     }
                     Tool::Point => {
                         self.run_op_with("sketch.point", &[("at", v3(p))]);
+                        self.sketch_tool_done();
+                    }
+                    // Text goes where it is clicked; its words and font are
+                    // then the last operation's to change.
+                    Tool::Text => {
+                        self.run_op_with("sketch.text", &[("at", v3(p))]);
                         self.sketch_tool_done();
                     }
                     // Trim stays in hand: one click a piece, as many as there are.
@@ -12230,6 +12308,11 @@ impl App {
             self.end_circle_select();
             return;
         }
+        if self.text_place && code == KeyCode::Escape {
+            self.text_place = false;
+            self.status("");
+            return;
+        }
         if self.mate.is_some() && code == KeyCode::Escape {
             self.mate = None;
             self.status("Align Faces cancelled");
@@ -12406,6 +12489,12 @@ impl App {
             // face to give a direction, move freely.
             // Alt+E's rows: the same gesture, along the region's normal or
             // each face's own.
+            // Add > Text: the next click puts it where it lands.
+            "app.place_text" => {
+                self.text_place = true;
+                let message = self.ui.catalog.get("text-place-prompt");
+                self.status(&message);
+            }
             // A sketch on a face: the next click picks the face.
             "app.sketch_on_face" => {
                 self.sketch_face_pick = true;
@@ -13594,6 +13683,21 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // Putting text: left puts it under the pointer, right gives up.
+                if self.text_place && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.place_text_under_cursor();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.text_place = false;
+                            self.status("");
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // Picking a face to sketch on: left takes the face under
                 // the pointer, right gives up.
                 if self.sketch_face_pick && pressed {
@@ -14574,6 +14678,12 @@ fn write_beside(path: &std::path::Path, files: &[(String, Vec<u8>)]) -> Result<(
 fn main() {
     // To the console and to the day's file in the settings folder's `logs`.
     kreate::logs::init();
+
+    // The computer's fonts, listed on the side: the first text's font menu
+    // then opens at once rather than after a second's look through them.
+    let _ = std::thread::Builder::new().name("fonts".into()).spawn(|| {
+        kreate_mesh::text::fonts();
+    });
 
     // The interface is in English. `--lang ko` still switches it, for the
     // Korean catalogue that is kept and tested.
@@ -17188,6 +17298,56 @@ kreate.ops.object.add_primitive()" }),
         assert!(object.features.is_empty());
         let mesh = app.doc.mesh(object.mesh().unwrap()).unwrap();
         assert_eq!(mesh.num_faces(), 6);
+    }
+
+    /// Add > Text waits for a click and puts the text there: on the
+    /// surface under the pointer, lying on it facing the view; on the
+    /// floor where there is none. One step each.
+    #[test]
+    fn text_is_put_where_it_is_clicked() {
+        let mut app = app();
+        with_viewport(&mut app);
+        app.camera.pivot = DVec3::ZERO;
+        app.doc
+            .add_mesh_object("Block", kreate_mesh::primitives::cube(2.0));
+        app.evaluate_scene();
+        app.dispatch(&Action::new("app.place_text"));
+        assert!(app.text_place);
+        app.place_text_under_cursor();
+        assert!(!app.text_place);
+        let text = app.doc.selection.active.expect("text added");
+        let o = app.doc.object(text).unwrap();
+        assert!(o.name.starts_with("Text"), "{}", o.name);
+        let at = o.transform.translation;
+        let up = o.transform.rotation * DVec3::Z;
+        // On the block's surface: one coordinate at its half-size, and the
+        // text's Z out of that face, toward the eye.
+        let on_face = [at.x, at.y, at.z]
+            .iter()
+            .any(|c| (c.abs() - 1.0).abs() < 1e-6);
+        assert!(on_face, "{at}");
+        assert!(up.dot(app.camera.eye() - at) > 0.0, "facing the view: {up}");
+        assert!((up.length() - 1.0).abs() < 1e-9);
+
+        // Nothing under the pointer: on the floor, lying flat.
+        let block = app
+            .doc
+            .objects()
+            .find(|(_, o)| o.name == "Block")
+            .map(|(id, _)| id)
+            .unwrap();
+        app.doc.remove_object(block);
+        app.evaluate_scene();
+        app.dispatch(&Action::new("app.place_text"));
+        app.place_text_under_cursor();
+        let text = app.doc.selection.active.unwrap();
+        let o = app.doc.object(text).unwrap();
+        assert!(
+            o.transform.translation.z.abs() < 1e-6,
+            "{}",
+            o.transform.translation
+        );
+        assert!((o.transform.rotation * DVec3::Z - DVec3::Z).length() < 1e-9);
     }
 
     #[test]

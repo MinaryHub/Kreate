@@ -1934,7 +1934,6 @@ struct Labels {
     dissolve_limited: String,
     edges_to_sketch: String,
     sketch_construction: String,
-    sketch_text: String,
     design_section: String,
     design_parameters: String,
     param_name: String,
@@ -2347,7 +2346,6 @@ impl Labels {
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
             sketch_construction: t("sketch-construction"),
-            sketch_text: t("sketch-text"),
             design_section: t("design-section"),
             design_parameters: t("design-parameters"),
             param_name: t("param-name"),
@@ -4697,11 +4695,11 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "point",
                         "fillet",
                         "trim",
+                        "text",
                     ],
                 )
                 .into_iter()
                 .chain([
-                    entry("sketch.text", &l.sketch_text, op("sketch.text", &[])),
                     MenuNode::Separator,
                     entry(
                         "app.sketch_construction",
@@ -5145,7 +5143,11 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Sub(l.add_manufacturing.clone(), manufacturing),
         MenuNode::Sub(l.add_architecture.clone(), architecture),
         MenuNode::Separator,
-        entry("object.add_text", &l.add_text, op("object.add_text", &[])),
+        entry(
+            "app.place_text",
+            &l.add_text,
+            Run::Dispatch("app.place_text", PropertyMap::new()),
+        ),
         entry(
             "object.add_camera",
             &l.add_camera,
@@ -14259,7 +14261,7 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 26] = [
+const SKETCH_TOOLS: [&str; 27] = [
     "select",
     "pattern",
     "line",
@@ -14286,6 +14288,7 @@ const SKETCH_TOOLS: [&str; 26] = [
     "fixed",
     "extrude",
     "revolve",
+    "text",
 ];
 
 /// Menu entries that take up sketch tools, by name.
@@ -16410,7 +16413,6 @@ mod tests {
             "menu-add-railing",
             "menu-add-slab",
             "menu-add-roof",
-            "sketch-text",
             "menu-add-curve",
             "design-parameters",
             "sketch-construction",

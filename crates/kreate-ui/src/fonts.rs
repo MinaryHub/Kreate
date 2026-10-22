@@ -47,7 +47,7 @@ pub const PRETENDARD: &[u8] = kreate_mesh::text::DEFAULT_FONT;
 
 /// The embedded monospaced face, for numbers and script text: IBM Plex
 /// Mono, under the SIL Open Font License (see its licence beside it).
-pub const PLEX_MONO: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf");
+pub const PLEX_MONO: &[u8] = kreate_mesh::text::MONO_FONT;
 
 /// Family names, in resolution order.
 pub mod family {

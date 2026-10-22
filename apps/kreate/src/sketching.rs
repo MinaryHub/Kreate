@@ -45,6 +45,8 @@ pub enum Tool {
     Revolve,
     /// Copies of what is selected, in rows and columns or round a centre.
     Pattern,
+    /// Text, put where it is clicked.
+    Text,
 }
 
 impl Tool {
@@ -68,6 +70,7 @@ impl Tool {
             "extrude" => Tool::Extrude,
             "revolve" => Tool::Revolve,
             "pattern" => Tool::Pattern,
+            "text" => Tool::Text,
             "coincident" => Tool::Constrain("coincident"),
             "horizontal" => Tool::Constrain("horizontal"),
             "vertical" => Tool::Constrain("vertical"),
@@ -100,6 +103,7 @@ impl Tool {
             Tool::Extrude => "extrude",
             Tool::Revolve => "revolve",
             Tool::Pattern => "pattern",
+            Tool::Text => "text",
             Tool::Constrain(kind) => kind,
         }
     }
@@ -1138,6 +1142,7 @@ pub fn view(
         (Tool::Arc, 1) => "sketch-prompt-arc-end",
         (Tool::Arc, _) => "sketch-prompt-arc-through",
         (Tool::Point, _) => "sketch-prompt-point",
+        (Tool::Text, _) => "sketch-prompt-text",
         (Tool::Polygon, 0) => "sketch-prompt-centre",
         (Tool::Polygon, _) => "sketch-prompt-polygon-corner",
         (Tool::Slot, 0) => "sketch-prompt-slot-start",

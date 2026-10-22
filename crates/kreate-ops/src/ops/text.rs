@@ -1,8 +1,11 @@
 //! Text: a string's letters as a solid object, and as lines in a sketch.
 //!
-//! Both read the bundled font (`kreate_mesh::text::DEFAULT_FONT`, Latin and
-//! all of Hangul). Neither reads a font from a file: an operator that
-//! touches the disk does not replay, and the history is a script.
+//! Both set it in a font named by its parameter: the two the program
+//! carries (Pretendard, Latin and all of Hangul, the default; IBM Plex Mono)
+//! or one of the computer's (`kreate_mesh::text::fonts`). A font is named,
+//! not embedded, so a script replays wherever that font is installed — and
+//! where it is not, the text comes out in the default, said so, rather than
+//! not at all.
 
 use kreate_math::{DQuat, DVec2, DVec3};
 use kreate_mesh::text::{self, Align};
@@ -25,7 +28,13 @@ fn align_of(v: u32) -> Align {
 }
 
 /// The layout, or why there is none; characters the font lacks are said.
-fn laid_out(body: &str, size: f64, align: u32, spacing: f64) -> Result<text::Layout, OpError> {
+fn laid_out(
+    font: &str,
+    body: &str,
+    size: f64,
+    align: u32,
+    spacing: f64,
+) -> Result<text::Layout, OpError> {
     if body.trim().is_empty() {
         return Err(OpError::Failed("there is no text to write".into()));
     }
@@ -37,8 +46,19 @@ fn laid_out(body: &str, size: f64, align: u32, spacing: f64) -> Result<text::Lay
     } else {
         1.0
     };
-    let l = text::layout(
-        text::DEFAULT_FONT,
+    let (bytes, index) = match text::font_data(font) {
+        Some(found) => found,
+        None => {
+            crate::report::say(format!(
+                "there is no font called {font:?} here: set in {}",
+                text::DEFAULT_FONT_NAME
+            ));
+            text::font_data("").expect("the default is bundled")
+        }
+    };
+    let l = text::layout_face(
+        &bytes,
+        index,
         body,
         size as f32,
         align_of(align),
@@ -63,6 +83,9 @@ fn laid_out(body: &str, size: f64, align: u32, spacing: f64) -> Result<text::Lay
 pub struct AddTextParams {
     /// What it says; a line break starts a new line.
     pub text: String,
+    /// The font, by name: the program's own or one this computer has.
+    #[param(unit = "font")]
+    pub font: String,
     /// The font's size (its em): a capital stands about seven tenths of it.
     #[param(min = 0.0001, soft_max = 1.0, unit = "length")]
     pub size: f64,
@@ -88,6 +111,7 @@ impl Default for AddTextParams {
     fn default() -> Self {
         Self {
             text: "Text".into(),
+            font: text::DEFAULT_FONT_NAME.into(),
             size: 0.02,
             depth: 0.002,
             align: 0,
@@ -116,7 +140,13 @@ impl Operator for AddText {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let l = laid_out(&params.text, params.size, params.align, params.line_spacing)?;
+        let l = laid_out(
+            &params.font,
+            &params.text,
+            params.size,
+            params.align,
+            params.line_spacing,
+        )?;
         let mesh = text::solid(&l, params.depth.max(0.0) as f32);
         if mesh.num_faces() == 0 {
             return Err(OpError::Failed("the letters made no faces".into()));
@@ -155,6 +185,9 @@ impl Operator for AddText {
 pub struct SketchTextParams {
     /// What it says; a line break starts a new line.
     pub text: String,
+    /// The font, by name: the program's own or one this computer has.
+    #[param(unit = "font")]
+    pub font: String,
     /// The font's size (its em): a capital stands about seven tenths of it.
     #[param(min = 0.0001, soft_max = 1.0, unit = "length")]
     pub size: f64,
@@ -174,6 +207,7 @@ impl Default for SketchTextParams {
     fn default() -> Self {
         Self {
             text: "Text".into(),
+            font: text::DEFAULT_FONT_NAME.into(),
             size: 0.01,
             at: [0.0; 3],
             align: 1,
@@ -205,7 +239,13 @@ impl Operator for SketchText {
     ) -> Result<OpResult, OpError> {
         let id = crate::ops::sketch_draw::active_sketch(doc.document())
             .ok_or_else(|| OpError::Failed("no sketch is being drawn".into()))?;
-        let l = laid_out(&params.text, params.size, params.align, params.line_spacing)?;
+        let l = laid_out(
+            &params.font,
+            &params.text,
+            params.size,
+            params.align,
+            params.line_spacing,
+        )?;
         let at = DVec2::new(params.at[0], params.at[1]);
         let mut pts = crate::ops::sketch_draw::points(doc.document(), id);
         let mut lines = Vec::new();
@@ -283,6 +323,44 @@ mod tests {
         );
         assert!(h.undo(&mut doc));
         assert_eq!(doc.object_count(), 0);
+    }
+
+    /// The font is a parameter: the mono face sets wider letters than the
+    /// default, and a font this computer lacks falls back to the default.
+    #[test]
+    fn the_font_is_chosen_by_name() {
+        let (r, mut h, mut doc) = setup();
+        let width = |doc: &Document| {
+            let id = doc.selection.active.unwrap();
+            let (lo, hi) = doc.object_world_bounds(id).unwrap();
+            hi.x - lo.x
+        };
+        let mut add = |doc: &mut Document, font: &str| {
+            run(
+                &r,
+                &mut h,
+                doc,
+                "object.add_text",
+                &[
+                    ("text", PropertyValue::Text("iiii".into())),
+                    ("font", PropertyValue::Text(font.into())),
+                ],
+            )
+            .unwrap();
+        };
+        add(&mut doc, text::DEFAULT_FONT_NAME);
+        let sans = width(&doc);
+        add(&mut doc, text::MONO_FONT_NAME);
+        let mono = width(&doc);
+        assert!(
+            mono > sans * 1.5,
+            "a monospaced i is as wide as an m: {mono} {sans}"
+        );
+        add(&mut doc, "No Such Font 12345");
+        assert!(
+            (width(&doc) - sans).abs() < 1e-9,
+            "the default, when the font is missing"
+        );
     }
 
     /// Empty text is refused with a reason rather than making nothing.

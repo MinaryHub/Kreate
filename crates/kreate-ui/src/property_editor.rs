@@ -34,7 +34,7 @@ pub struct UnitDisplay {
 impl UnitDisplay {
     pub fn of(unit: Unit) -> Self {
         match unit {
-            Unit::None => Self {
+            Unit::None | Unit::Font => Self {
                 to_display: 1.0,
                 suffix: "",
                 default_step: 0.01,
@@ -562,6 +562,35 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
         (PropertyKind::Text, Some(PropertyValue::Text(v))) if v.len() > LONGEST_TYPED => {
             // i18n-exempt: a byte count
             ui.weak(format!("{} bytes", v.len()));
+        }
+        // A font: picked from the computer's, by name, with a filter to
+        // type into — a system has hundreds.
+        (PropertyKind::Text, Some(PropertyValue::Text(v))) if desc.unit == Unit::Font => {
+            let shown = if v.trim().is_empty() {
+                kreate_mesh::text::DEFAULT_FONT_NAME.to_string()
+            } else {
+                v.clone()
+            };
+            let filter_id = ui.make_persistent_id((desc.name, "font-filter"));
+            let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+            egui::ComboBox::from_id_salt((desc.name, "font"))
+                .selected_text(&shown)
+                .width(ui.available_width().clamp(120.0, 260.0))
+                .height(320.0)
+                .show_ui(ui, |ui| {
+                    ui.text_edit_singleline(&mut filter);
+                    let needle = filter.to_lowercase();
+                    for name in kreate_mesh::text::font_names() {
+                        if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
+                            continue;
+                        }
+                        if ui.selectable_label(name == shown, &name).clicked() {
+                            values.set(desc.name, PropertyValue::Text(name));
+                            changed = true;
+                        }
+                    }
+                });
+            ui.data_mut(|d| d.insert_temp(filter_id, filter));
         }
         (PropertyKind::Text, Some(PropertyValue::Text(v))) => {
             let mut text = v;
