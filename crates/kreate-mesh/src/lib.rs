@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod arch;
 pub mod arena;
 pub mod attribute;
 pub mod bmesh;

@@ -1276,6 +1276,14 @@ impl App {
                 | "object.add_armature"
                 | "object.add_gear"
                 | "object.add_text"
+                | "object.add_wall"
+                | "object.add_door"
+                | "object.add_window"
+                | "object.add_stairs"
+                | "object.add_column"
+                | "object.add_railing"
+                | "object.add_slab"
+                | "object.add_roof"
         ) && params.get("location").is_none()
         {
             let spot = self.free_spot(self.doc.cursor);
@@ -1990,15 +1998,77 @@ impl App {
                     "menu-add-gear-bevel",
                     "menu-add-gear-worm",
                 ];
-                let mut mesh: Vec<_> = mesh;
-                for (kind, key) in gears.iter().enumerate() {
-                    mesh.push(row(
-                        self,
-                        t(key),
-                        "object.add_gear",
-                        &[("kind", PropertyValue::Enum(kind as u32))],
-                    ));
+                // Gears and the parts they run with: the Manufacturing group.
+                let mut manufacturing: Vec<_> = gears
+                    .iter()
+                    .enumerate()
+                    .map(|(kind, key)| {
+                        row(
+                            self,
+                            t(key),
+                            "object.add_gear",
+                            &[("kind", PropertyValue::Enum(kind as u32))],
+                        )
+                    })
+                    .collect();
+                for (key, id, pairs) in [
+                    ("mech-bearing", "object.add_bearing", None),
+                    ("mech-shaft", "object.add_shaft", None),
+                    ("mech-pulley", "object.add_pulley", None),
+                    ("mech-sprocket", "object.add_sprocket", None),
+                    (
+                        "mech-spring-compression",
+                        "object.add_spring",
+                        Some(("kind", PropertyValue::Enum(0))),
+                    ),
+                    (
+                        "mech-spring-extension",
+                        "object.add_spring",
+                        Some(("kind", PropertyValue::Enum(1))),
+                    ),
+                    (
+                        "mech-spring-torsion",
+                        "object.add_spring",
+                        Some(("kind", PropertyValue::Enum(2))),
+                    ),
+                    (
+                        "mech-cap-screw",
+                        "object.add_fastener",
+                        Some(("kind", PropertyValue::Enum(0))),
+                    ),
+                    (
+                        "mech-hex-bolt",
+                        "object.add_fastener",
+                        Some(("kind", PropertyValue::Enum(1))),
+                    ),
+                    (
+                        "mech-nut",
+                        "object.add_fastener",
+                        Some(("kind", PropertyValue::Enum(2))),
+                    ),
+                    (
+                        "mech-washer",
+                        "object.add_fastener",
+                        Some(("kind", PropertyValue::Enum(3))),
+                    ),
+                    (
+                        "mech-sheet-folded",
+                        "object.add_sheet_metal",
+                        Some(("flat", PropertyValue::Bool(false))),
+                    ),
+                    (
+                        "mech-sheet-flat",
+                        "object.add_sheet_metal",
+                        Some(("flat", PropertyValue::Bool(true))),
+                    ),
+                ] {
+                    let pairs: Vec<(&'static str, PropertyValue)> = pairs.into_iter().collect();
+                    manufacturing.push(row(self, t(key), id, &pairs));
                 }
+                let architecture: Vec<_> = kreate::shell::ADD_ARCHITECTURE
+                    .iter()
+                    .map(|(id, key)| row(self, t(key), id, &[]))
+                    .collect();
                 let other = vec![
                     row(self, t("menu-add-camera"), "object.add_camera", &[]),
                     row(self, t("menu-add-empty"), "object.add_empty", &[]),
@@ -2013,6 +2083,14 @@ impl App {
                     Group {
                         title: t("menu-add-light"),
                         entries: lights,
+                    },
+                    Group {
+                        title: t("menu-add-manufacturing"),
+                        entries: manufacturing,
+                    },
+                    Group {
+                        title: t("menu-add-architecture"),
+                        entries: architecture,
                     },
                     Group {
                         title: String::new(),
@@ -14738,7 +14816,15 @@ impl AppParams {
             | "object.add_empty"
             | "object.add_armature"
             | "object.add_gear"
-            | "object.add_text" => Some(DVec3::ZERO),
+            | "object.add_text"
+            | "object.add_wall"
+            | "object.add_door"
+            | "object.add_window"
+            | "object.add_stairs"
+            | "object.add_column"
+            | "object.add_railing"
+            | "object.add_slab"
+            | "object.add_roof" => Some(DVec3::ZERO),
             "object.add_light" => Some(DVec3::new(0.0, 0.0, 4.0)),
             "object.add_camera" => Some(DVec3::new(0.0, -8.0, 2.0)),
             _ => None,

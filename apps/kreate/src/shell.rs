@@ -1777,6 +1777,11 @@ struct Labels {
     add_shapes: [String; 8],
     /// Each kind of gear the Add menu makes, in `object.add_gear`'s order.
     add_gears: [String; 5],
+    add_manufacturing: String,
+    add_architecture: String,
+    /// One per entry of `ADD_ARCHITECTURE`.
+    add_arch: [String; 8],
+    add_text: String,
     /// The Mechanical menu's names, by their catalogue key.
     mech: std::collections::BTreeMap<&'static str, String>,
     shading_studio: String,
@@ -2191,6 +2196,10 @@ impl Labels {
                 t("menu-add-gear-bevel"),
                 t("menu-add-gear-worm"),
             ],
+            add_manufacturing: t("menu-add-manufacturing"),
+            add_architecture: t("menu-add-architecture"),
+            add_arch: ADD_ARCHITECTURE.map(|(_, key)| t(key)),
+            add_text: t("menu-add-text"),
             shading_studio: t("shading-studio"),
             shading_flat: t("shading-flat"),
             shading_wireframe: t("shading-wireframe"),
@@ -5083,13 +5092,12 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
         )
     })
     .collect();
-    let mut shapes = shapes;
-    // Parts, not primitives: ISO gears of each kind, set up in the panel
-    // after.
-    shapes.push(MenuNode::Separator);
+    // Parts, not primitives, in a group of their own: ISO gears of each
+    // kind, then what they run on and with — the Mechanical menu's parts.
+    let mut manufacturing: Vec<MenuNode> = Vec::new();
     for (kind, label) in l.add_gears.iter().enumerate() {
         let value = V::Enum(kind as u32);
-        shapes.push(MenuNode::Entry(
+        manufacturing.push(MenuNode::Entry(
             MenuEntry::new(
                 "object.add_gear",
                 label,
@@ -5098,6 +5106,26 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
             .variant("kind", value),
         ));
     }
+    for group in ADD_MANUFACTURING_PARTS {
+        manufacturing.push(MenuNode::Separator);
+        for (key, id, arg) in *group {
+            let (pairs, variant) = match *arg {
+                MechArg::None => (Vec::new(), None),
+                MechArg::Enum(n, v) => (vec![(n, V::Enum(v))], Some((n, V::Enum(v)))),
+                MechArg::Bool(n, v) => (vec![(n, V::Bool(v))], Some((n, V::Bool(v)))),
+            };
+            let mut e = MenuEntry::new(id, &l.m(key), op(id, &pairs));
+            if let Some((n, v)) = variant {
+                e = e.variant(n, v);
+            }
+            manufacturing.push(MenuNode::Entry(e));
+        }
+    }
+    let architecture: Vec<MenuNode> = ADD_ARCHITECTURE
+        .iter()
+        .zip(&l.add_arch)
+        .map(|((id, _), label)| entry(id, label, op(id, &[])))
+        .collect();
     let curves: Vec<MenuNode> = (0..4u32)
         .map(|shape| {
             MenuNode::Entry(
@@ -5114,7 +5142,10 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
         MenuNode::Sub(l.add_mesh.clone(), shapes),
         MenuNode::Sub(l.add_curve.clone(), curves),
         MenuNode::Sub(l.add_light.clone(), lights),
+        MenuNode::Sub(l.add_manufacturing.clone(), manufacturing),
+        MenuNode::Sub(l.add_architecture.clone(), architecture),
         MenuNode::Separator,
+        entry("object.add_text", &l.add_text, op("object.add_text", &[])),
         entry(
             "object.add_camera",
             &l.add_camera,
@@ -5132,6 +5163,77 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
         ),
     ]
 }
+
+/// The Add menu's Architecture group: each element's operator and name key.
+pub const ADD_ARCHITECTURE: [(&str, &str); 8] = [
+    ("object.add_wall", "menu-add-wall"),
+    ("object.add_door", "menu-add-door"),
+    ("object.add_window", "menu-add-window"),
+    ("object.add_stairs", "menu-add-stairs"),
+    ("object.add_column", "menu-add-column"),
+    ("object.add_railing", "menu-add-railing"),
+    ("object.add_slab", "menu-add-slab"),
+    ("object.add_roof", "menu-add-roof"),
+];
+
+/// The parts the Add menu's Manufacturing group holds after the gears, in
+/// groups: what a gear runs on, its springs, its fasteners, sheet metal.
+/// The same entries, names and arguments as the Mechanical menu's.
+const ADD_MANUFACTURING_PARTS: &[&[MechEntry]] = &[
+    &[
+        ("mech-bearing", "object.add_bearing", MechArg::None),
+        ("mech-shaft", "object.add_shaft", MechArg::None),
+        ("mech-pulley", "object.add_pulley", MechArg::None),
+        ("mech-sprocket", "object.add_sprocket", MechArg::None),
+    ],
+    &[
+        (
+            "mech-spring-compression",
+            "object.add_spring",
+            MechArg::Enum("kind", 0),
+        ),
+        (
+            "mech-spring-extension",
+            "object.add_spring",
+            MechArg::Enum("kind", 1),
+        ),
+        (
+            "mech-spring-torsion",
+            "object.add_spring",
+            MechArg::Enum("kind", 2),
+        ),
+    ],
+    &[
+        (
+            "mech-cap-screw",
+            "object.add_fastener",
+            MechArg::Enum("kind", 0),
+        ),
+        (
+            "mech-hex-bolt",
+            "object.add_fastener",
+            MechArg::Enum("kind", 1),
+        ),
+        ("mech-nut", "object.add_fastener", MechArg::Enum("kind", 2)),
+        (
+            "mech-washer",
+            "object.add_fastener",
+            MechArg::Enum("kind", 3),
+        ),
+    ],
+    &[
+        (
+            "mech-sheet-folded",
+            "object.add_sheet_metal",
+            MechArg::Bool("flat", false),
+        ),
+        (
+            "mech-sheet-flat",
+            "object.add_sheet_metal",
+            MechArg::Bool("flat", true),
+        ),
+    ],
+];
 
 /// The operator ids behind the Mesh submenu, in `PRIMITIVES` order — the
 /// tooltip, and the thing a test compares against the operator's own list.
@@ -16298,6 +16400,16 @@ mod tests {
             "menu-add-camera",
             "menu-add-empty",
             "menu-add-text",
+            "menu-add-manufacturing",
+            "menu-add-architecture",
+            "menu-add-wall",
+            "menu-add-door",
+            "menu-add-window",
+            "menu-add-stairs",
+            "menu-add-column",
+            "menu-add-railing",
+            "menu-add-slab",
+            "menu-add-roof",
             "sketch-text",
             "menu-add-curve",
             "design-parameters",
