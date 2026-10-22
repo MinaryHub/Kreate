@@ -1271,7 +1271,11 @@ impl App {
         // beside it instead, and said, when the spot is taken.
         if matches!(
             op_id,
-            "object.add_primitive" | "object.add_empty" | "object.add_armature" | "object.add_gear"
+            "object.add_primitive"
+                | "object.add_empty"
+                | "object.add_armature"
+                | "object.add_gear"
+                | "object.add_text"
         ) && params.get("location").is_none()
         {
             let spot = self.free_spot(self.doc.cursor);
@@ -1998,6 +2002,7 @@ impl App {
                 let other = vec![
                     row(self, t("menu-add-camera"), "object.add_camera", &[]),
                     row(self, t("menu-add-empty"), "object.add_empty", &[]),
+                    row(self, t("menu-add-text"), "object.add_text", &[]),
                     row(self, t("menu-add-armature"), "object.add_armature", &[]),
                 ];
                 vec![
@@ -12375,6 +12380,22 @@ impl App {
                     // The pattern works on what is selected: it is kept.
                     let picked = (self.sketching.points.clone(), self.sketching.lines.clone());
                     self.sketching.take(tool);
+                    // An extrude nobody has picked for takes what the sketch
+                    // draws — a rectangle on a face, a plate with its holes,
+                    // a line of text — at once; a click puts a region back
+                    // or adds one, as before.
+                    if matches!(
+                        tool,
+                        kreate::sketching::Tool::Extrude | kreate::sketching::Tool::Revolve
+                    ) {
+                        if let Some((id, _)) = self.sketch_target() {
+                            self.sketching.seeds =
+                                kreate_scene::feature::profile_seeds(&self.doc, id)
+                                    .into_iter()
+                                    .map(|s| glam::DVec2::new(s[0], s[1]))
+                                    .collect();
+                        }
+                    }
                     if matches!(
                         tool,
                         kreate::sketching::Tool::Pattern
@@ -14716,7 +14737,8 @@ impl AppParams {
             "object.add_primitive"
             | "object.add_empty"
             | "object.add_armature"
-            | "object.add_gear" => Some(DVec3::ZERO),
+            | "object.add_gear"
+            | "object.add_text" => Some(DVec3::ZERO),
             "object.add_light" => Some(DVec3::new(0.0, 0.0, 4.0)),
             "object.add_camera" => Some(DVec3::new(0.0, -8.0, 2.0)),
             _ => None,
@@ -16124,6 +16146,48 @@ kreate.ops.object.add_primitive()" }),
 
     /// A bake on its own thread: the bar moves, the result goes in as one
     /// undo step through `physics.bake`, and a cancelled one leaves nothing.
+    /// A rectangle drawn on a cube's top: the Extrude tool takes it without
+    /// a click, and the dialog joins it onto the cube. The sketch panel's
+    /// Extrude button is this tool; it made an empty solid of a drawn sketch.
+    #[test]
+    fn extruding_a_rectangle_drawn_on_a_face_joins_it_without_a_pick() {
+        let mut app = app();
+        let part = app
+            .doc
+            .add_mesh_object("Part", kreate_mesh::primitives::cube(0.04));
+        app.doc.selection.add(part);
+        app.doc.selection.active = Some(part);
+        app.run_op_with(
+            "sketch.new",
+            &[
+                ("plane", PropertyValue::Enum(4)),
+                ("at", PropertyValue::Vec3([0.0, 0.0, 0.02])),
+            ],
+        );
+        app.run_op_with(
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([-0.01, -0.01, 0.0])),
+                ("b", PropertyValue::Vec3([0.01, 0.01, 0.0])),
+            ],
+        );
+        let sketch = kreate_ops::ops::sketch_draw::active_sketch(&app.doc).unwrap();
+        app.evaluate_scene();
+        let mut p = PropertyMap::new();
+        p.set("tool", PropertyValue::Text("extrude".into()));
+        app.dispatch(&Action {
+            op_id: "app.sketch_tool".into(),
+            params: p,
+        });
+        assert_eq!(app.sketching.tool, kreate::sketching::Tool::Extrude);
+        assert_eq!(app.sketching.seeds.len(), 1, "the rectangle, not the face");
+        app.ui.length_unit = 0.001;
+        app.ui.solid_dialog.distance = 5.0;
+        app.choose_solid_operation(sketch);
+        assert_eq!(app.ui.solid_dialog.operation, 1, "a join");
+        assert_eq!(app.ui.solid_dialog.target, "Part");
+    }
+
     #[test]
     fn an_extrude_into_an_object_cuts_it_and_out_of_one_joins_it() {
         let mut app = app();

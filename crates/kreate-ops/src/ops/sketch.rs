@@ -388,6 +388,26 @@ impl Operator for MakeSolid {
         let Some(id) = sketch_object(doc.document()) else {
             return Ok(OpResult::Cancelled);
         };
+        // A sketch drawn with the tools is points and lines, and the profile
+        // node pushes faces: it would make nothing, in silence. Its regions
+        // are extruded as features.
+        let d = doc.document();
+        let drawn = d.object(id).is_some_and(|o| !o.sketch_lines.is_empty());
+        let has_faces = d
+            .object(id)
+            .and_then(|o| o.mesh())
+            .and_then(|m| d.mesh(m))
+            .is_some_and(|m| m.num_faces() > 0);
+        if drawn && !has_faces {
+            let seeds = kreate_scene::feature::profile_seeds(d, id);
+            let hint = seeds
+                .first()
+                .map(|s| format!("seeds=[{:.4}, {:.4}], ", s[0], s[1]))
+                .unwrap_or_default();
+            return Err(OpError::Failed(format!(
+                "this sketch is drawn lines, which make_solid cannot push: extrude its regions with kreate.ops.feature.extrude({hint}distance=...) — seeds are a point in each region, in the sketch's plane — or the Extrude tool"
+            )));
+        }
         let (name, kind) = if params.kind == 1 {
             (
                 "Revolve Profile",

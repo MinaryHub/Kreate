@@ -132,6 +132,88 @@ pub fn picked(regions: &[Region], seeds: &[[f64; 2]]) -> Vec<usize> {
     out
 }
 
+/// What an extrude takes from a sketch nobody has picked in: a point inside
+/// each region it would take, in the sketch's plane.
+///
+/// Every region, less two kinds. A region bounded only by fixed points is
+/// the outline of the face the sketch was made on, projected into it for
+/// drawing against — extruding it is extruding the whole face. And a region
+/// that fills another's hole is that hole: the counter of an `O`, the bore
+/// of a washer, the circle cut out of a plate. So a rectangle on a face, a
+/// plate with holes and a line of text each come out as drawn.
+pub fn profile_seeds(doc: &Document, sketch: crate::document::ObjectId) -> Vec<[f64; 2]> {
+    let regions = sketch_regions(doc, sketch);
+    let (Some(object), Some(mesh)) = (
+        doc.object(sketch),
+        doc.object(sketch)
+            .and_then(|o| o.mesh())
+            .and_then(|m| doc.mesh(m)),
+    ) else {
+        return Vec::new();
+    };
+    let fixed: Vec<Vec2> = object
+        .sketch
+        .iter()
+        .filter_map(|c| match c {
+            crate::sketch::Constraint::Fixed { a, .. } => mesh
+                .positions()
+                .get(*a as usize)
+                .map(|p| Vec2::new(p.x, p.y)),
+            _ => None,
+        })
+        .collect();
+    let on_fixed = |p: &Vec2| fixed.iter().any(|f| f.distance(*p) < 1e-7);
+    // A ring as its set of points, which way round it runs left out.
+    let key = |ring: &[Vec2]| -> Vec<(u32, u32)> {
+        let mut k: Vec<(u32, u32)> = ring
+            .iter()
+            .map(|p| (p.x.to_bits(), p.y.to_bits()))
+            .collect();
+        k.sort_unstable();
+        k
+    };
+    let candidates: Vec<usize> = (0..regions.len())
+        .filter(|&i| !regions[i].outline.iter().all(on_fixed))
+        .collect();
+    let holes: Vec<Vec<(u32, u32)>> = candidates
+        .iter()
+        .flat_map(|&i| regions[i].holes.iter().map(|h| key(h)))
+        .collect();
+    let mut out = Vec::new();
+    for &i in &candidates {
+        if holes.contains(&key(&regions[i].outline)) {
+            continue;
+        }
+        if let Some(p) = inside_point(&regions, i) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// A point inside region `i` and no other: the middle of its largest
+/// triangle, checked against the regions as a click would be.
+fn inside_point(regions: &[Region], i: usize) -> Option<[f64; 2]> {
+    let r = &regions[i];
+    let mut rings: Vec<Vec<DVec2>> = vec![r.outline.iter().map(|p| p.as_dvec2()).collect()];
+    rings.extend(
+        r.holes
+            .iter()
+            .map(|h| h.iter().map(|p| p.as_dvec2()).collect()),
+    );
+    let all: Vec<DVec2> = rings.iter().flatten().copied().collect();
+    let mut tris = kreate_mesh::earcut::triangulate(&rings);
+    let area = |t: &[usize; 3]| {
+        let (a, b, c) = (all[t[0]], all[t[1]], all[t[2]]);
+        (b - a).perp_dot(c - a).abs()
+    };
+    tris.sort_by(|a, b| area(b).total_cmp(&area(a)));
+    tris.iter().find_map(|t| {
+        let m = (all[t[0]] + all[t[1]] + all[t[2]]) / 3.0;
+        (regions::region_at(regions, m.as_vec2()) == Some(i)).then_some([m.x, m.y])
+    })
+}
+
 /// A sketch's regions: its points are its mesh's, its lines the object's
 /// own (see `Object::sketch_lines`) and its faces' edges, which is what a
 /// sketch drawn before it had lines of its own was made of.

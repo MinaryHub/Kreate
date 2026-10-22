@@ -29,6 +29,7 @@ pub mod sculpt;
 pub mod section;
 pub mod selection;
 pub mod tessellate;
+pub mod text;
 
 pub use arena::{Arena, ArenaIndex, EdgeId, FaceId, LoopId, VertId};
 pub use attribute::{AttrData, AttrType, AttributeStore, Domain, Layer};

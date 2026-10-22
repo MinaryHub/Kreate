@@ -41,8 +41,9 @@
 
 use std::sync::Arc;
 
-/// The embedded Korean + Latin UI font.
-pub const PRETENDARD: &[u8] = include_bytes!("../../../assets/fonts/Pretendard-Regular.subset.ttf");
+/// The embedded Korean + Latin UI font. The same bytes text objects are
+/// drawn in, so the 2 MB face is in the program once.
+pub const PRETENDARD: &[u8] = kreate_mesh::text::DEFAULT_FONT;
 
 /// The embedded monospaced face, for numbers and script text: IBM Plex
 /// Mono, under the SIL Open Font License (see its licence beside it).

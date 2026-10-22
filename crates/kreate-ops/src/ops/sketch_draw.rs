@@ -146,6 +146,18 @@ fn commit(
     Ok(OpResult::Finished)
 }
 
+/// Puts `points` (all the sketch's, the new ones last) and the new `lines`
+/// into sketch `id`, holding nothing: what a drawing from outside this
+/// module — text — adds.
+pub fn add_drawing(
+    doc: &mut DocMut<'_>,
+    id: ObjectId,
+    points: Vec<DVec2>,
+    lines: Vec<[u32; 2]>,
+) -> Result<OpResult, OpError> {
+    commit(doc, id, points, lines, Vec::new())
+}
+
 fn need_sketch(doc: &Document) -> Result<ObjectId, OpError> {
     active_sketch(doc).ok_or_else(|| OpError::Failed("no sketch is being drawn".into()))
 }
@@ -3018,5 +3030,58 @@ mod tests {
             1,
             "the origin's hold, and not the line's level"
         );
+    }
+
+    /// A rectangle drawn on a cube's face: the face's own outline is not
+    /// taken, the rectangle is, and the extrude joins it onto the cube.
+    #[test]
+    fn a_rectangle_on_a_face_is_what_an_unpicked_extrude_takes() {
+        let (r, mut h, mut doc) = setup();
+        let part = doc.add_mesh_object("Part", kreate_mesh::primitives::cube(0.04));
+        doc.selection.add(part);
+        doc.selection.active = Some(part);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.new",
+            &[
+                ("plane", PropertyValue::Enum(4)),
+                ("at", PropertyValue::Vec3([0.003, 0.003, 0.02])),
+            ],
+        )
+        .unwrap();
+        let s = doc.selection.active.unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([-0.01, -0.01, 0.0])),
+                ("b", PropertyValue::Vec3([0.01, 0.01, 0.0])),
+            ],
+        )
+        .unwrap();
+        let seeds = kreate_scene::feature::profile_seeds(&doc, s);
+        assert_eq!(seeds.len(), 1, "{seeds:?}");
+        assert!(
+            seeds[0][0].abs() < 0.01 && seeds[0][1].abs() < 0.01,
+            "inside the rectangle"
+        );
+        // Drawn lines are not a profile make_solid can push: it says so and
+        // points at what can, rather than making an empty solid.
+        let err = run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.make_solid",
+            &[("height", PropertyValue::Float(0.01))],
+        );
+        let Err(OpError::Failed(why)) = err else {
+            panic!("{err:?}")
+        };
+        assert!(why.contains("feature.extrude"), "{why}");
+        assert!(doc.object(s).unwrap().geometry_nodes.is_none());
     }
 }

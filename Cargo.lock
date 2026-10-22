@@ -1719,6 +1719,7 @@ dependencies = [
  "rayon",
  "smallvec",
  "thiserror 2.0.20",
+ "ttf-parser",
 ]
 
 [[package]]
@@ -1813,6 +1814,7 @@ dependencies = [
  "kreate-i18n",
  "kreate-input",
  "kreate-math",
+ "kreate-mesh",
  "kreate-reflect",
  "kreate-render",
 ]

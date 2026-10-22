@@ -1929,6 +1929,7 @@ struct Labels {
     dissolve_limited: String,
     edges_to_sketch: String,
     sketch_construction: String,
+    sketch_text: String,
     design_section: String,
     design_parameters: String,
     param_name: String,
@@ -2337,6 +2338,7 @@ impl Labels {
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
             sketch_construction: t("sketch-construction"),
+            sketch_text: t("sketch-text"),
             design_section: t("design-section"),
             design_parameters: t("design-parameters"),
             param_name: t("param-name"),
@@ -4690,6 +4692,7 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                 )
                 .into_iter()
                 .chain([
+                    entry("sketch.text", &l.sketch_text, op("sketch.text", &[])),
                     MenuNode::Separator,
                     entry(
                         "app.sketch_construction",
@@ -12375,17 +12378,34 @@ fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene:
             if !object.sketch.is_empty() && ui.button(state.catalog.get("sketch-solve")).clicked() {
                 state.queue.run("sketch.solve", PropertyMap::new());
             }
-            if ui.button(state.catalog.get("sketch-extrude")).clicked() {
+            // A sketch drawn with the tools is lines; its regions are
+            // extruded by the Extrude tool, as the Solid menu's is. A plane
+            // made a sketch has faces, which make_solid pushes.
+            let drawn = !object.sketch_lines.is_empty();
+            let tool = |name: &str| {
                 let mut p = PropertyMap::new();
-                p.set("kind", V::Enum(0));
-                // Ten of the scene's units: a part's thickness to start from.
-                p.set("height", V::Float(10.0 / length.to_display));
-                state.queue.run("sketch.make_solid", p);
+                p.set("tool", V::Text(name.to_string()));
+                p
+            };
+            if ui.button(state.catalog.get("sketch-extrude")).clicked() {
+                if drawn {
+                    state.queue.dispatch("app.sketch_tool", tool("extrude"));
+                } else {
+                    let mut p = PropertyMap::new();
+                    p.set("kind", V::Enum(0));
+                    // Ten of the scene's units: a part's thickness to start from.
+                    p.set("height", V::Float(10.0 / length.to_display));
+                    state.queue.run("sketch.make_solid", p);
+                }
             }
             if ui.button(state.catalog.get("sketch-revolve")).clicked() {
-                let mut p = PropertyMap::new();
-                p.set("kind", V::Enum(1));
-                state.queue.run("sketch.make_solid", p);
+                if drawn {
+                    state.queue.dispatch("app.sketch_tool", tool("revolve"));
+                } else {
+                    let mut p = PropertyMap::new();
+                    p.set("kind", V::Enum(1));
+                    state.queue.run("sketch.make_solid", p);
+                }
             }
             // A sketch made on a part's face: back onto the face after the
             // part changed.
@@ -16277,6 +16297,8 @@ mod tests {
             "menu-add-light",
             "menu-add-camera",
             "menu-add-empty",
+            "menu-add-text",
+            "sketch-text",
             "menu-add-curve",
             "design-parameters",
             "sketch-construction",

@@ -32,6 +32,7 @@ pub mod sketch;
 pub mod sketch_draw;
 pub mod sketch_face;
 pub mod sketch_trim;
+pub mod text;
 pub mod texture;
 pub mod uv;
 
@@ -63,6 +64,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     pose::register(registry);
     sculpt::register(registry);
     shape::register(registry);
+    text::register(registry);
     texture::register(registry);
     uv::register(registry);
 }
