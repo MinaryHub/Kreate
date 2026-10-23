@@ -309,6 +309,8 @@ pub struct ShellState {
     /// elsewhere — as its place in the history and its id. The next one
     /// brings the panel back.
     adjust_dismissed: Option<(usize, String)>,
+    /// The operation the adjust panel last showed, to know a new one.
+    adjust_seen: Option<(usize, String)>,
     /// The chrome's appearance, as the preferences set it.
     pub appearance: kreate_ui::Appearance,
     /// Whether the remapping panel is open.
@@ -887,6 +889,7 @@ impl Default for ShellState {
             document_title: "untitled".into(),
             adjust_open: false,
             adjust_dismissed: None,
+            adjust_seen: None,
             appearance: kreate_ui::Appearance::Dark,
             capturing: None,
             palette: Default::default(),
@@ -11045,6 +11048,17 @@ fn draw_adjust_float(
     if state.adjust_dismissed.as_ref() == Some(&which) {
         return;
     }
+    // Something just added is still being shaped: its panel opens on its
+    // fields and stays until Done — a click into the view to look at it, or
+    // Escape, does not take the fields away from the hand still setting
+    // them. Any other operation's panel is a popup, as before.
+    let adding = adds_an_object(&entry.op_id);
+    if state.adjust_seen.as_ref() != Some(&which) {
+        state.adjust_seen = Some(which.clone());
+        if adding {
+            state.adjust_open = true;
+        }
+    }
     let label = state.catalog.format(&info.name_key(), TextKind::Ui, &[]);
     let label = if label == info.name_key() {
         info.label.to_string()
@@ -11082,6 +11096,10 @@ fn draw_adjust_float(
                         .get(if open { "adjust-done" } else { "adjust-edit" });
                     if ui.small_button(toggle).clicked() {
                         state.adjust_open = !open;
+                        // Done on something added puts its panel away.
+                        if open && adding {
+                            state.adjust_dismissed = Some(which.clone());
+                        }
                     }
                 });
             });
@@ -11104,10 +11122,16 @@ fn draw_adjust_float(
         (i.key_pressed(egui::Key::Escape), elsewhere)
     });
     let typing = ui.ctx().egui_wants_keyboard_input();
-    if (escape && !typing) || pressed_elsewhere {
+    if !adding && ((escape && !typing) || pressed_elsewhere) {
         state.adjust_dismissed = Some(which);
         state.adjust_open = false;
     }
+}
+
+/// Whether `op_id` adds an object — a shape, a part, a building element,
+/// text — whose panel stays open until Done.
+fn adds_an_object(op_id: &str) -> bool {
+    op_id.starts_with("object.add_")
 }
 
 fn draw_adjust_panel(
@@ -15340,6 +15364,87 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
 
 #[cfg(test)]
 mod tests {
+    /// The panel of something just added opens on its fields and stays
+    /// through a click elsewhere and Escape — only Done puts it away. Any
+    /// other operation's panel is still a popup a click elsewhere closes.
+    #[test]
+    fn an_added_objects_panel_stays_until_done() {
+        use kreate_ops::{History, OperatorRegistry, PropertyMap};
+        let mut registry = OperatorRegistry::new();
+        kreate_ops::register_builtin(&mut registry);
+        let mut history = History::new();
+        let mut doc = kreate_scene::Document::new();
+        let ctx = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
+        let mut state = super::ShellState::default();
+        // One frame; a press at `press`, if any. The panel's rect, if shown.
+        let frame = |state: &mut super::ShellState,
+                         history: &History,
+                         press: Option<egui::Pos2>,
+                         escape: bool| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            };
+            if let Some(at) = press {
+                input.events.push(egui::Event::PointerMoved(at));
+                input.events.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            if escape {
+                input.events.push(egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            state.viewport_blockers.clear();
+            let _ = ctx.run_ui(input, |ui| {
+                super::draw_adjust_float(ui, state, &registry, history, viewport);
+            });
+            state.viewport_blockers.last().copied()
+        };
+        let run = |history: &mut History, doc: &mut kreate_scene::Document, id: &str| {
+            history
+                .dispatch(
+                    &registry,
+                    doc,
+                    &kreate_ops::Context::default(),
+                    id,
+                    &PropertyMap::new(),
+                )
+                .unwrap();
+        };
+
+        run(&mut history, &mut doc, "object.add_wall");
+        assert!(frame(&mut state, &history, None, false).is_some());
+        assert!(
+            state.adjust_open,
+            "an added object's fields are open at once"
+        );
+        let away = egui::pos2(300.0, 500.0);
+        for _ in 0..3 {
+            frame(&mut state, &history, Some(away), false);
+            frame(&mut state, &history, None, true);
+        }
+        assert!(
+            frame(&mut state, &history, None, false).is_some() && state.adjust_open,
+            "still open after clicks elsewhere and Escape"
+        );
+
+        // A move's panel goes on a click elsewhere, as a popup does.
+        run(&mut history, &mut doc, "object.translate");
+        assert!(frame(&mut state, &history, None, false).is_some());
+        frame(&mut state, &history, Some(away), false);
+        assert!(frame(&mut state, &history, None, false).is_none());
+    }
+
     #[test]
     fn tab_never_hands_the_keyboard_to_a_button() {
         let ctx = egui::Context::default();
