@@ -38,19 +38,12 @@ impl App {
             ),
             frame: self.doc.playback.frame,
         };
-        {
-            let v = &mut gfx.viewport;
-            v.shading = kreate_render::ShadingMode::Rendered;
-            v.path_trace = true;
-            v.show_grid = false;
-            v.show_wireframe = false;
-            v.show_outline = false;
-            v.xray = false;
-            v.face_orientation = false;
-            v.sample_cap = Some(settings.samples);
-            v.path_trace_denoise = settings.denoise;
-            v.path_trace_bounces = settings.bounces;
-        }
+        // The rendered look goes on a frame later (`apply_render_look`):
+        // the frame that first draws it builds the renderer's pipelines and
+        // can take seconds, and a frame drawn before it puts up the
+        // progress window, so the wait is shown rather than a frozen window.
+        let _ = gfx;
+        self.ui.render_progress = Some((self.ui.catalog.get("render-preparing"), f32::NAN));
         self.rendering_still = true;
         self.capturing = true;
         self.ui.render_result = None;
@@ -68,6 +61,8 @@ impl App {
             folder,
             saved,
             started: Instant::now(),
+            sampling: None,
+            look: false,
             drawn: 0,
             ids: None,
             blur: None,
@@ -126,11 +121,48 @@ impl App {
 
     /// One step of the render under way, after each drawn frame: counts the
     /// samples, and when the picture is done writes it and moves on.
+    /// The render's look on the viewport: the path tracer at the settings'
+    /// samples, denoising and bounces, and nothing drawn over the picture.
+    fn apply_render_look(&mut self) {
+        let Some(job) = self.render_job.as_mut() else {
+            return;
+        };
+        job.look = true;
+        job.drawn = 0;
+        let settings = job.settings.clone();
+        let blurred = job.blur.is_some();
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let v = &mut gfx.viewport;
+        v.shading = kreate_render::ShadingMode::Rendered;
+        v.path_trace = true;
+        v.show_grid = false;
+        v.show_wireframe = false;
+        v.show_outline = false;
+        v.xray = false;
+        v.face_orientation = false;
+        v.sample_cap = Some(if blurred {
+            Blur::samples_each(settings.samples)
+        } else {
+            settings.samples
+        });
+        v.path_trace_denoise = settings.denoise;
+        v.path_trace_bounces = settings.bounces;
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
     pub(super) fn advance_render_job(&mut self) {
         let Some(job) = self.render_job.as_mut() else {
             return;
         };
         job.drawn += 1;
+        // The frame just drawn showed "preparing"; the next builds the
+        // renderer.
+        if !job.look {
+            self.apply_render_look();
+            return;
+        }
         let (drawn, size, started) = (
             job.drawn,
             (job.settings.width, job.settings.height),
@@ -179,8 +211,30 @@ impl App {
                 }
                 None => share,
             };
+            // Time left: what the samples so far took, for those to come.
+            // From the first sample, not from the start, so the renderer's
+            // preparing is not taken for slow sampling.
+            let job = self.render_job.as_mut().expect("checked");
+            if job.sampling.is_none() && fraction > 0.0 {
+                job.sampling = Some((Instant::now(), fraction));
+            }
+            let left = job.sampling.and_then(|(since, at)| {
+                let done = fraction - at;
+                (done > 0.02).then(|| since.elapsed().as_secs_f32() * (1.0 - fraction) / done)
+            });
+            let left = match left {
+                Some(s) => format!(
+                    ", {}",
+                    self.ui.catalog.format(
+                        "render-time-left",
+                        kreate_i18n::TextKind::Ui,
+                        &[("seconds", &format!("{:.0}", s.max(0.0).ceil()))],
+                    )
+                ),
+                None => String::new(),
+            };
             self.ui.render_progress = Some((
-                format!("{progress}, {:.0} s", started.elapsed().as_secs_f32()),
+                format!("{progress}, {:.0} s{left}", started.elapsed().as_secs_f32()),
                 fraction,
             ));
             self.status(&format!(

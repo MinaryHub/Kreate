@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/kreate.ico");
     commit();
     build_number();
+    shader_compiler();
     // `winresource` is a build-dependency only on a Windows host (build
     // scripts are compiled for the host), so the code that names it must be too.
     #[cfg(windows)]
@@ -90,6 +91,58 @@ fn build_number() {
         "../../Cargo.toml",
     ] {
         println!("cargo:rerun-if-changed={dir}");
+    }
+}
+
+/// DirectX's modern shader compiler, `dxcompiler.dll` and its `dxil.dll`,
+/// copied beside the program being built. wgpu uses DXC when it finds it
+/// there and the old FXC otherwise, and FXC took 40 seconds over this
+/// renderer's shaders in a release build — the first frame, and again the
+/// first render — where DXC takes three or four.
+///
+/// From `KREATE_DXC_DIR`, or the newest Windows SDK that has both. None
+/// found, the build goes on: the program runs on FXC, slowly at first.
+fn shader_compiler() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo:rerun-if-env-changed=KREATE_DXC_DIR");
+    let files = ["dxcompiler.dll", "dxil.dll"];
+    let has = |dir: &std::path::Path| files.iter().all(|f| dir.join(f).is_file());
+    let from = std::env::var_os("KREATE_DXC_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|d| has(d))
+        .or_else(|| {
+            let kits = std::path::Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
+            let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(kits)
+                .ok()?
+                .flatten()
+                .map(|e| e.path().join("x64"))
+                .filter(|d| has(d))
+                .collect();
+            found.sort();
+            found.pop()
+        });
+    let Some(from) = from else {
+        println!("cargo:warning=no dxcompiler.dll found: shaders compile with the slow FXC");
+        return;
+    };
+    // target/<profile>/build/<crate>-<hash>/out → target/<profile>
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default());
+    let Some(profile) = out.ancestors().nth(3) else {
+        return;
+    };
+    for f in files {
+        let (source, target) = (from.join(f), profile.join(f));
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            let len = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).ok();
+            len(a).is_some() && len(a) == len(b)
+        };
+        if !same(&source, &target) {
+            if let Err(e) = std::fs::copy(&source, &target) {
+                println!("cargo:warning=copying {f}: {e}");
+            }
+        }
     }
 }
 

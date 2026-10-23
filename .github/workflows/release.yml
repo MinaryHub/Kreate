@@ -88,6 +88,18 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.exe }} dist/
           cp target/${{ matrix.target }}/release/${{ matrix.mcp }} dist/
+          # Windows: DirectX's shader compiler beside the program, from the
+          # runner's newest Windows SDK. wgpu uses it when it is there; the
+          # old compiler it falls back on takes most of a minute over the
+          # renderer's shaders on the first frame.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            sdk=$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin/"10.*/x64 2>/dev/null | sort -V | tail -1)
+            if [ -f "$sdk/dxcompiler.dll" ] && [ -f "$sdk/dxil.dll" ]; then
+              cp "$sdk/dxcompiler.dll" "$sdk/dxil.dll" dist/
+            else
+              echo "::warning::no dxcompiler.dll in the Windows SDK"
+            fi
+          fi
           cd dist && tar czf ../kreate-${{ matrix.name }}.tar.gz *
           # The zip is what the application's updater fetches (`update::asset_name`):
           # the executables at its top level.

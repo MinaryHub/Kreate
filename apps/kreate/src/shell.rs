@@ -7388,11 +7388,14 @@ fn draw_render_progress(ctx: &egui::Context, state: &mut ShellState) {
                 // i18n-exempt: composed by the application
                 ui.label(text);
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
-                            .desired_width(270.0)
-                            .show_percentage(),
-                    );
+                    // Not a number: preparing, how long not known — a bar
+                    // that moves, with no percentage.
+                    let bar = if fraction.is_nan() {
+                        egui::ProgressBar::new(0.0).animate(true)
+                    } else {
+                        egui::ProgressBar::new(fraction.clamp(0.0, 1.0)).show_percentage()
+                    };
+                    ui.add(bar.desired_width(270.0));
                     if ui.button(&stop).clicked() {
                         stopped = true;
                     }
@@ -15379,9 +15382,9 @@ mod tests {
         let mut state = super::ShellState::default();
         // One frame; a press at `press`, if any. The panel's rect, if shown.
         let frame = |state: &mut super::ShellState,
-                         history: &History,
-                         press: Option<egui::Pos2>,
-                         escape: bool| {
+                     history: &History,
+                     press: Option<egui::Pos2>,
+                     escape: bool| {
             let mut input = egui::RawInput {
                 screen_rect: Some(viewport),
                 ..Default::default()

@@ -14253,6 +14253,11 @@ struct RenderJob {
     folder: std::path::PathBuf,
     saved: SavedView,
     started: Instant,
+    /// When sampling began and how far along it was then, for the time left.
+    sampling: Option<(Instant, f32)>,
+    /// Whether the viewport has been given the render's look: a frame after
+    /// the start, so "preparing" is on screen while the renderer is built.
+    look: bool,
     /// Frames drawn since this picture started: its first frames still show
     /// the last one's samples.
     drawn: u32,

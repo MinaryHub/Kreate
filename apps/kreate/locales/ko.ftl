@@ -2016,3 +2016,5 @@ op-object-add_roof-param-rise-name = 높이
 op-object-add_roof-param-thickness-name = 두께
 op-object-add_roof-param-overhang-name = 처마 길이
 op-material-set_properties-param-thin-name = 얇은 유리
+render-preparing = 렌더러 준비 중…
+render-time-left = 약 { $seconds }초 남음

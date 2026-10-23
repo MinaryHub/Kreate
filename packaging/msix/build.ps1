@@ -87,6 +87,13 @@ try {
     New-Item -ItemType Directory -Force (Join-Path $layout 'Assets') | Out-Null
     Copy-Item 'target\release\kreate.exe' $layout
     Copy-Item 'target\release\kreate-mcp.exe' $layout
+    # DirectX's shader compiler, from the same SDK: with it the first frame
+    # takes seconds, without it (FXC) most of a minute.
+    foreach ($dll in 'dxcompiler.dll', 'dxil.dll') {
+        $from = Join-Path $bin.FullName "x64\$dll"
+        if (Test-Path $from) { Copy-Item $from $layout }
+        else { Write-Warning "$dll not in the SDK: the package compiles shaders with FXC" }
+    }
     Copy-Item (Join-Path $here 'Assets\*') (Join-Path $layout 'Assets')
     (Get-Content (Join-Path $here 'AppxManifest.xml') -Raw).Replace('$VERSION$', $version) |
         Set-Content (Join-Path $layout 'AppxManifest.xml') -Encoding utf8
