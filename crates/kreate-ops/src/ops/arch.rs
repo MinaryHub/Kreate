@@ -87,6 +87,8 @@ fn glass(m: &mut Material) {
     m.roughness = 0.02;
     m.transmission = 1.0;
     m.ior = 1.5;
+    // A pane: what is behind it is seen where it is.
+    m.thin = true;
 }
 fn concrete(m: &mut Material) {
     m.base_color = SceneRgb::new(0.42, 0.41, 0.39);
@@ -845,8 +847,9 @@ mod tests {
             assert!(line.contains(id) && !line.contains("location"), "{line}");
         }
         assert_eq!(doc.object_count(), 9);
-        let glass = doc.materials().filter(|(_, m)| m.name == "Glass").count();
-        assert_eq!(glass, 1, "one glass for both windows");
+        let glass: Vec<_> = doc.materials().filter(|(_, m)| m.name == "Glass").collect();
+        assert_eq!(glass.len(), 1, "one glass for both windows");
+        assert!(glass[0].1.thin, "a pane: seen through, not bent");
     }
 
     /// Its sizes are its parameters: a wider door, and nonsense refused.

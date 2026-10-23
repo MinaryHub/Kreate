@@ -1174,6 +1174,9 @@ pub struct MaterialRecord {
     /// that is not the default solid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transmission: Option<[f32; 2]>,
+    /// A thin sheet of glass. See `Material::thin`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thin: bool,
     /// Below what opacity the surface is cut away, for one that is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha_clip: Option<f32>,
@@ -2198,6 +2201,7 @@ pub fn write(
                     ]),
                     transmission: (m.transmission != 0.0 || m.ior != 1.5)
                         .then_some([m.transmission, m.ior]),
+                    thin: m.thin,
                     alpha_clip: m.alpha_clip,
                     graph: m.graph.as_ref().map(|g| graph_record(g, document)),
                     action: m.action.and_then(|a| action_index.get(&a).copied()),
@@ -2763,6 +2767,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             emission_strength: record.emission.map_or(0.0, |e| e[3]),
             transmission: record.transmission.map_or(0.0, |t| t[0]),
             ior: record.transmission.map_or(1.5, |t| t[1]),
+            thin: record.thin,
             alpha_clip: record.alpha_clip.map(|c| c.clamp(0.0, 1.0)),
             graph: record
                 .graph

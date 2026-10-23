@@ -379,6 +379,13 @@ pub struct Material {
     /// The index of refraction, for what passes through: 1.5 for glass, 1.33
     /// for water. glTF's `KHR_materials_ior`, and its default.
     pub ior: f32,
+    /// A thin sheet — a window pane, a bubble — rather than a solid of
+    /// glass: what is seen through it is not shifted, as through a pane it
+    /// is not, the way out undoing the bend of the way in. The rasterised
+    /// view bends what is behind a surface by its front face alone, and
+    /// through a pane that put the frame behind it somewhere else and moved
+    /// it with the view. glTF's transmission without `KHR_materials_volume`.
+    pub thin: bool,
     /// Where the surface is cut away: wherever its opacity — `alpha`, times
     /// the base colour image's alpha — is below this. glTF's `MASK` and its
     /// `alphaCutoff`: a leaf drawn on a card. `None` is solid throughout.
@@ -421,6 +428,7 @@ impl Default for Material {
             emission_strength: 0.0,
             transmission: 0.0,
             ior: 1.5,
+            thin: false,
             alpha_clip: None,
             graph: None,
             action: None,

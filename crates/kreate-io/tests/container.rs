@@ -870,6 +870,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         normal_strength: None,
         emission: None,
         transmission: None,
+        thin: false,
         alpha_clip: None,
         emission_uid: None,
         occlusion_uid: None,

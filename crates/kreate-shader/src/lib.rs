@@ -2387,9 +2387,39 @@ mod map_tests {
             compile_with(&graph, |_| ColorSpace::Srgb).expect("compiles")
         );
     }
+
+    /// A thin sheet keeps its transmission and loses only its bend, in the
+    /// compiled constants the rasterised view reads.
+    #[test]
+    fn a_thin_sheet_is_not_bent() {
+        let mut graph =
+            ShaderGraph::standard("Pane", kreate_math::SceneRgb::new(1.0, 1.0, 1.0), 0.0, 0.02);
+        if let kreate_scene::shader::NodeKind::Surface {
+            transmission, ior, ..
+        } = &mut graph.nodes[0].kind
+        {
+            *transmission = 1.0;
+            *ior = 1.5;
+        }
+        let mut c = compile(&graph).unwrap();
+        assert_eq!(c.constants[c.transmission_slot][1], 1.5);
+        c.make_thin();
+        assert_eq!(c.constants[c.transmission_slot][1], 1.0);
+        assert_eq!(c.transmission(), 1.0);
+    }
 }
 
 impl Compiled {
+    /// Makes the material a thin sheet for the rasterised view: what is
+    /// behind it is seen unbent (see `Material::thin`). Its index of
+    /// refraction is left to the path tracer, which follows the light
+    /// through both faces of the pane and needs it.
+    pub fn make_thin(&mut self) {
+        if let Some(c) = self.constants.get_mut(self.transmission_slot) {
+            c[1] = 1.0;
+        }
+    }
+
     /// How much light passes through, zero to one.
     pub fn transmission(&self) -> f32 {
         self.constants

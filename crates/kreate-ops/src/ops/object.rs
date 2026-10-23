@@ -1269,6 +1269,9 @@ pub struct SetMaterialParams {
     /// How sharply what passes through bends: 1.5 is glass, 1.33 water.
     #[param(min = 1.0, soft_max = 3.0)]
     pub ior: f64,
+    /// A thin sheet of glass — a window pane — rather than a solid: what is
+    /// seen through it is not shifted.
+    pub thin: bool,
     /// Cut the surface away where its opacity — alpha, times the base colour
     /// image's — is below this: a leaf on a card. Zero is never.
     #[param(min = 0.0, max = 1.0)]
@@ -1288,6 +1291,7 @@ impl Default for SetMaterialParams {
             emission_strength: 0.0,
             transmission: 0.0,
             ior: 1.5,
+            thin: false,
             alpha_clip: 0.0,
         }
     }
@@ -1357,6 +1361,7 @@ impl Operator for SetMaterial {
         material.emission_strength = params.emission_strength.max(0.0) as f32;
         material.transmission = params.transmission.clamp(0.0, 1.0) as f32;
         material.ior = params.ior.max(1.0) as f32;
+        material.thin = params.thin;
         material.alpha_clip = (params.alpha_clip > 0.0).then(|| params.alpha_clip.min(1.0) as f32);
         let (glass, bend) = (material.transmission, material.ior);
         let (opacity, cut) = (material.alpha, material.alpha_clip.unwrap_or(0.0));
@@ -1958,6 +1963,7 @@ pub fn material_params(material: &kreate_scene::Material, slot: u32) -> SetMater
         emission_strength: material.emission_strength as f64,
         transmission: material.transmission as f64,
         ior: material.ior as f64,
+        thin: material.thin,
         alpha_clip: material.alpha_clip.unwrap_or(0.0) as f64,
     }
 }

@@ -59,7 +59,11 @@ impl Materials {
             // lives beside the fields rather than here — one answer to "what is
             // a standard surface", which is what keeps a field added to the
             // material from having to be added twice.
-            compiled.push(compile_one(doc, &material.shading_graph()));
+            let mut one = compile_one(doc, &material.shading_graph());
+            if material.thin {
+                one.make_thin();
+            }
+            compiled.push(one);
         }
         let revisions = compiled
             .iter()

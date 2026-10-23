@@ -284,3 +284,24 @@ fn an_objects_generator_line_is_saved_with_it() {
     let o = back.objects().find(|(_, o)| o.name == "Door").unwrap().1;
     assert_eq!(o.generator.as_deref(), Some(line));
 }
+
+/// A thin sheet of glass stays one through a save.
+#[test]
+fn a_thin_glass_is_saved_as_one() {
+    let mut doc = Document::new();
+    let id = doc.add_material(kreate_scene::document::Material {
+        name: "Pane".into(),
+        transmission: 1.0,
+        thin: true,
+        ..Default::default()
+    });
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    doc.set_mesh_slots(mesh, vec![Some(id)]);
+    doc.add_object(kreate_scene::document::Object::new(
+        "Window",
+        kreate_scene::document::ObjectData::Mesh(mesh),
+    ));
+    let back = round_trip(&doc);
+    let (_, m) = back.materials().find(|(_, m)| m.name == "Pane").unwrap();
+    assert!(m.thin && m.transmission == 1.0);
+}

@@ -2015,3 +2015,4 @@ op-object-add_roof-param-length-name = 길이
 op-object-add_roof-param-rise-name = 높이
 op-object-add_roof-param-thickness-name = 두께
 op-object-add_roof-param-overhang-name = 처마 길이
+op-material-set_properties-param-thin-name = 얇은 유리

@@ -300,14 +300,20 @@ pub fn window(s: &Window) -> MeshData {
         let z = iz0 + row_h * r as f32;
         p.cuboid(v(ix0, -bd, z - bar * 0.5), v(ix1, bd, z + bar * 0.5), 0);
     }
-    // The panes: one sheet each, between the bars.
+    // The panes: one sheet each, its edges set into the frame and the bars
+    // round it, as glass sits in its rebate. Cut flush, each edge lay in the
+    // face it met, and two faces in one plane are drawn in turn as the view
+    // moves: the frame's edge flickered through the glass.
     let g = within(s.glass * 0.5, 0.0005, bd);
+    let set_in = (f.min(bar) * 0.3).max(0.0002);
     for c in 0..cols {
         for r in 0..rows {
-            let x0 = ix0 + col_w * c as f32 + if c > 0 { bar * 0.5 } else { 0.0 };
-            let x1 = ix0 + col_w * (c + 1) as f32 - if c + 1 < cols { bar * 0.5 } else { 0.0 };
-            let zz0 = iz0 + row_h * r as f32 + if r > 0 { bar * 0.5 } else { 0.0 };
-            let zz1 = iz0 + row_h * (r + 1) as f32 - if r + 1 < rows { bar * 0.5 } else { 0.0 };
+            let x0 = ix0 + col_w * c as f32 + if c > 0 { bar * 0.5 } else { 0.0 } - set_in;
+            let x1 =
+                ix0 + col_w * (c + 1) as f32 - if c + 1 < cols { bar * 0.5 } else { 0.0 } + set_in;
+            let zz0 = iz0 + row_h * r as f32 + if r > 0 { bar * 0.5 } else { 0.0 } - set_in;
+            let zz1 =
+                iz0 + row_h * (r + 1) as f32 - if r + 1 < rows { bar * 0.5 } else { 0.0 } + set_in;
             p.cuboid(v(x0, -g, zz0), v(x1, g, zz1), 1);
         }
     }
@@ -761,6 +767,28 @@ mod tests {
         let b = m.bounds();
         assert!((b.max.z - 2.3).abs() < 1e-4, "{}", b.max.z);
         // No sill: nothing stands out in front of the frame.
+        // No pane's edge lies in a face of the frame or a bar: each is set
+        // into them.
+        let p = m.positions();
+        let slots = m.attributes().get_i32(names::MATERIAL_INDEX).unwrap();
+        let frame_x: Vec<f32> = m
+            .faces()
+            .enumerate()
+            .filter(|(f, _)| slots[*f] == 0)
+            .flat_map(|(_, c)| c.iter().map(|v| p[*v as usize].x).collect::<Vec<_>>())
+            .collect();
+        for (f, corners) in m.faces().enumerate() {
+            if slots[f] != 1 {
+                continue;
+            }
+            for c in corners {
+                let x = p[*c as usize].x;
+                assert!(
+                    frame_x.iter().all(|fx| (fx - x).abs() > 1e-5),
+                    "a pane's edge in a frame face at x = {x}"
+                );
+            }
+        }
         let bare = window(&Window {
             sill: 0.0,
             ..Window::default()

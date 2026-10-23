@@ -2009,3 +2009,4 @@ op-object-add_roof-param-length-name = Length
 op-object-add_roof-param-rise-name = Rise
 op-object-add_roof-param-thickness-name = Thickness
 op-object-add_roof-param-overhang-name = Overhang
+op-material-set_properties-param-thin-name = Thin Glass
