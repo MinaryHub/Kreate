@@ -3932,17 +3932,20 @@ impl App {
             return;
         };
         let edits = self.op_ctx.mode.edits_elements();
-        if self.xray && !edits {
+        if self.xray {
             if let (Some((x, y)), Some(radius)) = (
                 self.cursor_viewport_px(),
                 self.circle.as_ref().map(|c| c.radius),
             ) {
-                resolved.extend(
-                    self.xray_region_objects(&kreate_render::SelectShape::Circle {
-                        centre: (x as f32, y as f32),
-                        radius,
-                    }),
-                );
+                let brush = kreate_render::SelectShape::Circle {
+                    centre: (x as f32, y as f32),
+                    radius,
+                };
+                resolved.extend(if edits {
+                    self.xray_region_elements(&brush)
+                } else {
+                    self.xray_region_objects(&brush)
+                });
             }
         }
         let mode = match self.pick_domain() {
@@ -8527,14 +8530,129 @@ impl App {
     /// mesh is projected instead: it is in the region if a vertex is, an
     /// edge crosses the region's outline, or the region lies inside a face.
     fn xray_region_objects(&self, shape: &kreate_render::SelectShape) -> Vec<u32> {
-        use kreate_math::Vec2;
-        let Some(gfx) = self.gfx.as_ref() else {
+        let Some(region) = self.xray_region(shape) else {
             return Vec::new();
         };
+        let mut out = Vec::new();
+        for (id, mesh) in &self.evaluated {
+            if !self.doc.is_shown(*id) {
+                continue;
+            }
+            let px = region.project(mesh, self.doc.world_transform(*id));
+            let hit = px.iter().flatten().any(|p| region.inside(*p))
+                || mesh.edges().iter().any(|[a, b]| {
+                    matches!(
+                        (px[*a as usize], px[*b as usize]),
+                        (Some(a), Some(b)) if region.crosses(a, b)
+                    )
+                })
+                || (0..mesh.num_faces()).any(|f| region.face_holds_anchor(mesh, &px, f));
+            if hit {
+                out.push(shell::object_key(*id));
+            }
+        }
+        out
+    }
+
+    /// The mesh elements a region covers, through everything: what X-ray
+    /// selects in edit mode, numbered as the region select's bitset is.
+    ///
+    /// The id buffer keeps one element a pixel even with X-ray on, so a back
+    /// vertex that lands on the same pixels as a front one — every vertex of
+    /// a cube seen straight on — was never collected. The cages are projected
+    /// instead, as [`App::xray_region_objects`] does: a vertex is in if it is
+    /// inside; an edge if an end is or it crosses the outline; a face if a
+    /// corner is, a side crosses, or the region lies inside it.
+    fn xray_region_elements(&self, shape: &kreate_render::SelectShape) -> Vec<u32> {
+        let Some(region) = self.xray_region(shape) else {
+            return Vec::new();
+        };
+        let domain = self.pick_domain();
+        // Each mesh being edited and where its elements start.
+        let meshes: Vec<(ObjectId, u32)> = match self.edit_bases() {
+            Some((_, groups)) => kreate_ops::ops::mesh::edit_targets(&self.doc)
+                .iter()
+                .filter_map(|t| {
+                    let key = shell::object_key(t.object);
+                    groups.iter().find(|g| g.0 == key).map(|g| (t.object, g.1))
+                })
+                .collect(),
+            None => self
+                .doc
+                .selection
+                .active
+                .into_iter()
+                .map(|id| (id, 0))
+                .collect(),
+        };
+        let mut out = Vec::new();
+        for (id, base) in meshes {
+            let Some(mesh) = self
+                .doc
+                .object(id)
+                .and_then(|o| o.mesh())
+                .and_then(|m| self.doc.mesh(m))
+            else {
+                continue;
+            };
+            let px = region.project(mesh, self.doc.world_transform(id));
+            let vert_in: Vec<bool> = px
+                .iter()
+                .map(|p| p.is_some_and(|p| region.inside(p)))
+                .collect();
+            let edge_in = |a: u32, b: u32| {
+                vert_in[a as usize]
+                    || vert_in[b as usize]
+                    || matches!(
+                        (px[a as usize], px[b as usize]),
+                        (Some(a), Some(b)) if region.crosses(a, b)
+                    )
+            };
+            let (kind, found): (kreate_mesh::Domain, Vec<u32>) = match domain {
+                kreate_render::PickDomain::Vert => (
+                    kreate_mesh::Domain::Point,
+                    (0..vert_in.len() as u32)
+                        .filter(|v| vert_in[*v as usize])
+                        .collect(),
+                ),
+                kreate_render::PickDomain::Edge => (
+                    kreate_mesh::Domain::Edge,
+                    (0..mesh.num_edges())
+                        .filter(|e| {
+                            let [a, b] = mesh.edges()[*e as usize];
+                            edge_in(a, b)
+                        })
+                        .collect(),
+                ),
+                _ => (
+                    kreate_mesh::Domain::Face,
+                    (0..mesh.num_faces())
+                        .filter(|f| {
+                            let ring = mesh.face_verts(*f);
+                            (0..ring.len()).any(|i| edge_in(ring[i], ring[(i + 1) % ring.len()]))
+                                || region.face_holds_anchor(mesh, &px, *f)
+                        })
+                        .collect(),
+                ),
+            };
+            let hidden = kreate_mesh::selection::hidden_flags(mesh, kind);
+            out.extend(
+                found
+                    .into_iter()
+                    .filter(|e| !hidden.get(*e as usize).copied().unwrap_or(false))
+                    .map(|e| e + base),
+            );
+        }
+        out
+    }
+
+    /// A region in the viewport's pixels, ready to test projected geometry
+    /// against. `None` before the renderer exists.
+    fn xray_region(&self, shape: &kreate_render::SelectShape) -> Option<XrayRegion> {
+        use kreate_math::Vec2;
+        let gfx = self.gfx.as_ref()?;
         let (w, h) = gfx.viewport.render_size();
         let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-        let vp = self.camera.view_projection(w as f64 / h as f64);
-        let eye = self.camera.eye();
         let outline: Vec<Vec2> = match shape {
             kreate_render::SelectShape::Box { from, to } => {
                 let (a, b) = (Vec2::new(from.0, from.1), Vec2::new(to.0, to.1));
@@ -8546,68 +8664,19 @@ impl App {
             }
             kreate_render::SelectShape::Circle { .. } => Vec::new(),
         };
-        let inside = |p: Vec2| -> bool {
-            match shape {
-                kreate_render::SelectShape::Circle { centre, radius } => {
-                    p.distance(Vec2::new(centre.0, centre.1)) <= *radius
-                }
-                _ => in_polygon(&outline, p),
+        let circle = match shape {
+            kreate_render::SelectShape::Circle { centre, radius } => {
+                Some((Vec2::new(centre.0, centre.1), *radius))
             }
+            _ => None,
         };
-        let crosses = |a: Vec2, b: Vec2| -> bool {
-            match shape {
-                kreate_render::SelectShape::Circle { centre, radius } => {
-                    let c = Vec2::new(centre.0, centre.1);
-                    let ab = b - a;
-                    let t =
-                        ((c - a).dot(ab) / ab.length_squared().max(f32::EPSILON)).clamp(0.0, 1.0);
-                    (a + ab * t).distance(c) <= *radius
-                }
-                _ => (0..outline.len())
-                    .any(|i| segments_cross(a, b, outline[i], outline[(i + 1) % outline.len()])),
-            }
-        };
-        // A point of the region, for a region wholly inside one face.
-        let anchor = match shape {
-            kreate_render::SelectShape::Circle { centre, .. } => Vec2::new(centre.0, centre.1),
-            _ => outline.first().copied().unwrap_or(Vec2::ZERO),
-        };
-        let mut out = Vec::new();
-        for (id, mesh) in &self.evaluated {
-            if !self.doc.is_shown(*id) {
-                continue;
-            }
-            let world = self.doc.world_transform(*id);
-            let px: Vec<Option<Vec2>> = mesh
-                .positions()
-                .iter()
-                .map(|p| {
-                    let rel = (world.transform_point3(p.as_dvec3()) - eye).as_vec3();
-                    let c = vp * rel.extend(1.0);
-                    // Behind the eye: no place on screen.
-                    (c.w > 1e-6).then(|| {
-                        let n = c.truncate() / c.w;
-                        Vec2::new((n.x * 0.5 + 0.5) * w, (0.5 - n.y * 0.5) * h)
-                    })
-                })
-                .collect();
-            let hit = px.iter().flatten().any(|p| inside(*p))
-                || mesh.edges().iter().any(|[a, b]| {
-                    matches!(
-                        (px[*a as usize], px[*b as usize]),
-                        (Some(a), Some(b)) if crosses(a, b)
-                    )
-                })
-                || (0..mesh.num_faces()).any(|f| {
-                    let ring: Option<Vec<Vec2>> =
-                        mesh.face_verts(f).iter().map(|v| px[*v as usize]).collect();
-                    ring.is_some_and(|r| in_polygon(&r, anchor))
-                });
-            if hit {
-                out.push(shell::object_key(*id));
-            }
-        }
-        out
+        Some(XrayRegion {
+            view_projection: self.camera.view_projection(w as f64 / h as f64),
+            eye: self.camera.eye(),
+            size: Vec2::new(w, h),
+            outline,
+            circle,
+        })
     }
 
     /// What a rubber band in progress should collect.
@@ -10059,6 +10128,13 @@ impl App {
         }
 
         let mut elements = resolved;
+        if self.xray {
+            for e in self.xray_region_elements(&drag.shape()) {
+                if !elements.contains(&e) {
+                    elements.push(e);
+                }
+            }
+        }
         // Several meshes: each bit back to its object and its own index.
         let mut objects = Vec::new();
         let mut counts = Vec::new();
@@ -14757,6 +14833,83 @@ impl Splash {
     }
 }
 
+/// A selection region in viewport pixels, and the camera that projects
+/// geometry onto it: what X-ray tests meshes against.
+struct XrayRegion {
+    view_projection: kreate_math::Mat4,
+    eye: kreate_math::DVec3,
+    size: kreate_math::Vec2,
+    /// A box's or lasso's outline; empty for a circle.
+    outline: Vec<kreate_math::Vec2>,
+    circle: Option<(kreate_math::Vec2, f32)>,
+}
+
+impl XrayRegion {
+    /// Each vertex of `mesh` in pixels, `None` for one behind the eye.
+    fn project(
+        &self,
+        mesh: &MeshData,
+        world: kreate_math::DAffine3,
+    ) -> Vec<Option<kreate_math::Vec2>> {
+        mesh.positions()
+            .iter()
+            .map(|p| {
+                let rel = (world.transform_point3(p.as_dvec3()) - self.eye).as_vec3();
+                let c = self.view_projection * rel.extend(1.0);
+                (c.w > 1e-6).then(|| {
+                    let n = c.truncate() / c.w;
+                    kreate_math::Vec2::new(
+                        (n.x * 0.5 + 0.5) * self.size.x,
+                        (0.5 - n.y * 0.5) * self.size.y,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn inside(&self, p: kreate_math::Vec2) -> bool {
+        match self.circle {
+            Some((c, r)) => p.distance(c) <= r,
+            None => in_polygon(&self.outline, p),
+        }
+    }
+
+    /// Whether the segment `ab` crosses the region's edge.
+    fn crosses(&self, a: kreate_math::Vec2, b: kreate_math::Vec2) -> bool {
+        match self.circle {
+            Some((c, r)) => {
+                let ab = b - a;
+                let t = ((c - a).dot(ab) / ab.length_squared().max(f32::EPSILON)).clamp(0.0, 1.0);
+                (a + ab * t).distance(c) <= r
+            }
+            None => (0..self.outline.len()).any(|i| {
+                segments_cross(
+                    a,
+                    b,
+                    self.outline[i],
+                    self.outline[(i + 1) % self.outline.len()],
+                )
+            }),
+        }
+    }
+
+    /// Whether face `f` holds a point of the region — for a region wholly
+    /// inside one face, which touches none of its corners or sides.
+    fn face_holds_anchor(&self, mesh: &MeshData, px: &[Option<kreate_math::Vec2>], f: u32) -> bool {
+        let anchor = match self.circle {
+            Some((c, _)) => c,
+            None => self
+                .outline
+                .first()
+                .copied()
+                .unwrap_or(kreate_math::Vec2::ZERO),
+        };
+        let ring: Option<Vec<kreate_math::Vec2>> =
+            mesh.face_verts(f).iter().map(|v| px[*v as usize]).collect();
+        ring.is_some_and(|r| in_polygon(&r, anchor))
+    }
+}
+
 /// Whether `p` is inside the closed outline `ring` (even-odd).
 fn in_polygon(ring: &[kreate_math::Vec2], p: kreate_math::Vec2) -> bool {
     let mut inside = false;
@@ -15237,6 +15390,44 @@ mod tests {
             square[0],
             square[1]
         ));
+    }
+
+    #[test]
+    fn x_ray_reaches_the_corners_hidden_behind_the_front_ones() {
+        use super::*;
+        use kreate_math::Vec2;
+        // Looking straight down an axis, a cube's back corners fall on the
+        // very pixels of its front ones — and still all eight are found.
+        let cube = kreate_mesh::primitives::cube(1.0);
+        let region = XrayRegion {
+            view_projection: kreate_math::Mat4::IDENTITY,
+            eye: DVec3::ZERO,
+            size: Vec2::new(100.0, 100.0),
+            outline: vec![
+                Vec2::new(10.0, 10.0),
+                Vec2::new(90.0, 10.0),
+                Vec2::new(90.0, 90.0),
+                Vec2::new(10.0, 90.0),
+            ],
+            circle: None,
+        };
+        let px = region.project(&cube, kreate_math::DAffine3::IDENTITY);
+        assert_eq!(
+            px.iter().flatten().filter(|p| region.inside(**p)).count(),
+            8
+        );
+        // A box inside one face, touching none of its corners, holds it.
+        let small = XrayRegion {
+            outline: vec![
+                Vec2::new(48.0, 48.0),
+                Vec2::new(52.0, 48.0),
+                Vec2::new(52.0, 52.0),
+                Vec2::new(48.0, 52.0),
+            ],
+            ..region
+        };
+        assert!((0..cube.num_faces()).any(|f| small.face_holds_anchor(&cube, &px, f)));
+        assert!(px.iter().flatten().all(|p| !small.inside(*p)));
     }
 
     #[test]
@@ -16264,7 +16455,7 @@ kreate.ops.object.add_primitive()" }),
             .unwrap();
         let csv = read("b.csv");
         let row = csv.lines().nth(1).expect("one part");
-        assert!(row.contains(",2,2000.0000,2000.0000,2000.0000,"), "{csv}");
+        assert!(row.contains(",2,,2000.0000,2000.0000,2000.0000,"), "{csv}");
         assert_eq!(csv.lines().count(), 2, "{csv}");
         app.write_drawing(
             &dir.join(format!("kreate-test-{pid}-c.dxf")),
