@@ -1391,6 +1391,9 @@ impl App {
         if ids.is_empty() || ids.len() > 2 {
             return Err("name one or two objects, or select them".into());
         }
+        // A density given wins for every part; otherwise each is weighed by
+        // what it is made of — its physical material, or the scene's.
+        let given = density;
         let density = density.unwrap_or(doc.design.density);
         let mut measured = Vec::new();
         let mut meshes = Vec::new();
@@ -1409,8 +1412,10 @@ impl App {
                 "centroid": m.centroid.to_array(),
             });
             if m.closed {
+                let own = given.unwrap_or_else(|| doc.density_of(*id));
                 v["volume_m3"] = json!(m.volume.abs());
-                v["mass_kg"] = json!(m.volume.abs() * density);
+                v["density_kg_m3"] = json!(own);
+                v["mass_kg"] = json!(m.volume.abs() * own);
             } else {
                 v["note"] = json!("the surface is open, so it holds no volume and has no mass");
             }

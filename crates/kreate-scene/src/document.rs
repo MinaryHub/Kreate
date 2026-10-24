@@ -404,6 +404,13 @@ pub struct Material {
     pub graph: Option<crate::shader::ShaderGraph>,
     /// The action animating this material's values, if any.
     pub action: Option<ActionId>,
+    /// What the stuff weighs, kilograms per cubic metre, when the material
+    /// says: a part made of it is weighed by this rather than by the scene's
+    /// density. Fusion's physical material, look and mass in one.
+    pub density: Option<f64>,
+    /// The library entry it was made from, by id
+    /// ([`crate::material_library`]), so choosing the same one again reuses it.
+    pub physical: Option<String>,
     pub linkage: Linkage,
     /// Assigned by the document. See [`Uid`].
     pub uid: Uid,
@@ -432,6 +439,8 @@ impl Default for Material {
             alpha_clip: None,
             graph: None,
             action: None,
+            density: None,
+            physical: None,
             linkage: Linkage::Local,
             uid: Uid::NONE,
         }
@@ -1032,6 +1041,25 @@ impl Document {
     /// Silently orphaning children would leave the hierarchy referring to a dead
     /// id; deleting them recursively is a different operation and should be the
     /// caller's explicit choice.
+    /// What an object is made of, kilograms per cubic metre: its first
+    /// material that says, or the scene's density.
+    pub fn density_of(&self, id: ObjectId) -> f64 {
+        self.object(id)
+            .and_then(|o| match &o.data {
+                ObjectData::Mesh(mesh) => Some(*mesh),
+                _ => None,
+            })
+            .and_then(|mesh| {
+                self.mesh_slots(mesh)
+                    .iter()
+                    .flatten()
+                    .filter_map(|m| self.material(*m))
+                    .find_map(|m| m.density)
+            })
+            .filter(|d| d.is_finite() && *d > 0.0)
+            .unwrap_or(self.design.density)
+    }
+
     /// Whether `id` is an object that is a camera.
     pub fn is_camera(&self, id: ObjectId) -> bool {
         self.object(id)

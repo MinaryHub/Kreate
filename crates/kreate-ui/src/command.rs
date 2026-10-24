@@ -240,6 +240,17 @@ pub enum Command {
     OpenAbout,
     /// Help ▸ Support Kreate: the sponsors' page, in the browser.
     Donate,
+    /// A field naming an object — a boolean's cutter, a path — is filled by
+    /// the next click on an object in the viewport: `op_id` run with
+    /// `params` and the object's name as `object`.
+    PickObjectField {
+        op_id: String,
+        params: PropertyMap,
+    },
+    /// The objects picked in the viewport are used: the boolean is made.
+    ObjectPickConfirm,
+    /// Picking objects in the viewport is given up.
+    ObjectPickCancel,
     /// From the contact form: send this to the developers. `kind` is one of
     /// `contact::KINDS`.
     ContactSend {

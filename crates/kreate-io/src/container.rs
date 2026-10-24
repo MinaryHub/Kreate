@@ -1186,6 +1186,12 @@ pub struct MaterialRecord {
     /// Index into [`SceneFile::actions`]: what animates this material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<usize>,
+    /// Kilograms per cubic metre, when the material says what it weighs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<f64>,
+    /// The physical-material library entry it was made from, by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -2205,6 +2211,8 @@ pub fn write(
                     alpha_clip: m.alpha_clip,
                     graph: m.graph.as_ref().map(|g| graph_record(g, document)),
                     action: m.action.and_then(|a| action_index.get(&a).copied()),
+                    density: m.density,
+                    physical: m.physical.clone(),
                     extra: BTreeMap::new(),
                 }
             })
@@ -2774,6 +2782,9 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                 .as_ref()
                 .and_then(|g| graph_from_record(g, &document)),
             action: record.action.and_then(|i| action_ids.get(i).copied()),
+            // A density that weighs nothing, or less, is no density.
+            density: record.density.filter(|d| d.is_finite() && *d > 0.0),
+            physical: record.physical.clone(),
             linkage: Linkage::Local,
             uid: kreate_scene::Uid::NONE,
         };

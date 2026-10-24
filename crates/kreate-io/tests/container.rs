@@ -877,6 +877,8 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         occlusion_strength: None,
         graph: None,
         action: None,
+        density: None,
+        physical: None,
         extra: Default::default(),
     };
     let text = serde_json::to_string(&record).expect("serialises");
@@ -1275,4 +1277,17 @@ fn a_cut_out_threshold_survives_the_file() {
     };
     assert_eq!(clip_of("Leaf"), Some(0.4));
     assert_eq!(clip_of("Solid"), None);
+}
+
+#[test]
+fn a_physical_material_keeps_its_density_and_its_library_entry() {
+    let mut doc = kreate_scene::Document::new();
+    let oak = kreate_scene::material_library::find("oak")
+        .expect("in the library")
+        .material("Oak");
+    doc.add_material(oak);
+    let back = round_trip(&doc).document;
+    let (_, m) = back.materials().next().expect("came back");
+    assert_eq!(m.density, Some(750.0));
+    assert_eq!(m.physical.as_deref(), Some("oak"));
 }

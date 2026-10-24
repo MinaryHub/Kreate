@@ -17,6 +17,7 @@ pub mod feature;
 pub mod geonodes;
 pub mod image;
 pub mod light;
+pub mod material_library;
 pub mod modifier;
 pub mod nla;
 pub mod physics;

@@ -211,6 +211,19 @@ fn parameters(ui: &mut Ui, catalog: &Catalog, row: &mut ModifierRow, queue: &mut
                         ui.selectable_value(&mut chosen, name.clone(), name.as_str());
                     }
                 });
+            // Or click it in the viewport, as Fusion picks a body.
+            if ui
+                .small_button(catalog.format("modifier-pick-object", TextKind::Ui, &[]))
+                .on_hover_text(catalog.format("modifier-pick-object-hint", TextKind::Tooltip, &[]))
+                .clicked()
+            {
+                let mut params = row.params.clone();
+                params.set("index", PropertyValue::Int(row.index as i64));
+                queue.push(Command::PickObjectField {
+                    op_id: row.op_id.clone(),
+                    params,
+                });
+            }
         });
         if chosen != current {
             let mut params = row.params.clone();

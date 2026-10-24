@@ -425,6 +425,8 @@ pub struct ShellState {
     /// Whether the 3D cursor is drawn. Hidden, it still places new objects
     /// and parts and still turns things as the pivot.
     pub show_cursor: bool,
+    /// Objects being chosen by clicking them in the viewport, when they are.
+    pub object_pick: Option<ObjectPick>,
     /// The history's step names and how many are applied, for the Undo
     /// History menu.
     pub history_steps: Vec<String>,
@@ -933,6 +935,7 @@ impl Default for ShellState {
             show_stats: false,
             show_dimensions: true,
             show_cursor: true,
+            object_pick: None,
             history_steps: Vec::new(),
             history_at: 0,
             pivot: 0,
@@ -2766,6 +2769,7 @@ pub fn draw(
     }
     state.apply_area_edits();
     draw_help_windows(ui.ctx(), state, &l);
+    draw_object_pick(ui.ctx(), state, doc, &l);
     draw_search(ui, state, &l, history, mode);
     draw_pie(ui, state, &l, doc, mode);
     viewport_rect
@@ -6678,6 +6682,20 @@ fn draw_physical_panel(
     registry: &OperatorRegistry,
 ) {
     let Some(mass) = state.mass else { return };
+    // What the part is made of: a physical material's density wins over the
+    // scene's, which is then only the fallback for parts made of nothing.
+    let active = doc.selection.active;
+    let density = active.map_or(doc.design.density, |a| doc.density_of(a));
+    let made_of = active
+        .and_then(|a| doc.object(a)?.mesh())
+        .and_then(|m| {
+            doc.mesh_slots(m)
+                .iter()
+                .flatten()
+                .filter_map(|id| doc.material(*id))
+                .find(|m| m.density.is_some())
+        })
+        .map(|m| format!("{} · {:.0} kg/m³", m.name, m.density.unwrap_or_default()));
     let title = state.catalog.get("panel-physical");
     let open = !mass.closed;
     kreate_ui::panel::section(ui, &title, true, |ui| {
@@ -6702,7 +6720,7 @@ fn draw_physical_panel(
                 ("physical-area", kreate_reflect::format_area(mass.area)),
                 (
                     "physical-mass",
-                    kreate_reflect::format_mass(mass.volume.abs() * doc.design.density),
+                    kreate_reflect::format_mass(mass.volume.abs() * density),
                 ),
                 (
                     "physical-centroid",
@@ -6714,6 +6732,12 @@ fn draw_physical_panel(
                     ),
                 ),
             ];
+            if let Some(made_of) = &made_of {
+                ui.label(state.catalog.get("physical-material"));
+                // i18n-exempt: a material's name and its density
+                ui.label(made_of);
+                ui.end_row();
+            }
             for (key, value) in rows {
                 ui.label(state.catalog.get(key));
                 // i18n-exempt: measured values
@@ -11873,6 +11897,254 @@ const CLEAR_GLYPH: &str = "×";
 /// glyph the chrome draws to it.
 // i18n-exempt: symbols, not words
 const ADD_GLYPH: &str = "+";
+
+/// Objects chosen by clicking them in the viewport rather than from a list.
+///
+/// Objects by their keys ([`object_key`]), resolved against the document when
+/// used, as the outliner's are.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ObjectPick {
+    /// Fusion's Combine: the body acted on, and the bodies acting on it.
+    Boolean {
+        /// `object.boolean`'s operation: difference, union, intersect.
+        operation: u32,
+        target: Option<u32>,
+        tools: Vec<u32>,
+        /// Bake the result and delete the tools, or keep a live modifier.
+        apply: bool,
+    },
+    /// One field naming an object, filled by the next click.
+    Field { op_id: String, params: PropertyMap },
+}
+
+impl ObjectPick {
+    /// What a click on the object `key` does to the choice. True when the
+    /// choice is complete and should be used now.
+    pub fn click(&mut self, key: u32) -> bool {
+        match self {
+            ObjectPick::Boolean { target, tools, .. } => {
+                match *target {
+                    // The first click is the body acted on.
+                    None => *target = Some(key),
+                    // A click on it again lets it go, to choose another.
+                    Some(t) if t == key => *target = None,
+                    // Then the tools, a click each way.
+                    Some(_) => match tools.iter().position(|k| *k == key) {
+                        Some(i) => {
+                            tools.remove(i);
+                        }
+                        None => tools.push(key),
+                    },
+                }
+                false
+            }
+            ObjectPick::Field { .. } => true,
+        }
+    }
+}
+
+/// The panel for picking objects in the viewport: what is chosen, what to
+/// click next, and Done.
+fn draw_object_pick(ctx: &egui::Context, state: &mut ShellState, doc: &Document, l: &Labels) {
+    let Some(pick) = state.object_pick.clone() else {
+        return;
+    };
+    let catalog = &state.catalog;
+    let name_of = |key: u32| {
+        object_from_key(doc, key)
+            .and_then(|id| doc.object(id))
+            .map(|o| o.name.clone())
+            // i18n-exempt: a mark for an object that is gone
+            .unwrap_or_else(|| "?".into())
+    };
+    let mut next = pick.clone();
+    let mut confirm = false;
+    let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let title = match &pick {
+        ObjectPick::Boolean { .. } => l.menu_boolean.clone(),
+        ObjectPick::Field { .. } => catalog.get("pick-object-title"),
+    };
+    egui::Window::new(title)
+        .id(egui::Id::new("object-pick"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(16.0, 190.0))
+        .show(ctx, |ui| {
+            let theme = kreate_ui::theme::from_ui(ui);
+            match &mut next {
+                ObjectPick::Boolean {
+                    operation,
+                    target,
+                    tools,
+                    apply,
+                } => {
+                    ui.horizontal(|ui| {
+                        for (n, label) in l.boolean_ops.iter().enumerate() {
+                            ui.selectable_value(operation, n as u32, label);
+                        }
+                    });
+                    ui.separator();
+                    egui::Grid::new("object-pick-grid")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            ui.label(catalog.get("pick-boolean-target"));
+                            match *target {
+                                // i18n-exempt: an object's name
+                                Some(t) => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(name_of(t)).color(theme.accent),
+                                        );
+                                        if ui.small_button("×").clicked() {
+                                            *target = None;
+                                        }
+                                    });
+                                }
+                                None => {
+                                    ui.weak(catalog.get("pick-click-viewport"));
+                                }
+                            }
+                            ui.end_row();
+                            ui.label(catalog.get("pick-boolean-tools"));
+                            ui.vertical(|ui| {
+                                if tools.is_empty() {
+                                    ui.weak(catalog.get("pick-click-viewport"));
+                                }
+                                let mut drop = None;
+                                for (i, k) in tools.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        // i18n-exempt: an object's name
+                                        ui.label(name_of(*k));
+                                        if ui.small_button("×").clicked() {
+                                            drop = Some(i);
+                                        }
+                                    });
+                                }
+                                if let Some(i) = drop {
+                                    tools.remove(i);
+                                }
+                            });
+                            ui.end_row();
+                        });
+                    ui.add_space(4.0);
+                    let hint = if target.is_none() {
+                        catalog.get("pick-boolean-hint-target")
+                    } else {
+                        catalog.get("pick-boolean-hint-tools")
+                    };
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(hint).color(theme.text_dim)).wrap(),
+                    );
+                    ui.checkbox(apply, catalog.get("pick-boolean-apply"));
+                    ui.add_space(4.0);
+                    let ready = target.is_some() && !tools.is_empty();
+                    ui.horizontal(|ui| {
+                        let enter = ready && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui
+                            .add_enabled(ready, egui::Button::new(catalog.get("pick-ok")))
+                            .clicked()
+                            || enter
+                        {
+                            confirm = true;
+                        }
+                        if ui.button(catalog.get("pick-cancel")).clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+                ObjectPick::Field { .. } => {
+                    ui.label(catalog.get("pick-field-hint"));
+                    if ui.button(catalog.get("pick-cancel")).clicked() {
+                        cancel = true;
+                    }
+                }
+            }
+        });
+    if next != pick {
+        state.object_pick = Some(next);
+    }
+    if cancel {
+        state.queue.push(Command::ObjectPickCancel);
+    } else if confirm {
+        state.queue.push(Command::ObjectPickConfirm);
+    }
+}
+
+/// Fusion's physical materials: a menu of what a part can be made of, shelf
+/// by shelf, each with its colour and weight. Choosing one makes the selected
+/// parts of it, in `slot`.
+fn draw_physical_library(ui: &mut Ui, state: &mut ShellState, doc: &Document, slot: u32) {
+    use kreate_scene::material_library::{Category, LIBRARY};
+    let current = doc
+        .selection
+        .active
+        .and_then(|a| doc.object(a)?.mesh())
+        .and_then(|m| doc.mesh_slots(m).get(slot as usize).copied().flatten())
+        .and_then(|id| doc.material(id))
+        .and_then(|m| m.physical.clone());
+    let title = state.catalog.get("physical-library");
+    let shown = current
+        .as_deref()
+        .and_then(kreate_scene::material_library::find)
+        .map(|m| state.catalog.get(&m.name_key()));
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.menu_button(format!("{title} \u{25BE}"), |ui| {
+            for category in Category::ALL {
+                ui.menu_button(state.catalog.get(category.name_key()), |ui| {
+                    for entry in LIBRARY.iter().filter(|m| m.category == category) {
+                        let name = state.catalog.get(&entry.name_key());
+                        let response = ui
+                            .horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(16.0, 16.0),
+                                    egui::Sense::hover(),
+                                );
+                                let [r, g, b] = [
+                                    (entry.color >> 16) as u8,
+                                    (entry.color >> 8) as u8,
+                                    entry.color as u8,
+                                ];
+                                ui.painter().rect(
+                                    rect,
+                                    3.0,
+                                    egui::Color32::from_rgb(r, g, b),
+                                    egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+                                    egui::StrokeKind::Inside,
+                                );
+                                let on = current.as_deref() == Some(entry.id);
+                                // i18n-exempt: a density, in its unit
+                                let label = format!("{name}   {:.0} kg/m³", entry.density);
+                                ui.selectable_label(on, label)
+                            })
+                            .inner;
+                        if response.clicked() {
+                            chosen = Some((entry.id, name));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        })
+        .response
+        .on_hover_text(state.catalog.get("physical-library-hint"));
+        if let Some(shown) = &shown {
+            let theme = kreate_ui::theme::from_ui(ui);
+            // i18n-exempt: the library entry's translated name
+            ui.label(egui::RichText::new(shown).color(theme.text_dim));
+        }
+    });
+    if let Some((id, name)) = chosen {
+        let mut p = PropertyMap::new();
+        p.set(
+            "preset",
+            kreate_reflect::PropertyValue::Text(id.to_string()),
+        );
+        p.set("name", kreate_reflect::PropertyValue::Text(name));
+        p.set("slot", kreate_reflect::PropertyValue::Int(slot as i64));
+        state.queue.run("material.apply_physical", p);
+    }
+}
 // i18n-exempt: a symbol, not a word. An en dash rather than the minus sign
 // U+2212 this wants: the bundled subset has no glyph for that one, and the
 // test below caught it before it reached a screen.
@@ -11972,6 +12244,8 @@ fn draw_material_tab(
             }
         });
     });
+
+    draw_physical_library(ui, state, doc, slot);
 
     let slot_param = |extra: Option<(&'static str, kreate_reflect::PropertyValue)>| {
         let mut p = PropertyMap::new();

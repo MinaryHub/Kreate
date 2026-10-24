@@ -3392,3 +3392,29 @@ fn shot_gear_kinds() {
         }
     }
 }
+
+/// The boolean's pick panel over the viewport: a target chosen, a tool.
+#[test]
+fn shot_boolean_pick() {
+    let mut doc = doc_with_cube();
+    let tool = doc.add_mesh_object("Cutter", kreate_mesh::primitives::cube(1.0));
+    let cube = doc
+        .objects()
+        .find(|(_, o)| o.name == "Cube")
+        .map(|(id, _)| id)
+        .expect("the cube");
+    for (label, locale) in [("boolean-pick", "en"), ("boolean-pick-ko", "ko-KR")] {
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            state.object_pick = Some(kreate::shell::ObjectPick::Boolean {
+                operation: 0,
+                target: Some(kreate::shell::object_key(cube)),
+                tools: vec![kreate::shell::object_key(tool)],
+                apply: false,
+            });
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}

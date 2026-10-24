@@ -1791,6 +1791,122 @@ impl Operator for SelectByMaterial {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ApplyPhysicalMaterialParams {
+    /// The library entry, by id: `oak`, `aluminum`, `abs_black`. See
+    /// `kreate_scene::material_library::LIBRARY`.
+    pub preset: String,
+    /// What to call the material; empty is the entry's own name in English.
+    pub name: String,
+    /// Which slot of each object. See [`SetMaterialParams::slot`].
+    #[param(min = 0.0)]
+    pub slot: u32,
+}
+
+/// Fusion's physical materials: the selected parts are made of oak, of
+/// aluminium, of ABS — painted to look it and weighed by its density.
+///
+/// One material per library entry, reused: a second part made of oak shares
+/// the first one's, so changing the oak changes both, as it would in Fusion.
+pub struct ApplyPhysicalMaterial;
+
+/// The meshes it acts on: the selected ones, or the active one.
+fn physical_targets(doc: &Document) -> Vec<MeshId> {
+    let mut meshes: Vec<MeshId> = doc
+        .selection
+        .objects
+        .iter()
+        .chain(doc.selection.active.iter())
+        .filter_map(|id| doc.object(*id)?.mesh())
+        .collect();
+    meshes.sort_unstable();
+    meshes.dedup();
+    meshes
+}
+
+impl Operator for ApplyPhysicalMaterial {
+    type Params = ApplyPhysicalMaterialParams;
+
+    fn id() -> &'static str {
+        "material.apply_physical"
+    }
+    fn label() -> &'static str {
+        "Physical Material"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        !physical_targets(doc).is_empty()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(entry) = kreate_scene::material_library::find(params.preset.trim()) else {
+            let ids: Vec<&str> = kreate_scene::material_library::LIBRARY
+                .iter()
+                .map(|m| m.id)
+                .collect();
+            return Err(OpError::Failed(format!(
+                "no physical material {:?}; there are {}",
+                params.preset,
+                ids.join(", ")
+            )));
+        };
+        let meshes = physical_targets(doc.document());
+        if meshes.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let slot = params.slot as usize;
+        if let Some(short) = meshes
+            .iter()
+            .find(|m| slot > doc.document().mesh_slots(**m).len())
+        {
+            let have = doc.document().mesh_slots(*short).len();
+            return Err(OpError::Failed(format!(
+                "a part has {have} slot(s); slot {slot} would leave a gap"
+            )));
+        }
+        let existing = doc
+            .document()
+            .materials()
+            .find(|(_, m)| m.physical.as_deref() == Some(entry.id))
+            .map(|(id, _)| id);
+        let d = doc.document_mut();
+        let material = existing.unwrap_or_else(|| {
+            let name = if params.name.trim().is_empty() {
+                // i18n-exempt: the English name a script reads back
+                entry
+                    .id
+                    .split('_')
+                    .map(|w| {
+                        let mut c = w.chars();
+                        c.next()
+                            .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                params.name.trim().to_string()
+            };
+            d.add_material(entry.material(&name))
+        });
+        let mut changed = existing.is_none();
+        for mesh in meshes {
+            if d.mesh_slots(mesh).get(slot) != Some(&Some(material)) {
+                d.set_mesh_slot(mesh, slot, Some(material));
+                changed = true;
+            }
+        }
+        Ok(if changed {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct LinkMaterialParams {
     /// Which slot. See [`SetMaterialParams::slot`].
     #[param(min = 0.0)]
@@ -4153,6 +4269,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AssignMaterial>();
     registry.register::<SelectByMaterial>();
     registry.register::<LinkMaterial>();
+    registry.register::<ApplyPhysicalMaterial>();
     registry.register::<SetMaterialImage>();
     registry.register::<SetMaterial>();
     registry.register::<SetCamera>();
@@ -5823,5 +5940,35 @@ mod gear_tests {
             )
             .is_err());
         assert_eq!(doc.object_count(), 0);
+    }
+
+    /// A physical material paints the selected parts, is shared by the next
+    /// part made of the same, and weighs them by its density.
+    #[test]
+    fn a_physical_material_is_shared_and_weighs_its_parts() {
+        let mut r = OperatorRegistry::new();
+        crate::ops::register_builtin(&mut r);
+        let mut doc = Document::new();
+        let a = doc.add_mesh_object("a", kreate_mesh::primitives::cube(1.0));
+        let b = doc.add_mesh_object("b", kreate_mesh::primitives::cube(1.0));
+        let apply = |doc: &mut Document, preset: &str| {
+            let mut p = PropertyMap::new();
+            p.set("preset", PropertyValue::Text(preset.into()));
+            History::new().dispatch(&r, doc, &Context::default(), "material.apply_physical", &p)
+        };
+        doc.selection.add(a);
+        doc.selection.add(b);
+        apply(&mut doc, "oak").unwrap();
+        doc.selection.clear();
+        doc.selection.add(b);
+        apply(&mut doc, "oak").unwrap();
+        assert_eq!(doc.materials().count(), 1, "one oak, shared");
+        let oak = doc.materials().next().unwrap().1;
+        assert_eq!(oak.name, "Oak");
+        assert_eq!(doc.density_of(a), 750.0);
+        apply(&mut doc, "aluminum").unwrap();
+        assert_eq!(doc.density_of(b), 2700.0);
+        assert_eq!(doc.density_of(a), 750.0, "only the selected part changed");
+        assert!(apply(&mut doc, "unobtainium").is_err());
     }
 }

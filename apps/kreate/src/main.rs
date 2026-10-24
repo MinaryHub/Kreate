@@ -4079,16 +4079,26 @@ impl App {
 
     /// The bill of materials: each part, how many there are of it (objects
     /// sharing a mesh are one part used more than once), its size, volume and
-    /// mass at the scene's density — as CSV, in the scene's unit.
+    /// mass by what each is made of — as CSV, in the scene's unit.
     fn parts_list(&self) -> String {
         let unit = self.doc.design.length_unit;
         let symbol = unit.symbol();
-        let mut rows: Vec<(String, usize, [f64; 3], f64, usize)> = Vec::new();
+        /// One part of the list.
+        struct Row {
+            name: String,
+            count: usize,
+            size: [f64; 3],
+            volume: f64,
+            faces: usize,
+            material: String,
+            density: f64,
+        }
+        let mut rows: Vec<Row> = Vec::new();
         let mut by_mesh: Vec<(usize, usize)> = Vec::new();
         for (name, mesh, world) in self.printable_parts() {
             let key = Arc::as_ptr(&mesh) as usize;
             if let Some((_, row)) = by_mesh.iter().find(|(k, _)| *k == key) {
-                rows[*row].1 += 1;
+                rows[*row].count += 1;
                 continue;
             }
             let points: Vec<DVec3> = mesh
@@ -4106,34 +4116,63 @@ impl App {
                 hi - lo
             };
             let mass = kreate_mesh::measure::mass_properties(&mesh, |p| world.transform_point3(p));
+            // What it is made of: its first material, and that material's
+            // density or the scene's.
+            let object = self
+                .doc
+                .objects()
+                .find(|(_, o)| o.name == name)
+                .map(|(id, _)| id);
+            let material = object
+                .and_then(|id| self.doc.object(id)?.mesh())
+                .and_then(|m| self.doc.mesh_slots(m).iter().flatten().next().copied())
+                .and_then(|m| self.doc.material(m))
+                .map(|m| m.name.clone())
+                .unwrap_or_default();
+            let density = object.map_or(self.doc.design.density, |id| self.doc.density_of(id));
             by_mesh.push((key, rows.len()));
-            rows.push((
+            rows.push(Row {
                 name,
-                1,
-                size.to_array(),
-                mass.volume.abs(),
-                mesh.num_faces() as usize,
-            ));
+                count: 1,
+                size: size.to_array(),
+                volume: mass.volume.abs(),
+                faces: mesh.num_faces() as usize,
+                material,
+                density,
+            });
         }
         let per = unit.metres();
         let mut out = format!(
-            "Part,Quantity,Size X ({symbol}),Size Y ({symbol}),Size Z ({symbol}),Volume ({symbol}3),Mass each (kg),Faces
+            "Part,Quantity,Material,Size X ({symbol}),Size Y ({symbol}),Size Z ({symbol}),Volume ({symbol}3),Mass each (kg),Faces
 "
         );
-        for (name, count, size, volume, faces) in rows {
-            let name = if name.contains([',', '"']) {
-                format!("\"{}\"", name.replace('"', "\"\""))
+        let quote = |text: String| {
+            if text.contains([',', '"']) {
+                format!("\"{}\"", text.replace('"', "\"\""))
             } else {
-                name
-            };
+                text
+            }
+        };
+        for Row {
+            name,
+            count,
+            size,
+            volume,
+            faces,
+            material,
+            density,
+        } in rows
+        {
+            let name = quote(name);
+            let material = quote(material);
             out.push_str(&format!(
-                "{name},{count},{:.4},{:.4},{:.4},{:.4},{:.6},{faces}
+                "{name},{count},{material},{:.4},{:.4},{:.4},{:.4},{:.6},{faces}
 ",
                 size[0] / per,
                 size[1] / per,
                 size[2] / per,
                 volume / per.powi(3),
-                volume * self.doc.design.density,
+                volume * density,
             ));
         }
         out
@@ -6343,7 +6382,27 @@ impl App {
     fn drain_ui_commands(&mut self) {
         for command in self.ui.queue.drain() {
             match command {
+                // A boolean from a menu or the ribbon is chosen in the
+                // viewport, as Fusion's Combine is; a script's runs as given.
+                Command::RunOperator { op_id, params } if op_id == "object.boolean" => {
+                    let operation = params.get("operation").and_then(|v| match v {
+                        PropertyValue::Enum(n) => Some(*n),
+                        PropertyValue::Int(n) => Some(*n as u32),
+                        _ => None,
+                    });
+                    self.begin_boolean_pick(operation.unwrap_or(0));
+                }
                 Command::RunOperator { op_id, params } => self.run_op(&op_id, params),
+                Command::PickObjectField { op_id, params } => {
+                    self.ui.object_pick = Some(kreate::shell::ObjectPick::Field { op_id, params });
+                    let message = self.ui.catalog.get("pick-field-hint");
+                    self.status(&message);
+                }
+                Command::ObjectPickConfirm => self.finish_object_pick(),
+                Command::ObjectPickCancel => {
+                    self.ui.object_pick = None;
+                    self.redraw.set(RedrawReason::UI);
+                }
                 // The same path a key press takes, so a menu entry that says
                 // "Move" starts the drag the G key starts. See `dispatch`.
                 Command::Dispatch { op_id, params } => {
@@ -10150,6 +10209,14 @@ impl App {
                     (None, Some(hit)) => Some(hit.object),
                     (None, None) => None,
                 };
+                // Picking objects for a boolean or a field: the click chooses
+                // rather than selects.
+                if self.ui.object_pick.is_some() {
+                    if let Some(key) = hit_key {
+                        self.pick_object(key);
+                    }
+                    return true;
+                }
                 let (objects, active) = match hit_key {
                     // Through one rule for a plain click and a shift-click,
                     // the same one the outliner applies, so the two ways of
@@ -10181,6 +10248,113 @@ impl App {
             }
         }
         true
+    }
+
+    /// Starts Fusion's Combine: the target and the tools chosen in the
+    /// viewport, beginning from the selection — the active mesh the target,
+    /// the other selected meshes its tools.
+    fn begin_boolean_pick(&mut self, operation: u32) {
+        let is_mesh = |doc: &Document, id: kreate_scene::ObjectId| {
+            doc.object(id).and_then(|o| o.mesh()).is_some()
+        };
+        let target = self.doc.selection.active.filter(|a| is_mesh(&self.doc, *a));
+        let tools: Vec<u32> = self
+            .doc
+            .selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| Some(*id) != target && is_mesh(&self.doc, *id))
+            .map(shell::object_key)
+            .collect();
+        self.ui.object_pick = Some(kreate::shell::ObjectPick::Boolean {
+            operation: operation.min(2),
+            target: target.map(shell::object_key),
+            tools,
+            apply: false,
+        });
+        self.show_pick_selection();
+        let message = self.ui.catalog.get("pick-boolean-hint-target");
+        self.status(&message);
+    }
+
+    /// A click on an object while picking.
+    fn pick_object(&mut self, key: u32) {
+        let Some(pick) = self.ui.object_pick.as_mut() else {
+            return;
+        };
+        // Only a mesh can be cut or cut with.
+        let is_mesh = shell::object_from_key(&self.doc, key)
+            .and_then(|id| self.doc.object(id))
+            .is_some_and(|o| o.mesh().is_some());
+        if matches!(pick, kreate::shell::ObjectPick::Boolean { .. }) && !is_mesh {
+            return;
+        }
+        if pick.click(key) {
+            if let Some(kreate::shell::ObjectPick::Field { op_id, mut params }) =
+                self.ui.object_pick.take()
+            {
+                if let Some(o) =
+                    shell::object_from_key(&self.doc, key).and_then(|id| self.doc.object(id))
+                {
+                    params.set("object", PropertyValue::Text(o.name.clone()));
+                    self.run_op(&op_id, params);
+                }
+            }
+        } else {
+            self.show_pick_selection();
+        }
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    /// The boolean's choice, shown as the selection: the tools selected, the
+    /// target active, so their outlines say which is which.
+    fn show_pick_selection(&mut self) {
+        let Some(kreate::shell::ObjectPick::Boolean { target, tools, .. }) = &self.ui.object_pick
+        else {
+            return;
+        };
+        let objects: Vec<u32> = tools.clone();
+        let active = *target;
+        self.ui
+            .queue
+            .push(kreate_ui::Command::SetSelection { objects, active });
+    }
+
+    /// Done: the boolean made from what was picked.
+    fn finish_object_pick(&mut self) {
+        let Some(kreate::shell::ObjectPick::Boolean {
+            operation,
+            target,
+            tools,
+            apply,
+        }) = self.ui.object_pick.take()
+        else {
+            return;
+        };
+        let target = target.and_then(|k| shell::object_from_key(&self.doc, k));
+        let tools: Vec<_> = tools
+            .iter()
+            .filter_map(|k| shell::object_from_key(&self.doc, *k))
+            .filter(|id| Some(*id) != target)
+            .collect();
+        let Some(target) = target.filter(|_| !tools.is_empty()) else {
+            return;
+        };
+        // The operator reads the selection: the tools, and the target last
+        // so that it is active.
+        self.doc.selection.clear();
+        for id in tools {
+            self.doc.selection.add(id);
+        }
+        self.doc.selection.add(target);
+        self.run_op_with(
+            "object.boolean",
+            &[
+                ("operation", PropertyValue::Enum(operation)),
+                ("apply", PropertyValue::Bool(apply)),
+            ],
+        );
     }
 
     /// Runs what the console was given, and tells the console what happened.
@@ -12674,6 +12848,15 @@ impl App {
             }
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
+            // The keys' boolean, like the menu's: chosen in the viewport.
+            "object.boolean" => {
+                let operation = action.params.get("operation").and_then(|v| match v {
+                    PropertyValue::Enum(n) => Some(*n),
+                    PropertyValue::Int(n) => Some(*n as u32),
+                    _ => None,
+                });
+                self.begin_boolean_pick(operation.unwrap_or(0));
+            }
             // Ctrl+Numpad 0: the active camera becomes the scene's, and the
             // view goes through it.
             "view.camera_set_active" => {
