@@ -306,7 +306,7 @@ fn add(
     let sketch = active_sketch(d).ok_or_else(|| OpError::Failed("no sketch is active".into()))?;
     let sketch_uid = d.object_uid(sketch).expect("an object");
     let seeds = seeds_of(seeds);
-    let regions = feature::sketch_regions(d, sketch);
+    let regions = feature::shape_regions(d, sketch, &shape);
     if feature::picked(&regions, &seeds).is_empty() {
         return Err(OpError::Failed("pick a closed region of the sketch".into()));
     }
@@ -466,6 +466,10 @@ pub struct RevolveParams {
     /// The two points of the sketch the axis runs through.
     #[param(hidden)]
     pub axis: Vec<u32>,
+    /// What it turns about: the line through `axis`, or the sketch's own
+    /// horizontal or vertical through its origin.
+    #[param(variants("line", "sketch_x", "sketch_y"))]
+    pub about: u32,
     /// How far round, in radians: a whole turn is a ring.
     #[param(unit = "angle")]
     pub angle: f64,
@@ -479,6 +483,7 @@ impl Default for RevolveParams {
         Self {
             seeds: Vec::new(),
             axis: Vec::new(),
+            about: 0,
             angle: std::f64::consts::TAU,
             operation: 0,
             target: String::new(),
@@ -505,10 +510,15 @@ impl Operator for Revolve {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        let [a, b] = params.axis[..] else {
-            return Err(OpError::Failed("pick the line to turn about".into()));
+        let [a, b] = match params.about {
+            1 => [feature::AXIS_X; 2],
+            2 => [feature::AXIS_Y; 2],
+            _ => match params.axis[..] {
+                [a, b] => [a, b],
+                _ => return Err(OpError::Failed("pick the line to turn about".into())),
+            },
         };
-        if a == b || !params.angle.is_finite() || params.angle == 0.0 {
+        if (a == b && params.about == 0) || !params.angle.is_finite() || params.angle == 0.0 {
             return Err(OpError::Failed(
                 "a revolve needs an axis and an angle".into(),
             ));
@@ -794,6 +804,57 @@ mod tests {
 
     fn body(doc: &Document) -> ObjectId {
         body_named(doc, "").expect("a body")
+    }
+
+    /// A profile drawn as one open run of lines beside the sketch's vertical
+    /// — a cup's wall, from the axis out along the bottom and up — turned a
+    /// whole way round about that axis is a closed solid of the right size.
+    #[test]
+    fn an_open_profile_turned_about_the_sketchs_axis_is_a_solid() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.line",
+            &[(
+                "points",
+                PropertyValue::Floats(vec![0.0, 0.0, 0.03, 0.0, 0.03, 0.05]),
+            )],
+        )
+        .unwrap();
+        let sketch = active_sketch(&doc).unwrap();
+        let shape = Shape::Revolve {
+            axis: [feature::AXIS_Y; 2],
+            angle: std::f64::consts::TAU,
+        };
+        let seeds = feature::shape_profile_seeds(&doc, sketch, &shape);
+        assert_eq!(seeds.len(), 1, "the closed profile");
+        // Without saying the axis, there is nothing closed to turn.
+        assert!(feature::profile_seeds(&doc, sketch).is_empty());
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.revolve",
+            &[
+                ("seeds", PropertyValue::Floats(seeds[0].to_vec())),
+                ("about", PropertyValue::Enum(2)),
+            ],
+        )
+        .unwrap();
+        let mut cache = ModifierCache::new();
+        let mesh = cache
+            .evaluated(&doc, body(&doc), &EvalCtx::still())
+            .expect("a body");
+        assert!(kreate_mesh::measure::is_closed(&mesh));
+        let v = kreate_mesh::measure::mass_properties(&mesh, |p| p).volume;
+        let want = std::f64::consts::PI * 0.03f64.powi(2) * 0.05;
+        assert!((v - want).abs() < want * 3e-3, "{v} against {want}");
     }
 
     /// The flow the user asked for, as operators: a sketch on the ground, a

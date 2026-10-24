@@ -1096,7 +1096,24 @@ pub fn view(
     }
     // The regions picked, and the one under the pointer.
     if matches!(ui.tool, Tool::Extrude | Tool::Revolve) {
-        let regions = kreate_scene::feature::sketch_regions(doc, id);
+        let regions = match (ui.tool, ui.axis) {
+            (Tool::Revolve, Some(axis)) => {
+                // The axis, drawn across the sketch and past it.
+                if let Some((origin, dir)) = kreate_scene::feature::revolve_axis(doc, id, axis) {
+                    let (origin, dir) = (origin.as_dvec2(), dir.normalize_or_zero().as_dvec2());
+                    let reach = points
+                        .iter()
+                        .fold(0.01f64, |m, p| m.max((*p - origin).length()))
+                        * 1.5;
+                    view.axis_line = Some([
+                        to_world(origin - dir * reach),
+                        to_world(origin + dir * reach),
+                    ]);
+                }
+                kreate_scene::feature::shape_regions(doc, id, &revolve_shape(axis))
+            }
+            _ => kreate_scene::feature::sketch_regions(doc, id),
+        };
         // Each region as its rings and its triangles, holes and all: a fan
         // from one corner filled outside a concave outline and over a hole.
         let outline = |r: &kreate_mesh::regions::Region| {
@@ -1175,6 +1192,15 @@ pub fn view(
     view.band = ui.band;
     view.drawing = ui.tool.draws();
     view
+}
+
+/// A whole turn about `axis`: the shape a revolve's regions are found for,
+/// which does not depend on the angle.
+pub fn revolve_shape(axis: [u32; 2]) -> kreate_scene::feature::Shape {
+    kreate_scene::feature::Shape::Revolve {
+        axis,
+        angle: std::f64::consts::TAU,
+    }
 }
 
 /// What a drag-box from `a` to `b` on screen takes: the points inside it,

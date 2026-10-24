@@ -5514,13 +5514,22 @@ impl App {
                                 .and_then(|(id, _)| self.doc.object(id))
                                 .and_then(|o| o.sketch_lines.get(l as usize).copied())
                             {
-                                self.sketching.axis = Some(ends);
+                                self.set_revolve_axis(ends);
                                 return true;
                             }
                         }
                         // A region: picked, or put back if it already was.
                         if let Some((id, _)) = self.sketch_target() {
-                            let regions = kreate_scene::feature::sketch_regions(&self.doc, id);
+                            let regions = match (tool, self.sketching.axis) {
+                                (Tool::Revolve, Some(axis)) => {
+                                    kreate_scene::feature::shape_regions(
+                                        &self.doc,
+                                        id,
+                                        &kreate::sketching::revolve_shape(axis),
+                                    )
+                                }
+                                _ => kreate_scene::feature::sketch_regions(&self.doc, id),
+                            };
                             let at = |q: glam::DVec2| {
                                 kreate_mesh::regions::region_at(&regions, q.as_vec2())
                             };
@@ -8739,6 +8748,29 @@ impl App {
                 count,
             },
         ))
+    }
+
+    /// The revolve turns about `axis` now. With no profile picked, it takes
+    /// what the sketch draws once closed against the axis — so an open line
+    /// beside it is picked as soon as the axis is — and drops a region that
+    /// was picked but is no longer one.
+    fn set_revolve_axis(&mut self, axis: [u32; 2]) {
+        self.sketching.axis = Some(axis);
+        let Some((id, _)) = self.sketch_target() else {
+            return;
+        };
+        let shape = kreate::sketching::revolve_shape(axis);
+        let regions = kreate_scene::feature::shape_regions(&self.doc, id, &shape);
+        self.sketching
+            .seeds
+            .retain(|s| kreate_mesh::regions::region_at(&regions, s.as_vec2()).is_some());
+        if self.sketching.seeds.is_empty() {
+            self.sketching.seeds =
+                kreate_scene::feature::shape_profile_seeds(&self.doc, id, &shape)
+                    .into_iter()
+                    .map(|s| glam::DVec2::new(s[0], s[1]))
+                    .collect();
+        }
     }
 
     /// With more than one mesh in edit mode, where each object's elements
@@ -12785,6 +12817,16 @@ impl App {
             }
             "mesh.loop_cut" if self.op_ctx.mode.edits_elements() => self.begin_loop_cut_hover(),
             "mesh.knife" if self.op_ctx.mode.edits_elements() => self.begin_knife(),
+            // The revolve's axis as the sketch's own horizontal or vertical.
+            "app.sketch_axis" => {
+                use kreate_scene::feature::{AXIS_X, AXIS_Y};
+                let axis = match action.params.get("axis") {
+                    Some(PropertyValue::Text(t)) if t == "y" => AXIS_Y,
+                    _ => AXIS_X,
+                };
+                self.set_revolve_axis([axis; 2]);
+                self.redraw.set(RedrawReason::UI);
+            }
             "app.sketch_tool" => {
                 let name = match action.params.get("tool") {
                     Some(PropertyValue::Text(t)) => t.clone(),

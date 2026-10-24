@@ -3418,3 +3418,97 @@ fn shot_boolean_pick() {
         shot.dump(label);
     }
 }
+
+/// A vase's half outline drawn as one open run of lines beside the sketch's
+/// vertical, the revolve tool with that axis chosen — the profile closed
+/// against it and picked — and the solid it turns into. Writes
+/// `target/composite-revolve-{1-profile,2-solid}.png`.
+#[test]
+#[ignore]
+fn shot_revolve_an_open_profile() {
+    use kreate_ops::{History, OperatorRegistry, PropertyMap, PropertyValue as V};
+    use kreate_scene::feature::AXIS_Y;
+    let mut r = OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut r);
+    let mut h = History::new();
+    let mut doc = Document::new();
+    let ctx = kreate_ops::operator::Context::default();
+    let mut run = |doc: &mut Document, id: &str, pairs: Vec<(&'static str, V)>| {
+        let mut p = PropertyMap::new();
+        for (k, v) in pairs {
+            p.set(k, v);
+        }
+        h.dispatch(&r, doc, &ctx, id, &p).expect(id);
+    };
+    run(&mut doc, "sketch.new", vec![]);
+    let sketch = kreate_ops::ops::sketch_draw::active_sketch(&doc).unwrap();
+    run(
+        &mut doc,
+        "sketch.line",
+        vec![(
+            "points",
+            V::Floats(vec![
+                0.0, 0.0, 0.03, 0.0, 0.04, 0.03, 0.02, 0.07, 0.025, 0.09,
+            ]),
+        )],
+    );
+    let shape = kreate::sketching::revolve_shape([AXIS_Y; 2]);
+    let seeds = kreate_scene::feature::shape_profile_seeds(&doc, sketch, &shape);
+    assert_eq!(seeds.len(), 1);
+    let ui = kreate::sketching::SketchUi {
+        tool: kreate::sketching::Tool::Revolve,
+        axis: Some([AXIS_Y; 2]),
+        seeds: seeds.iter().map(|s| glam::DVec2::new(s[0], s[1])).collect(),
+        ..Default::default()
+    };
+    let points = kreate_ops::ops::sketch_draw::points(&doc, sketch);
+    let pinned = kreate::sketching::pinned(&points, &doc.object(sketch).unwrap().sketch);
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    FRAMING.with(|f| {
+        f.set(Some((
+            glam::DVec3::new(0.0, 0.045, 0.0),
+            0.06,
+            Some(glam::DQuat::IDENTITY),
+            true,
+        )))
+    });
+    let shot = composite_in_mode(&doc, "ko-KR", kreate_ops::operator::Mode::Sketch, |state| {
+        state.sketch_view = Some(kreate::sketching::view(
+            &doc,
+            sketch,
+            &ui,
+            &state.catalog,
+            &pinned,
+        ));
+    });
+    if shot.is_some() {
+        let _ = std::fs::copy(
+            dir.join("composite-scene-ko-KR.png"),
+            dir.join("composite-revolve-1-profile.png"),
+        );
+    }
+    run(
+        &mut doc,
+        "feature.revolve",
+        vec![
+            ("seeds", V::Floats(seeds[0].to_vec())),
+            ("about", V::Enum(2)),
+        ],
+    );
+    FRAMING.with(|f| {
+        f.set(Some((
+            glam::DVec3::new(0.0, 0.045, 0.0),
+            0.07,
+            Some(glam::DQuat::from_rotation_z(-0.6) * glam::DQuat::from_rotation_x(1.0)),
+            false,
+        )))
+    });
+    let shot = composite_in_mode(&doc, "ko-KR", kreate_ops::operator::Mode::Object, |_| {});
+    FRAMING.with(|f| f.set(None));
+    if shot.is_some() {
+        let _ = std::fs::copy(
+            dir.join("composite-scene-ko-KR.png"),
+            dir.join("composite-revolve-2-solid.png"),
+        );
+    }
+}

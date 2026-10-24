@@ -50,7 +50,8 @@ pub enum Shape {
     /// the other way; symmetric goes half each way.
     Extrude { distance: f64, symmetric: bool },
     /// Turned about the line through two of the sketch's points, by this
-    /// many radians.
+    /// many radians — or about the sketch's own horizontal or vertical axis,
+    /// when both are [`AXIS_X`] or [`AXIS_Y`].
     Revolve { axis: [u32; 2], angle: f64 },
     /// Every sharp edge of the body so far rounded to this radius, in
     /// metres — or cut back this far, for a chamfer. Names no sketch.
@@ -121,6 +122,57 @@ impl Feature {
     }
 }
 
+/// A revolve's axis that is the sketch's own horizontal: through its origin
+/// along its X. Twice, as `[AXIS_X, AXIS_X]`; no sketch has this many points.
+pub const AXIS_X: u32 = u32::MAX;
+/// The sketch's own vertical, as [`AXIS_X`] is its horizontal.
+pub const AXIS_Y: u32 = u32::MAX - 1;
+
+/// A revolve's axis in its sketch's plane: a point on it and its direction.
+/// `None` when it names a point the sketch no longer has.
+pub fn revolve_axis(
+    doc: &Document,
+    sketch: crate::document::ObjectId,
+    axis: [u32; 2],
+) -> Option<(Vec2, Vec2)> {
+    match axis {
+        [AXIS_X, AXIS_X] => return Some((Vec2::ZERO, Vec2::X)),
+        [AXIS_Y, AXIS_Y] => return Some((Vec2::ZERO, Vec2::Y)),
+        _ => {}
+    }
+    let mesh = doc
+        .object(sketch)
+        .and_then(|o| o.mesh())
+        .and_then(|m| doc.mesh(m))?;
+    let at = |v: u32| {
+        mesh.positions()
+            .get(v as usize)
+            .map(|p| Vec2::new(p.x, p.y))
+    };
+    let (a, b) = (at(axis[0])?, at(axis[1])?);
+    (a.distance(b) > 0.0).then_some((a, b - a))
+}
+
+/// The regions a feature of this shape picks from: a sketch's regions, and
+/// for a revolve those with the loose ends closed against its axis — so a
+/// profile drawn open beside the axis is one to turn.
+pub fn shape_regions(
+    doc: &Document,
+    sketch: crate::document::ObjectId,
+    shape: &Shape,
+) -> Vec<Region> {
+    let Shape::Revolve { axis, .. } = shape else {
+        return sketch_regions(doc, sketch);
+    };
+    let Some((origin, dir)) = revolve_axis(doc, sketch, *axis) else {
+        return sketch_regions(doc, sketch);
+    };
+    let Some((points, edges)) = sketch_drawing(doc, sketch) else {
+        return Vec::new();
+    };
+    regions::regions_against_axis(&points, &edges, origin, dir)
+}
+
 /// The regions of a sketch a feature's seeds pick, each once.
 pub fn picked(regions: &[Region], seeds: &[[f64; 2]]) -> Vec<usize> {
     let mut out: Vec<usize> = seeds
@@ -142,7 +194,24 @@ pub fn picked(regions: &[Region], seeds: &[[f64; 2]]) -> Vec<usize> {
 /// of a washer, the circle cut out of a plate. So a rectangle on a face, a
 /// plate with holes and a line of text each come out as drawn.
 pub fn profile_seeds(doc: &Document, sketch: crate::document::ObjectId) -> Vec<[f64; 2]> {
-    let regions = sketch_regions(doc, sketch);
+    seeds_among(doc, sketch, &sketch_regions(doc, sketch))
+}
+
+/// The same for a feature of this shape: a revolve's, among the regions
+/// closed against its axis.
+pub fn shape_profile_seeds(
+    doc: &Document,
+    sketch: crate::document::ObjectId,
+    shape: &Shape,
+) -> Vec<[f64; 2]> {
+    seeds_among(doc, sketch, &shape_regions(doc, sketch, shape))
+}
+
+fn seeds_among(
+    doc: &Document,
+    sketch: crate::document::ObjectId,
+    regions: &[Region],
+) -> Vec<[f64; 2]> {
     let (Some(object), Some(mesh)) = (
         doc.object(sketch),
         doc.object(sketch)
@@ -184,7 +253,7 @@ pub fn profile_seeds(doc: &Document, sketch: crate::document::ObjectId) -> Vec<[
         if holes.contains(&key(&regions[i].outline)) {
             continue;
         }
-        if let Some(p) = inside_point(&regions, i) {
+        if let Some(p) = inside_point(regions, i) {
             out.push(p);
         }
     }
@@ -218,12 +287,18 @@ fn inside_point(regions: &[Region], i: usize) -> Option<[f64; 2]> {
 /// own (see `Object::sketch_lines`) and its faces' edges, which is what a
 /// sketch drawn before it had lines of its own was made of.
 pub fn sketch_regions(doc: &Document, sketch: crate::document::ObjectId) -> Vec<Region> {
-    let Some(object) = doc.object(sketch) else {
-        return Vec::new();
-    };
-    let Some(mesh) = object.mesh().and_then(|m| doc.mesh(m)) else {
-        return Vec::new();
-    };
+    sketch_drawing(doc, sketch)
+        .map(|(points, edges)| regions::regions(&points, &edges))
+        .unwrap_or_default()
+}
+
+/// A sketch's points in its plane and the lines that bound regions.
+fn sketch_drawing(
+    doc: &Document,
+    sketch: crate::document::ObjectId,
+) -> Option<(Vec<Vec2>, Vec<[u32; 2]>)> {
+    let object = doc.object(sketch)?;
+    let mesh = object.mesh().and_then(|m| doc.mesh(m))?;
     let points: Vec<Vec2> = mesh
         .positions()
         .iter()
@@ -238,7 +313,7 @@ pub fn sketch_regions(doc: &Document, sketch: crate::document::ObjectId) -> Vec<
             .copied()
             .filter(|l| !crate::sketch::Constraint::is_construction(&object.sketch, *l)),
     );
-    regions::regions(&points, &edges)
+    Some((points, edges))
 }
 
 /// The solid one feature makes, in its sketch's own space; empty when its
@@ -247,14 +322,7 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
     let Some(sketch) = doc.object_by_uid(feature.sketch) else {
         return MeshData::empty();
     };
-    let Some(mesh) = doc
-        .object(sketch)
-        .and_then(|o| o.mesh())
-        .and_then(|m| doc.mesh(m))
-    else {
-        return MeshData::empty();
-    };
-    let all = sketch_regions(doc, sketch);
+    let all = shape_regions(doc, sketch, &feature.shape);
     let mut out = MeshData::empty();
     for i in picked(&all, &feature.seeds) {
         let piece = match feature.shape {
@@ -271,15 +339,10 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
                 regions::extrude_region(&all[i], z0, z1)
             }
             Shape::Revolve { axis, angle } => {
-                let at = |v: u32| {
-                    mesh.positions()
-                        .get(v as usize)
-                        .map(|p| Vec2::new(p.x, p.y))
-                };
-                let (Some(a), Some(b)) = (at(axis[0]), at(axis[1])) else {
+                let Some((origin, dir)) = revolve_axis(doc, sketch, axis) else {
                     continue;
                 };
-                regions::revolve_region(&all[i], a, b - a, angle as f32, 64)
+                regions::revolve_region(&all[i], origin, dir, angle as f32, 64)
             }
             Shape::Round { .. }
             | Shape::Shell { .. }

@@ -14684,6 +14684,8 @@ pub struct SketchView {
     pub preview: Vec<Vec<kreate_math::DVec3>>,
     /// What the trim tool would take out.
     pub cut: Vec<[kreate_math::DVec3; 2]>,
+    /// A revolve's axis, once there is one, drawn across the sketch.
+    pub axis_line: Option<[kreate_math::DVec3; 2]>,
     /// The point the pointer has snapped to.
     pub snap: Option<kreate_math::DVec3>,
     /// The regions picked for an extrude or a revolve, and the one under
@@ -15068,6 +15070,16 @@ fn draw_sketches(
             painter.line_segment([p, q], egui::Stroke::new(3.0, red));
         }
     }
+    if let Some([a, b]) = &view.axis_line {
+        if let (Some(p), Some(q)) = (project(a), project(b)) {
+            painter.add(egui::Shape::dashed_line(
+                &[p, q],
+                egui::Stroke::new(2.0, theme.accent),
+                12.0,
+                4.0,
+            ));
+        }
+    }
     if let Some(p) = view.snap.as_ref().and_then(project) {
         painter.circle_stroke(p, 6.0, egui::Stroke::new(1.5, theme.accent));
     }
@@ -15118,7 +15130,8 @@ fn draw_sketches(
 
     draw_dimension_edit(ui, state, &view, projector);
     // The extrude or revolve dialog, once a region is picked.
-    if matches!(view.tool, "extrude" | "revolve") && !view.seeds.is_empty() {
+    // A revolve's from the start, for its axis can be chosen there.
+    if view.tool == "revolve" || (view.tool == "extrude" && !view.seeds.is_empty()) {
         draw_solid_dialog(ui, state, &view, inner);
     }
     if view.tool == "pattern" {
@@ -15388,13 +15401,46 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                             ui.label(state.catalog.get("feature-angle"));
                             ui.add(egui::DragValue::new(&mut d.angle).speed(1.0).suffix("°"));
                             ui.end_row();
+                            use kreate_scene::feature::{AXIS_X, AXIS_Y};
                             ui.label(state.catalog.get("feature-axis"));
-                            ui.label(if view.axis.is_some() {
-                                state.catalog.get("feature-axis-set")
-                            } else {
-                                state.catalog.get("feature-axis-pick")
+                            ui.horizontal(|ui| {
+                                let line = view.axis.is_some_and(|a| a[0] < AXIS_Y);
+                                ui.selectable_label(
+                                    line,
+                                    if line {
+                                        state.catalog.get("feature-axis-set")
+                                    } else {
+                                        state.catalog.get("feature-axis-pick")
+                                    },
+                                )
+                                .on_hover_text(state.catalog.get("feature-axis-pick-hint"));
+                                for (name, key, value) in [
+                                    ("x", "feature-axis-horizontal", AXIS_X),
+                                    ("y", "feature-axis-vertical", AXIS_Y),
+                                ] {
+                                    let on = view.axis == Some([value; 2]);
+                                    if ui.selectable_label(on, state.catalog.get(key)).clicked()
+                                        && !on
+                                    {
+                                        let mut p = PropertyMap::new();
+                                        p.set(
+                                            "axis",
+                                            kreate_reflect::PropertyValue::Text(name.into()),
+                                        );
+                                        state.queue.dispatch("app.sketch_axis", p);
+                                    }
+                                }
                             });
                             ui.end_row();
+                            if view.seeds.is_empty() {
+                                ui.label("");
+                                ui.label(
+                                    egui::RichText::new(state.catalog.get("feature-profile-pick"))
+                                        .small()
+                                        .weak(),
+                                );
+                                ui.end_row();
+                            }
                         } else {
                             ui.label(state.catalog.get("feature-distance"));
                             ui.add(
@@ -15432,7 +15478,7 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                     if ui.button(&cancel).clicked() {
                         done = Some(false);
                     }
-                    let ready = !revolve || view.axis.is_some();
+                    let ready = !view.seeds.is_empty() && (!revolve || view.axis.is_some());
                     if ui.add_enabled(ready, egui::Button::new(&ok)).clicked() {
                         done = Some(true);
                     }
@@ -15454,7 +15500,16 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                 p.set("target", V::Text(d.target.clone()));
             }
             if revolve {
+                use kreate_scene::feature::{AXIS_X, AXIS_Y};
                 let axis = view.axis.unwrap_or([0, 0]);
+                p.set(
+                    "about",
+                    V::Enum(match axis[0] {
+                        AXIS_X => 1,
+                        AXIS_Y => 2,
+                        _ => 0,
+                    }),
+                );
                 p.set("axis", V::Ints(axis.to_vec()));
                 p.set("angle", V::Float(d.angle.to_radians()));
                 state.queue.run("feature.revolve", p);

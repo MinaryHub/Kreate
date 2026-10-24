@@ -373,6 +373,10 @@ pub fn extrude_region(region: &Region, z0: f32, z1: f32) -> MeshData {
 /// `axis`, both in its plane, in `segments` steps for a whole turn: a lathe,
 /// closed with the region itself at both ends when it does not go all the
 /// way round.
+///
+/// A point on the axis stays one vertex however far it turns, so a profile
+/// drawn against its axis — a vase's half, a cone — comes out a closed
+/// solid with a point at its tip, not a seam of slivers.
 pub fn revolve_region(
     region: &Region,
     origin: Vec2,
@@ -391,36 +395,113 @@ pub fn revolve_region(
     let steps =
         ((segments.max(3) as f32 * turn.abs() / std::f32::consts::TAU).ceil() as u32).max(1);
     let rings = if full { steps } else { steps + 1 };
-    let n = points.len() as u32;
+    let extent = points
+        .iter()
+        .fold(0.0f32, |m, p| m.max((*p - origin).length()))
+        .max(1e-6);
+    let on_axis: Vec<bool> = points
+        .iter()
+        .map(|p| (*p - origin).dot(side).abs() <= extent * 1e-5)
+        .collect();
     let mut verts: Vec<Vec3> = Vec::new();
-    for s in 0..rings {
-        let a = turn * s as f32 / steps as f32;
-        for p in &points {
-            let d = *p - origin;
-            let along = d.dot(axis);
-            let out = d.dot(side);
-            let flat = origin + axis * along + side * (out * a.cos());
+    // Each point's vertex in each ring; one for all rings on the axis.
+    let mut index = vec![vec![0u32; points.len()]; rings as usize];
+    for (i, p) in points.iter().enumerate() {
+        let d = *p - origin;
+        let along = origin + axis * d.dot(axis);
+        let out = d.dot(side);
+        if on_axis[i] {
+            let v = verts.len() as u32;
+            verts.push(Vec3::new(along.x, along.y, 0.0));
+            for ring in index.iter_mut() {
+                ring[i] = v;
+            }
+            continue;
+        }
+        for (s, ring) in index.iter_mut().enumerate() {
+            let a = turn * s as f32 / steps as f32;
+            let flat = along + side * (out * a.cos());
+            ring[i] = verts.len() as u32;
             verts.push(Vec3::new(flat.x, flat.y, out * a.sin()));
         }
     }
+    // A face with its repeated corners gone; `None` once it has no area.
+    let face = |ring: Vec<u32>| -> Option<Vec<u32>> {
+        let mut f: Vec<u32> = Vec::with_capacity(ring.len());
+        for v in ring {
+            if f.last() != Some(&v) {
+                f.push(v);
+            }
+        }
+        while f.len() > 1 && f.first() == f.last() {
+            f.pop();
+        }
+        (f.len() >= 3).then_some(f)
+    };
     let mut faces: Vec<Vec<u32>> = Vec::new();
-    for s in 0..steps {
-        let (r0, r1) = (s * n, ((s + 1) % rings) * n);
+    for s in 0..steps as usize {
+        let (r0, r1) = (&index[s], &index[(s + 1) % rings as usize]);
         for l in &loops {
             for k in 0..l.len() {
-                let (a, b) = (l[k], l[(k + 1) % l.len()]);
-                faces.push(vec![r0 + a, r0 + b, r1 + b, r1 + a]);
+                let (a, b) = (l[k] as usize, l[(k + 1) % l.len()] as usize);
+                faces.extend(face(vec![r0[a], r0[b], r1[b], r1[a]]));
             }
         }
     }
     if !full {
-        let last = steps * n;
+        let last = &index[steps as usize];
         for cap in caps(region) {
-            faces.push(cap.iter().rev().copied().collect());
-            faces.push(cap.iter().map(|v| v + last).collect());
+            faces.extend(face(
+                cap.iter().rev().map(|v| index[0][*v as usize]).collect(),
+            ));
+            faces.extend(face(cap.iter().map(|v| last[*v as usize]).collect()));
         }
     }
     outward(MeshData::from_faces(verts, &faces))
+}
+
+/// A drawing's regions once its loose ends are closed against an axis: each
+/// end that no other line meets is run straight to the line through
+/// `origin` along `dir`, and that line is drawn between the farthest of
+/// them. So the half outline of a vase, drawn open beside its axis, is a
+/// region to turn — as a person drawing it means, though Fusion asks for
+/// the closing lines to be drawn.
+pub fn regions_against_axis(
+    points: &[Vec2],
+    edges: &[[u32; 2]],
+    origin: Vec2,
+    dir: Vec2,
+) -> Vec<Region> {
+    let dir = dir.normalize_or_zero();
+    if dir == Vec2::ZERO {
+        return regions(points, edges);
+    }
+    let (nodes, links) = arrange(points, edges);
+    let mut degree = vec![0u32; nodes.len()];
+    for [a, b] in &links {
+        degree[*a] += 1;
+        degree[*b] += 1;
+    }
+    let mut pts = points.to_vec();
+    let mut es = edges.to_vec();
+    let mut span: Option<(f32, f32)> = None;
+    for (n, p) in nodes.iter().enumerate() {
+        if degree[n] != 1 {
+            continue;
+        }
+        let t = (*p - origin).dot(dir);
+        pts.push(*p);
+        pts.push(origin + dir * t);
+        es.push([pts.len() as u32 - 2, pts.len() as u32 - 1]);
+        span = Some(span.map_or((t, t), |(lo, hi)| (lo.min(t), hi.max(t))));
+    }
+    let Some((lo, hi)) = span else {
+        return regions(points, edges);
+    };
+    pts.push(origin + dir * lo);
+    pts.push(origin + dir * hi);
+    es.push([pts.len() as u32 - 2, pts.len() as u32 - 1]);
+    regions(&pts, &es)
 }
 
 /// Turned to face out: a solid's signed volume is positive when its faces
@@ -580,6 +661,27 @@ mod tests {
         let v = mass_properties(&solid, |p| p).volume;
         let want = r[plate].area() as f64 * 0.01;
         assert!((v - want).abs() < want * 1e-4, "{v} against {want}");
+    }
+
+    #[test]
+    fn an_open_profile_beside_its_axis_turns_into_a_closed_solid() {
+        // A cone's slant, drawn alone: from the axis out and up to a point
+        // off it — closed against the Y axis, a triangle; turned, a cone.
+        let points = vec![Vec2::new(1.0, 0.0), Vec2::new(0.0, 2.0)];
+        assert!(regions(&points, &[[0, 1]]).is_empty());
+        let r = regions_against_axis(&points, &[[0, 1]], Vec2::ZERO, Vec2::Y);
+        assert_eq!(r.len(), 1);
+        let cone = revolve_region(&r[0], Vec2::ZERO, Vec2::Y, std::f32::consts::TAU, 128);
+        assert!(is_closed(&cone));
+        let v = mass_properties(&cone, |p| p).volume;
+        let want = std::f64::consts::PI * 1.0 * 2.0 / 3.0;
+        assert!((v - want).abs() < want * 2e-3, "{v} against {want}");
+        // Half way round: the cut faces close it too.
+        let half = revolve_region(&r[0], Vec2::ZERO, Vec2::Y, std::f32::consts::PI, 128);
+        assert!(is_closed(&half));
+        // A closed drawing is left as it is.
+        let (p, e) = drawing(&[rect(1.0, 0.0, 2.0, 1.0)]);
+        assert_eq!(regions_against_axis(&p, &e, Vec2::ZERO, Vec2::Y).len(), 1);
     }
 
     #[test]
