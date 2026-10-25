@@ -2083,3 +2083,6 @@ op-object-add_roof-param-overhang-name = 처마 길이
 op-material-set_properties-param-thin-name = 얇은 유리
 render-preparing = 렌더러 준비 중…
 render-time-left = 약 { $seconds }초 남음
+
+# The updater, in the status bar: a release downloaded for the next start.
+update-downloaded = Kreate { $version } 버전을 내려받았습니다. 다음에 Kreate를 시작하면 적용됩니다

@@ -2077,3 +2077,6 @@ op-object-add_roof-param-overhang-name = Overhang
 op-material-set_properties-param-thin-name = Thin Glass
 render-preparing = Preparing the renderer…
 render-time-left = about { $seconds } s left
+
+# The updater, in the status bar: a release downloaded for the next start.
+update-downloaded = Kreate { $version } is downloaded and will be used the next time Kreate starts

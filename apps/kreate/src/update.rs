@@ -25,6 +25,14 @@
 //! every rename if any copy fails, so an update either happens whole or not at
 //! all. The `*.old` files are deleted the start after, when nothing runs them.
 //!
+//! # Inside a macOS bundle
+//!
+//! The executables are in `Kreate.app/Contents/MacOS`, and the bundle is
+//! signed as a whole. Replacing one breaks that seal and leaves the bundle
+//! naming the old version, so after an update, and again once the files put
+//! aside are gone, the bundle's version is set and it is signed again, ad
+//! hoc, as `scripts/macos-app.sh` signs it.
+//!
 //! # Not in a build tree
 //!
 //! An executable under a `target` folder is a developer's own build, and a
@@ -78,9 +86,14 @@ pub fn enabled(exe: &Path) -> bool {
 
 /// Whether `exe` runs from an MSIX package: Windows installs every package
 /// under a `WindowsApps` folder, and nothing else lives there.
+///
+/// Read as text split at either slash, so a Windows path is one wherever
+/// it is asked about: elsewhere a backslash is not a separator, and the whole
+/// path was one component that never matched.
 pub fn packaged(exe: &Path) -> bool {
-    exe.components()
-        .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+    exe.to_string_lossy()
+        .split(['/', '\\'])
+        .any(|c| c.eq_ignore_ascii_case("WindowsApps"))
 }
 
 /// `%LOCALAPPDATA%\Kreate\update`, beside the autosaves: machine-local and
@@ -257,15 +270,63 @@ pub fn check_in_background(wake: impl FnOnce() + Send + 'static) -> Arc<Mutex<Op
 }
 
 /// Deletes what earlier updates renamed aside, now that nothing runs it.
-fn remove_old(dir: &Path) {
+/// Whether anything was.
+fn remove_old(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return false;
     };
+    let mut removed = false;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with("kreate") && name.contains(".old") {
-            let _ = std::fs::remove_file(entry.path());
+            removed |= std::fs::remove_file(entry.path()).is_ok();
         }
+    }
+    removed
+}
+
+/// The `.app` whose executables are in `dir`: `Kreate.app` for
+/// `Kreate.app/Contents/MacOS`.
+pub fn bundle_of(dir: &Path) -> Option<&Path> {
+    if dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = dir.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let app = contents.parent()?;
+    app.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        .then_some(app)
+}
+
+/// Seals a bundle whose executables changed: its version set to `version`,
+/// when there is one, and signed again ad hoc. See the module notes.
+fn reseal(bundle: &Path, version: Option<&str>) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    if let Some(version) = version {
+        let plist = bundle.join("Contents/Info.plist");
+        for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+            let _ = Command::new("plutil")
+                .args(["-replace", key, "-string", version])
+                .arg(&plist)
+                .status();
+        }
+    }
+    match Command::new("codesign")
+        .args(["--force", "--deep", "-s", "-"])
+        .arg(bundle)
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => tracing::warn!(
+            error = %String::from_utf8_lossy(&out.stderr).trim(),
+            "bundle not signed again"
+        ),
+        Err(e) => tracing::warn!(error = %e, "bundle not signed again"),
     }
 }
 
@@ -329,7 +390,12 @@ pub fn apply_staged(args: &[String]) -> bool {
     if !enabled(&exe) {
         return false;
     }
-    remove_old(dir);
+    let bundle = bundle_of(dir);
+    if remove_old(dir) {
+        if let Some(bundle) = bundle {
+            reseal(bundle, None);
+        }
+    }
     let Some((version, files)) = staged(&root) else {
         return false;
     };
@@ -343,6 +409,9 @@ pub fn apply_staged(args: &[String]) -> bool {
     match install(&files, dir) {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(root.join(&version));
+            if let Some(bundle) = bundle {
+                reseal(bundle, Some(&version));
+            }
             tracing::info!(%version, "updated");
             Command::new(&exe).args(args).spawn().is_ok()
         }
@@ -389,6 +458,17 @@ mod tests {
         assert!(!enabled(store));
         let unpacked = Path::new(r"C:\Users\me\Apps\Kreate\kreate.exe");
         assert!(!packaged(unpacked));
+    }
+
+    /// Only the folder of a bundle's executables is a bundle's.
+    #[test]
+    fn a_bundle_is_found_from_its_executables_folder() {
+        assert_eq!(
+            bundle_of(Path::new("/Applications/Kreate.app/Contents/MacOS")),
+            Some(Path::new("/Applications/Kreate.app"))
+        );
+        assert_eq!(bundle_of(Path::new("/opt/kreate/bin")), None);
+        assert_eq!(bundle_of(Path::new("/x/Kreate/Contents/MacOS")), None);
     }
 
     #[test]
@@ -485,7 +565,7 @@ mod tests {
             "mine"
         );
 
-        remove_old(&app);
+        assert!(remove_old(&app));
         assert!(!app.join("kreate.exe.old").exists());
         assert!(app.join("notes.txt").exists());
         let _ = std::fs::remove_dir_all(&root);

@@ -14448,9 +14448,11 @@ impl ApplicationHandler for App {
             .as_ref()
             .and_then(|slot| slot.lock().ok().and_then(|mut v| v.take()));
         if let Some(version) = downloaded {
-            self.status(&format!(
-                "Kreate {version} is downloaded and will be used the next time Kreate starts"
-            ));
+            let text = self
+                .ui
+                .catalog
+                .get_args("update-downloaded", &[("version", &version)]);
+            self.status(&text);
             self.redraw.set(RedrawReason::UI);
         }
         // While the user is dragging, stay on Poll so motion is continuous;
