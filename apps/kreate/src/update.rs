@@ -387,25 +387,47 @@ pub fn apply_staged(args: &[String]) -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
-    let (Some(dir), Some(root)) = (exe.parent(), update_root()) else {
+    let Some(root) = update_root() else {
         return false;
     };
     if !enabled(&exe) {
         return false;
     }
+    apply_staged_in(&exe, &root, crate::version::VERSION, args, |exe, args| {
+        Command::new(exe).args(args).spawn().is_ok()
+    })
+}
+
+/// [`apply_staged`] with its places and its launcher handed in: `exe` is
+/// the running program, `root` the update folder, `current` this version,
+/// and `launch` starts the new executable with the arguments.
+///
+/// Separated so a test can walk the whole start — the files put aside
+/// last time cleared, the staging found, spent, installed and started —
+/// in a folder of its own, with a launcher that only takes note.
+pub fn apply_staged_in(
+    exe: &Path,
+    root: &Path,
+    current: &str,
+    args: &[String],
+    launch: impl FnOnce(&Path, &[String]) -> bool,
+) -> bool {
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
     let bundle = bundle_of(dir);
     if remove_old(dir) {
         if let Some(bundle) = bundle {
             reseal(bundle, None);
         }
     }
-    let Some((version, files)) = staged(&root) else {
+    let Some((version, files)) = staged(root) else {
         return false;
     };
     // Whatever happens next, this staging is spent: a failure is said once,
     // not retried on every start.
     let _ = std::fs::remove_file(root.join("staged.txt"));
-    if !is_newer(&version, crate::version::VERSION) {
+    if !is_newer(&version, current) {
         let _ = std::fs::remove_dir_all(root.join(&version));
         return false;
     }
@@ -416,7 +438,7 @@ pub fn apply_staged(args: &[String]) -> bool {
                 reseal(bundle, Some(&version));
             }
             tracing::info!(%version, "updated");
-            Command::new(&exe).args(args).spawn().is_ok()
+            launch(exe, args)
         }
         Err(e) => {
             tracing::warn!(error = %e, %version, "update not installed");
@@ -446,6 +468,50 @@ mod tests {
             fetch_and_stage(&root, DEFAULT_REPO, "0.0.1"),
             Ok(None),
             "not twice"
+        );
+
+        // The next start: the release goes in over an "old" program, and
+        // what was fetched runs — the connector, asked to introduce itself,
+        // answers, which a cut-short or wrongly-built download would not.
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let exe = app.join(exe_file_name());
+        std::fs::write(&exe, "old").unwrap();
+        let started = apply_staged_in(&exe, &root, "0.0.1", &[], |exe, _| exe.is_file());
+        assert!(started);
+        assert_ne!(
+            std::fs::read(&exe).unwrap(),
+            b"old",
+            "the release is in place"
+        );
+        let connector = app.join(format!("kreate-mcp{}", std::env::consts::EXE_SUFFIX));
+        let mut child = Command::new(&connector)
+            .env("KREATE_NO_UPDATE", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the fetched connector starts");
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"test","version":"0"}}}}}}"#
+            )
+            .unwrap();
+        }
+        let mut answer = String::new();
+        {
+            use std::io::BufRead;
+            let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+            out.read_line(&mut answer).unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            answer.contains(r#""result""#),
+            "the connector answered: {answer}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -535,6 +601,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A release staged for the next start, as the whole start sees it.
+    fn stage(root: &Path, version: &str, body: &str) {
+        let files = root.join(version).join("files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join(exe_file_name()), body).unwrap();
+        std::fs::write(root.join("staged.txt"), version).unwrap();
+    }
+
+    /// The start after a download: the staged version goes in over the
+    /// running one, the staging is spent, and the new executable is started
+    /// with the arguments this one was. The start after that clears what
+    /// was put aside.
+    #[test]
+    fn a_staged_newer_version_is_installed_and_started() {
+        let scratch = scratch("apply");
+        let (app, root) = (scratch.join("app"), scratch.join("update"));
+        std::fs::create_dir_all(&app).unwrap();
+        let exe = app.join(exe_file_name());
+        std::fs::write(&exe, "old").unwrap();
+        stage(&root, "9.9.9", "new");
+        let args = vec!["model.kreate".to_string()];
+
+        let mut launched = None;
+        let started = apply_staged_in(&exe, &root, "0.3.1", &args, |exe, args| {
+            launched = Some((exe.to_path_buf(), args.to_vec()));
+            true
+        });
+        assert!(started, "the new version was started, so this one ends");
+        assert_eq!(launched, Some((exe.clone(), args)));
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "new");
+        assert!(app.join(format!("{}.old", exe_file_name())).exists());
+        assert!(!root.join("staged.txt").exists(), "the staging is spent");
+        assert!(!root.join("9.9.9").exists(), "and its files are gone");
+
+        // The next start, as the new version: nothing staged, the old
+        // executable swept up.
+        let again = apply_staged_in(&exe, &root, "9.9.9", &[], |_, _| panic!("nothing to start"));
+        assert!(!again);
+        assert!(!app.join(format!("{}.old", exe_file_name())).exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A staging no newer than what is running — downloaded before a
+    /// manual update, say — is thrown away, and nothing is started.
+    #[test]
+    fn a_staged_older_version_is_thrown_away() {
+        let scratch = scratch("stale");
+        let (app, root) = (scratch.join("app"), scratch.join("update"));
+        std::fs::create_dir_all(&app).unwrap();
+        let exe = app.join(exe_file_name());
+        std::fs::write(&exe, "current").unwrap();
+        stage(&root, "0.0.1", "older");
+
+        let started = apply_staged_in(&exe, &root, "0.3.1", &[], |_, _| {
+            panic!("an older version must not be started")
+        });
+        assert!(!started);
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "current");
+        assert!(!root.join("staged.txt").exists());
+        assert!(!root.join("0.0.1").exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A staging that cannot go in — here, the executable's place is a
+    /// folder — leaves the running version as it was and starts nothing;
+    /// and it is not tried again at the next start.
+    #[test]
+    fn a_staging_that_cannot_be_installed_is_spent_not_retried() {
+        let scratch = scratch("refused");
+        let (app, root) = (scratch.join("app"), scratch.join("update"));
+        std::fs::create_dir_all(&app).unwrap();
+        let exe = app.join(exe_file_name());
+        std::fs::write(&exe, "current").unwrap();
+        stage(&root, "9.9.9", "new");
+        let files = root.join("9.9.9").join("files");
+        std::fs::write(files.join("z-extra"), "x").unwrap();
+        std::fs::create_dir_all(app.join("z-extra")).unwrap();
+
+        let started = apply_staged_in(&exe, &root, "0.3.1", &[], |_, _| {
+            panic!("a failed install must not start anything")
+        });
+        assert!(!started);
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "current");
+        assert!(!app.join(format!("{}.old", exe_file_name())).exists());
+        assert!(!root.join("staged.txt").exists(), "said once, not retried");
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// The executables are replaced, the old ones put aside, and a file the
