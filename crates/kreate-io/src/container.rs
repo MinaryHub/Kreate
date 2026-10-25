@@ -2554,7 +2554,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     };
 
     // Every entry, so unknown ones can be carried through.
-    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    let names = zip
+        .file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<Vec<String>, _>>()?;
     let mut meshes: BTreeMap<String, MeshData> = BTreeMap::new();
     let mut image_tiles: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut unknown = Vec::new();

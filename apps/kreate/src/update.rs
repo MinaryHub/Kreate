@@ -182,7 +182,10 @@ pub fn extract(zip_path: &Path, into: &Path) -> Result<(), String> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let Some(name) = entry.enclosed_name() else {
-            return Err(format!("unsafe path in the zip: {}", entry.name()));
+            let name = entry
+                .name()
+                .map_or_else(|e| e.to_string(), |n| n.into_owned());
+            return Err(format!("unsafe path in the zip: {name}"));
         };
         let target = into.join(name);
         if entry.is_dir() {

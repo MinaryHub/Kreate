@@ -16,7 +16,8 @@ kreate-i18n.workspace = true
 # and no scene: this crate reads state and emits commands.
 kreate-input.workspace = true
 kreate-math.workspace = true
-kreate-mesh.workspace = true
+# The font picker lists what text can be set in; the fonts, not the mesh.
+kreate-fonts.workspace = true
 kreate-render.workspace = true
 egui.workspace = true
 ab_glyph.workspace = true

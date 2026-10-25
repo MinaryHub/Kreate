@@ -567,7 +567,7 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
         // type into — a system has hundreds.
         (PropertyKind::Text, Some(PropertyValue::Text(v))) if desc.unit == Unit::Font => {
             let shown = if v.trim().is_empty() {
-                kreate_mesh::text::DEFAULT_FONT_NAME.to_string()
+                kreate_fonts::DEFAULT_FONT_NAME.to_string()
             } else {
                 v.clone()
             };
@@ -580,7 +580,7 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
                 .show_ui(ui, |ui| {
                     ui.text_edit_singleline(&mut filter);
                     let needle = filter.to_lowercase();
-                    for name in kreate_mesh::text::font_names() {
+                    for name in kreate_fonts::font_names() {
                         if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
                             continue;
                         }

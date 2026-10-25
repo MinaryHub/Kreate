@@ -550,11 +550,11 @@ fn retag_the_only_light(archive: &[u8], kind: &str) -> Vec<u8> {
 fn rewrite_scene(archive: &[u8], scene: &str) -> Vec<u8> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive.to_vec())).expect("archive");
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).expect("entry");
-        let name = entry.name().to_string();
+        let name = entry.name().expect("a named entry").into_owned();
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut bytes).expect("read");
         out.start_file(&name, options).expect("start");

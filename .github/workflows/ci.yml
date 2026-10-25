@@ -36,6 +36,16 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
+      # A GPU for the renderer's tests: the runner has none, and Mesa's
+      # lavapipe is a Vulkan device on the CPU that draws what a GPU draws,
+      # slowly. Without it every GPU test skips itself, and a renderer change
+      # that broke the picture would pass here.
+      - name: Software Vulkan
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+
       - name: Format
         run: cargo fmt --all --check
 
@@ -50,11 +60,19 @@ jobs:
       # tests in the application's crate crash it when several make their
       # devices at once. One at a time there; everything else as usual. Bash,
       # so a failure in the first command fails the step.
+      #
+      # The renderer's own tests measure light: shadows, the path tracer,
+      # the denoiser, each against a physical expectation. WARP draws none
+      # of those as a GPU does — a sun's shadow comes out as acne and a
+      # traced scene as nothing — and the Windows job had been red on them
+      # for every run on record. They are measured on Linux's lavapipe and
+      # on the Mac runner's Metal, which do; Windows still builds them
+      # (clippy, above) and runs everything else.
       - name: Test (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cargo test --workspace --exclude kreate
+          cargo test --workspace --exclude kreate --exclude kreate-render
           cargo test -p kreate -- --test-threads=1
 
       # Arena handles carry a generation counter only when debug_assertions is

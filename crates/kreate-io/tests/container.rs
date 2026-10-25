@@ -160,7 +160,7 @@ fn mesh_entries_are_stored_uncompressed_so_they_can_be_mapped() {
     let mut checked = 0;
     for i in 0..zip.len() {
         let entry = zip.by_index(i).expect("entry");
-        let name = entry.name().to_string();
+        let name = entry.name().expect("a named entry").into_owned();
         if name.ends_with(".kmesh") {
             assert_eq!(
                 entry.compression(),
@@ -200,7 +200,7 @@ fn every_entry_carries_a_fixed_timestamp() {
     let epoch = zip::DateTime::default();
     for i in 0..zip.len() {
         let entry = zip.by_index(i).expect("entry");
-        let name = entry.name().to_string();
+        let name = entry.name().expect("a named entry").into_owned();
         assert_eq!(
             entry.last_modified(),
             Some(epoch),
@@ -437,7 +437,7 @@ fn image_entries_are_stored_uncompressed_so_they_can_be_mapped() {
     let mut checked = 0;
     for i in 0..zip.len() {
         let entry = zip.by_index(i).expect("entry");
-        let name = entry.name().to_string();
+        let name = entry.name().expect("a named entry").into_owned();
         if name.ends_with(".ktile") {
             assert_eq!(
                 entry.compression(),
@@ -468,7 +468,10 @@ fn a_declared_image_with_no_pixels_writes_no_tile_file() {
     // passes whether the entry is there or not — and the claim is that the
     // entry is not there.
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("opens");
-    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|n| n.expect("a named entry").into_owned())
+        .collect();
     assert!(
         !names.iter().any(|n| n.ends_with(".ktile")),
         "an image with no pixels wrote a tile file: {names:?}"
@@ -588,7 +591,7 @@ fn a_build_that_has_never_heard_of_images_does_not_destroy_one() {
     let mut carried = Vec::new();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).expect("entry");
-        let name = entry.name().to_string();
+        let name = entry.name().expect("a named entry").into_owned();
         if name.ends_with(".ktile") {
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut entry, &mut bytes).expect("reads");
@@ -772,7 +775,7 @@ fn a_texture_the_file_does_not_carry_comes_back_as_no_texture() {
         let mut writer = zip::ZipWriter::new(Cursor::new(&mut out));
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).expect("an entry");
-            let name = entry.name().to_string();
+            let name = entry.name().expect("a named entry").into_owned();
             writer
                 .start_file(
                     &name,
@@ -982,7 +985,7 @@ fn a_graph_with_a_node_this_build_does_not_know_falls_back_to_the_flat_material(
         let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).expect("entry");
-            let name = entry.name().to_string();
+            let name = entry.name().expect("a named entry").into_owned();
             let mut data = Vec::new();
             entry.read_to_end(&mut data).expect("read");
             if name.ends_with(".json") {

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kreate-math",
     "crates/kreate-mesh",
+    "crates/kreate-fonts",
     "crates/kreate-scene",
     "crates/kreate-ops",
     "crates/kreate-ops-derive",
@@ -36,6 +37,7 @@ publish = false
 [workspace.dependencies]
 kreate-math       = { path = "crates/kreate-math" }
 kreate-mesh       = { path = "crates/kreate-mesh" }
+kreate-fonts      = { path = "crates/kreate-fonts" }
 kreate-scene      = { path = "crates/kreate-scene" }
 kreate-ops        = { path = "crates/kreate-ops" }
 kreate-ops-derive = { path = "crates/kreate-ops-derive" }
@@ -85,7 +87,7 @@ gltf = { version = "1", default-features = false, features = ["import", "utils",
 
 # The document container. `zip` because the format is a zip: universal tooling,
 # streaming, random access to one mesh, and recoverable with `unzip` at 2am.
-zip = { version = "6", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Native file dialogs. The alternative is drawing one inside egui, which means
 # reimplementing a file browser — and getting a worse one that does not know
 # about the user's shortcuts, network locations, or shell extensions. `rfd` calls
@@ -93,7 +95,7 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 #
 # `xdg-portal` rather than gtk3 on Linux: it talks to the desktop portal over
 # D-Bus, so there is no GTK build dependency and it works from inside a flatpak.
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 # Tier two crash reporting: a GPU fault, a stack overflow or an abort does not
 # run a Rust panic hook at all, so the only way to record one is to have a

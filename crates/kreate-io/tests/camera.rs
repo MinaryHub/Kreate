@@ -185,10 +185,10 @@ fn rewrite_entry(bytes: &[u8], name: &str, f: impl Fn(&str) -> String) -> Vec<u8
     let mut out = Vec::new();
     {
         let mut writer = zip::ZipWriter::new(Cursor::new(&mut out));
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         for i in 0..source.len() {
             let mut entry = source.by_index(i).expect("entry");
-            let entry_name = entry.name().to_string();
+            let entry_name = entry.name().expect("a named entry").into_owned();
             let mut content = Vec::new();
             std::io::Read::read_to_end(&mut entry, &mut content).expect("read");
             if entry_name == name {

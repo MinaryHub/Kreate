@@ -10,6 +10,47 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- The Material tab shows the slot's material on a ball under the material
+  preview's light, and pointing at a physical material in its menu shows
+  that one — what a part would be made of, before choosing it and without
+  switching the view.
+- Physical materials have a finish: wood grain with its rings, marble
+  veins, granite speckle, concrete blotches and pores, leather grain, a
+  brushed hairline on steel and titanium, a cast surface on iron and MDF,
+  a moulded texture on plastics and rubber, frost on frosted glass, and a
+  satin unevenness on the other metals. Laid out in metres, so a grain is
+  the same few millimetres on a cup and on a table.
+- A sketch's open profile revolves into a solid about the sketch's own
+  horizontal or vertical axis, as well as about one of its lines.
+- X-ray selection in edit mode reaches every vertex, edge and face behind
+  the front ones, not only those a pixel happened to show.
+
+### Changed
+
+- The zip reader is `zip` 9: three advisories on 6's extraction, one on
+  permissions kept through symbolic links, no longer apply. File dialogs
+  are `rfd` 0.17, which drops the unmaintained D-Bus crates 0.15 carried.
+- CI: Linux runs the renderer's tests on Mesa's lavapipe, which draws what
+  a GPU draws; Windows, whose runner has only WARP, no longer runs them —
+  WARP draws no shadows and traces nothing, and the job had been red on
+  that for every run on record.
+
+### Fixed
+
+- Updating on macOS left Kreate.app's seal broken and its version the old
+  one; the bundle is now signed again and its Info.plist set, after the
+  update and again once the files put aside are deleted.
+- The status bar's "update downloaded" message is translated.
+- The font list no longer offers the faces macOS keeps for its own
+  interface (".SF NS", ".ADT Slab Numeric Light"), which no font menu
+  shows and some of which hold numerals only.
+- The fonts — the two bundled and the computer's — are their own crate,
+  `kreate-fonts`, read by the mesh kernel and by the font picker; the
+  interface had been reaching into the mesh kernel for them, which the
+  architecture tests forbid and which CI had never reached to say so.
+
 ## [0.3.1] - 2026-10-22
 
 ### Added

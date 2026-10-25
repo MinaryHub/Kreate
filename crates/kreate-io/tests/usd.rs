@@ -291,14 +291,19 @@ fn a_usdz_carries_its_pictures_and_reads_back_with_them() {
     // Every file's data on a 64-byte boundary, stored as it is.
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("a zip");
     assert_eq!(
-        archive.by_index(0).unwrap().name(),
+        archive.by_index(0).unwrap().name().unwrap(),
         "scene.usdc",
         "the stage first"
     );
     for i in 0..archive.len() {
         let f = archive.by_index(i).unwrap();
         assert_eq!(f.compression(), zip::CompressionMethod::Stored);
-        assert_eq!(f.data_start() % 64, 0, "{}", f.name());
+        assert_eq!(
+            f.data_start().expect("data start") % 64,
+            0,
+            "{}",
+            f.name().unwrap()
+        );
     }
 
     let path = std::env::temp_dir().join(format!("kreate-usdz-{}.usdz", std::process::id()));
