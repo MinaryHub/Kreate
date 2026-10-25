@@ -59,11 +59,7 @@ impl Materials {
             // lives beside the fields rather than here — one answer to "what is
             // a standard surface", which is what keeps a field added to the
             // material from having to be added twice.
-            let mut one = compile_one(doc, &material.shading_graph());
-            if material.thin {
-                one.make_thin();
-            }
-            compiled.push(one);
+            compiled.push(compile_material(doc, material));
         }
         let revisions = compiled
             .iter()
@@ -347,6 +343,19 @@ impl TextureImage {
 /// a texture beats a failure.
 pub fn encoded_rgba(image: &kreate_scene::Image, space: kreate_scene::ColorSpace) -> Vec<u8> {
     kreate_io::image_import::rgba8_of(image, space)
+}
+
+/// One material, compiled as [`Materials::compile`] compiles each: what the
+/// material tab's preview draws, as the viewport would.
+pub fn compile_material(
+    doc: &Document,
+    material: &kreate_scene::document::Material,
+) -> kreate_shader::Compiled {
+    let mut one = compile_one(doc, &material.shading_graph());
+    if material.thin {
+        one.make_thin();
+    }
+    one
 }
 
 fn compile_one(doc: &Document, graph: &ShaderGraph) -> kreate_shader::Compiled {

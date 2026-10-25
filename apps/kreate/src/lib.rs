@@ -26,6 +26,7 @@ pub mod generate;
 pub mod glyphs;
 pub mod gpu_sync;
 pub mod logs;
+pub mod material_preview;
 pub mod materials;
 pub mod meshcheck;
 pub mod modal;

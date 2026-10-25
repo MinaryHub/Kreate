@@ -184,6 +184,12 @@ pub struct ShellState {
     /// that shortens the list is a document edit and an undo can lengthen it
     /// again.
     pub material_slot: u32,
+    /// What the material tab's preview should show, asked for while the
+    /// tab is drawn and taken by the application when it renders: nothing
+    /// asked, nothing drawn.
+    pub material_preview_wanted: Option<crate::material_preview::PreviewOf>,
+    /// The preview's picture, once there is one.
+    pub material_preview: Option<egui::TextureId>,
     /// The camera's rotation, for drawing the navigation gizmo. Interface state
     /// reads the camera; it never writes to it.
     pub camera_rotation: kreate_math::DQuat,
@@ -818,6 +824,8 @@ impl Default for ShellState {
             editors: kreate_ui::EditorRegistry::with_builtins(),
             catalog: Catalog::new(),
             material_slot: 0,
+            material_preview_wanted: None,
+            material_preview: None,
             console_input: String::new(),
             console_log: Vec::new(),
             chat_input: String::new(),
@@ -12118,6 +12126,16 @@ fn draw_physical_library(ui: &mut Ui, state: &mut ShellState, doc: &Document, sl
                                 ui.selectable_label(on, label)
                             })
                             .inner;
+                        // Pointed at, the ball wears it: what it would look
+                        // like, before it is chosen.
+                        if response.hovered() {
+                            state.material_preview_wanted =
+                                Some(crate::material_preview::PreviewOf::Physical(entry.id));
+                        }
+                        let picture = state.material_preview;
+                        let response = response.on_hover_ui(|ui| {
+                            draw_material_ball(ui, picture, 160.0);
+                        });
                         if response.clicked() {
                             chosen = Some((entry.id, name));
                             ui.close();
@@ -12145,6 +12163,29 @@ fn draw_physical_library(ui: &mut Ui, state: &mut ShellState, doc: &Document, sl
         state.queue.run("material.apply_physical", p);
     }
 }
+/// The material preview's picture, `side` points square and centred; an
+/// empty square of the same size until the first one is drawn, so the panel
+/// does not jump when it arrives.
+fn draw_material_ball(ui: &mut Ui, picture: Option<egui::TextureId>, side: f32) {
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+        match picture {
+            Some(texture) => {
+                ui.painter().image(
+                    texture,
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            None => {
+                ui.painter()
+                    .rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+            }
+        }
+    });
+}
+
 // i18n-exempt: a symbol, not a word. An en dash rather than the minus sign
 // U+2212 this wants: the bundled subset has no glyph for that one, and the
 // test below caught it before it reached a screen.
@@ -12319,6 +12360,16 @@ fn draw_material_tab(
     let Some(info) = registry.get("material.set_properties") else {
         return;
     };
+
+    // The slot's material on a ball, under the material preview's light:
+    // what it is made of, without switching the view to see it. Unless a
+    // physical material is being pointed at above, which it shows instead.
+    if let Some(id) = doc.material_id_at(object, slot as usize) {
+        state
+            .material_preview_wanted
+            .get_or_insert(crate::material_preview::PreviewOf::Material(id));
+    }
+    draw_material_ball(ui, state.material_preview, 128.0);
 
     // Blender's "Use Nodes". On, the graph is the material and the Shader
     // Editor is where it is edited; the flat controls below would be editing

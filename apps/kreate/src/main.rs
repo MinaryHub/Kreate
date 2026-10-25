@@ -600,6 +600,10 @@ struct Gfx {
     /// The 3D viewports after the first, by their area: each a renderer, a
     /// picture and a camera of its own.
     extra: std::collections::BTreeMap<kreate_ui::AreaId, ExtraView>,
+    /// The material tab's ball, made the first time the tab is shown.
+    material_preview: Option<kreate::material_preview::MaterialPreview>,
+    /// Whether the ball was drawn this frame and still has frames to add.
+    material_preview_busy: bool,
 }
 
 /// A viewport after the first. It draws the same scene through its own
@@ -12237,6 +12241,28 @@ impl App {
             v.render(&mut encoder, &view.target.view, &draws);
         }
 
+        // The material tab's ball, when the tab asked for one: drawn into a
+        // picture of its own, before the interface that shows it.
+        gfx.material_preview_busy = false;
+        if let Some(of) = self.ui.material_preview_wanted.take() {
+            let preview = gfx.material_preview.get_or_insert_with(|| {
+                kreate::material_preview::MaterialPreview::new(
+                    &gfx.gpu.device,
+                    &mut gfx.egui_renderer,
+                )
+            });
+            let drew = preview.draw(
+                &gfx.gpu.device,
+                &gfx.gpu.queue,
+                &mut encoder,
+                &self.doc,
+                of,
+                self.ui.punchy,
+            );
+            gfx.material_preview_busy = drew && preview.accumulating();
+            self.ui.material_preview = Some(preview.id);
+        }
+
         // ...then the interface over the surface, with the target as an image.
         let paint_jobs = self
             .egui_ctx
@@ -13889,6 +13915,8 @@ impl ApplicationHandler for App {
             egui_renderer,
             target,
             extra: std::collections::BTreeMap::new(),
+            material_preview: None,
+            material_preview_busy: false,
         });
         self.window = Some(window);
         // A document opened at launch keeps the view it was saved with; a
@@ -14397,7 +14425,10 @@ impl ApplicationHandler for App {
                     self.redraw.clear();
                     self.advance_render_job();
                     if self.render_job.is_some()
-                        || self.gfx.as_ref().is_some_and(|g| g.viewport.accumulating())
+                        || self
+                            .gfx
+                            .as_ref()
+                            .is_some_and(|g| g.viewport.accumulating() || g.material_preview_busy)
                     {
                         self.redraw.set(RedrawReason::ACCUMULATE);
                     }
