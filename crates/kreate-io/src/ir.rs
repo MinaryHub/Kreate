@@ -277,7 +277,13 @@ impl ImportMesh {
             for dx in -1..=1 {
                 for dy in -1..=1 {
                     for dz in -1..=1 {
-                        let key = [c[0] + dx, c[1] + dy, c[2] + dz];
+                        // Saturating: a position at infinity, which a broken
+                        // file can hold, floors to the last cell there is.
+                        let key = [
+                            c[0].saturating_add(dx),
+                            c[1].saturating_add(dy),
+                            c[2].saturating_add(dz),
+                        ];
                         let Some(bucket) = grid.get(&key) else {
                             continue;
                         };

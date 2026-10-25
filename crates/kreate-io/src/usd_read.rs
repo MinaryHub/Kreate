@@ -1457,7 +1457,10 @@ impl<'a> Reader<'a> {
             .iter()
             .map(|i| *i as u32)
             .collect();
-        if counts.iter().sum::<usize>() != indices.len() {
+        // Summed with a check: counts a broken file took from the far end
+        // of the integers would otherwise overflow rather than disagree.
+        let total = counts.iter().try_fold(0usize, |a, c| a.checked_add(*c));
+        if total != Some(indices.len()) {
             self.say(format!(
                 "`{}`: its face counts and indices disagree",
                 prim.name

@@ -279,6 +279,20 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
         if is_vertex {
             positions.reserve(element.count.min(1 << 24));
         }
+        // An element with nothing in it reads nothing, however many it
+        // says it has — a count in the quintillions over no properties
+        // would otherwise be that many empty faces, and the memory for
+        // them. With properties, each item is at least a byte, so a count
+        // past the bytes left is a lie the file is refused for.
+        if element.properties.is_empty() {
+            continue;
+        }
+        if element.count > bytes.len().saturating_sub(body) {
+            return Err(PlyError::Truncated {
+                element: element.name.clone(),
+                item: 0,
+            });
+        }
         let mut values = vec![0.0f64; element.properties.len()];
         for item in 0..element.count {
             let fail = |what: String| {

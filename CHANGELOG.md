@@ -39,6 +39,14 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- A damaged file no longer takes the program down with it. Every reader
+  is now tested against thousands of broken copies of a sound file — bits
+  flipped, cut short, numbers swapped for impossible ones — and what that
+  found is fixed: a PLY naming more faces than there are atoms made that
+  many empty faces until the system killed Kreate; a vertex at infinity
+  overflowed the welder; counts and offsets at the end of the integers
+  overflowed the USD, FBX and COLLADA readers; and the glTF library
+  asserts on a file whose accessors disagree, which is now an error.
 - Updating on macOS left Kreate.app's seal broken and its version the old
   one; the bundle is now signed again and its Info.plist set, after the
   update and again once the files put aside are deleted.

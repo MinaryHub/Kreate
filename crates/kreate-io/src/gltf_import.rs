@@ -99,6 +99,37 @@ pub enum GltfError {
     NoPositions { mesh: String, primitive: usize },
     #[error("the file names {0:?}, which is not a file beside it")]
     Outside(String),
+    /// The glTF library gave up on the file instead of refusing it: its
+    /// validation indexes an accessor a primitive names before checking the
+    /// index is one the file has, and a file that is wrong there would
+    /// otherwise take the program down. See [`guarded`].
+    #[error("not a readable glTF file: {0}")]
+    Broken(String),
+}
+
+/// Runs a read through the glTF library and turns a panic in it into an
+/// error: a broken file is the library's input, not the program's fault,
+/// and an error is what a reader owes for one.
+///
+/// The whole read, not the library's entry call alone: the library also
+/// asserts while its accessors are being read — a buffer view shorter
+/// than the accessor says, a count that is not a whole number of
+/// elements — which is well inside `from_imported`. A panic of Kreate's
+/// own in there is turned into an error too, which the mutation test then
+/// cannot see; the readers it can see are the ones not built on a library
+/// that panics.
+fn guarded<T>(read: impl FnOnce() -> Result<T, GltfError>) -> Result<T, GltfError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)) {
+        Ok(result) => result,
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "the reader failed".to_string());
+            Err(GltfError::Broken(message))
+        }
+    }
 }
 
 /// Reads a `.gltf` or `.glb` from memory.
@@ -108,8 +139,10 @@ pub enum GltfError {
 /// cannot do — [`parse_gltf_file`] does. `import_slice` handles embedded base64
 /// buffers and `.glb`.
 pub fn parse_gltf(bytes: &[u8], options: &GltfOptions) -> Result<ImportScene, GltfError> {
-    let (document, buffers, images) = gltf::import_slice(bytes)?;
-    from_imported(document, buffers, images, options)
+    guarded(|| {
+        let (document, buffers, images) = gltf::import_slice(bytes)?;
+        from_imported(document, buffers, images, options)
+    })
 }
 
 /// Reads a `.gltf` or `.glb` from disk, with the buffers and images it names
@@ -125,7 +158,7 @@ pub fn parse_gltf_file(
     options: &GltfOptions,
 ) -> Result<ImportScene, GltfError> {
     let bytes = std::fs::read(path).map_err(|e| GltfError::Parse(gltf::Error::Io(e)))?;
-    let parsed = gltf::Gltf::from_slice(&bytes)?;
+    let parsed = guarded(|| Ok(gltf::Gltf::from_slice(&bytes)?))?;
     let uris = parsed
         .buffers()
         .filter_map(|b| match b.source() {
@@ -141,8 +174,10 @@ pub fn parse_gltf_file(
             return Err(GltfError::Outside(uri));
         }
     }
-    let (document, buffers, images) = gltf::import(path)?;
-    from_imported(document, buffers, images, options)
+    guarded(|| {
+        let (document, buffers, images) = gltf::import(path)?;
+        from_imported(document, buffers, images, options)
+    })
 }
 
 /// Whether a glTF reference stays with its file: embedded, or a relative

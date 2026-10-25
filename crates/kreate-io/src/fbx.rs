@@ -631,8 +631,11 @@ impl Layer {
         } else {
             usize::try_from(*self.index.get(at)?).ok()?
         };
-        self.data
-            .get(at * self.stride..at * self.stride + self.stride)
+        // Checked: an index from a broken file can be anything, and past
+        // the end is `None`, not an overflow.
+        let start = at.checked_mul(self.stride)?;
+        let end = start.checked_add(self.stride)?;
+        self.data.get(start..end)
     }
 }
 

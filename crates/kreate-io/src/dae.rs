@@ -414,7 +414,16 @@ impl<'a> Reader<'a> {
                     ))
                 })
                 .collect();
-            let width = inputs.iter().map(|i| i.1).max().map_or(1, |m| m + 1);
+            // An offset is whatever the file says; a skin with one at the
+            // end of the integers is left at rest, not overflowed.
+            let Some(width) = inputs
+                .iter()
+                .map(|i| i.1)
+                .max()
+                .map_or(Some(1), |m| m.checked_add(1))
+            else {
+                continue;
+            };
             let joint_at = inputs
                 .iter()
                 .find(|i| i.0 == "JOINT")
@@ -750,7 +759,13 @@ impl<'a> Reader<'a> {
                     ))
                 })
                 .collect();
-            let width = inputs.iter().map(|i| i.1).max().map_or(1, |m| m + 1);
+            // A `set` offset is whatever the file says; one at the end of
+            // the integers is refused, not overflowed.
+            let width = inputs
+                .iter()
+                .map(|i| i.1)
+                .max()
+                .map_or(Some(1), |m| m.checked_add(1))?;
             let vertex_at = inputs.iter().find(|i| i.0 == "VERTEX").map(|i| i.1)?;
             let first_uv_set = inputs
                 .iter()
