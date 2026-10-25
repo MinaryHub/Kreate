@@ -12,6 +12,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- A welcome card over the empty document at the first start: what Kreate
+  does, in four lines each saying how to begin — modelling, designing a
+  part, shading and rendering, working with an assistant — and a button
+  that opens a sample scene. Closed once, it stays closed; Help ▸ Welcome
+  brings it back.
 - The Material tab shows the slot's material on a ball under the material
   preview's light, and pointing at a physical material in its menu shows
   that one — what a part would be made of, before choosing it and without

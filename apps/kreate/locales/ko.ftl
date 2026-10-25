@@ -2086,3 +2086,20 @@ render-time-left = 약 { $seconds }초 남음
 
 # The updater, in the status bar: a release downloaded for the next start.
 update-downloaded = Kreate { $version } 버전을 내려받았습니다. 다음에 Kreate를 시작하면 적용됩니다
+
+# 처음 시작할 때 빈 문서 위에 뜨는 환영 카드, 그리고 도움말 메뉴의 시작 안내.
+help-welcome = 시작 안내
+welcome-title = Kreate에 오신 것을 환영합니다
+welcome-intro = 부품, 캐릭터, 장면을 만드는 3D 모델러이고, AI 어시스턴트가 옆에서 함께 작업할 수 있습니다.
+welcome-model = 모델링
+welcome-model-how = Shift+A로 도형을 추가하고, Tab으로 점·선·면을 편집하고, G·R·S로 옮기고 돌리고 키웁니다. F3으로 모든 명령을 이름으로 찾을 수 있습니다.
+welcome-design = 부품 설계
+welcome-design-how = Design 워크스페이스에서 치수가 있는 스케치를 그린 뒤 돌출, 회전, 라운드, 쉘로 부품을 만듭니다. 매개변수로 묶어 두면 나중에 숫자만 바꿔도 따라옵니다.
+welcome-render = 재질과 렌더
+welcome-render-how = 재질 탭에서 부품을 오크, 강철, 유리로 만들고, 뷰포트의 렌더 모드로 비춰 보고, 렌더 메뉴의 이미지 렌더로 사진을 뽑습니다.
+welcome-ai = 어시스턴트와 함께
+welcome-ai-how = 도움말 메뉴의 AI 앱에 연결로 Kreate를 Claude, Cursor, VS Code에 붙이면, 어시스턴트가 모델을 만들고 재고 고치는 일을 함께 합니다.
+welcome-sample = 샘플 장면 열기
+welcome-close = 닫기
+welcome-sample-opened = 샘플 장면입니다. 렌더 보기와 재질 탭을 써 보세요
+op-help-welcome-desc = 환영 카드를 다시 보여 줍니다. Kreate로 무엇을 할 수 있는지, 어떻게 시작하는지, 그리고 샘플 장면.

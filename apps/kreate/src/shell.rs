@@ -170,6 +170,9 @@ pub struct ShellState {
     pub collab: kreate_ui::collab::CollabForm,
     pub collab_view: Option<kreate_ui::collab::CollabView>,
     pub about_open: bool,
+    /// The welcome card over the viewport: the first start's, and Help ▸
+    /// Welcome's after.
+    pub welcome_open: bool,
     /// The last render, shown in its own window until closed.
     pub render_result: Option<RenderResultView>,
     /// A render under way: what it is doing, and how far through it is, zero
@@ -860,6 +863,7 @@ impl Default for ShellState {
             collab: Default::default(),
             collab_view: None,
             about_open: false,
+            welcome_open: false,
             render_result: None,
             render_progress: None,
             queue: CommandQueue::new(),
@@ -1814,6 +1818,7 @@ struct Labels {
     help_donate: String,
     file_collab: String,
     help_about: String,
+    help_welcome: String,
     contact_title: String,
     contact_intro: String,
     contact_kind_bug: String,
@@ -2229,6 +2234,7 @@ impl Labels {
             help_donate: t("help-donate"),
             file_collab: t("menu-file-collab"),
             help_about: t("help-about"),
+            help_welcome: t("help-welcome"),
             contact_title: t("contact-title"),
             contact_intro: t("contact-intro"),
             contact_kind_bug: t("contact-kind-bug"),
@@ -4509,6 +4515,11 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                 ),
                 Separator,
                 entry(
+                    "help.welcome",
+                    &l.help_welcome,
+                    Run::Command(Command::OpenWelcome),
+                ),
+                entry(
                     "help.about",
                     &l.help_about,
                     Run::Command(Command::OpenAbout),
@@ -5797,6 +5808,64 @@ fn draw_viewport(
     draw_context_menu(ui, state, rect);
     draw_rename(ui, state, rect);
     draw_imports(ui, state, rect);
+    draw_welcome(ui, state, rect);
+}
+
+/// The first start's card: what Kreate does, in four lines each saying how
+/// to begin, and a scene to start from. Over the empty document, until it
+/// is closed; after that from Help ▸ Welcome.
+fn draw_welcome(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
+    if !state.welcome_open || !state.importing.is_empty() {
+        return;
+    }
+    let width = 440.0f32.min(viewport.width() - 16.0).max(160.0);
+    let t = |key: &str| state.catalog.get(key);
+    let mut sample = false;
+    let mut close = false;
+    egui::Area::new(egui::Id::new("welcome"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(
+            viewport.center().x - width / 2.0,
+            viewport.min.y + 48.0,
+        ))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(14))
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.label(egui::RichText::new(t("welcome-title")).heading());
+                    ui.add_space(4.0);
+                    ui.weak(t("welcome-intro"));
+                    ui.add_space(10.0);
+                    for (head, how) in [
+                        ("welcome-model", "welcome-model-how"),
+                        ("welcome-design", "welcome-design-how"),
+                        ("welcome-render", "welcome-render-how"),
+                        ("welcome-ai", "welcome-ai-how"),
+                    ] {
+                        ui.label(egui::RichText::new(t(head)).strong());
+                        ui.label(t(how));
+                        ui.add_space(6.0);
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(t("welcome-sample")).clicked() {
+                            sample = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(t("welcome-close")).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+        });
+    if sample {
+        state.queue.push(Command::OpenSample);
+    }
+    if close {
+        state.queue.push(Command::CloseWelcome);
+    }
 }
 
 /// A file being read, as the progress card shows it.
@@ -16875,6 +16944,20 @@ mod tests {
             "chat-nothing-to-export",
             "menu-file-collab",
             "help-about",
+            "help-welcome",
+            "welcome-title",
+            "welcome-intro",
+            "welcome-model",
+            "welcome-model-how",
+            "welcome-design",
+            "welcome-design-how",
+            "welcome-render",
+            "welcome-render-how",
+            "welcome-ai",
+            "welcome-ai-how",
+            "welcome-sample",
+            "welcome-close",
+            "welcome-sample-opened",
             "contact-title",
             "contact-intro",
             "contact-kind-bug",

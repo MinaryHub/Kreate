@@ -209,6 +209,20 @@ pub fn save_appearance(
     write_atomic(path, &format!("theme = {}\n", appearance.tag()))
 }
 
+/// Where the welcome card's closing is remembered: a file that is there
+/// once it has been closed on this computer.
+pub fn welcome_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("welcome-seen.txt"))
+}
+
+pub fn welcome_seen(path: &Path) -> bool {
+    path.exists()
+}
+
+pub fn save_welcome_seen(path: &Path) -> Result<(), std::io::Error> {
+    write_atomic(path, "seen\n")
+}
+
 /// The workspace file's path.
 /// File ▸ Open Recent's list, one path per line, newest first.
 pub fn recent_path() -> Option<PathBuf> {

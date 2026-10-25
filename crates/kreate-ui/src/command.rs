@@ -238,6 +238,13 @@ pub enum Command {
     OpenContact,
     /// Help ▸ About Kreate.
     OpenAbout,
+    /// Help ▸ Welcome: the first start's card, shown again.
+    OpenWelcome,
+    /// The welcome card closed, and not shown at the next start.
+    CloseWelcome,
+    /// A scene to start from — a cube, a lamp and a camera — in place of
+    /// the document, as File ▸ New would with something in it.
+    OpenSample,
     /// Help ▸ Support Kreate: the sponsors' page, in the browser.
     Donate,
     /// A field naming an object — a boolean's cutter, a path — is filled by

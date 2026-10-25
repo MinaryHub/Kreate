@@ -2960,6 +2960,23 @@ fn shot_import_progress() {
     shot.dump("import-progress");
 }
 
+/// The first start: the welcome card over the empty document, in both
+/// languages.
+#[test]
+fn shot_welcome() {
+    let mut doc = Document::new();
+    kreate::startup::starting_scene(&mut doc);
+    for (label, locale) in [("welcome", "en"), ("welcome-ko", "ko-KR")] {
+        let Some(shot) = composite_with(&doc, locale, false, |state| {
+            state.welcome_open = true;
+        }) else {
+            eprintln!("no GPU; skipping");
+            return;
+        };
+        shot.dump(label);
+    }
+}
+
 /// A real robot read from its URDF and given an armature, then posed by IK:
 /// the arm's target moved somewhere the arm can reach, and the arm follows.
 /// Two pictures, before and after; and the numbers, to the console.

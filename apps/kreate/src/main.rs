@@ -1137,6 +1137,9 @@ impl App {
             .unwrap_or_default();
         app.load_keymap();
         app.load_workspaces();
+        // The welcome card, until it has been closed once on this computer.
+        app.ui.welcome_open =
+            kreate::prefs::welcome_path().is_none_or(|p| !kreate::prefs::welcome_seen(&p));
         app
     }
 
@@ -6503,6 +6506,9 @@ impl App {
                 Command::CollabJoin { name, address, key } => self.collab_join(name, address, key),
                 Command::CollabLeave => self.collab_leave(),
                 Command::OpenAbout => self.ui.about_open = true,
+                Command::OpenWelcome => self.ui.welcome_open = true,
+                Command::CloseWelcome => self.close_welcome(),
+                Command::OpenSample => self.open_sample(),
                 Command::Donate => {
                     kreate::desktop::open_url(kreate::desktop::SPONSORS_URL);
                     let message = self.ui.catalog.get("donate-opened");
@@ -6997,6 +7003,39 @@ impl App {
         self.adopt(load_document(None));
         self.file = DocumentFile::new();
         self.status("new document");
+    }
+
+    /// The welcome card put away, and not shown at the next start.
+    fn close_welcome(&mut self) {
+        self.ui.welcome_open = false;
+        if let Some(path) = kreate::prefs::welcome_path() {
+            if let Err(e) = kreate::prefs::save_welcome_seen(&path) {
+                tracing::warn!(error = %e, "the welcome card's closing was not remembered");
+            }
+        }
+    }
+
+    /// The sample scene in place of the document: File ▸ New with a cube,
+    /// a lamp and a camera in it, framed, for a first look at the Rendered
+    /// view and the Material tab.
+    fn open_sample(&mut self) {
+        if !self.confirm_discarding_changes("unsaved-what-new") {
+            return;
+        }
+        self.camera = kreate::startup::starting_camera();
+        self.motion = kreate_render::CameraMotion::new(kreate::startup::starting_camera());
+        self.camera_view = None;
+        self.camera_view_object = None;
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.viewport.show_grid = true;
+        }
+        let mut doc = Document::new();
+        kreate::startup::sample_scene(&mut doc);
+        self.adopt(doc);
+        self.file = DocumentFile::new();
+        self.close_welcome();
+        let message = self.ui.catalog.get("welcome-sample-opened");
+        self.status(&message);
     }
 
     fn open_document(&mut self) {

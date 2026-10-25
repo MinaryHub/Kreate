@@ -2080,3 +2080,20 @@ render-time-left = about { $seconds } s left
 
 # The updater, in the status bar: a release downloaded for the next start.
 update-downloaded = Kreate { $version } is downloaded and will be used the next time Kreate starts
+
+# The welcome card over the empty document at the first start, and Help's Welcome.
+help-welcome = Welcome
+welcome-title = Welcome to Kreate
+welcome-intro = A 3D modeller for parts, characters and scenes, with an assistant that can work in it beside you.
+welcome-model = Model
+welcome-model-how = Shift+A adds a shape; Tab edits its points, edges and faces; G, R and S move, turn and scale. F3 finds any command by name.
+welcome-design = Design a part
+welcome-design-how = In the Design workspace, draw a sketch with dimensions, then extrude, revolve, round or shell it. Parameters hold it to numbers you can change later.
+welcome-render = Shade and render
+welcome-render-how = The Material tab makes a part of oak, steel or glass; the viewport's Rendered mode lights it, and Render Image, in the Render menu, takes the picture.
+welcome-ai = Work with an assistant
+welcome-ai-how = Connect to AI Apps, in the Help menu, adds Kreate to Claude, Cursor or VS Code, which can then build, measure and fix a model with you.
+welcome-sample = Open a sample scene
+welcome-close = Close
+welcome-sample-opened = a sample scene: try the Rendered view, and the Material tab
+op-help-welcome-desc = Shows the welcome card again: what Kreate does, how to begin, and a sample scene to start from.
