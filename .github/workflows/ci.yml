@@ -53,13 +53,23 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        if: runner.os != 'Windows'
+        if: runner.os == 'macOS'
         run: cargo test --workspace
 
-      # The Windows runner has no GPU and draws through WARP, and the GPU
-      # tests in the application's crate crash it when several make their
-      # devices at once. One at a time there; everything else as usual. Bash,
-      # so a failure in the first command fails the step.
+      # The application's GPU tests crash a software device when several
+      # make their devices at once — WARP on Windows, and lavapipe on Linux
+      # just the same, where the composite tests died of a segmentation
+      # fault the first time they ran there. One at a time; everything else
+      # as usual. Bash, so a failure in the first command fails the step.
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo test --workspace --exclude kreate
+          cargo test -p kreate -- --test-threads=1
+
+      # Windows has only WARP, and the application's tests want one at a
+      # time there for the same reason.
       #
       # The renderer's own tests measure light: shadows, the path tracer,
       # the denoiser, each against a physical expectation. WARP draws none

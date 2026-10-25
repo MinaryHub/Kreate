@@ -1920,14 +1920,19 @@ pub fn write(
         // the graph can turn on without anyone noticing. Then the default
         // becomes the clock and determinism goes silently.
         let epoch = zip::DateTime::default();
+        // And the system named as the maker: the zip writer takes the
+        // platform's otherwise, and the same document saved on Windows
+        // differed from one saved on a Mac by that one byte per entry.
         let text = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
-            .last_modified_time(epoch);
+            .last_modified_time(epoch)
+            .system(zip::System::Unix);
         // STORED, because a deflated entry cannot be memory mapped and mapping
         // is the entire reason `.kmesh` is laid out the way it is.
         let binary = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
             .last_modified_time(epoch)
+            .system(zip::System::Unix)
             .large_file(true);
 
         zip.start_file(MANIFEST, text)?;

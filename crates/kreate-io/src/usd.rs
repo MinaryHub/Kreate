@@ -83,6 +83,7 @@ pub fn write_usdz(scene: &ExportScene<'_>) -> (Vec<u8>, Vec<LossyNote>) {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
+        .system(zip::System::Unix)
         .with_alignment(64);
     let mut notes = package.notes;
     let mut failed = None;

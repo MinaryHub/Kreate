@@ -100,7 +100,8 @@ pub fn write_3mf(parts: &[(String, &MeshData, DAffine3)], metres_per_unit: f64) 
         let mut zip = zip::ZipWriter::new(&mut buffer);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
-            .last_modified_time(zip::DateTime::default());
+            .last_modified_time(zip::DateTime::default())
+            .system(zip::System::Unix);
         for (path, body) in [
             ("[Content_Types].xml", content_types),
             ("_rels/.rels", rels),
