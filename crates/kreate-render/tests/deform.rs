@@ -51,6 +51,12 @@ fn awkward_object() -> glam::DAffine3 {
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// A device on the CPU — Mesa's lavapipe, on a runner with no GPU —
+    /// whose arithmetic lands further from the CPU reference than any
+    /// real GPU's: its sines and its specular lobes are a few parts in a
+    /// thousand off, where the tests ask for one. Tolerated on such a
+    /// device alone.
+    software: bool,
 }
 
 /// The one device this test binary uses.
@@ -66,17 +72,22 @@ struct Gpu {
 /// work. `wgpu::Device` and `Queue` are `Arc` handles, so cloning them is a
 /// refcount bump and every call site stays as it was.
 fn gpu() -> Option<Gpu> {
-    static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
+    static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue, bool)>> =
         std::sync::OnceLock::new();
-    let (device, queue) = SHARED
+    let (device, queue, software) = SHARED
         .get_or_init(|| {
             let opts = GpuOptions::default();
             let instance = kreate_render::Gpu::create_instance(&opts);
             let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
-            Some((gpu.device.clone(), gpu.queue.clone()))
+            let software = gpu.info.device_type == "Cpu";
+            Some((gpu.device.clone(), gpu.queue.clone(), software))
         })
         .clone()?;
-    Some(Gpu { device, queue })
+    Some(Gpu {
+        device,
+        queue,
+        software,
+    })
 }
 
 /// Skips when there is no adapter, which is the state of a headless runner.
@@ -322,7 +333,18 @@ fn assert_split_holds(
     );
 }
 
-fn compare(label: &str, gpu: &Shaded, cpu: &Shaded) {
+/// How far a GPU vertex may sit from the CPU's: a tenth of a millimetre
+/// on a metre, ten times that on a software device (see `Gpu::software`).
+fn position_tolerance(software: bool) -> f32 {
+    if software {
+        1e-3
+    } else {
+        1e-4
+    }
+}
+
+fn compare(label: &str, gpu: &Shaded, cpu: &Shaded, software: bool) {
+    let tolerance = position_tolerance(software);
     assert_eq!(
         gpu.positions.len(),
         cpu.positions.len(),
@@ -339,7 +361,7 @@ fn compare(label: &str, gpu: &Shaded, cpu: &Shaded) {
         let d = (*a - *b).length();
         worst_position = worst_position.max(d);
         assert!(
-            d < 1e-4,
+            d < tolerance,
             "{label}: vertex {i} is at {a:?} on the GPU and {b:?} on the CPU"
         );
     }
@@ -396,7 +418,7 @@ fn frames_then(
     let weights = per_render_vertex(mesh, &weight_of);
     let from_gpu = on_gpu(gpu, mesh, &weights, drags);
     let from_cpu = on_cpu(mesh, &weight_of, last);
-    compare(label, &from_gpu, &from_cpu);
+    compare(label, &from_gpu, &from_cpu, gpu.software);
 }
 
 /// A smooth falloff about the origin, which is what proportional editing hands
@@ -773,6 +795,7 @@ fn shrinking_the_proportional_radius_mid_drag_releases_what_it_let_go() {
         "a shrinking radius",
         &from_gpu,
         &on_cpu(&mesh, &narrow, &drag),
+        g.software,
     );
 }
 

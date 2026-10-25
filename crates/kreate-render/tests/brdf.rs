@@ -26,21 +26,32 @@ use kreate_render::GpuOptions;
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// A device on the CPU — Mesa's lavapipe, on a runner with no GPU —
+    /// whose arithmetic lands further from the CPU reference than any
+    /// real GPU's: its sines and its specular lobes are a few parts in a
+    /// thousand off, where the tests ask for one. Tolerated on such a
+    /// device alone.
+    software: bool,
 }
 
 /// The one device this test binary uses. See `deform.rs` for why it is shared.
 fn gpu() -> Option<Gpu> {
-    static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
+    static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue, bool)>> =
         std::sync::OnceLock::new();
-    let (device, queue) = SHARED
+    let (device, queue, software) = SHARED
         .get_or_init(|| {
             let opts = GpuOptions::default();
             let instance = kreate_render::Gpu::create_instance(&opts);
             let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
-            Some((gpu.device.clone(), gpu.queue.clone()))
+            let software = gpu.info.device_type == "Cpu";
+            Some((gpu.device.clone(), gpu.queue.clone(), software))
         })
         .clone()?;
-    Some(Gpu { device, queue })
+    Some(Gpu {
+        device,
+        queue,
+        software,
+    })
 }
 
 macro_rules! gpu_or_skip {
@@ -336,8 +347,8 @@ fn close(got: f32, want: f32) -> bool {
 /// usual, for that one case: a lobe the wrong shape is off by far more.
 const MIRROR_RELATIVE: f32 = 1e-2;
 
-fn tolerance_for(surface: &Surface) -> f32 {
-    if surface.roughness == 0.0 {
+fn tolerance_for(surface: &Surface, software: bool) -> f32 {
+    if software || surface.roughness == 0.0 {
         MIRROR_RELATIVE
     } else {
         RELATIVE
@@ -370,7 +381,7 @@ fn the_gpu_agrees_with_the_cpu_on_both_lobes() {
 
     for ((surface, v, l), (diffuse, specular)) in expected.iter().zip(&got) {
         let want = brdf::evaluate(surface, n, *v, *l);
-        let relative = tolerance_for(surface);
+        let relative = tolerance_for(surface, gpu.software);
         for c in 0..3 {
             assert!(
                 diffuse[c].is_finite() && specular[c].is_finite(),

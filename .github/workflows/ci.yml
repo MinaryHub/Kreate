@@ -64,11 +64,14 @@ jobs:
       # just the same, where the composite tests died of a segmentation
       # fault the first time they ran there. One at a time; everything else
       # as usual. Bash, so a failure in the first command fails the step.
+      # The renderer's own tests too: five of their binaries died the same
+      # death on lavapipe, each test making its device beside the others'.
       - name: Test (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          cargo test --workspace --exclude kreate --no-fail-fast
+          cargo test --workspace --exclude kreate --exclude kreate-render --no-fail-fast
+          cargo test -p kreate-render --no-fail-fast -- --test-threads=1
           cargo test -p kreate --no-fail-fast -- --test-threads=1
 
       # Windows has only WARP, and the application's tests want one at a
