@@ -1446,6 +1446,18 @@ mod tests {
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
     }
 
+    #[test]
+    fn every_physical_material_compiles() {
+        // The library's finishes are graphs nobody drew in an editor; each
+        // is WGSL the renderers will take, or a material that draws black.
+        for m in kreate_scene::material_library::LIBRARY {
+            if let Some(graph) = m.material(m.id).graph {
+                let compiled = compile(&graph).unwrap_or_else(|e| panic!("{}: {e:?}", m.id));
+                validates(&compiled);
+            }
+        }
+    }
+
     /// Every procedural texture, each output wired somewhere: noise's colour
     /// mixed with a checker by a voronoi's distance into the base colour, a
     /// wave's number into the roughness and the noise's into the metallic.

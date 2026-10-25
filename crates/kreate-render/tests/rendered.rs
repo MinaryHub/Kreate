@@ -3940,3 +3940,151 @@ fn a_cut_out_casts_only_its_opaque_part() {
         "the floor where the clear half's shadow would fall: {solid} under a solid card, {cut} under a cut one"
     );
 }
+
+/// The library's physical materials, each on a cube a hand's width across,
+/// in the material preview: a picture to look at, tiled four across.
+/// Writes `target/physical-finishes.png`.
+#[test]
+#[ignore]
+fn shot_physical_finishes() {
+    const CELL: u32 = 192;
+    const ACROSS: u32 = 4;
+    let gpu = gpu_or_skip!(gpu());
+    let ids = [
+        "oak",
+        "walnut",
+        "pine",
+        "plywood",
+        "marble_white",
+        "granite",
+        "concrete",
+        "leather_brown",
+        "brushed_steel",
+        "cast_iron",
+        "copper",
+        "abs_black",
+        "aluminum",
+        "glass_frosted",
+        "rubber_black",
+        "mdf",
+    ];
+    let rows = (ids.len() as u32).div_ceil(ACROSS);
+    let mut sheet = image::RgbaImage::new(CELL * ACROSS, CELL * rows);
+    let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(0.08));
+    for (i, id) in ids.iter().enumerate() {
+        let entry = kreate_scene::material_library::find(id).expect(id);
+        let material = entry.material(id);
+        let graph = material
+            .graph
+            .clone()
+            .unwrap_or_else(|| kreate_scene::shader::ShaderGraph::for_material(&material));
+        let mut viewport = Viewport::new(&gpu.device, FORMAT, CELL, CELL);
+        viewport.shading = ShadingMode::Material;
+        viewport.set_display(
+            &gpu.queue,
+            Display {
+                view: kreate_math::ViewTransform::AgX,
+                exposure: -0.6,
+            },
+        );
+        viewport.show_grid = false;
+        viewport.show_ground_shadow = false;
+        viewport.show_wireframe = false;
+        let uploaded =
+            kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+        let camera = Camera {
+            distance: 0.24,
+            ..Camera::default()
+        };
+        graph_material(&gpu, &mut viewport, &graph);
+        // The material preview's studio, as the application lights it.
+        viewport.set_world([0.5, 0.5, 0.52]);
+        viewport.set_environment(
+            &gpu.device,
+            &gpu.queue,
+            kreate_render::studio::WIDTH,
+            kreate_render::studio::HEIGHT,
+            &kreate_render::studio::equirect(),
+        );
+        let key = PlacedLight {
+            falloff: Falloff::Parallel,
+            direction: -kreate_render::studio::key_direction().normalize(),
+            amount: [10.0; 3],
+            angular_radius: 0.1,
+            cast_shadow: true,
+            ..PlacedLight::default()
+        };
+        let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
+        viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[key]);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("finish"),
+            size: wgpu::Extent3d {
+                width: CELL,
+                height: CELL,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        viewport.render(&mut encoder, &view, &draws);
+        let row = (CELL * 4).div_ceil(256) * 256;
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (row * CELL) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(CELL),
+                },
+            },
+            wgpu::Extent3d {
+                width: CELL,
+                height: CELL,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let data = staging.slice(..).get_mapped_range().to_vec();
+        staging.unmap();
+        let (ox, oy) = ((i as u32 % ACROSS) * CELL, (i as u32 / ACROSS) * CELL);
+        for y in 0..CELL {
+            for x in 0..CELL {
+                let at = (y * row + x * 4) as usize;
+                sheet.put_pixel(
+                    ox + x,
+                    oy + y,
+                    image::Rgba([data[at], data[at + 1], data[at + 2], 255]),
+                );
+            }
+        }
+    }
+    let out =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/physical-finishes.png");
+    sheet.save(&out).expect("saved");
+    eprintln!("{}", out.display());
+}
