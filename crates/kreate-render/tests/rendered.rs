@@ -26,26 +26,53 @@ struct Gpu {
     /// passing on its own. The CI runner's Windows build already runs the
     /// application's GPU tests singly for the same family of crash.
     _turn: std::sync::MutexGuard<'static, ()>,
+    /// A device on the CPU: see `traced_gpu_or_skip!`.
+    software: bool,
 }
 
 fn gpu() -> Option<Gpu> {
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
+    static SHARED: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue, bool)>> =
         std::sync::OnceLock::new();
-    let (device, queue) = SHARED
+    let (device, queue, software) = SHARED
         .get_or_init(|| {
             let opts = GpuOptions::default();
             let instance = kreate_render::Gpu::create_instance(&opts);
             let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
-            Some((gpu.device.clone(), gpu.queue.clone()))
+            let software = gpu.info.device_type == "Cpu";
+            Some((gpu.device.clone(), gpu.queue.clone(), software))
         })
         .clone()?;
     let turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     Some(Gpu {
         device,
         queue,
+        software,
         _turn: turn,
     })
+}
+
+/// A device for a test that path traces: a software device is skipped.
+///
+/// Mesa's lavapipe, the Linux runner's device, dies of a segmentation
+/// fault in the path tracer's compute — inside the driver, on the first
+/// traced frame — and takes the whole binary with it. The raster tests
+/// run there; the traced ones run where there is a GPU, which the macOS
+/// runner has.
+macro_rules! traced_gpu_or_skip {
+    ($e:expr) => {
+        match $e {
+            Some(v) if v.software => {
+                eprintln!("a software device; the path tracer is not run on it");
+                return;
+            }
+            Some(v) => v,
+            None => {
+                eprintln!("no GPU adapter; skipping");
+                return;
+            }
+        }
+    };
 }
 
 macro_rules! gpu_or_skip {
@@ -2120,7 +2147,7 @@ thread_local! {
 /// sample is — and a still view still settles on its own mean.
 #[test]
 fn a_moved_view_carries_the_last_frames_samples_over() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let shot = |nudge: u32, frames: u32| {
         NUDGE_FROM.with(|n| n.set(nudge));
         NOISE_THRESHOLD.with(|t| t.set(0.0));
@@ -2160,7 +2187,7 @@ fn a_moved_view_carries_the_last_frames_samples_over() {
 /// also what shows the stopping happens at all.
 #[test]
 fn adaptive_sampling_leaves_the_converged_picture_as_it_was() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let shot = |threshold: f32| {
         NOISE_THRESHOLD.with(|t| t.set(threshold));
         let p = traced_shot_with(&gpu, true, 256, None, false);
@@ -2362,7 +2389,7 @@ fn traced_scene(
 /// lamp does not, by bouncing off what it does.
 #[test]
 fn the_path_tracer_agrees_with_the_rasteriser_and_bounces_light() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let raster = traced_shot(&gpu, false, 1, None);
     let traced = traced_shot(&gpu, true, 64, None);
     let mean =
@@ -2390,7 +2417,7 @@ fn sharp_steps(p: &[[f32; 4]]) -> usize {
 /// edges blur — fewer sharp steps than through a pinhole.
 #[test]
 fn a_wide_lens_focused_away_blurs_the_cube() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let pinhole = traced_shot(&gpu, true, 96, None);
     let lens = kreate_render::pathtrace::Lens {
         radius: 0.25,
@@ -2409,7 +2436,7 @@ fn a_wide_lens_focused_away_blurs_the_cube() {
 /// eight samples raw.
 #[test]
 fn a_young_mean_denoised_is_nearer_the_converged_picture() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let converged = traced_shot_with(&gpu, true, 256, None, false);
     let raw = traced_shot_with(&gpu, true, 8, None, false);
     let filtered = traced_shot_with(&gpu, true, 8, None, true);
@@ -2446,7 +2473,7 @@ fn a_young_mean_denoised_is_nearer_the_converged_picture() {
 /// filter brings back.
 #[test]
 fn a_texture_comes_through_the_denoiser_sharp() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     // 8×8 texels, red and blue alternating, sRGB-encoded.
     let pixels: Vec<u8> = (0..64)
         .flat_map(|i| {
@@ -2501,7 +2528,7 @@ fn a_texture_comes_through_the_denoiser_sharp() {
 /// the other is traced red and blue, where without it the floor is grey.
 #[test]
 fn the_path_tracer_reads_the_base_colour_image() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     // Two texels: red, then blue — sRGB-encoded, as a colour image is.
     let pixels = [230u8, 20, 20, 255, 20, 20, 230, 255];
     let image = kreate_render::pathtrace::PtImage {
@@ -2602,7 +2629,7 @@ fn the_preview_shows_a_glow_as_its_colour() {
 /// The path tracer adds a glowing surface's light where a path meets it.
 #[test]
 fn the_path_tracer_sees_a_glow() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let plain = kreate_render::pathtrace::PtSurface {
         base_color: [0.8, 0.8, 0.8],
         roughness: 0.5,
@@ -2642,7 +2669,7 @@ thread_local! {
 /// nothing left to add.
 #[test]
 fn contact_shadows_darken_where_things_touch_and_nowhere_brighten() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     DECOYS.with(|d| d.set(kreate_render::shadow::MAX_SHADOWS));
     CONTACT.with(|c| c.set(false));
     let without = traced_shot(&gpu, false, 1, None);
@@ -2706,7 +2733,7 @@ fn distance(a: &[[f32; 4]], b: &[[f32; 4]]) -> f32 {
 /// the view up into the sky — black here — as it would in a real block.
 #[test]
 fn a_glass_cube_lets_the_light_through() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
     for (traced, frames) in [(false, 1), (true, 48)] {
         let none = cube_shot(&gpu, CubeKind::None, traced, frames);
@@ -2979,7 +3006,7 @@ fn shadows_stay_while_the_view_moves() {
 /// keeps the shadow: one sample, filtered, is dark where many samples are.
 #[test]
 fn one_traced_sample_filtered_keeps_the_shadow() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let converged = traced_shot_with(&gpu, true, 128, None, true);
     let first = traced_shot_with(&gpu, true, 1, None, true);
     let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
@@ -3011,7 +3038,7 @@ fn one_traced_sample_filtered_keeps_the_shadow() {
 /// transmission at all and the object stopped casting.
 #[test]
 fn a_mostly_solid_cube_keeps_most_of_its_shadow() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
     for (traced, frames) in [(false, 16), (true, 64)] {
         let none = cube_shot(&gpu, CubeKind::None, traced, frames);
@@ -3152,7 +3179,7 @@ fn a_renders_passes_read_back_with_depth_and_normals() {
 /// finding it only by bouncing is speckle.
 #[test]
 fn a_glowing_panel_lights_the_floor_as_much_as_it_should_and_quietly() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let camera = Camera {
         pivot: glam::DVec3::new(0.3, 0.0, 0.0),
         distance: 3.0,
@@ -3308,7 +3335,7 @@ fn glowing_panel_patch_sided(
 /// below its middle is exactly what the rectangle's form factor says.
 #[test]
 fn a_big_glowing_panel_is_counted_once() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     // Low, looking in under the panel's edge at the floor below its middle.
     let camera = Camera {
         pivot: glam::DVec3::ZERO,
@@ -3432,7 +3459,7 @@ fn sky_patch(gpu: &Gpu, frames: u32, sky: &[u8], (w, h): (u32, u32)) -> Vec<f32>
 /// smooth after a few samples.
 #[test]
 fn an_image_sky_lights_the_floor_as_much_as_it_should_and_quietly() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let (w, h) = (256, 128);
     let mean = |p: &[f32]| p.iter().sum::<f32>() / p.len() as f32;
     // A cap of radiance L to θ₀ from straight up irradiates a level floor
@@ -3461,7 +3488,7 @@ fn an_image_sky_lights_the_floor_as_much_as_it_should_and_quietly() {
 /// or by bouncing, where the same panel glowing both ways does.
 #[test]
 fn a_one_sided_panel_lights_only_what_it_faces() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let camera = Camera {
         pivot: glam::DVec3::new(0.3, 0.0, 0.0),
         distance: 3.0,
@@ -3589,7 +3616,7 @@ fn grey_with(
 /// in both colours, read where each ray lands on the object.
 #[test]
 fn the_path_tracer_paints_with_the_materials_own_code() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let frame = traced_floor(
         &gpu,
         &grey_with(
@@ -3617,7 +3644,7 @@ fn the_path_tracer_paints_with_the_materials_own_code() {
 /// than one would average to a floor that is only darker.
 #[test]
 fn the_path_tracer_tilts_the_light_by_a_bump() {
-    let gpu = gpu_or_skip!(gpu());
+    let gpu = traced_gpu_or_skip!(gpu());
     let flat = traced_floor(
         &gpu,
         &kreate_scene::shader::ShaderGraph::standard("test", grey().base_color, 0.0, 0.5),
