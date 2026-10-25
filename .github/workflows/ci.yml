@@ -52,9 +52,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Every test binary, not up to the first that fails: a run that stops
+      # there shows one failure where there may be five, and five runs an
+      # hour apart to find them all.
       - name: Test
         if: runner.os == 'macOS'
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       # The application's GPU tests crash a software device when several
       # make their devices at once — WARP on Windows, and lavapipe on Linux
@@ -65,8 +68,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          cargo test --workspace --exclude kreate
-          cargo test -p kreate -- --test-threads=1
+          cargo test --workspace --exclude kreate --no-fail-fast
+          cargo test -p kreate --no-fail-fast -- --test-threads=1
 
       # Windows has only WARP, and the application's tests want one at a
       # time there for the same reason.
@@ -82,8 +85,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cargo test --workspace --exclude kreate --exclude kreate-render
-          cargo test -p kreate -- --test-threads=1
+          cargo test --workspace --exclude kreate --exclude kreate-render --no-fail-fast
+          cargo test -p kreate --no-fail-fast -- --test-threads=1
 
       # Arena handles carry a generation counter only when debug_assertions is
       # on, so the release build takes a genuinely different code path and a

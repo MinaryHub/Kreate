@@ -325,8 +325,28 @@ fn geometry() -> Vec<(glam::Vec3, glam::Vec3)> {
 }
 
 fn close(got: f32, want: f32) -> bool {
+    close_within(got, want, RELATIVE)
+}
+
+/// The mirror's tolerance: a roughness of zero puts the specular lobe at
+/// its floor, where its height goes as the fourth power of a number near
+/// the smallest the shader allows, and a software device's arithmetic —
+/// lavapipe's, on the Linux runner — lands half a percent from the CPU's
+/// there while every real GPU is within the thousandth. Ten times the
+/// usual, for that one case: a lobe the wrong shape is off by far more.
+const MIRROR_RELATIVE: f32 = 1e-2;
+
+fn tolerance_for(surface: &Surface) -> f32 {
+    if surface.roughness == 0.0 {
+        MIRROR_RELATIVE
+    } else {
+        RELATIVE
+    }
+}
+
+fn close_within(got: f32, want: f32, relative: f32) -> bool {
     let scale = got.abs().max(want.abs());
-    (got - want).abs() <= (scale * RELATIVE).max(ABSOLUTE)
+    (got - want).abs() <= (scale * relative).max(ABSOLUTE)
 }
 
 #[test]
@@ -350,6 +370,7 @@ fn the_gpu_agrees_with_the_cpu_on_both_lobes() {
 
     for ((surface, v, l), (diffuse, specular)) in expected.iter().zip(&got) {
         let want = brdf::evaluate(surface, n, *v, *l);
+        let relative = tolerance_for(surface);
         for c in 0..3 {
             assert!(
                 diffuse[c].is_finite() && specular[c].is_finite(),
@@ -362,7 +383,7 @@ fn the_gpu_agrees_with_the_cpu_on_both_lobes() {
                 want.diffuse[c]
             );
             assert!(
-                close(specular[c], want.specular[c]),
+                close_within(specular[c], want.specular[c], relative),
                 "specular channel {c}, {surface:?} v {v} l {l}: GPU {} against CPU {}",
                 specular[c],
                 want.specular[c]
@@ -460,5 +481,5 @@ fn a_mirror_is_finite_on_the_device() {
         specular[0] > 100.0,
         "a mirror should be bright: {specular:?}"
     );
-    assert!(close(specular[0], want.specular[0]));
+    assert!(close_within(specular[0], want.specular[0], MIRROR_RELATIVE));
 }
