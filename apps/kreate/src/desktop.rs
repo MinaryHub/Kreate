@@ -17,7 +17,7 @@ pub fn open(path: &Path) {
 }
 
 /// Where Kreate's development can be supported.
-pub const SPONSORS_URL: &str = "https://github.com/sponsors/knoxxr";
+pub const SPONSORS_URL: &str = "https://github.com/sponsors/MinaryHub";
 
 /// Opens a web address in the system's browser.
 pub fn open_url(url: &str) {
