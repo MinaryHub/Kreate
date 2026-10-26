@@ -77,7 +77,12 @@ pub const VERSION_MAJOR: u32 = 1;
 /// never heard of one. What such a reader cannot do is *resolve* a world's
 /// background to it, and that was already true: `WorldRecord::image_uid` has
 /// been written since minor 2 against exactly this day.
-pub const VERSION_MINOR: u32 = 4;
+///
+/// 5: drawings (`ObjectRecord::drawing`): curves, points, text and
+/// dimensions on layers, held by constraints — the 2D drafting mode's, and
+/// what a sketch becomes. An older reader keeps the record in its `extra`
+/// map and does not draw it.
+pub const VERSION_MINOR: u32 = 5;
 
 const MANIFEST: &str = "manifest.json";
 const SCENE: &str = "scene.json";
@@ -402,6 +407,9 @@ pub struct ObjectRecord {
     /// Its sketch's lines, between its mesh's vertices.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sketch_lines: Vec<[u32; 2]>,
+    /// What it draws in its own plane: see `crate::drawing_record`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<crate::drawing_record::DrawingRecord>,
     /// The features that make it a body, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<FeatureRecord>,
@@ -2465,6 +2473,7 @@ pub fn write(
                     .map(|c| (c.tag().to_string(), c.parts().0, c.parts().1, c.at()))
                     .collect(),
                 sketch_lines: object.sketch_lines.clone(),
+                drawing: object.drawing.as_deref().map(crate::drawing_record::record),
                 features: object.features.iter().map(feature_record).collect(),
                 visible: object.visible,
                 selectable: object.selectable,
@@ -3144,6 +3153,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
             .copied()
             .collect();
         object.features = record.features.iter().filter_map(feature_from).collect();
+        object.drawing = record
+            .drawing
+            .as_ref()
+            .map(|r| Box::new(crate::drawing_record::drawing_from(r).0));
         // A constraint of a kind this build does not know is dropped, not
         // guessed at: the rest of the sketch still holds. So is one naming a
         // point the mesh does not have, as the lines are — the solver and

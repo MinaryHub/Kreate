@@ -283,6 +283,10 @@ pub struct Drawing {
     pub constraints: Vec<Constraint>,
     /// The layer new entities go on.
     pub current_layer: LayerId,
+    /// Entries a newer build wrote that this one cannot read — an entity or
+    /// a constraint of a kind it does not know — kept as the file had them
+    /// and written back, so a drawing passes through this build whole.
+    pub foreign: Vec<String>,
     next_entity: u32,
     next_layer: u32,
 }
@@ -294,6 +298,7 @@ impl Default for Drawing {
             layers: vec![Layer::new(LayerId(0), "0")],
             constraints: Vec::new(),
             current_layer: LayerId(0),
+            foreign: Vec::new(),
             next_entity: 1,
             next_layer: 1,
         }

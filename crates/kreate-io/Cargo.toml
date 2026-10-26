@@ -13,6 +13,7 @@ kreate-mesh.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 kreate-scene.workspace = true
+kreate-geom2d.workspace = true
 gltf.workspace = true
 zip.workspace = true
 serde.workspace = true
