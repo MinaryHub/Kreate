@@ -4,6 +4,7 @@ members = [
     "crates/kreate-math",
     "crates/kreate-mesh",
     "crates/kreate-fonts",
+    "crates/kreate-geom2d",
     "crates/kreate-scene",
     "crates/kreate-ops",
     "crates/kreate-ops-derive",
@@ -38,6 +39,7 @@ publish = false
 kreate-math       = { path = "crates/kreate-math" }
 kreate-mesh       = { path = "crates/kreate-mesh" }
 kreate-fonts      = { path = "crates/kreate-fonts" }
+kreate-geom2d     = { path = "crates/kreate-geom2d" }
 kreate-scene      = { path = "crates/kreate-scene" }
 kreate-ops        = { path = "crates/kreate-ops" }
 kreate-ops-derive = { path = "crates/kreate-ops-derive" }

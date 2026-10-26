@@ -105,7 +105,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           rustup target add wasm32-unknown-unknown
-          cargo check -p kreate-mesh -p kreate-math --target wasm32-unknown-unknown
+          cargo check -p kreate-mesh -p kreate-math -p kreate-geom2d --target wasm32-unknown-unknown
 
   deny:
     name: licenses / advisories

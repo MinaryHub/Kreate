@@ -1494,6 +1494,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kreate-geom2d"
+version = "0.3.1"
+dependencies = [
+ "glam",
+]
+
+[[package]]
 name = "kreate-i18n"
 version = "0.3.1"
 dependencies = [
