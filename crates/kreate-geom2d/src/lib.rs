@@ -27,11 +27,13 @@
 //! and is tested without a window or a GPU.
 
 mod curve;
+mod edit;
 mod intersect;
 mod prim;
 mod spline;
 
 pub use curve::Curve2D;
+pub use edit::{fillet, Fillet};
 pub use intersect::{intersect, Intersection};
 pub use prim::Prim;
 pub use spline::Spline;
