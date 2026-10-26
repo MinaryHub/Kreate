@@ -343,6 +343,131 @@ pub fn drawing_from_sketch(points: &[DVec2], lines: &[[u32; 2]], old: &[Old]) ->
     }
 }
 
+/// What [`sketches_to_drawings`] did: how many sketches became drawings,
+/// and the constraints that could not be carried, by sketch name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocumentMigration {
+    pub sketches: usize,
+    pub dropped: Vec<(String, Vec<u32>)>,
+}
+
+/// Every sketch of a document drawn with the sketch tools — points and
+/// lines — made a drawing: the same object, so the features made from it
+/// still name it; a revolve's axis, which named two of its points, names
+/// the line between them; and a parameter bound to a dimension by the
+/// constraint's place is bound to the dimension it became. The object's
+/// mesh of points is let go. A sketch made from a plane's faces is left as
+/// it is.
+pub fn sketches_to_drawings(doc: &mut crate::Document) -> DocumentMigration {
+    use crate::design::Bound;
+    use crate::document::{ObjectData, ObjectId};
+    use crate::feature::Shape;
+    let mut report = DocumentMigration::default();
+    let ids: Vec<ObjectId> = doc
+        .objects()
+        .filter(|(_, o)| !o.sketch_lines.is_empty() && o.drawing.is_none())
+        .map(|(id, _)| id)
+        .collect();
+    for id in ids {
+        let Some(o) = doc.object(id) else { continue };
+        let Some(points) = o.mesh().and_then(|m| doc.mesh(m)).map(|m| {
+            m.positions()
+                .iter()
+                .map(|p| DVec2::new(p.x as f64, p.y as f64))
+                .collect::<Vec<_>>()
+        }) else {
+            continue;
+        };
+        let (uid, name) = (o.uid, o.name.clone());
+        let mut m = drawing_from_sketch(&points, &o.sketch_lines, &o.sketch);
+        // Each revolve's axis: the line through its two points, or one
+        // drawn there for it, for construction.
+        let p = |i: u32| points.get(i as usize).copied().unwrap_or(DVec2::ZERO);
+        let mut axes: Vec<([u32; 2], EntityId)> = Vec::new();
+        let named: Vec<[u32; 2]> = doc
+            .objects()
+            .flat_map(|(_, b)| b.features.iter())
+            .filter(|f| f.sketch == uid)
+            .filter_map(|f| match f.shape {
+                Shape::Revolve { axis, .. } => Some(axis),
+                _ => None,
+            })
+            // The sketch's own axes are the drawing's too.
+            .filter(|a| {
+                !a.contains(&crate::feature::AXIS_X) && !a.contains(&crate::feature::AXIS_Y)
+            })
+            .collect();
+        for axis in named {
+            if axes.iter().any(|(a, _)| *a == axis) {
+                continue;
+            }
+            let (a, b) = (p(axis[0]), p(axis[1]));
+            let same = |x: DVec2, y: DVec2| x.distance(y) <= kreate_geom2d::POINT_EPS * 10.0;
+            let line = m.drawing.entities.iter().find_map(|e| match &e.kind {
+                EntityKind::Curve(Curve2D::Line { a: s, b: t })
+                    if (same(*s, a) && same(*t, b)) || (same(*s, b) && same(*t, a)) =>
+                {
+                    Some(e.id)
+                }
+                _ => None,
+            });
+            let line = line.unwrap_or_else(|| {
+                let e = m.drawing.add_curve(Curve2D::Line { a, b });
+                if let Some(x) = m.drawing.entity_mut(e) {
+                    x.construction = true;
+                }
+                e
+            });
+            axes.push((axis, line));
+        }
+        let bodies: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+        for body in bodies {
+            let Some(o) = doc.object_mut(body) else {
+                continue;
+            };
+            for f in &mut o.features {
+                if f.sketch != uid {
+                    continue;
+                }
+                if let Shape::Revolve { axis, angle } = f.shape {
+                    if let Some((_, e)) = axes.iter().find(|(a, _)| *a == axis) {
+                        f.shape = Shape::Revolve {
+                            axis: [e.0, e.0],
+                            angle,
+                        };
+                    }
+                }
+            }
+        }
+        for b in &mut doc.design.bindings {
+            if let Bound::SketchDimension { sketch, index } = b.target {
+                if sketch == uid {
+                    if let Some(dim) = m.dimensions.get(&index) {
+                        b.target = Bound::DrawingDimension {
+                            drawing: uid,
+                            dim: dim.0,
+                        };
+                    }
+                }
+            }
+        }
+        if !m.dropped.is_empty() {
+            report.dropped.push((name, m.dropped.clone()));
+        }
+        if let Some(o) = doc.object_mut(id) {
+            o.drawing = Some(Box::new(m.drawing));
+            o.sketch.clear();
+            o.sketch_lines.clear();
+            o.data = ObjectData::Empty;
+        }
+        report.sketches += 1;
+    }
+    if report.sketches > 0 {
+        doc.purge_unused();
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

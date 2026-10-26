@@ -177,7 +177,7 @@ fn the_sketches_of_format_one_four_still_read_as_they_did() {
         return;
     }
     let bytes = std::fs::read(&file).expect("the committed file");
-    let doc = kreate_io::container::read(std::io::Cursor::new(bytes))
+    let doc = kreate_io::container::read_as_written(std::io::Cursor::new(bytes))
         .expect("reads")
         .document;
     let want = std::fs::read_to_string(&expected).expect("the committed expectation");
@@ -191,7 +191,7 @@ fn the_sketches_of_format_one_four_still_read_as_they_did() {
 #[test]
 fn every_sketch_of_format_one_four_migrates_to_the_same_regions() {
     let bytes = std::fs::read(assets().join(FILE)).expect("the committed file");
-    let doc = kreate_io::container::read(std::io::Cursor::new(bytes))
+    let doc = kreate_io::container::read_as_written(std::io::Cursor::new(bytes))
         .expect("reads")
         .document;
     let want = std::fs::read_to_string(assets().join(EXPECTED)).expect("the expectation");
@@ -261,4 +261,80 @@ fn every_sketch_of_format_one_four_migrates_to_the_same_regions() {
         checked += 1;
     }
     assert_eq!(checked, 5, "every sketch in the file");
+}
+
+/// The file opened as the program opens it — every sketch a drawing now —
+/// builds the same solids: each body's volume within what exact curves add
+/// over chords, its bounds where they were. And the dimension the width
+/// parameter held is held to it still.
+#[test]
+fn the_file_opened_builds_the_same_solids_from_drawings() {
+    let bytes = std::fs::read(assets().join(FILE)).expect("the committed file");
+    let mut doc = kreate_io::container::read(std::io::Cursor::new(bytes))
+        .expect("reads")
+        .document;
+    assert!(
+        doc.objects()
+            .all(|(_, o)| o.sketch_lines.is_empty() && o.sketch.is_empty()),
+        "no sketch is left as one"
+    );
+    assert_eq!(
+        doc.objects().filter(|(_, o)| o.drawing.is_some()).count(),
+        5
+    );
+    let want = std::fs::read_to_string(assets().join(EXPECTED)).expect("the expectation");
+    let got = reading(&doc);
+    let bodies = |text: &str| -> Vec<(String, f64, Vec<f64>)> {
+        text.lines()
+            .filter(|l| l.starts_with("body "))
+            .map(|l| {
+                let w: Vec<&str> = l.split_whitespace().collect();
+                let volume: f64 = w[5].parse().expect("a volume");
+                let bounds: Vec<f64> = l
+                    .split("bounds")
+                    .nth(1)
+                    .unwrap()
+                    .replace(['[', ']', ','], " ")
+                    .split_whitespace()
+                    .map(|x| x.parse().expect("a bound"))
+                    .collect();
+                (w[1].to_string(), volume, bounds)
+            })
+            .collect()
+    };
+    let (was, now) = (bodies(&want), bodies(&got));
+    assert_eq!(was.len(), now.len(), "{got}");
+    for ((name, v0, b0), (_, v1, b1)) in was.iter().zip(&now) {
+        assert!((v1 - v0).abs() <= v0 * 5e-3, "{name}: {v1} against {v0}");
+        for (x, y) in b0.iter().zip(b1) {
+            assert!((x - y).abs() <= 2e-4, "{name}: {b1:?} against {b0:?}");
+        }
+    }
+    // The width parameter still drives the plate's width.
+    let bound = doc
+        .design
+        .bindings
+        .iter()
+        .find(|b| {
+            matches!(
+                b.target,
+                kreate_scene::design::Bound::DrawingDimension { .. }
+            )
+        })
+        .expect("the binding carried to the dimension")
+        .clone();
+    assert_eq!(bound.expression, "width");
+    doc.design.parameters.iter_mut().for_each(|p| {
+        if p.name == "width" {
+            p.expression = "50".into();
+        }
+    });
+    doc.apply_parameters();
+    let after = bodies(&reading(&doc));
+    let wide = after.iter().find(|(n, ..)| n == "Body").unwrap();
+    assert!(
+        (wide.2[3] - 0.05).abs() < 1e-4,
+        "50 mm wide now: {:?}",
+        wide.2
+    );
 }

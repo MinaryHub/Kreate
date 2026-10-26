@@ -500,6 +500,21 @@ fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<
         let Some(other) = doc.object_by_uid(uid).filter(|o| *o != id) else {
             continue;
         };
+        // A drawing as a path: its curves drawn as points and lines.
+        if let Some(d) = doc.object(other).and_then(|o| o.drawing.as_deref()) {
+            let (points, lines) = crate::feature::drawn_edges(d);
+            let verts = points
+                .iter()
+                .map(|p| kreate_math::Vec3::new(p.x, p.y, 0.0))
+                .collect();
+            out.push(Operand {
+                uid,
+                mesh: Arc::new(MeshData::from_faces(verts, &[])),
+                to_local: to_local * doc.world_transform(other),
+                lines: Arc::new(lines),
+            });
+            continue;
+        }
         let Some(mesh) = doc
             .object(other)
             .and_then(|o| o.mesh())

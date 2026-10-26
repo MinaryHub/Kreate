@@ -10,6 +10,15 @@ fn round_trip(doc: &Document) -> Document {
     container::read(Cursor::new(bytes)).expect("opens").document
 }
 
+/// As [`round_trip`], read as written: what the format keeps, before an
+/// old sketch is brought up to a drawing.
+fn round_trip_as_written(doc: &Document) -> Document {
+    let bytes = container::write(doc, &Manifest::default(), &[]).expect("writes");
+    container::read_as_written(Cursor::new(bytes))
+        .expect("opens")
+        .document
+}
+
 #[test]
 fn the_length_unit_is_saved() {
     for unit in LengthUnit::ALL {
@@ -174,7 +183,7 @@ fn sketch_lines_and_a_bodys_features_are_saved() {
     ];
     let original = body.features.clone();
     doc.add_object(body);
-    let back = round_trip(&doc);
+    let back = round_trip_as_written(&doc);
     let (_, s) = back.objects().find(|(_, o)| o.name == "Sketch").unwrap();
     assert_eq!(s.sketch_lines, vec![[0, 1], [1, 2], [2, 3], [3, 0]]);
     assert_eq!(s.sketch.len(), 3);

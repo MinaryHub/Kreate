@@ -2534,8 +2534,18 @@ pub fn write(
     Ok(buffer.into_inner())
 }
 
-/// Parses a `.kreate` archive.
+/// Parses a `.kreate` archive, bringing what an older build wrote up to
+/// this one: a sketch of points and lines is a drawing now
+/// (`kreate_scene::drawing_migrate`).
 pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
+    let mut loaded = read_as_written(reader)?;
+    kreate_scene::drawing_migrate::sketches_to_drawings(&mut loaded.document);
+    Ok(loaded)
+}
+
+/// Parses a `.kreate` archive as it was written, nothing brought up to
+/// date: what a test of an old file reads it with.
+pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     let mut zip = zip::ZipArchive::new(reader)?;
 
     let manifest: Manifest = {

@@ -352,7 +352,7 @@ pub const DRAWING_CHORD: f64 = 1e-5;
 /// A drawing's profile curves as points and the edges between them, for
 /// the region finder and the sweeps that take points: each curve drawn to
 /// [`DRAWING_CHORD`], its ends shared with whatever else ends there.
-fn drawn_edges(drawing: &crate::drawing::Drawing) -> (Vec<Vec2>, Vec<[u32; 2]>) {
+pub fn drawn_edges(drawing: &crate::drawing::Drawing) -> (Vec<Vec2>, Vec<[u32; 2]>) {
     let mut points: Vec<Vec2> = Vec::new();
     let mut edges: Vec<[u32; 2]> = Vec::new();
     let index = |p: kreate_geom2d::DVec2, points: &mut Vec<Vec2>| -> u32 {
@@ -601,6 +601,10 @@ pub fn key(doc: &Document, features: &[Feature], body_world: DAffine3) -> u64 {
             }
             if let Some(o) = doc.object(id) {
                 o.sketch_lines.hash(&mut h);
+                // A drawing is its own geometry, not a mesh's.
+                if let Some(d) = o.drawing.as_deref() {
+                    format!("{d:?}").hash(&mut h);
+                }
             }
             if let Some(mesh) = doc
                 .object(id)
