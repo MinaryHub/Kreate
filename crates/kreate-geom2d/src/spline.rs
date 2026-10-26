@@ -106,6 +106,51 @@ impl Spline {
         }
     }
 
+    /// The uniform Catmull–Rom curve through `through`, exactly: each span
+    /// is the cubic Bézier between two of the points, its handles a sixth
+    /// of the way to the neighbours, and the spans one after another are a
+    /// B-spline whose inner knots are each three times over. What a sketch
+    /// of format 1.4 drew a spline as, so its migration keeps its shape.
+    /// Closed, it comes back round to the first point.
+    pub fn catmull_rom(through: &[DVec2], closed: bool) -> Spline {
+        let n = through.len();
+        if n < 2 {
+            return Spline::clamped(1, through.to_vec());
+        }
+        let spans = if closed { n } else { n - 1 };
+        let at = |i: isize| -> DVec2 {
+            if closed {
+                through[i.rem_euclid(n as isize) as usize]
+            } else {
+                through[i.clamp(0, n as isize - 1) as usize]
+            }
+        };
+        let mut ctrl = vec![at(0)];
+        for k in 0..spans as isize {
+            let (p0, p1, p2, p3) = (at(k - 1), at(k), at(k + 1), at(k + 2));
+            ctrl.push(p1 + (p2 - p0) / 6.0);
+            ctrl.push(p2 - (p3 - p1) / 6.0);
+            ctrl.push(p2);
+        }
+        let mut knots = vec![0.0; 4];
+        for k in 1..spans {
+            let t = k as f64 / spans as f64;
+            knots.extend([t, t, t]);
+        }
+        knots.extend([1.0; 4]);
+        let mut fit = through.to_vec();
+        if closed {
+            fit.push(through[0]);
+        }
+        Spline {
+            degree: 3,
+            ctrl,
+            knots,
+            weights: None,
+            fit,
+        }
+    }
+
     pub fn domain(&self) -> (f64, f64) {
         (
             self.knots[self.degree],
@@ -312,6 +357,37 @@ mod tests {
         }
         assert!(s.point(lo).distance(fit[0]) < 1e-12);
         assert!(s.point(hi).distance(fit[4]) < 1e-12);
+    }
+
+    /// The Catmull–Rom spline is the sketch's: at a quarter of each span
+    /// it is where `kreate_scene::sketch::spline_ring` would put a point.
+    #[test]
+    fn a_catmull_rom_spline_passes_its_points_with_their_tangents() {
+        let p = [
+            DVec2::new(0.0, 0.0),
+            DVec2::new(1.0, 1.0),
+            DVec2::new(2.0, 0.0),
+            DVec2::new(3.0, 1.0),
+        ];
+        let s = Spline::catmull_rom(&p, false);
+        for (k, q) in p.iter().enumerate() {
+            let t = k as f64 / 3.0;
+            assert!(s.point(t).distance(*q) < 1e-12, "{k}");
+        }
+        // The Catmull–Rom formula at a quarter of the middle span.
+        let t = 0.25;
+        let (p0, p1, p2, p3) = (p[0], p[1], p[2], p[3]);
+        let want = (p1 * 2.0
+            + (p2 - p0) * t
+            + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * (t * t)
+            + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * (t * t * t))
+            * 0.5;
+        let got = s.point((1.0 + t) / 3.0);
+        assert!(got.distance(want) < 1e-12, "{got} against {want}");
+        // Closed, it comes back.
+        let c = Spline::catmull_rom(&p, true);
+        let (lo, hi) = c.domain();
+        assert!(c.point(lo).distance(c.point(hi)) < 1e-12);
     }
 
     /// Weights of one make a NURBS the plain B-spline.

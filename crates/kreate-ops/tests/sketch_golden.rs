@@ -183,3 +183,82 @@ fn the_sketches_of_format_one_four_still_read_as_they_did() {
     let want = std::fs::read_to_string(&expected).expect("the committed expectation");
     assert_eq!(reading(&doc), want);
 }
+
+/// The migration's promise, on the committed file: each sketch becomes a
+/// drawing with every constraint carried, the same regions — their areas
+/// within what drawing a circle as forty-eight chords took off it — and a
+/// solve that converges without moving anything.
+#[test]
+fn every_sketch_of_format_one_four_migrates_to_the_same_regions() {
+    let bytes = std::fs::read(assets().join(FILE)).expect("the committed file");
+    let doc = kreate_io::container::read(std::io::Cursor::new(bytes))
+        .expect("reads")
+        .document;
+    let want = std::fs::read_to_string(assets().join(EXPECTED)).expect("the expectation");
+    let mut checked = 0;
+    for line in want.lines().filter(|l| l.starts_with("sketch ")) {
+        let name = line.split_whitespace().nth(1).expect("a name");
+        let areas: Vec<f64> = line
+            .split('[')
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .map(|s| {
+                s.split(',')
+                    .filter(|x| !x.trim().is_empty())
+                    .map(|x| x.trim().parse().expect("an area"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (_, object) = doc
+            .objects()
+            .find(|(_, o)| o.name == name)
+            .unwrap_or_else(|| panic!("{name} in the file"));
+        let mesh = object
+            .mesh()
+            .and_then(|m| doc.mesh(m))
+            .expect("a sketch's points");
+        let points: Vec<glam::DVec2> = mesh
+            .positions()
+            .iter()
+            .map(|p| glam::DVec2::new(p.x as f64, p.y as f64))
+            .collect();
+        let mut m = kreate_scene::drawing_migrate::drawing_from_sketch(
+            &points,
+            &object.sketch_lines,
+            &object.sketch,
+        );
+        let dropped: Vec<String> = m
+            .dropped
+            .iter()
+            .map(|i| format!("{i}: {:?}", object.sketch[*i as usize]))
+            .collect();
+        assert!(dropped.is_empty(), "{name}: not carried {dropped:?}");
+        let mut got: Vec<f64> = m.drawing.regions(1e-7).iter().map(|r| r.area).collect();
+        got.sort_by(f64::total_cmp);
+        assert_eq!(got.len(), areas.len(), "{name}: {got:?} against {areas:?}");
+        for (g, w) in got.iter().zip(&areas) {
+            // Exact curves enclose a little more than chords did.
+            assert!(
+                (g - w).abs() <= w * 5e-3,
+                "{name}: {got:?} against {areas:?}"
+            );
+        }
+        let before = m.drawing.clone();
+        let out = m.drawing.solve();
+        assert!(out.iter().all(|p| p.converged), "{name}: {out:?}");
+        for (b, a) in before.entities.iter().zip(&m.drawing.entities) {
+            if let (
+                kreate_scene::drawing::EntityKind::Curve(b),
+                kreate_scene::drawing::EntityKind::Curve(a),
+            ) = (&b.kind, &a.kind)
+            {
+                assert!(
+                    b.start().distance(a.start()) < 1e-6 && b.end().distance(a.end()) < 1e-6,
+                    "{name}: the solve moved {b:?} to {a:?}"
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 5, "every sketch in the file");
+}
