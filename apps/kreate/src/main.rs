@@ -516,6 +516,35 @@ const PINCH_NOTCHES: f64 = 6.0;
 /// selects nothing.
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
+/// `draft.constrain`'s kinds and `draft.dimension`'s, in the order of their
+/// enums: what a tool's tag is sent as.
+const DRAFT_CONSTRAINTS: [&str; 13] = [
+    "coincident",
+    "horizontal",
+    "vertical",
+    "parallel",
+    "perpendicular",
+    "tangent",
+    "equal",
+    "concentric",
+    "point_on",
+    "symmetric",
+    "midpoint",
+    "fixed",
+    "smooth",
+];
+const DRAFT_DIMENSIONS: [&str; 9] = [
+    "horizontal",
+    "vertical",
+    "aligned",
+    "angular",
+    "radius",
+    "diameter",
+    "arc_length",
+    "ordinate_x",
+    "ordinate_y",
+];
+
 impl DragSelect {
     fn shape(&self) -> kreate_render::SelectShape {
         match &self.lasso {
@@ -1023,6 +1052,9 @@ struct App {
     /// Which points of the sketch are pinned, and what that was worked out
     /// for: the analysis is a matrix reduction, not a per-frame cost.
     sketch_pinned: (u64, Vec<bool>),
+    /// A drawing's entities nothing can move, for the document version
+    /// they were worked out at.
+    drawing_pinned: (u64, Vec<kreate_scene::drawing::EntityId>),
     /// The Measure tool, while it is out. See `begin_measure`.
     measure: Option<MeasureTool>,
     /// Walk Navigation, while it runs, and when it last moved the view.
@@ -1250,6 +1282,7 @@ impl App {
             text_place: false,
             sketch_faced: None,
             sketch_pinned: (0, Vec::new()),
+            drawing_pinned: (u64::MAX, Vec::new()),
             measure: None,
             walk: None,
             walk_clock: None,
@@ -1476,7 +1509,7 @@ impl App {
         // A sketch is held as a mesh of points and lines, and editing it is
         // the sketch tools, not its vertices: Tab on one goes into it.
         if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Objects
-            && kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_some()
+            && self.active_sketching().is_some()
         {
             self.set_mode(OpMode::Sketch);
             return;
@@ -1497,9 +1530,7 @@ impl App {
         // inside it can be. A sweep proved the point — the guard that used to
         // live here, and the selection sweep below, could both be removed
         // without a single test noticing.
-        if mode == OpMode::Sketch
-            && kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_none()
-        {
+        if mode == OpMode::Sketch && self.active_sketching().is_none() {
             self.sketch_waiting = true;
             self.open_popup_menu("sketch_plane");
             return;
@@ -2218,7 +2249,7 @@ impl App {
                     row(
                         app,
                         t(key),
-                        "sketch.new",
+                        "draft.new",
                         &[("plane", PropertyValue::Enum(i))],
                     )
                 };
@@ -3468,8 +3499,8 @@ impl App {
         params.set("plane", PropertyValue::Enum(4));
         params.set("object", PropertyValue::Text(name));
         params.set("at", PropertyValue::Vec3(hit.point.to_array()));
-        self.run_op("sketch.new", params);
-        if kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_none() {
+        self.run_op("draft.new", params);
+        if self.active_sketching().is_none() {
             self.sketch_waiting = false;
         }
     }
@@ -4521,8 +4552,21 @@ impl App {
 
     /// The active sketch and where it is in the world.
     fn sketch_target(&self) -> Option<(kreate_scene::document::ObjectId, glam::DAffine3)> {
-        let id = kreate_ops::ops::sketch_draw::active_sketch(&self.doc)?;
+        let id = self.active_sketching()?;
         Some((id, self.doc.world_transform(id)))
+    }
+
+    /// What sketch mode draws in: the active sketch, or the active drawing.
+    fn active_sketching(&self) -> Option<ObjectId> {
+        kreate_ops::ops::sketch_draw::active_sketch(&self.doc)
+            .or_else(|| kreate_ops::ops::draft::active_drawing(&self.doc))
+    }
+
+    /// The drawing sketch mode draws in, when it is one: the tools then run
+    /// the drafting operators.
+    fn active_drawing(&self) -> Option<&kreate_scene::drawing::Drawing> {
+        let id = kreate_ops::ops::draft::active_drawing(&self.doc)?;
+        self.doc.object(id)?.drawing.as_deref()
     }
 
     /// The ray under the pointer: from the eye in perspective, from the view's
@@ -4760,6 +4804,14 @@ impl App {
         let (id, world) = self.sketch_target()?;
         let projector = self.ui.projector?;
         let object = self.doc.object(id)?;
+        if let Some(d) = object.drawing.as_deref() {
+            let tol = kreate::sketching::drawing_tolerance(d);
+            return Some(kreate::sketching::Geometry::from_drawing(d, tol, |p| {
+                projector
+                    .project(world.transform_point3(DVec3::new(p.x, p.y, 0.0)))
+                    .map(|q| glam::DVec2::new(q.x as f64, q.y as f64))
+            }));
+        }
         let points = kreate_ops::ops::sketch_draw::points(&self.doc, id);
         Some(kreate::sketching::Geometry::new(
             points,
@@ -5014,8 +5066,24 @@ impl App {
             return;
         }
         let mut params = PropertyMap::new();
-        params.set("points", PropertyValue::Ints(drag.points.clone()));
-        params.set("offset", PropertyValue::Vec3([offset.x, offset.y, 0.0]));
+        let op = if self.active_drawing().is_some() {
+            match drag.at {
+                Some(at) => {
+                    params.set("at", PropertyValue::Text(kreate::sketching::ref_text(at)));
+                    params.set("to", PropertyValue::Vec3([to.x, to.y, 0.0]));
+                    "draft.drag"
+                }
+                None => {
+                    params.set("ids", PropertyValue::Ints(drag.entities.clone()));
+                    params.set("offset", PropertyValue::Vec3([offset.x, offset.y, 0.0]));
+                    "draft.move"
+                }
+            }
+        } else {
+            params.set("points", PropertyValue::Ints(drag.points.clone()));
+            params.set("offset", PropertyValue::Vec3([offset.x, offset.y, 0.0]));
+            "sketch.move"
+        };
         match self.sketch_drag_session.as_mut() {
             Some(session) => {
                 if let Err(e) = self.history.update_modal(
@@ -5034,7 +5102,7 @@ impl App {
                 &mut self.doc,
                 None,
                 &self.op_ctx,
-                "sketch.move",
+                op,
                 &params,
             ) {
                 Ok(Some(session)) => self.sketch_drag_session = Some(session),
@@ -5065,7 +5133,20 @@ impl App {
     /// A line tool's points so far, run as one stroke.
     fn commit_sketch_line(&mut self, closed: bool) {
         let clicks = std::mem::take(&mut self.sketching.clicks);
-        if clicks.len() >= 2 {
+        if clicks.len() >= 2 && self.active_drawing().is_some() {
+            self.run_op_with(
+                "draft.line",
+                &[
+                    (
+                        "points",
+                        PropertyValue::Floats(
+                            clicks.iter().flat_map(|(p, _)| [p.x, p.y]).collect(),
+                        ),
+                    ),
+                    ("closed", PropertyValue::Bool(closed)),
+                ],
+            );
+        } else if clicks.len() >= 2 {
             self.run_op_with(
                 "sketch.line",
                 &[
@@ -5089,7 +5170,20 @@ impl App {
     /// A spline tool's points so far, run as one stroke.
     fn commit_sketch_spline(&mut self, closed: bool) {
         let clicks = std::mem::take(&mut self.sketching.clicks);
-        if clicks.len() >= 2 {
+        if clicks.len() >= 2 && self.active_drawing().is_some() {
+            self.run_op_with(
+                "draft.spline",
+                &[
+                    (
+                        "points",
+                        PropertyValue::Floats(
+                            clicks.iter().flat_map(|(p, _)| [p.x, p.y]).collect(),
+                        ),
+                    ),
+                    ("closed", PropertyValue::Bool(closed)),
+                ],
+            );
+        } else if clicks.len() >= 2 {
             self.run_op_with(
                 "sketch.spline",
                 &[
@@ -5157,7 +5251,33 @@ impl App {
                         self.history.commit_modal(session);
                         // One point dropped on another of the sketch: joined.
                         let (hover, snapped) = (self.sketching.hover, self.sketching.snapped);
-                        if let (Some(v), Some((_, join)), false) = (drag.single, hover, snapped) {
+                        if let (Some(at), Some((_, join)), false) = (drag.at, hover, snapped) {
+                            let target = (join > 0)
+                                .then(|| self.sketch_geometry())
+                                .flatten()
+                                .filter(|g| {
+                                    g.map
+                                        .as_ref()
+                                        .is_some_and(|m| !m.refs[(join - 1) as usize].contains(&at))
+                                })
+                                .and_then(|g| g.point_ref(join - 1));
+                            if let Some(target) = target {
+                                let refs = format!(
+                                    "{} {}",
+                                    kreate::sketching::ref_text(at),
+                                    kreate::sketching::ref_text(target)
+                                );
+                                self.run_op_with(
+                                    "draft.constrain",
+                                    &[
+                                        ("kind", PropertyValue::Enum(0)),
+                                        ("refs", PropertyValue::Text(refs)),
+                                    ],
+                                );
+                            }
+                        } else if let (Some(v), Some((_, join)), false) =
+                            (drag.single, hover, snapped)
+                        {
                             if join > 0 && join - 1 != v {
                                 let kind = kreate_scene::sketch::KINDS
                                     .iter()
@@ -5188,6 +5308,22 @@ impl App {
                     .zip(self.sketch_geometry())
                     .and_then(|(at, g)| g.pick(at));
                 let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
+                // A drawing's own tools: the drafting operators.
+                if self.active_drawing().is_some()
+                    && !matches!(
+                        tool,
+                        Tool::Line
+                            | Tool::Spline
+                            | Tool::Select
+                            | Tool::Pattern
+                            | Tool::Extrude
+                            | Tool::Revolve
+                    )
+                {
+                    self.drawing_click(tool, p, pick);
+                    self.redraw.set(RedrawReason::UI);
+                    return true;
+                }
                 match tool {
                     Tool::Line => {
                         // On the outline's first point: closed.
@@ -5439,11 +5575,7 @@ impl App {
                     Tool::Select | Tool::Pattern => {
                         let extend = self.input.shift_down;
                         let g = self.sketch_geometry().unwrap_or_default();
-                        let lines_of = |pick: Pick| match pick {
-                            Pick::Line(l) => vec![l],
-                            Pick::Round { centre, on } => g.lines_of_round(centre, on),
-                            Pick::Point(_) => Vec::new(),
-                        };
+                        let lines_of = |pick: Pick| g.lines_of(pick);
                         // Taking hold of what is already selected drags all
                         // of it; anything else is selected first (Shift adds).
                         let held = match pick {
@@ -5507,15 +5639,41 @@ impl App {
                                 ),
                                 _ => (raw, None),
                             };
+                            // In a drawing one point is dragged through the
+                            // solver; anything more moves whole.
+                            let at = single.and_then(|v| g.point_ref(v));
+                            let mut entities =
+                                g.entities_in(&self.sketching.points, &self.sketching.lines);
+                            if let Some(e) = g.entity_of(pick) {
+                                if !entities.contains(&e.0) {
+                                    entities.push(e.0);
+                                }
+                            }
                             self.sketching.drag = Some(kreate::sketching::SketchDrag {
                                 points,
                                 anchor,
                                 single,
+                                at,
+                                entities,
                             });
                         }
                     }
                     Tool::Extrude | Tool::Revolve => {
                         if let (Tool::Revolve, Some(Pick::Line(l))) = (tool, pick) {
+                            // A drawing's axis is its line, named twice.
+                            let line = self
+                                .sketch_geometry()
+                                .and_then(|g| g.entity_of_line(l))
+                                .filter(|e| {
+                                    matches!(
+                                        self.active_drawing().and_then(|d| d.curve(*e)),
+                                        Some(kreate_geom2d::Curve2D::Line { .. })
+                                    )
+                                });
+                            if let Some(e) = line {
+                                self.set_revolve_axis([e.0, e.0]);
+                                return true;
+                            }
                             if let Some(ends) = self
                                 .sketch_target()
                                 .and_then(|(id, _)| self.doc.object(id))
@@ -5554,6 +5712,269 @@ impl App {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// A tool's click in a drawing: the drafting operator it means. What is
+    /// drawn from a point of the drawing is joined to it by the operator.
+    fn drawing_click(
+        &mut self,
+        tool: kreate::sketching::Tool,
+        p: glam::DVec2,
+        pick: Option<kreate::sketching::Pick>,
+    ) {
+        use kreate::sketching::{Pick, Tool};
+        use kreate_scene::drawing::{EntityId, EntityRef, Part};
+        let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
+        let unit = self.doc.design.length_unit.metres();
+        let typed = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
+        let (Some(g), Some(d)) = (self.sketch_geometry(), self.active_drawing().cloned()) else {
+            return;
+        };
+        match tool {
+            // Mirror: the axis is the line clicked; what is selected goes
+            // across it.
+            Tool::Mirror => {
+                if let Some(axis) = pick.and_then(|k| g.entity_of(k)) {
+                    let ids = g.entities_in(&self.sketching.points, &self.sketching.lines);
+                    self.run_op_with(
+                        "draft.mirror",
+                        &[
+                            ("ids", PropertyValue::Ints(ids)),
+                            ("axis", PropertyValue::Int(axis.0 as i64)),
+                        ],
+                    );
+                    self.sketch_tool_done();
+                }
+            }
+            // Offset: the selected curves, as far as the click is from the
+            // first of them, to its side — or as typed.
+            Tool::Offset => {
+                let ids = g.entities_in(&[], &self.sketching.lines);
+                if let Some(first) = ids.first().and_then(|i| d.curve(EntityId(*i))) {
+                    let (_, near) = first.closest(p);
+                    let distance = typed.first().map(|t| t.abs()).unwrap_or(near.distance(p));
+                    if distance > 1e-9 {
+                        for id in ids {
+                            self.run_op_with(
+                                "draft.offset",
+                                &[
+                                    ("id", PropertyValue::Int(id as i64)),
+                                    ("distance", PropertyValue::Float(distance)),
+                                    ("toward", v3(p)),
+                                ],
+                            );
+                        }
+                    }
+                    self.sketch_tool_done();
+                }
+            }
+            // Fillet: a corner clicked, where two curves end; the radius as
+            // typed, or a fifth of the shorter.
+            Tool::Fillet => {
+                let Some(Pick::Point(v)) = pick else {
+                    return;
+                };
+                let ends: Vec<EntityRef> = g
+                    .map
+                    .as_ref()
+                    .map(|m| m.refs[v as usize].clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| matches!(r.part, Part::Start | Part::End))
+                    .filter(|r| d.curve(r.entity).is_some())
+                    .collect();
+                let [a, b, ..] = ends.as_slice() else {
+                    return;
+                };
+                let inward = |r: &EntityRef| {
+                    let c = d.curve(r.entity)?;
+                    let (lo, hi) = c.domain();
+                    let t = if r.part == Part::Start {
+                        lo + (hi - lo) * 0.25
+                    } else {
+                        hi - (hi - lo) * 0.25
+                    };
+                    Some((c.point(t), c.length()))
+                };
+                let (Some((near_a, la)), Some((near_b, lb))) = (inward(a), inward(b)) else {
+                    return;
+                };
+                let radius = typed.first().map(|r| r.abs()).unwrap_or(0.2 * la.min(lb));
+                self.run_op_with(
+                    "draft.fillet",
+                    &[
+                        ("a", PropertyValue::Int(a.entity.0 as i64)),
+                        ("b", PropertyValue::Int(b.entity.0 as i64)),
+                        ("radius", PropertyValue::Float(radius)),
+                        ("near_a", v3(near_a)),
+                        ("near_b", v3(near_b)),
+                    ],
+                );
+                self.sketching.typed.clear();
+            }
+            Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
+                self.sketching.clicks.push((p, 0));
+                let c: Vec<glam::DVec2> = self.sketching.clicks.iter().map(|c| c.0).collect();
+                match (tool, c.len()) {
+                    (Tool::Polygon, 2) => {
+                        let r = typed
+                            .first()
+                            .map(|d| d.abs())
+                            .unwrap_or(c[0].distance(c[1]));
+                        let rotation = (c[1] - c[0]).y.atan2((c[1] - c[0]).x);
+                        if r > 1e-9 {
+                            self.run_op_with(
+                                "draft.polygon",
+                                &[
+                                    ("centre", v3(c[0])),
+                                    ("radius", PropertyValue::Float(r)),
+                                    ("rotation", PropertyValue::Float(rotation)),
+                                ],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    (Tool::Slot, 3) => {
+                        let dir = c[1] - c[0];
+                        let side = glam::DVec2::new(-dir.y, dir.x).normalize_or_zero();
+                        let w = typed
+                            .first()
+                            .map(|w| w.abs())
+                            .unwrap_or(((c[2] - c[0]).dot(side)).abs() * 2.0);
+                        if w > 1e-9 && dir.length() > 1e-9 {
+                            self.run_op_with(
+                                "draft.slot",
+                                &[
+                                    ("a", v3(c[0])),
+                                    ("b", v3(c[1])),
+                                    ("width", PropertyValue::Float(w)),
+                                ],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    (Tool::Rectangle, 2) => {
+                        self.run_op_with("draft.rectangle", &[("a", v3(c[0])), ("b", v3(c[1]))]);
+                        self.sketch_tool_done();
+                    }
+                    (Tool::Circle, 2) => {
+                        let r = c[0].distance(c[1]);
+                        if r > 1e-9 {
+                            self.run_op_with(
+                                "draft.circle",
+                                &[("centre", v3(c[0])), ("radius", PropertyValue::Float(r))],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    // Start, end, then a point on the way.
+                    (Tool::Arc, 3) => {
+                        self.run_op_with(
+                            "draft.arc",
+                            &[
+                                ("start", v3(c[0])),
+                                ("end", v3(c[1])),
+                                ("through", v3(c[2])),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    _ => {}
+                }
+            }
+            Tool::Point => {
+                self.run_op_with("draft.point", &[("at", v3(p))]);
+                self.sketch_tool_done();
+            }
+            Tool::Text => {
+                self.run_op_with("sketch.text", &[("at", v3(p))]);
+                self.sketch_tool_done();
+            }
+            // Trim stays in hand: one click a piece, as many as there are.
+            Tool::Trim => {
+                if let Some((line, on)) = self.sketching.trim.take() {
+                    if let Some(e) = g.entity_of_line(line) {
+                        self.run_op_with(
+                            "draft.trim",
+                            &[("id", PropertyValue::Int(e.0 as i64)), ("at", v3(on))],
+                        );
+                    }
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                    self.sketch_hover();
+                }
+            }
+            Tool::Constrain(_) | Tool::Dimension => {
+                let Some(pick) = pick else {
+                    return;
+                };
+                self.sketching.picks.push(pick);
+                let result = match tool {
+                    Tool::Constrain(kind) => {
+                        kreate::sketching::drawing_constraint_for(kind, &self.sketching.picks, &g)
+                    }
+                    _ => kreate::sketching::drawing_dimension_for(&self.sketching.picks, &g, &d),
+                };
+                match result {
+                    Ok(Some((tag, refs))) => {
+                        let refs = refs
+                            .iter()
+                            .map(|r| kreate::sketching::ref_text(*r))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if tool == Tool::Dimension {
+                            let kind = DRAFT_DIMENSIONS.iter().position(|k| *k == tag).unwrap_or(2);
+                            self.run_op_with(
+                                "draft.dimension",
+                                &[
+                                    ("kind", PropertyValue::Enum(kind as u32)),
+                                    ("refs", PropertyValue::Text(refs)),
+                                    ("driving", PropertyValue::Bool(true)),
+                                    ("at", v3(p)),
+                                ],
+                            );
+                            // A dimension placed is a number to type.
+                            let newest = self.active_drawing().and_then(|d| {
+                                d.entities
+                                    .iter()
+                                    .filter(|e| {
+                                        matches!(
+                                            e.kind,
+                                            kreate_scene::drawing::EntityKind::Dimension(_)
+                                        )
+                                    })
+                                    .map(|e| e.id.0)
+                                    .max()
+                            });
+                            self.ui.sketch_dim_edit = newest.map(|id| (id as usize, String::new()));
+                        } else {
+                            let kind = DRAFT_CONSTRAINTS
+                                .iter()
+                                .position(|k| *k == tag)
+                                .unwrap_or(0);
+                            self.run_op_with(
+                                "draft.constrain",
+                                &[
+                                    ("kind", PropertyValue::Enum(kind as u32)),
+                                    ("refs", PropertyValue::Text(refs)),
+                                ],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        self.status(&self.ui.catalog.get("sketch-cannot-constrain"));
+                        self.sketch_tool_done();
+                    }
+                }
+            }
+            Tool::Line
+            | Tool::Spline
+            | Tool::Select
+            | Tool::Pattern
+            | Tool::Extrude
+            | Tool::Revolve => {}
         }
     }
 
@@ -5612,6 +6033,23 @@ impl App {
                     }
                     (Tool::Line, []) => self.commit_sketch_line(false),
                     (Tool::Spline, []) => self.commit_sketch_spline(false),
+                    (Tool::Rectangle, [w, h, ..]) if self.active_drawing().is_some() => {
+                        let first = self.sketching.clicks[0];
+                        let far = kreate::sketching::corner(first.0, toward, *w, *h);
+                        self.run_op_with("draft.rectangle", &[("a", v3(first.0)), ("b", v3(far))]);
+                        self.sketch_tool_done();
+                    }
+                    (Tool::Circle, [d, ..]) if self.active_drawing().is_some() => {
+                        let first = self.sketching.clicks[0];
+                        self.run_op_with(
+                            "draft.circle",
+                            &[
+                                ("centre", v3(first.0)),
+                                ("radius", PropertyValue::Float(d.abs() * 0.5)),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
                     (Tool::Rectangle, [w, h, ..]) => {
                         let first = self.sketching.clicks[0];
                         let far = kreate::sketching::corner(first.0, toward, *w, *h);
@@ -5685,7 +6123,7 @@ impl App {
         // Waiting for a plane: entered once the new sketch is active, given
         // up when the menu closed without one.
         if self.sketch_waiting {
-            if kreate_ops::ops::sketch_draw::active_sketch(&self.doc).is_some() {
+            if self.active_sketching().is_some() {
                 self.sketch_waiting = false;
                 self.set_mode(OpMode::Sketch);
             } else if self.ui.context_menu.groups.is_empty() && !self.sketch_face_pick {
@@ -5718,6 +6156,25 @@ impl App {
             self.camera = camera;
             self.motion = kreate_render::CameraMotion::new(camera);
             self.redraw.set(RedrawReason::SCENE_CHANGED);
+        }
+        if let Some(d) = self.active_drawing() {
+            let version = self.doc.version();
+            if self.drawing_pinned.0 != version {
+                self.drawing_pinned = (version, kreate::sketching::drawing_pinned(d));
+            }
+            self.ui.sketch_view = self.sketch_geometry().map(|g| {
+                kreate::sketching::drawing_view(
+                    &self.doc,
+                    id,
+                    &self.sketching,
+                    &self.ui.catalog,
+                    &g,
+                    &self.drawing_pinned.1,
+                )
+            });
+            self.preview_sketch_pattern(id, world);
+            self.choose_solid_operation(id);
+            return;
         }
         // Pinned, worked out again only when the sketch changed.
         let points = kreate_ops::ops::sketch_draw::points(&self.doc, id);
@@ -5759,6 +6216,41 @@ impl App {
         let Some(object) = self.doc.object(id) else {
             return;
         };
+        if let Some(d) = object.drawing.as_deref() {
+            let ids = self
+                .sketch_geometry()
+                .map(|g| g.entities_in(&self.sketching.points, &self.sketching.lines))
+                .unwrap_or_default();
+            let mut chosen = d.clone();
+            chosen.entities.retain(|e| ids.contains(&e.id.0));
+            let pieces = kreate::sketching::drawing_pieces(&chosen);
+            let params = self
+                .ui
+                .pattern_dialog
+                .params(self.doc.design.length_unit.metres());
+            let moves = kreate_ops::ops::sketch_draw::pattern_moves(&params);
+            let to_world = |p: glam::DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
+            let mut preview = Vec::new();
+            for m in moves.iter().take(2000) {
+                for [a, b] in &pieces {
+                    preview.push(vec![
+                        to_world(m.transform_point2(*a)),
+                        to_world(m.transform_point2(*b)),
+                    ]);
+                }
+            }
+            let dialog = &self.ui.pattern_dialog;
+            let centre = dialog
+                .circular
+                .then(|| to_world(glam::DVec2::from(dialog.centre)));
+            if let Some(view) = self.ui.sketch_view.as_mut() {
+                view.preview.extend(preview);
+                if centre.is_some() {
+                    view.snap = centre;
+                }
+            }
+            return;
+        }
         let pts = kreate_ops::ops::sketch_draw::points(&self.doc, id);
         let (_, with) = kreate_ops::ops::sketch_draw::pattern_source(
             &object.sketch_lines,
@@ -10991,6 +11483,13 @@ impl App {
         if self.input.has_pending() {
             self.motion.interrupt(&self.camera);
         }
+        // Drawing in 2D the view stays square to the drawing: what would
+        // turn it pans, as a CAD program's middle button does.
+        if self.op_ctx.mode == OpMode::Sketch && self.active_drawing().is_some() {
+            let (dx, dy) = std::mem::take(&mut self.input.orbit_delta);
+            self.input.pan_delta.0 += dx;
+            self.input.pan_delta.1 += dy;
+        }
         if self.input.orbit_delta != (0.0, 0.0) {
             let (dx, dy) = self.input.orbit_delta;
             let scale = std::f64::consts::TAU / (2.0 * height);
@@ -12932,6 +13431,36 @@ impl App {
                     self.redraw.set(RedrawReason::UI);
                 }
             }
+            "app.sketch_free" if self.active_drawing().is_some() => {
+                // What holds the selected entities, but what joins them.
+                let ids = self
+                    .sketch_geometry()
+                    .map(|g| g.entities_in(&self.sketching.points, &self.sketching.lines))
+                    .unwrap_or_default();
+                let holding: Vec<usize> = self
+                    .active_drawing()
+                    .map(|d| {
+                        d.constraints
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| {
+                                !matches!(c, kreate_scene::drawing::Constraint::Coincident(..))
+                                    && c.entities().iter().any(|e| ids.contains(&e.0))
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if holding.is_empty() {
+                    self.status(&self.ui.catalog.get("sketch-free-nothing"));
+                }
+                for i in holding.into_iter().rev() {
+                    self.run_op_with(
+                        "draft.unconstrain",
+                        &[("index", PropertyValue::Int(i as i64))],
+                    );
+                }
+            }
             "app.sketch_free" => {
                 // The selected points, and the ends of the selected lines.
                 let mut points = self.sketching.points.clone();
@@ -12957,6 +13486,29 @@ impl App {
             }
             // The selected lines made construction, or ordinary again when
             // every one of them already is.
+            "app.sketch_construction"
+                if self.op_ctx.mode == OpMode::Sketch && self.active_drawing().is_some() =>
+            {
+                let ids = self
+                    .sketch_geometry()
+                    .map(|g| g.entities_in(&[], &self.sketching.lines))
+                    .unwrap_or_default();
+                let all = self.active_drawing().is_some_and(|d| {
+                    ids.iter().all(|i| {
+                        d.entity(kreate_scene::drawing::EntityId(*i))
+                            .is_some_and(|e| e.construction)
+                    })
+                });
+                if !ids.is_empty() {
+                    self.run_op_with(
+                        "draft.construction",
+                        &[
+                            ("ids", PropertyValue::Ints(ids)),
+                            ("on", PropertyValue::Bool(!all)),
+                        ],
+                    );
+                }
+            }
             "app.sketch_construction" if self.op_ctx.mode == OpMode::Sketch => {
                 let lines = self.sketching.lines.clone();
                 if let Some(id) = kreate_ops::ops::sketch_draw::active_sketch(&self.doc) {
@@ -12979,6 +13531,18 @@ impl App {
                             );
                         }
                     }
+                }
+            }
+            "app.sketch_delete"
+                if self.op_ctx.mode == OpMode::Sketch && self.active_drawing().is_some() =>
+            {
+                let ids = self
+                    .sketch_geometry()
+                    .map(|g| g.entities_in(&self.sketching.points, &self.sketching.lines))
+                    .unwrap_or_default();
+                if !ids.is_empty() {
+                    self.run_op_with("draft.delete", &[("ids", PropertyValue::Ints(ids))]);
+                    self.sketching.reset();
                 }
             }
             "app.sketch_delete" if self.op_ctx.mode == OpMode::Sketch => {
@@ -13119,6 +13683,28 @@ impl App {
             "view.toggle_cursor" => {
                 self.ui.show_cursor = !self.ui.show_cursor;
                 self.redraw.set(RedrawReason::UI);
+            }
+            // Between 2D and 3D: out of drawing to the 3D view, or into the
+            // drawing selected — or the scene's first, or a new one.
+            "app.toggle_2d" => {
+                if self.op_ctx.mode == OpMode::Sketch {
+                    self.set_mode(OpMode::RESTING);
+                } else {
+                    if self.active_sketching().is_none() {
+                        let first = self
+                            .doc
+                            .objects()
+                            .find(|(id, o)| o.drawing.is_some() && self.doc.is_shown(*id))
+                            .map(|(id, _)| id);
+                        if let Some(id) = first {
+                            self.doc.selection.clear();
+                            self.doc.selection.add(id);
+                            self.doc.selection.active = Some(id);
+                        }
+                    }
+                    self.set_mode(OpMode::Sketch);
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
             "app.rename" => {
                 // The active object's name, in a field under the pointer.
@@ -17064,6 +17650,7 @@ kreate.ops.object.add_primitive()" }),
             points: vec![1, 2],
             anchor: glam::DVec2::new(1.5, 1.0),
             single: None,
+            ..Default::default()
         });
         // Two moves: the second from where the drag began, not from the first.
         app.drive_sketch_drag(glam::DVec2::new(1.5, 2.0));
@@ -17080,6 +17667,7 @@ kreate.ops.object.add_primitive()" }),
             points: vec![1],
             anchor: glam::DVec2::new(1.0, 3.0),
             single: Some(1),
+            ..Default::default()
         });
         app.drive_sketch_drag(glam::DVec2::new(0.0, 0.0));
         assert!(app.cancel_sketch_drag());
@@ -17642,6 +18230,21 @@ kreate.ops.object.add_primitive()" }),
         app.input.cursor = Some((500.0, 350.0));
     }
 
+    impl App {
+        /// The projector a frame sets, for a test with no frame.
+        fn update_ui_state_for_test(&mut self) {
+            self.ui.projector = self.viewport_px.map(|(x, y, w, h)| {
+                let aspect = if h > 0.0 { (w / h) as f64 } else { 1.0 };
+                kreate_ui::object_glyph::Projector {
+                    eye: self.camera.eye(),
+                    rotation: self.camera.rotation,
+                    projection: self.camera.projection_matrix(aspect).as_dmat4(),
+                    rect: egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+                }
+            });
+        }
+    }
+
     /// A conversation is kept as it goes and, after a restart, shown again
     /// and carried on in the same session; New Chat leaves nothing to bring
     /// back.
@@ -17696,6 +18299,119 @@ kreate.ops.object.add_primitive()" }),
         assert!(third.ui.chat_log.is_empty());
     }
 
+    /// The sketch tools in a drawing: a rectangle clicked, a line drawn on
+    /// from its corner and joined to it, the corner dragged with both
+    /// following, a side dimensioned and the number open to type.
+    #[test]
+    fn the_sketch_tools_draw_drag_and_dimension_in_a_drawing() {
+        use kreate::sketching::{Pick, SketchDrag, Tool};
+        use kreate_scene::drawing::{EntityId, EntityRef, Part};
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        assert!(app.active_drawing().is_some());
+        app.update_ui_state_for_test();
+        let at = |x: f64, y: f64| glam::DVec2::new(x, y);
+        app.sketching.take(Tool::Rectangle);
+        app.drawing_click(Tool::Rectangle, at(0.0, 0.0), None);
+        app.drawing_click(Tool::Rectangle, at(2.0, 1.0), None);
+        let d = app.active_drawing().unwrap();
+        assert_eq!(d.profile_curves().len(), 4);
+        assert_eq!(d.regions(1e-9).len(), 1);
+        // From the corner at (2, 0) on out: joined there.
+        app.sketching.take(Tool::Line);
+        app.sketching.clicks = vec![(at(2.0, 0.0), 0), (at(3.0, -1.0), 0)];
+        app.commit_sketch_line(false);
+        let line = EntityId(5);
+        assert!(app
+            .active_drawing()
+            .unwrap()
+            .constraints
+            .iter()
+            .any(|c| matches!(
+                c,
+                kreate_scene::drawing::Constraint::Coincident(a, _) if a.entity == line
+            )));
+        // The corner dragged: the rectangle's sides and the new line follow.
+        let corner = EntityRef::at(EntityId(1), Part::End);
+        app.sketching.take(Tool::Select);
+        app.sketching.drag = Some(SketchDrag {
+            points: vec![2],
+            anchor: at(2.0, 0.0),
+            single: Some(2),
+            at: Some(corner),
+            entities: vec![],
+        });
+        app.drive_sketch_drag(at(2.5, 0.0));
+        let session = app.sketch_drag_session.take().expect("a live step");
+        app.history.commit_modal(session);
+        let d = app.active_drawing().unwrap();
+        let start = d.point_of(EntityRef::at(line, Part::Start)).unwrap();
+        let moved = d.point_of(corner).unwrap();
+        assert!(moved.distance(at(2.5, 0.0)) < 1e-6, "{moved}");
+        assert!(start.distance(moved) < 1e-9, "the line came along");
+        // A side's length: a dimension, open for its number.
+        app.sketching.take(Tool::Dimension);
+        let side = app
+            .sketch_geometry()
+            .unwrap()
+            .lines_of(Pick::Line(0))
+            .first()
+            .copied()
+            .unwrap();
+        app.drawing_click(Tool::Dimension, at(1.0, -0.3), Some(Pick::Line(side)));
+        let (dim, _) = app.ui.sketch_dim_edit.clone().expect("the number to type");
+        let d = app.active_drawing().unwrap();
+        assert!(matches!(
+            d.entity(EntityId(dim as u32)).map(|e| &e.kind),
+            Some(kreate_scene::drawing::EntityKind::Dimension(_))
+        ));
+        // And the overlay draws it, as a drawing's.
+        app.op_ctx.mode = OpMode::Sketch;
+        app.update_sketch_view();
+        let view = app.ui.sketch_view.as_ref().expect("a view");
+        assert!(view.drafting);
+        assert_eq!(view.dims.len(), 1);
+        assert!(view.lines.len() >= 5);
+    }
+
+    /// F2 goes into the drawing and out again; in 2D what would turn the
+    /// view pans it, and Ctrl+F2 is what renames.
+    #[test]
+    fn f2_goes_between_2d_and_3d_and_2d_does_not_turn_the_view() {
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        app.doc.selection.clear();
+        app.doc.selection.active = None;
+        let f2 = |app: &App, ctrl: bool| {
+            let mut m = app.modifiers();
+            m.ctrl = ctrl;
+            app.keymap
+                .resolve(
+                    KeyContext::ObjectMode,
+                    &KeyInput::Key("F2".into()),
+                    m,
+                    EventKind::Press,
+                )
+                .map(|a| a.op_id)
+        };
+        assert_eq!(f2(&app, false).as_deref(), Some("app.toggle_2d"));
+        assert_eq!(f2(&app, true).as_deref(), Some("app.rename"));
+        app.dispatch(&Action::new("app.toggle_2d"));
+        assert_eq!(app.op_ctx.mode, OpMode::Sketch, "into the scene's drawing");
+        assert!(app.active_drawing().is_some());
+        let turned = app.camera.rotation;
+        app.input.orbit_delta = (40.0, 10.0);
+        app.apply_input();
+        assert!(
+            app.motion.target.rotation.abs_diff_eq(turned, 1e-12),
+            "not turned"
+        );
+        app.dispatch(&Action::new("app.toggle_2d"));
+        assert_eq!(app.op_ctx.mode, OpMode::Object);
+    }
+
     /// Picking "on a face" and clicking a part: a sketch on the face under
     /// the pointer, its outline in it; clicking nothing makes nothing.
     #[test]
@@ -17710,10 +18426,14 @@ kreate.ops.object.add_primitive()" }),
         app.camera = kreate::startup::starting_camera();
         app.sketch_face_pick = true;
         app.sketch_on_face_under_cursor();
-        let s = kreate_ops::ops::sketch_draw::active_sketch(&app.doc).expect("a sketch");
+        let s = kreate_ops::ops::draft::active_drawing(&app.doc).expect("a drawing");
         assert_ne!(s, part);
         let o = app.doc.object(s).unwrap();
-        assert_eq!(o.sketch_lines.len(), 4, "the face's square");
+        let outline = o.drawing.as_deref().unwrap().profile_curves();
+        assert!(
+            matches!(outline.as_slice(), [(_, kreate_geom2d::Curve2D::Polyline { verts, closed: true })] if verts.len() == 4),
+            "the face's square: {outline:?}"
+        );
         // On the face: the sketch's origin is on the cube's surface.
         let at = app.doc.world_transform(s).translation;
         assert_eq!(o.parent, Some(part));

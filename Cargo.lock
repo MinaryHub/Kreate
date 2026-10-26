@@ -1448,6 +1448,7 @@ dependencies = [
  "half",
  "image",
  "kreate-collab",
+ "kreate-geom2d",
  "kreate-i18n",
  "kreate-input",
  "kreate-io",

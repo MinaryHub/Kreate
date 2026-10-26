@@ -347,6 +347,7 @@ const APP_ACTIONS: &[&str] = &[
     "view.toggle_contact_shadows",
     "view.toggle_path_trace",
     "app.rename",
+    "app.toggle_2d",
     "view.toggle_face_orientation",
     "view.toggle_textures",
     // A bake on its own thread, which only the application can run.

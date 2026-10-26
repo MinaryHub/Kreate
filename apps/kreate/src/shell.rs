@@ -12660,7 +12660,11 @@ fn draw_data_tab(
             draw_vertex_groups(ui, state, doc, id, active);
             draw_shape_keys(ui, state, active);
         }
-        _ => {}
+        _ => {
+            if let Some(d) = active.drawing.as_deref() {
+                draw_drawing_panel(ui, state, d);
+            }
+        }
     }
 }
 
@@ -12988,6 +12992,118 @@ fn draw_sketch_panel(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene:
                     .clicked()
             {
                 state.queue.run("sketch.reattach", PropertyMap::new());
+            }
+        });
+    });
+}
+
+/// A drawing's constraints and dimensions, each to let go of, a dimension's
+/// value to set and whether it drives; and its regions to extrude or
+/// revolve.
+fn draw_drawing_panel(ui: &mut Ui, state: &mut ShellState, d: &kreate_scene::drawing::Drawing) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_scene::drawing::{Constraint as C, DimKind, EntityKind};
+    let title = state.catalog.get("panel-drawing");
+    kreate_ui::panel::section(ui, &title, true, |ui| {
+        ui.weak(state.catalog.get("drawing-hint"));
+        let length = kreate_ui::property_editor::UnitDisplay::of(kreate_reflect::Unit::Length);
+        ui.label(egui::RichText::new(state.catalog.get("drawing-dimensions")).strong());
+        for e in &d.entities {
+            let EntityKind::Dimension(dim) = &e.kind else {
+                continue;
+            };
+            ui.horizontal(|ui| {
+                let angle = dim.kind == DimKind::Angular;
+                let mut shown = if angle {
+                    dim.value.to_degrees()
+                } else {
+                    dim.value * length.to_display
+                };
+                let field = egui::DragValue::new(&mut shown).max_decimals(length.decimals);
+                let field = if angle {
+                    field.speed(0.5).suffix("°")
+                } else {
+                    field
+                        .speed(0.01 * length.to_display * 0.01)
+                        .suffix(length.suffix)
+                };
+                let response = ui.add_enabled(dim.driving, field);
+                let mut driven = !dim.driving;
+                let toggled = ui
+                    .checkbox(&mut driven, state.catalog.get("drawing-driven"))
+                    .on_hover_text(state.catalog.get("drawing-driven-desc"))
+                    .changed();
+                if response.changed() || toggled {
+                    let value = if angle {
+                        shown.to_radians()
+                    } else {
+                        length.from_display(shown)
+                    };
+                    let mut p = PropertyMap::new();
+                    p.set("id", V::Int(e.id.0 as i64));
+                    p.set("value", V::Float(value));
+                    p.set("driving", V::Bool(!driven));
+                    let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                    send_edit(state, "draft.dimension_set", p, dragging && !toggled);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button(state.catalog.get("modifier-remove-button"))
+                        .clicked()
+                    {
+                        let mut p = PropertyMap::new();
+                        p.set("ids", V::Ints(vec![e.id.0]));
+                        state.queue.run("draft.delete", p);
+                    }
+                });
+            });
+        }
+        ui.label(egui::RichText::new(state.catalog.get("drawing-constraints")).strong());
+        for (i, c) in d.constraints.iter().enumerate() {
+            let tag = match c {
+                C::Coincident(..) => "coincident",
+                C::Horizontal(..) => "horizontal",
+                C::Vertical(..) => "vertical",
+                C::Parallel(..) => "parallel",
+                C::Perpendicular(..) => "perpendicular",
+                C::Tangent(..) => "tangent",
+                C::Equal(..) => "equal",
+                C::Concentric(..) => "concentric",
+                C::PointOn(..) => "point_on",
+                C::Symmetric(..) => "symmetric",
+                C::Midpoint(..) => "midpoint",
+                C::Fixed(..) => "fixed",
+                C::Smooth(..) => "smooth",
+            };
+            ui.horizontal(|ui| {
+                let name = state.catalog.get(&format!("sketch-kind-{tag}"));
+                let ids: Vec<String> = c.entities().iter().map(|e| e.0.to_string()).collect();
+                // i18n-exempt: a number, a translated kind and entity numbers
+                ui.label(format!("{}. {name} ({})", i + 1, ids.join(", ")));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button(state.catalog.get("modifier-remove-button"))
+                        .on_hover_text(state.catalog.get("op-sketch-constraint-remove"))
+                        .clicked()
+                    {
+                        let mut p = PropertyMap::new();
+                        p.set("index", V::Int(i as i64));
+                        state.queue.run("draft.unconstrain", p);
+                    }
+                });
+            });
+        }
+        ui.horizontal(|ui| {
+            let tool = |name: &str| {
+                let mut p = PropertyMap::new();
+                p.set("tool", V::Text(name.to_string()));
+                p
+            };
+            if ui.button(state.catalog.get("sketch-extrude")).clicked() {
+                state.queue.dispatch("app.sketch_tool", tool("extrude"));
+            }
+            if ui.button(state.catalog.get("sketch-revolve")).clicked() {
+                state.queue.dispatch("app.sketch_tool", tool("revolve"));
             }
         });
     });
@@ -14829,6 +14945,11 @@ pub struct SketchView {
     pub band: Option<[kreate_math::DVec2; 2]>,
     /// Whether the tool in hand draws, for the badge and the pointer.
     pub drawing: bool,
+    /// The sketch is a drawing: its dimensions are entities, by id, set
+    /// with the drafting operators.
+    pub drafting: bool,
+    /// In a drawing, the entities selected.
+    pub picked_entities: Vec<u32>,
 }
 
 /// A closed area of a sketch, for drawing: its outline and holes, and the
@@ -15405,8 +15526,12 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
             use kreate_reflect::PropertyValue as V;
             let params = d.params(view.unit.0);
             let mut p = PropertyMap::new();
-            p.set("points", V::Ints(view.picked_points.clone()));
-            p.set("lines", V::Ints(view.picked_lines.clone()));
+            if view.drafting {
+                p.set("ids", V::Ints(view.picked_entities.clone()));
+            } else {
+                p.set("points", V::Ints(view.picked_points.clone()));
+                p.set("lines", V::Ints(view.picked_lines.clone()));
+            }
             p.set("kind", V::Enum(params.kind));
             p.set("count", V::Int(params.count as i64));
             p.set("spacing", V::Float(params.spacing));
@@ -15414,7 +15539,14 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
             p.set("spacing2", V::Float(params.spacing2));
             p.set("centre", V::Vec3(params.centre));
             p.set("angle", V::Float(params.angle));
-            state.queue.run("sketch.pattern", p);
+            state.queue.run(
+                if view.drafting {
+                    "draft.pattern"
+                } else {
+                    "sketch.pattern"
+                },
+                p,
+            );
             state.queue.dispatch("app.sketch_tool", back);
         }
         Some(false) => state.queue.dispatch("app.sketch_tool", back),
@@ -15456,14 +15588,21 @@ fn draw_dimension_edit(
                         if v.is_finite() && v != 0.0 {
                             if dim.expression.is_some() {
                                 let mut p = PropertyMap::new();
-                                p.set("kind", V::Enum(0));
+                                p.set("kind", V::Enum(if view.drafting { 2 } else { 0 }));
                                 p.set("index", V::Int(index as i64));
                                 state.queue.run("design.unbind", p);
                             }
                             let mut p = PropertyMap::new();
-                            p.set("index", V::Int(index as i64));
-                            p.set("value", V::Float(dim.value_of(v, view.unit.0)));
-                            state.queue.run("sketch.constraint_set", p);
+                            if view.drafting {
+                                p.set("id", V::Int(index as i64));
+                                p.set("value", V::Float(dim.value_of(v, view.unit.0)));
+                                p.set("driving", V::Bool(true));
+                                state.queue.run("draft.dimension_set", p);
+                            } else {
+                                p.set("index", V::Int(index as i64));
+                                p.set("value", V::Float(dim.value_of(v, view.unit.0)));
+                                state.queue.run("sketch.constraint_set", p);
+                            }
                         }
                     } else if !typed.is_empty() {
                         // An expression: held to the parameters. A diameter
@@ -15474,7 +15613,7 @@ fn draw_dimension_edit(
                             typed.to_string()
                         };
                         let mut p = PropertyMap::new();
-                        p.set("kind", V::Enum(0));
+                        p.set("kind", V::Enum(if view.drafting { 2 } else { 0 }));
                         p.set("index", V::Int(index as i64));
                         p.set("expression", V::Text(expression));
                         state.queue.run("design.bind", p);

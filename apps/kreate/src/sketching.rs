@@ -7,7 +7,9 @@
 //! into the sketch's points on screen, and hands both in; what comes back is
 //! an operator to run, or nothing yet.
 
+use kreate_geom2d::Curve2D;
 use kreate_math::DVec2;
+use kreate_scene::drawing::{Drawing, EntityId, EntityKind, EntityRef, Part};
 use kreate_scene::sketch::Constraint;
 
 /// The tool in hand.
@@ -135,6 +137,10 @@ pub struct SketchDrag {
     /// The one point taken, when a single point is dragged: what is joined to
     /// a point it is dropped on.
     pub single: Option<u32>,
+    /// In a drawing: the part the one point is, dragged through the solver;
+    /// otherwise the entities that move whole.
+    pub at: Option<EntityRef>,
+    pub entities: Vec<u32>,
 }
 
 /// Something of the sketch under the pointer.
@@ -164,6 +170,22 @@ pub struct Geometry {
     /// Points that lie along a spline between the points it passes through:
     /// not picked as points, as a circle's ring is not.
     pub along: Vec<u32>,
+    /// For a drawing, what each point, line and round is in it.
+    pub map: Option<DrawingMap>,
+}
+
+/// What a drawing's points, lines and rounds stand for, when the tools see
+/// a drawing as a sketch: each point is the parts of entities at that
+/// place, each line a straight piece of one curve, each round a circle or
+/// an arc. See [`Geometry::from_drawing`].
+#[derive(Clone, Debug, Default)]
+pub struct DrawingMap {
+    pub refs: Vec<Vec<EntityRef>>,
+    pub line_entity: Vec<EntityId>,
+    pub round_entity: Vec<EntityId>,
+    /// Where drawing snaps that is no entity's point: a line's or an arc's
+    /// middle, and where two curves cross — exactly, not where two chords do.
+    pub snaps: Vec<DVec2>,
 }
 
 impl Geometry {
@@ -198,7 +220,269 @@ impl Geometry {
             lines,
             rounds,
             along,
+            map: None,
         }
+    }
+
+    /// A drawing as the tools see a sketch: point 0 its origin, then every
+    /// entity's points — one point for parts held coincident — and after
+    /// them the points along curves, each curve drawn as straight pieces
+    /// within `tol`, each circle and arc a round whose ring is those
+    /// pieces' ends. The drawing's points keep their numbers while a drag
+    /// moves them, since neither where they are nor how finely a curve is
+    /// drawn counts them.
+    pub fn from_drawing(d: &Drawing, tol: f64, project: impl Fn(DVec2) -> Option<DVec2>) -> Self {
+        use std::collections::HashMap;
+        let mut g = Geometry::default();
+        let mut map = DrawingMap::default();
+        g.points.push(DVec2::ZERO);
+        map.refs.push(Vec::new());
+        // The parts, one point for each set held together.
+        let parts: Vec<(EntityRef, DVec2)> =
+            d.entities.iter().flat_map(|e| d.parts(e.id)).collect();
+        let slot: HashMap<EntityRef, usize> = parts
+            .iter()
+            .enumerate()
+            .map(|(i, (r, _))| (*r, i))
+            .collect();
+        let mut parent: Vec<usize> = (0..parts.len()).collect();
+        fn root(parent: &mut [usize], i: usize) -> usize {
+            let mut r = i;
+            while parent[r] != r {
+                r = parent[r];
+            }
+            parent[i] = r;
+            r
+        }
+        for c in &d.constraints {
+            if let kreate_scene::drawing::Constraint::Coincident(a, b) = c {
+                if let (Some(&i), Some(&j)) = (slot.get(a), slot.get(b)) {
+                    let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
+                    if ri != rj {
+                        parent[ri.max(rj)] = ri.min(rj);
+                    }
+                }
+            }
+        }
+        let mut index: HashMap<EntityRef, u32> = HashMap::new();
+        let mut of_root: HashMap<usize, u32> = HashMap::new();
+        for (i, (r, p)) in parts.iter().enumerate() {
+            let k = root(&mut parent, i);
+            let v = *of_root.entry(k).or_insert_with(|| {
+                g.points.push(*p);
+                map.refs.push(Vec::new());
+                (g.points.len() - 1) as u32
+            });
+            map.refs[v as usize].push(*r);
+            index.insert(*r, v);
+        }
+        let idx = |r: EntityRef| index.get(&r).copied();
+        // A curve's pieces from point `from` to point `to`, through points
+        // of its own along the way.
+        let pieces = |g: &mut Geometry,
+                      map: &mut DrawingMap,
+                      c: &Curve2D,
+                      from: u32,
+                      to: u32,
+                      id: EntityId,
+                      mark: bool|
+         -> Vec<u32> {
+            let pts = c.tessellate(tol);
+            let mut ring = vec![from];
+            if pts.len() > 2 {
+                for p in &pts[1..pts.len() - 1] {
+                    g.points.push(*p);
+                    map.refs.push(Vec::new());
+                    let v = (g.points.len() - 1) as u32;
+                    if mark {
+                        g.along.push(v);
+                    }
+                    ring.push(v);
+                }
+            }
+            ring.push(to);
+            for w in ring.windows(2) {
+                if w[0] != w[1] {
+                    g.lines.push([w[0], w[1]]);
+                    map.line_entity.push(id);
+                }
+            }
+            ring
+        };
+        for e in &d.entities {
+            let id = e.id;
+            let at = |part| idx(EntityRef::at(id, part));
+            let EntityKind::Curve(c) = &e.kind else {
+                continue;
+            };
+            match c {
+                Curve2D::Line { .. } => {
+                    if let (Some(a), Some(b)) = (at(Part::Start), at(Part::End)) {
+                        g.lines.push([a, b]);
+                        map.line_entity.push(id);
+                    }
+                }
+                Curve2D::Circle { .. } | Curve2D::Ellipse { .. } if c.is_closed() => {
+                    let Some(centre) = at(Part::Center) else {
+                        continue;
+                    };
+                    // The ring begins at a point of its own, not the drawing's.
+                    g.points.push(c.start());
+                    map.refs.push(Vec::new());
+                    let first = (g.points.len() - 1) as u32;
+                    let mut ring = pieces(&mut g, &mut map, c, first, first, id, false);
+                    ring.pop();
+                    g.rounds.push((centre, ring, true));
+                    map.round_entity.push(id);
+                }
+                Curve2D::Circle { .. } => {}
+                Curve2D::Arc { .. } | Curve2D::Ellipse { .. } => {
+                    let (Some(centre), Some(s), Some(t)) =
+                        (at(Part::Center), at(Part::Start), at(Part::End))
+                    else {
+                        continue;
+                    };
+                    let ring = pieces(&mut g, &mut map, c, s, t, id, false);
+                    g.rounds.push((centre, ring, false));
+                    map.round_entity.push(id);
+                }
+                Curve2D::Polyline { verts, closed } => {
+                    let vs: Vec<Option<u32>> = (0..verts.len())
+                        .map(|i| at(Part::Vertex(i as u32)))
+                        .collect();
+                    let n = vs.len();
+                    let segments = if *closed { n } else { n.saturating_sub(1) };
+                    for k in 0..segments {
+                        let (Some(a), Some(b)) = (vs[k], vs[(k + 1) % n]) else {
+                            continue;
+                        };
+                        if verts[k].1 == 0.0 {
+                            g.lines.push([a, b]);
+                            map.line_entity.push(id);
+                        } else {
+                            let seg = c.sub(k as f64, (k + 1) as f64);
+                            pieces(&mut g, &mut map, &seg, a, b, id, true);
+                        }
+                    }
+                }
+                Curve2D::Spline(_) => {
+                    let ends: Vec<u32> = d
+                        .parts(id)
+                        .into_iter()
+                        .filter_map(|(r, _)| idx(r))
+                        .collect();
+                    let (Some(first), Some(last)) = (ends.first(), ends.last()) else {
+                        continue;
+                    };
+                    let last = if c.is_closed() { *first } else { *last };
+                    pieces(&mut g, &mut map, c, *first, last, id, true);
+                }
+            }
+        }
+        let curves: Vec<&Curve2D> = d
+            .entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Curve(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        for c in &curves {
+            if matches!(c, Curve2D::Line { .. } | Curve2D::Arc { .. }) {
+                let (lo, hi) = c.domain();
+                map.snaps.push(c.point((lo + hi) / 2.0));
+            }
+        }
+        // Crossings, pair by pair, as a sketch's are: a drawing past a few
+        // hundred curves is spared the cost.
+        if curves.len() <= 400 {
+            for (i, a) in curves.iter().enumerate() {
+                for b in &curves[i + 1..] {
+                    for hit in kreate_geom2d::intersect(a, b) {
+                        if let kreate_geom2d::Intersection::Point { p, .. } = hit {
+                            map.snaps.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        g.screen = g.points.iter().map(|p| project(*p)).collect();
+        g.map = Some(map);
+        g
+    }
+
+    /// The drawing's entity a line is a piece of.
+    pub fn entity_of_line(&self, l: u32) -> Option<EntityId> {
+        self.map.as_ref()?.line_entity.get(l as usize).copied()
+    }
+
+    /// The drawing's entity a round is: the circle or arc round `centre`
+    /// whose ring holds `on`.
+    pub fn entity_of_round(&self, centre: u32, on: u32) -> Option<EntityId> {
+        let map = self.map.as_ref()?;
+        let k = self
+            .rounds
+            .iter()
+            .position(|(c, ring, _)| *c == centre && ring.contains(&on))?;
+        map.round_entity.get(k).copied()
+    }
+
+    /// A drawing's point as a part of one of its entities — of a curve
+    /// before a lone point, which is what a constraint means by it.
+    pub fn point_ref(&self, v: u32) -> Option<EntityRef> {
+        let refs = self.map.as_ref()?.refs.get(v as usize)?;
+        refs.iter()
+            .find(|r| r.part != Part::Whole)
+            .or(refs.first())
+            .copied()
+    }
+
+    /// What a pick is in a drawing: its entity, for a line or a round.
+    pub fn entity_of(&self, pick: Pick) -> Option<EntityId> {
+        match pick {
+            Pick::Line(l) => self.entity_of_line(l),
+            Pick::Round { centre, on } => self.entity_of_round(centre, on),
+            Pick::Point(_) => None,
+        }
+    }
+
+    /// The lines a pick selects: a line alone in a sketch, every piece of
+    /// its curve in a drawing; a round's ring.
+    pub fn lines_of(&self, pick: Pick) -> Vec<u32> {
+        match (pick, &self.map) {
+            (Pick::Point(_), _) => Vec::new(),
+            (Pick::Round { centre, on }, None) => self.lines_of_round(centre, on),
+            (Pick::Line(l), None) => vec![l],
+            (_, Some(map)) => match self.entity_of(pick) {
+                Some(e) => (0..map.line_entity.len() as u32)
+                    .filter(|l| map.line_entity[*l as usize] == e)
+                    .collect(),
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// A drawing's entities among selected points and lines: each line's
+    /// curve, and the lone points.
+    pub fn entities_in(&self, points: &[u32], lines: &[u32]) -> Vec<u32> {
+        let Some(map) = &self.map else {
+            return Vec::new();
+        };
+        let mut out: Vec<u32> = lines
+            .iter()
+            .filter_map(|l| map.line_entity.get(*l as usize))
+            .map(|e| e.0)
+            .collect();
+        for v in points {
+            for r in map.refs.get(*v as usize).into_iter().flatten() {
+                if r.part == Part::Whole {
+                    out.push(r.entity.0);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Whether a point is a ring point of a circle or arc but not an end of
@@ -329,6 +613,9 @@ impl Geometry {
     /// Where drawing can snap that is not a point of the sketch: each line's
     /// middle and every place two lines cross, in the plane.
     pub fn snap_points(&self) -> Vec<DVec2> {
+        if let Some(map) = &self.map {
+            return map.snaps.clone();
+        }
         let seg = |l: &[u32; 2]| -> Option<(DVec2, DVec2)> {
             Some((
                 *self.points.get(l[0] as usize)?,
@@ -460,6 +747,97 @@ pub fn dimension_for(
     }))
 }
 
+/// [`constraint_for`] in a drawing: the `draft.constrain` kind, by its tag,
+/// and what it holds. A point on a line or a circle is held on it, as in a
+/// CAD program; a point that is no entity's (the origin) holds nothing.
+pub fn drawing_constraint_for(
+    kind: &'static str,
+    picks: &[Pick],
+    g: &Geometry,
+) -> Result<Option<(&'static str, Vec<EntityRef>)>, CannotConstrain> {
+    use Pick::*;
+    let point = |v: u32| g.point_ref(v).ok_or(CannotConstrain);
+    let whole = |p: Pick| g.entity_of(p).map(EntityRef::whole).ok_or(CannotConstrain);
+    let curve = |p: &Pick| matches!(p, Line(_) | Round { .. });
+    Ok(Some(match (kind, picks) {
+        ("horizontal" | "vertical", [l @ Line(_)]) => (kind, vec![whole(*l)?]),
+        ("horizontal" | "vertical", [Point(a), Point(b)]) => (kind, vec![point(*a)?, point(*b)?]),
+        ("fixed", [Point(a)]) => ("fixed", vec![point(*a)?]),
+        ("coincident", [Point(a), Point(b)]) => ("coincident", vec![point(*a)?, point(*b)?]),
+        ("coincident", [Point(p), c] | [c, Point(p)]) if curve(c) => {
+            ("point_on", vec![point(*p)?, whole(*c)?])
+        }
+        ("concentric", [a @ Round { .. }, b @ Round { .. }]) => {
+            ("concentric", vec![whole(*a)?, whole(*b)?])
+        }
+        ("parallel" | "perpendicular", [a @ Line(_), b @ Line(_)]) => {
+            (kind, vec![whole(*a)?, whole(*b)?])
+        }
+        ("equal", [a, b]) if curve(a) && curve(b) => ("equal", vec![whole(*a)?, whole(*b)?]),
+        ("tangent", [a, b]) if curve(a) && curve(b) => ("tangent", vec![whole(*a)?, whole(*b)?]),
+        (_, []) => return Ok(None),
+        ("coincident" | "concentric" | "parallel" | "perpendicular" | "equal" | "tangent", [_]) => {
+            return Ok(None)
+        }
+        ("horizontal" | "vertical", [Point(_)]) => return Ok(None),
+        _ => return Err(CannotConstrain),
+    }))
+}
+
+/// [`dimension_for`] in a drawing: the `draft.dimension` kind, by its tag,
+/// and what it measures — a line's length, a circle's diameter, an arc's
+/// radius, two points apart, two lines' angle.
+pub fn drawing_dimension_for(
+    picks: &[Pick],
+    g: &Geometry,
+    d: &Drawing,
+) -> Result<Option<(&'static str, Vec<EntityRef>)>, CannotConstrain> {
+    use Pick::*;
+    let point = |v: u32| g.point_ref(v).ok_or(CannotConstrain);
+    let entity = |p: Pick| g.entity_of(p).ok_or(CannotConstrain);
+    let is_line = |p: Pick| {
+        g.entity_of(p)
+            .is_some_and(|e| matches!(d.curve(e), Some(Curve2D::Line { .. })))
+    };
+    Ok(Some(match picks {
+        [l @ Line(_)] if is_line(*l) => ("aligned", vec![EntityRef::whole(entity(*l)?)]),
+        // A piece of a polyline: between its ends.
+        [Line(l)] => {
+            let [a, b] = g.ends(*l).ok_or(CannotConstrain)?;
+            ("aligned", vec![point(a)?, point(b)?])
+        }
+        [r @ Round { .. }] => {
+            let e = entity(*r)?;
+            let kind = match d.curve(e) {
+                Some(Curve2D::Circle { .. }) => "diameter",
+                Some(Curve2D::Arc { .. }) => "radius",
+                _ => return Err(CannotConstrain),
+            };
+            (kind, vec![EntityRef::whole(e)])
+        }
+        [Point(a), Point(b)] => ("aligned", vec![point(*a)?, point(*b)?]),
+        [x @ Line(_), y @ Line(_)] if is_line(*x) && is_line(*y) => (
+            "angular",
+            vec![EntityRef::whole(entity(*x)?), EntityRef::whole(entity(*y)?)],
+        ),
+        [Point(_)] | [] => return Ok(None),
+        _ => return Err(CannotConstrain),
+    }))
+}
+
+/// `3.start`: a reference as the drafting operators read it.
+pub fn ref_text(r: EntityRef) -> String {
+    let part = match r.part {
+        Part::Whole => return r.entity.0.to_string(),
+        Part::Start => "start".to_string(),
+        Part::End => "end".to_string(),
+        Part::Center => "center".to_string(),
+        Part::Mid => "mid".to_string(),
+        Part::Vertex(i) => format!("v{i}"),
+    };
+    format!("{}.{part}", r.entity.0)
+}
+
 /// A typed length in the scene's unit, as metres: "40", "12.5", or "40,20"
 /// for two. Commas and spaces separate.
 pub fn typed_lengths(text: &str, unit_metres: f64) -> Vec<f64> {
@@ -548,28 +926,83 @@ impl SketchUi {
 
 // --- the overlay's picture of the sketches, and the feature list ------------
 
+/// How finely a drawing's curves are drawn: a thousandth of its size.
+pub fn drawing_tolerance(d: &Drawing) -> f64 {
+    let (lo, hi) = d
+        .entities
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntityKind::Curve(c) => Some(c.bounds()),
+            EntityKind::Point(p) => Some((*p, *p)),
+            _ => None,
+        })
+        .fold(
+            (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN)),
+            |(lo, hi), (a, b)| (lo.min(a), hi.max(b)),
+        );
+    if lo.x > hi.x {
+        return 1e-5;
+    }
+    ((hi - lo).length() * 1e-3).max(1e-7)
+}
+
+/// A drawing's curves as straight pieces in its own plane, a thousandth of
+/// its size off at the most: what is drawn of it when it is not being drawn
+/// in, and what is snapped to and clicked.
+pub fn drawing_pieces(d: &Drawing) -> Vec<[DVec2; 2]> {
+    let tol = drawing_tolerance(d);
+    let curves = d.entities.iter().filter_map(|e| match &e.kind {
+        EntityKind::Curve(c) => Some(c),
+        _ => None,
+    });
+    let mut out = Vec::new();
+    for c in curves {
+        let pts = c.tessellate(tol);
+        for w in pts.windows(2) {
+            out.push([w[0], w[1]]);
+        }
+    }
+    out
+}
+
+/// Every sketch's and drawing's lines in the world, with the object they
+/// are of: sketches by their line list, drawings by [`drawing_pieces`].
+fn world_lines(
+    doc: &kreate_scene::Document,
+    id: kreate_scene::document::ObjectId,
+    o: &kreate_scene::document::Object,
+) -> Vec<[kreate_math::DVec3; 2]> {
+    use kreate_math::DVec3;
+    let world = doc.world_transform(id);
+    let w = |p: DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
+    if let Some(d) = o.drawing.as_deref() {
+        return drawing_pieces(d)
+            .into_iter()
+            .map(|[a, b]| [w(a), w(b)])
+            .collect();
+    }
+    let pts = kreate_ops::ops::sketch_draw::points(doc, id);
+    o.sketch_lines
+        .iter()
+        .filter_map(|[a, b]| Some([w(*pts.get(*a as usize)?), w(*pts.get(*b as usize)?)]))
+        .collect()
+}
+
 /// Every sketch's lines but `active`'s, in the world: what the overlay draws
 /// thin, since a sketch has no faces for the renderer to draw.
 pub fn other_lines(
     doc: &kreate_scene::Document,
     active: Option<kreate_scene::document::ObjectId>,
 ) -> Vec<[kreate_math::DVec3; 2]> {
-    use kreate_math::DVec3;
     let mut others = Vec::new();
     for (id, o) in doc.objects() {
-        if o.sketch_lines.is_empty() || Some(id) == active || !doc.is_shown(id) {
+        if (o.sketch_lines.is_empty() && o.drawing.is_none())
+            || Some(id) == active
+            || !doc.is_shown(id)
+        {
             continue;
         }
-        let world = doc.world_transform(id);
-        let pts = kreate_ops::ops::sketch_draw::points(doc, id);
-        for [a, b] in &o.sketch_lines {
-            if let (Some(p), Some(q)) = (pts.get(*a as usize), pts.get(*b as usize)) {
-                others.push([
-                    world.transform_point3(DVec3::new(p.x, p.y, 0.0)),
-                    world.transform_point3(DVec3::new(q.x, q.y, 0.0)),
-                ]);
-            }
-        }
+        others.extend(world_lines(doc, id, o));
     }
     others
 }
@@ -583,22 +1016,13 @@ pub fn sketch_under(
     at: egui::Pos2,
     reach: f32,
 ) -> Option<kreate_scene::document::ObjectId> {
-    use kreate_math::DVec3;
     let mut best: Option<(f32, kreate_scene::document::ObjectId)> = None;
     for (id, o) in doc.objects() {
-        if o.sketch_lines.is_empty() || !doc.is_shown(id) {
+        if (o.sketch_lines.is_empty() && o.drawing.is_none()) || !doc.is_shown(id) {
             continue;
         }
-        let world = doc.world_transform(id);
-        let pts = kreate_ops::ops::sketch_draw::points(doc, id);
-        for [a, b] in &o.sketch_lines {
-            let (Some(p), Some(q)) = (pts.get(*a as usize), pts.get(*b as usize)) else {
-                continue;
-            };
-            let (Some(p), Some(q)) = (
-                projector.project(world.transform_point3(DVec3::new(p.x, p.y, 0.0))),
-                projector.project(world.transform_point3(DVec3::new(q.x, q.y, 0.0))),
-            ) else {
+        for [p, q] in world_lines(doc, id, o) {
+            let (Some(p), Some(q)) = (projector.project(p), projector.project(q)) else {
                 continue;
             };
             let d = segment_distance(at, p, q);
@@ -628,10 +1052,12 @@ pub fn other_lines_marked(
     doc: &kreate_scene::Document,
     active: Option<kreate_scene::document::ObjectId>,
 ) -> Vec<([kreate_math::DVec3; 2], u8)> {
-    use kreate_math::DVec3;
     let mut out = Vec::new();
     for (id, o) in doc.objects() {
-        if o.sketch_lines.is_empty() || Some(id) == active || !doc.is_shown(id) {
+        if (o.sketch_lines.is_empty() && o.drawing.is_none())
+            || Some(id) == active
+            || !doc.is_shown(id)
+        {
             continue;
         }
         let mark = if doc.selection.active == Some(id) && doc.selection.contains(id) {
@@ -641,19 +1067,7 @@ pub fn other_lines_marked(
         } else {
             0
         };
-        let world = doc.world_transform(id);
-        let pts = kreate_ops::ops::sketch_draw::points(doc, id);
-        for [a, b] in &o.sketch_lines {
-            if let (Some(p), Some(q)) = (pts.get(*a as usize), pts.get(*b as usize)) {
-                out.push((
-                    [
-                        world.transform_point3(DVec3::new(p.x, p.y, 0.0)),
-                        world.transform_point3(DVec3::new(q.x, q.y, 0.0)),
-                    ],
-                    mark,
-                ));
-            }
-        }
+        out.extend(world_lines(doc, id, o).into_iter().map(|l| (l, mark)));
     }
     out
 }
@@ -669,13 +1083,21 @@ pub fn other_points(
     use kreate_math::DVec3;
     let mut out = Vec::new();
     for (id, o) in doc.objects() {
-        if (o.sketch_lines.is_empty() && o.sketch.is_empty())
+        if (o.sketch_lines.is_empty() && o.sketch.is_empty() && o.drawing.is_none())
             || Some(id) == active
             || !doc.is_shown(id)
         {
             continue;
         }
         let world = doc.world_transform(id);
+        if let Some(d) = o.drawing.as_deref() {
+            for e in &d.entities {
+                for (_, p) in d.parts(e.id) {
+                    out.push(world.transform_point3(DVec3::new(p.x, p.y, 0.0)));
+                }
+            }
+            continue;
+        }
         let pts = kreate_ops::ops::sketch_draw::points(doc, id);
         let mut along = vec![false; pts.len()];
         for c in &o.sketch {
@@ -770,7 +1192,7 @@ pub fn feature_rows(
     }
     // Each sketch just before the first feature made from it.
     for (_, o) in doc.objects() {
-        if o.sketch_lines.is_empty() && o.sketch.is_empty() {
+        if o.sketch_lines.is_empty() && o.sketch.is_empty() && o.drawing.is_none() {
             continue;
         }
         let first = doc
@@ -987,6 +1409,25 @@ pub fn view(
             _ => {}
         }
     }
+    overlay(&mut view, doc, id, ui, catalog, &points, &to_world, None);
+    view
+}
+
+/// What every sketch and drawing shows over its geometry: what the tool in
+/// hand would draw, the trim's piece, the regions picked, the prompt.
+/// `points` are the plane's points, for the size of things; `drawing` is
+/// the geometry when the sketch is a drawing.
+#[allow(clippy::too_many_arguments)]
+fn overlay(
+    view: &mut crate::shell::SketchView,
+    doc: &kreate_scene::Document,
+    id: kreate_scene::document::ObjectId,
+    ui: &SketchUi,
+    catalog: &kreate_i18n::Catalog,
+    points: &[DVec2],
+    to_world: &dyn Fn(DVec2) -> kreate_math::DVec3,
+    drawing: Option<&Geometry>,
+) {
     // What the tool would draw.
     let hover = ui.hover;
     if let Some((h, join)) = hover {
@@ -1089,8 +1530,25 @@ pub fn view(
             _ => {}
         }
         if let (Tool::Trim, Some((line, on))) = (ui.tool, ui.trim) {
-            for [a, b] in kreate_ops::ops::sketch_trim::preview(doc, id, line as usize, on) {
-                view.cut.push([to_world(a), to_world(b)]);
+            match drawing {
+                Some(g) => {
+                    let gone = g.entity_of_line(line).and_then(|e| {
+                        let d = doc.object(id)?.drawing.as_deref()?;
+                        kreate_ops::ops::draft::trim_plan(d, e, on).ok()
+                    });
+                    if let Some((_, gone)) = gone {
+                        let pts = gone.tessellate(trim_tolerance(points));
+                        for w in pts.windows(2) {
+                            view.cut.push([to_world(w[0]), to_world(w[1])]);
+                        }
+                    }
+                }
+                None => {
+                    for [a, b] in kreate_ops::ops::sketch_trim::preview(doc, id, line as usize, on)
+                    {
+                        view.cut.push([to_world(a), to_world(b)]);
+                    }
+                }
             }
         }
     }
@@ -1191,6 +1649,219 @@ pub fn view(
     view.picked_lines = ui.lines.clone();
     view.band = ui.band;
     view.drawing = ui.tool.draws();
+}
+
+/// How finely a preview draws a curve: a thousandth of the drawing's size.
+fn trim_tolerance(points: &[DVec2]) -> f64 {
+    let (lo, hi) = points.iter().fold(
+        (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN)),
+        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+    );
+    ((hi - lo).length() * 1e-3).max(1e-7)
+}
+
+/// The entities of a drawing nothing can move: those of every piece the
+/// solver finds held all round. What draws in the text colour, the rest
+/// blue, as Fusion colours a sketch.
+pub fn drawing_pinned(d: &Drawing) -> Vec<EntityId> {
+    let mut d = d.clone();
+    d.solve()
+        .into_iter()
+        .filter(|p| p.converged && p.freedom == 0)
+        .flat_map(|p| p.entities)
+        .collect()
+}
+
+/// [`view`] for a drawing, seen through `g` ([`Geometry::from_drawing`]).
+pub fn drawing_view(
+    doc: &kreate_scene::Document,
+    id: kreate_scene::document::ObjectId,
+    ui: &SketchUi,
+    catalog: &kreate_i18n::Catalog,
+    g: &Geometry,
+    pinned: &[EntityId],
+) -> crate::shell::SketchView {
+    use crate::shell::{DimKind, SketchDim, SketchView};
+    use kreate_math::DVec3;
+    use kreate_scene::drawing::{Constraint as C, DimKind as K};
+    let world = doc.world_transform(id);
+    let (Some(object), Some(map)) = (doc.object(id), g.map.as_ref()) else {
+        return SketchView::default();
+    };
+    let Some(d) = object.drawing.as_deref() else {
+        return SketchView::default();
+    };
+    let to_world = |p: DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
+    let held = |e: EntityId| pinned.contains(&e);
+    let construction = |e: EntityId| d.entity(e).is_some_and(|x| x.construction);
+    let mut view = SketchView {
+        unit: (
+            doc.design.length_unit.metres(),
+            doc.design.length_unit.symbol(),
+        ),
+        tool: ui.tool.name(),
+        typed: ui.typed.clone(),
+        ..Default::default()
+    };
+    for (i, [a, b]) in g.lines.iter().enumerate() {
+        let e = map.line_entity[i];
+        view.lines.push((
+            [
+                to_world(g.points[*a as usize]),
+                to_world(g.points[*b as usize]),
+            ],
+            held(e),
+            ui.lines.contains(&(i as u32)),
+            construction(e),
+        ));
+    }
+    for (v, p) in g.points.iter().enumerate().skip(1) {
+        let refs = &map.refs[v];
+        if refs.is_empty() {
+            continue;
+        }
+        view.points.push((
+            to_world(*p),
+            refs.iter().all(|r| held(r.entity)),
+            ui.points.contains(&(v as u32)),
+        ));
+    }
+    // The marks: at a point for what holds a point, at a curve's middle for
+    // what holds a curve.
+    let at = |r: EntityRef| d.point_of(r);
+    let mid = |e: EntityId| {
+        d.point_of(EntityRef::at(e, Part::Mid))
+            .or_else(|| d.point_of(EntityRef::at(e, Part::Center)))
+    };
+    let mut mark = |p: Option<DVec2>, text: &str| {
+        if let Some(p) = p {
+            view.glyphs.push((to_world(p), text.to_string()));
+        }
+    };
+    for c in &d.constraints {
+        match c {
+            C::Coincident(a, _) => mark(at(*a), "∘"),
+            C::Horizontal(a, None) => mark(mid(a.entity), "H"),
+            C::Vertical(a, None) => mark(mid(a.entity), "V"),
+            C::Horizontal(a, Some(_)) => mark(at(*a), "H"),
+            C::Vertical(a, Some(_)) => mark(at(*a), "V"),
+            C::Parallel(a, b) => {
+                mark(mid(*a), "//");
+                mark(mid(*b), "//");
+            }
+            C::Perpendicular(a, b) => {
+                mark(mid(*a), "⊥");
+                mark(mid(*b), "⊥");
+            }
+            C::Equal(a, b) => {
+                mark(mid(*a), "=");
+                mark(mid(*b), "=");
+            }
+            C::Tangent(a, _) => mark(mid(*a), "T"),
+            C::Smooth(a, _) => mark(mid(*a), "G2"),
+            C::Concentric(a, _) => mark(mid(*a), "C"),
+            C::PointOn(p, _) => mark(at(*p), "∘"),
+            C::Midpoint(p, _) => mark(at(*p), "M"),
+            C::Symmetric(a, b, _) => {
+                mark(at(*a), "S");
+                mark(at(*b), "S");
+            }
+            C::Fixed(p, _) => mark(at(*p), "F"),
+        }
+    }
+    let (m, sym) = view.unit;
+    for e in &d.entities {
+        let EntityKind::Dimension(dim) = &e.kind else {
+            continue;
+        };
+        // What it measures, end to end, as the overlay draws its line.
+        let ends: Option<[DVec2; 2]> = match (dim.kind, dim.refs.as_slice()) {
+            (K::Radius | K::Diameter | K::ArcLength, [r]) => match d.curve(r.entity) {
+                Some(Curve2D::Circle { c, r: radius })
+                | Some(Curve2D::Arc { c, r: radius, .. }) => {
+                    let toward = (dim.text_at - *c).normalize_or(DVec2::X);
+                    let far = *c + toward * *radius;
+                    Some(if dim.kind == K::Diameter {
+                        [*c - toward * *radius, far]
+                    } else {
+                        [*c, far]
+                    })
+                }
+                _ => None,
+            },
+            (K::Angular, [a, b]) => mid(a.entity).zip(mid(b.entity)).map(|(p, q)| [p, q]),
+            (_, [a, b]) => at(*a).zip(at(*b)).map(|(p, q)| [p, q]),
+            (_, [r]) => d.curve(r.entity).map(|c| [c.start(), c.end()]),
+            _ => None,
+        };
+        let Some([pa, pb]) = ends else {
+            continue;
+        };
+        let expression = doc
+            .design
+            .binding(&kreate_scene::design::Bound::DrawingDimension {
+                drawing: object.uid,
+                dim: e.id.0,
+            })
+            .map(|b| b.expression.clone());
+        let (shown, number, kind) = match dim.kind {
+            K::Angular => {
+                let deg = dim.value.to_degrees();
+                (deg, format!("{deg:.1}°"), DimKind::Angle)
+            }
+            K::Diameter => {
+                let v = dim.value / m;
+                (v, format!("Ø{v:.2}"), DimKind::Length)
+            }
+            K::Radius => {
+                let v = dim.value / m;
+                (v, format!("R{v:.2}"), DimKind::Length)
+            }
+            _ => {
+                let v = dim.value / m;
+                // i18n-exempt: a number and its unit
+                (v, format!("{v:.2} {sym}"), DimKind::Length)
+            }
+        };
+        // A driven dimension only measures: shown in brackets, as a
+        // reference dimension is on a drawing.
+        let number = if dim.driving {
+            number
+        } else {
+            format!("({number})")
+        };
+        let text = match &expression {
+            // i18n-exempt: an expression and its value
+            Some(x) => format!("{x} = {number}"),
+            None => number,
+        };
+        let label = if dim.text_at == DVec2::ZERO {
+            (pa + pb) * 0.5
+        } else {
+            dim.text_at
+        };
+        view.dims.push(SketchDim {
+            index: e.id.0 as usize,
+            at: to_world(label),
+            ends: [to_world(pa), to_world(pb)],
+            text,
+            shown,
+            kind,
+            expression,
+        });
+    }
+    view.drafting = true;
+    view.picked_entities = g.entities_in(&ui.points, &ui.lines);
+    overlay(
+        &mut view,
+        doc,
+        id,
+        ui,
+        catalog,
+        &g.points,
+        &to_world,
+        Some(g),
+    );
     view
 }
 
@@ -1223,14 +1894,24 @@ pub fn in_band(g: &Geometry, a: DVec2, b: DVec2) -> (Vec<u32>, Vec<u32>) {
     // its, not points of their own.
     let points: Vec<u32> = (1..g.points.len() as u32)
         .filter(|v| inside(*v) && !ring.contains(v))
+        .filter(|v| {
+            g.map
+                .as_ref()
+                .is_none_or(|m| !m.refs[*v as usize].is_empty())
+        })
         .collect();
-    let lines: Vec<u32> = g
+    let mut lines: Vec<u32> = g
         .lines
         .iter()
         .enumerate()
         .filter(|(_, [p, q])| inside(*p) && inside(*q))
         .map(|(i, _)| i as u32)
         .collect();
+    // In a drawing a curve is taken whole or not at all.
+    if g.map.is_some() {
+        let all = lines.clone();
+        lines.retain(|l| g.lines_of(Pick::Line(*l)).iter().all(|k| all.contains(k)));
+    }
     (points, lines)
 }
 
@@ -1326,6 +2007,142 @@ mod tests {
     use super::*;
 
     /// A unit square on screen at 100 px a unit, and a circle.
+    /// A rectangle's corners joined, a circle and an arc: one point per
+    /// corner, each line its entity, the round its circle.
+    fn drawn() -> Drawing {
+        use kreate_scene::drawing::Constraint as C;
+        let mut d = Drawing::new();
+        let corners = [
+            DVec2::new(0.0, 0.0),
+            DVec2::new(2.0, 0.0),
+            DVec2::new(2.0, 1.0),
+            DVec2::new(0.0, 1.0),
+        ];
+        let ids: Vec<EntityId> = (0..4)
+            .map(|k| {
+                d.add_curve(Curve2D::Line {
+                    a: corners[k],
+                    b: corners[(k + 1) % 4],
+                })
+            })
+            .collect();
+        for k in 0..4 {
+            d.constraints.push(C::Coincident(
+                EntityRef::at(ids[k], Part::End),
+                EntityRef::at(ids[(k + 1) % 4], Part::Start),
+            ));
+        }
+        d.add_curve(Curve2D::Circle {
+            c: DVec2::new(5.0, 0.0),
+            r: 1.0,
+        });
+        d.add_curve(Curve2D::Arc {
+            c: DVec2::new(8.0, 0.0),
+            r: 1.0,
+            start: 0.0,
+            sweep: std::f64::consts::PI,
+        });
+        d
+    }
+
+    #[test]
+    fn a_drawing_is_seen_as_points_lines_and_rounds() {
+        let d = drawn();
+        let g = Geometry::from_drawing(&d, 1e-3, |p| Some(p * 100.0));
+        let map = g.map.as_ref().unwrap();
+        // The origin, four corners, the circle's centre, the arc's centre
+        // and two ends; then the points along the curves.
+        let real = map.refs.iter().filter(|r| !r.is_empty()).count();
+        assert_eq!(real, 8);
+        assert!(map.refs[1..9].iter().all(|r| !r.is_empty()));
+        assert_eq!(map.refs[1].len(), 2, "a corner is two lines' ends");
+        // Each line its entity; a click near the rectangle's bottom is line 1.
+        match g.pick(DVec2::new(100.0, 1.0)) {
+            Some(p @ Pick::Line(_)) => assert_eq!(g.entity_of(p), Some(EntityId(1))),
+            other => panic!("{other:?}"),
+        }
+        // The circle as a round, and all its pieces selected with it.
+        let at = DVec2::new(500.0, 100.0);
+        let pick = g.pick(at).expect("the circle");
+        assert!(matches!(pick, Pick::Round { .. }));
+        assert_eq!(g.entity_of(pick), Some(EntityId(5)));
+        let lines = g.lines_of(pick);
+        assert!(lines.len() > 8);
+        assert!(lines
+            .iter()
+            .all(|l| g.entity_of_line(*l) == Some(EntityId(5))));
+        // A corner is a curve's part, never a lone point.
+        assert_eq!(g.point_ref(1).map(|r| r.part), Some(Part::Start));
+        assert_eq!(g.entities_in(&[1], &[0]), vec![1]);
+    }
+
+    /// The drawing's points keep their numbers when it moves: a drag finds
+    /// the point it took hold of on every step.
+    #[test]
+    fn a_drawings_points_keep_their_numbers_as_it_moves() {
+        let d = drawn();
+        let before = Geometry::from_drawing(&d, 1e-3, Some);
+        let mut moved = d.clone();
+        if let Some(e) = moved.entity_mut(EntityId(6)) {
+            e.kind = EntityKind::Curve(Curve2D::Arc {
+                c: DVec2::new(8.0, 0.0),
+                r: 3.0,
+                start: 0.0,
+                sweep: std::f64::consts::PI,
+            });
+        }
+        let after = Geometry::from_drawing(&moved, 1e-3, Some);
+        let (a, b) = (before.map.unwrap(), after.map.unwrap());
+        assert_eq!(a.refs[..9], b.refs[..9]);
+        assert!(after.points.len() > before.points.len(), "drawn finer");
+    }
+
+    #[test]
+    fn picks_in_a_drawing_become_the_drafting_constraint_they_mean() {
+        let d = drawn();
+        let g = Geometry::from_drawing(&d, 1e-3, |p| Some(p * 100.0));
+        let (bottom, right) = (Pick::Line(0), Pick::Line(1));
+        let circle = g.pick(DVec2::new(500.0, 100.0)).unwrap();
+        let whole = |i| EntityRef::whole(EntityId(i));
+        assert_eq!(
+            drawing_constraint_for("perpendicular", &[bottom, right], &g),
+            Ok(Some(("perpendicular", vec![whole(1), whole(2)])))
+        );
+        assert_eq!(
+            drawing_constraint_for("tangent", &[bottom, circle], &g),
+            Ok(Some(("tangent", vec![whole(1), whole(5)])))
+        );
+        // A point on a curve is held on it.
+        assert_eq!(
+            drawing_constraint_for("coincident", &[Pick::Point(1), circle], &g),
+            Ok(Some((
+                "point_on",
+                vec![EntityRef::at(EntityId(1), Part::Start), whole(5)]
+            )))
+        );
+        assert_eq!(
+            drawing_constraint_for("fixed", &[bottom], &g),
+            Err(CannotConstrain)
+        );
+        // A line's length, a circle's diameter, two lines' angle.
+        assert_eq!(
+            drawing_dimension_for(&[bottom], &g, &d),
+            Ok(Some(("aligned", vec![whole(1)])))
+        );
+        assert_eq!(
+            drawing_dimension_for(&[circle], &g, &d),
+            Ok(Some(("diameter", vec![whole(5)])))
+        );
+        assert_eq!(
+            drawing_dimension_for(&[bottom, right], &g, &d),
+            Ok(Some(("angular", vec![whole(1), whole(2)])))
+        );
+        assert_eq!(
+            ref_text(EntityRef::at(EntityId(3), Part::Vertex(2))),
+            "3.v2"
+        );
+    }
+
     fn geometry() -> Geometry {
         let mut points = vec![
             DVec2::new(0.0, 0.0),

@@ -1053,12 +1053,20 @@ fn common() -> Vec<Binding> {
             Action::new("object.reveal"),
         )
         .with_modifiers(Modifiers::alt()),
-        // Blender's F2: rename the active object.
+        // Rename on Ctrl+F2, and double-click in the outliner: F2 itself
+        // goes between 2D and 3D, as the drafting mode's switch.
         key(
             "object.rename",
             "F2",
             Context::ObjectMode,
             Action::new("app.rename"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "view.toggle_2d",
+            "F2",
+            Context::Viewport,
+            Action::new("app.toggle_2d"),
         ),
         key(
             "object.join",

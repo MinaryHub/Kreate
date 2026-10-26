@@ -13,6 +13,7 @@ kreate-input.workspace = true
 kreate-mesh.workspace = true
 kreate-render.workspace = true
 kreate-scene.workspace = true
+kreate-geom2d.workspace = true
 kreate-ops.workspace = true
 kreate-reflect.workspace = true
 kreate-ui.workspace = true

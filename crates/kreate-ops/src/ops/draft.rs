@@ -43,6 +43,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftMove>();
     registry.register::<DraftMirror>();
     registry.register::<DraftPattern>();
+    registry.register::<DraftUnconstrain>();
 }
 
 /// The active object, when it is a drawing.
@@ -1008,6 +1009,42 @@ impl Operator for DraftConstruction {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DraftUnconstrainParams {
+    /// The constraint's place in the drawing's list.
+    pub index: u32,
+}
+
+/// Lets go of one constraint.
+pub struct DraftUnconstrain;
+
+impl Operator for DraftUnconstrain {
+    type Params = DraftUnconstrainParams;
+    fn id() -> &'static str {
+        "draft.unconstrain"
+    }
+    fn label() -> &'static str {
+        "Remove Constraint"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        edit(doc, |d| {
+            let i = params.index as usize;
+            if i >= d.constraints.len() {
+                return Err(OpError::Failed(format!("no constraint {i}")));
+            }
+            d.constraints.remove(i);
+            Ok(())
+        })
+    }
+}
+
 // --- editing ----------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -1044,80 +1081,7 @@ impl Operator for DraftTrim {
         let target = EntityId(params.id);
         let at = xy(params.at);
         edit(doc, |d| {
-            let curve = d
-                .curve(target)
-                .cloned()
-                .ok_or_else(|| OpError::Failed(format!("{} is not a curve", params.id)))?;
-            let (lo, hi) = curve.domain();
-            // Where everything else crosses it.
-            let mut cuts: Vec<f64> = Vec::new();
-            for e in &d.entities {
-                if e.id == target {
-                    continue;
-                }
-                if let EntityKind::Curve(other) = &e.kind {
-                    for hit in kreate_geom2d::intersect(&curve, other) {
-                        match hit {
-                            kreate_geom2d::Intersection::Point { ta, .. } => cuts.push(ta),
-                            kreate_geom2d::Intersection::Overlap { a, .. } => {
-                                cuts.extend([a.0, a.1])
-                            }
-                        }
-                    }
-                }
-            }
-            let (t, _) = curve.closest(at);
-            let below = cuts
-                .iter()
-                .copied()
-                .filter(|c| *c < t - 1e-9)
-                .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.max(c))));
-            let above = cuts
-                .iter()
-                .copied()
-                .filter(|c| *c > t + 1e-9)
-                .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.min(c))));
-            let closed = curve.is_closed();
-            let keep: Vec<Curve2D> = match (below, above, closed) {
-                // A closed curve cut at least twice: the rest of it, the
-                // long way round.
-                (Some(b), Some(a), true) => vec![curve.sub(a, b)],
-                (None, Some(a), true) | (Some(a), None, true) => {
-                    // Crossed on one side only of the seam: the other side's
-                    // crossing is the outermost one.
-                    let other = if below.is_none() {
-                        cuts.iter().copied().fold(f64::MIN, f64::max)
-                    } else {
-                        cuts.iter().copied().fold(f64::MAX, f64::min)
-                    };
-                    let (from, to) = if below.is_none() {
-                        (a, other)
-                    } else {
-                        (other, a)
-                    };
-                    if (from - to).abs() < 1e-12 {
-                        return Err(OpError::Failed(
-                            "a closed curve is trimmed between two crossings".into(),
-                        ));
-                    }
-                    vec![curve.sub(from, to)]
-                }
-                (None, None, _) => {
-                    return Err(OpError::Failed(
-                        "nothing crosses it: delete it instead".into(),
-                    ))
-                }
-                (b, a, false) => {
-                    let mut keep = Vec::new();
-                    if let Some(b) = b {
-                        keep.push(curve.sub(lo, b));
-                    }
-                    if let Some(a) = a {
-                        keep.push(curve.sub(a, hi));
-                    }
-                    keep
-                }
-            };
+            let (keep, _) = trim_plan(d, target, at)?;
             // The constraints on the old curve no longer mean what they
             // did; the pieces are free, and their ends lie on what cut them.
             let layer = d.entity(target).map(|e| e.layer);
@@ -1130,6 +1094,79 @@ impl Operator for DraftTrim {
             }
             Ok(())
         })
+    }
+}
+
+/// What trimming curve `target` at `at` leaves of it, and the piece it
+/// takes away — what the trim tool shows before the click.
+pub fn trim_plan(
+    d: &Drawing,
+    target: EntityId,
+    at: DVec2,
+) -> Result<(Vec<Curve2D>, Curve2D), OpError> {
+    let curve = d
+        .curve(target)
+        .cloned()
+        .ok_or_else(|| OpError::Failed(format!("{} is not a curve", target.0)))?;
+    let (lo, hi) = curve.domain();
+    // Where everything else crosses it.
+    let mut cuts: Vec<f64> = Vec::new();
+    for e in &d.entities {
+        if e.id == target {
+            continue;
+        }
+        if let EntityKind::Curve(other) = &e.kind {
+            for hit in kreate_geom2d::intersect(&curve, other) {
+                match hit {
+                    kreate_geom2d::Intersection::Point { ta, .. } => cuts.push(ta),
+                    kreate_geom2d::Intersection::Overlap { a, .. } => cuts.extend([a.0, a.1]),
+                }
+            }
+        }
+    }
+    let (t, _) = curve.closest(at);
+    let below = cuts
+        .iter()
+        .copied()
+        .filter(|c| *c < t - 1e-9)
+        .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.max(c))));
+    let above = cuts
+        .iter()
+        .copied()
+        .filter(|c| *c > t + 1e-9)
+        .fold(None, |m: Option<f64>, c| Some(m.map_or(c, |m| m.min(c))));
+    match (below, above, curve.is_closed()) {
+        (None, None, _) => Err(OpError::Failed(
+            "nothing crosses it: delete it instead".into(),
+        )),
+        // A closed curve cut at least twice: the rest of it, the long way
+        // round.
+        (Some(b), Some(a), true) => Ok((vec![curve.sub(a, b)], curve.sub(b, a))),
+        (None, Some(a), true) | (Some(a), None, true) => {
+            // Crossed on one side only of the seam: the other side's
+            // crossing is the outermost one.
+            let (from, to) = if below.is_none() {
+                (a, cuts.iter().copied().fold(f64::MIN, f64::max))
+            } else {
+                (cuts.iter().copied().fold(f64::MAX, f64::min), a)
+            };
+            if (from - to).abs() < 1e-12 {
+                return Err(OpError::Failed(
+                    "a closed curve is trimmed between two crossings".into(),
+                ));
+            }
+            Ok((vec![curve.sub(from, to)], curve.sub(to, from)))
+        }
+        (b, a, false) => {
+            let mut keep = Vec::new();
+            if let Some(b) = b {
+                keep.push(curve.sub(lo, b));
+            }
+            if let Some(a) = a {
+                keep.push(curve.sub(a, hi));
+            }
+            Ok((keep, curve.sub(b.unwrap_or(lo), a.unwrap_or(hi))))
+        }
     }
 }
 
