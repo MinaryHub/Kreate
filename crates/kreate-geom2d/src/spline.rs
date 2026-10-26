@@ -11,6 +11,10 @@ pub struct Spline {
     pub knots: Vec<f64>,
     /// One per control point, or none for a plain B-spline.
     pub weights: Option<Vec<f64>>,
+    /// The points it was drawn through, when it was drawn that way: what
+    /// the person placed, and what editing it moves. Empty for a spline
+    /// given by its control points.
+    pub fit: Vec<DVec2>,
 }
 
 impl Spline {
@@ -30,6 +34,7 @@ impl Spline {
             ctrl,
             knots,
             weights: None,
+            fit: Vec::new(),
         }
     }
 
@@ -40,7 +45,9 @@ impl Spline {
     pub fn through(fit: &[DVec2]) -> Spline {
         let n = fit.len();
         if n < 3 {
-            return Spline::clamped(1, fit.to_vec());
+            let mut s = Spline::clamped(1, fit.to_vec());
+            s.fit = fit.to_vec();
+            return s;
         }
         // Chord-length parameters for the fit points.
         let mut u = vec![0.0; n];
@@ -68,6 +75,7 @@ impl Spline {
             ctrl: vec![DVec2::ZERO; m],
             knots: knots.clone(),
             weights: None,
+            fit: Vec::new(),
         };
         for (row, (&t, p)) in u.iter().zip(fit).enumerate() {
             for (j, v) in probe.basis(t, 0).into_iter().enumerate() {
@@ -94,6 +102,7 @@ impl Spline {
                 .collect(),
             knots,
             weights: None,
+            fit: fit.to_vec(),
         }
     }
 

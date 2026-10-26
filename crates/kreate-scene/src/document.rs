@@ -190,6 +190,9 @@ pub struct Object {
     /// mesh's edges because a mesh's edges are its faces', and a line drawn
     /// in a sketch bounds no face of its own until the regions are found.
     pub sketch_lines: Vec<[u32; 2]>,
+    /// What it draws in its own plane, when it is a drawing: see
+    /// [`crate::drawing`]. What a sketch becomes.
+    pub drawing: Option<Box<crate::drawing::Drawing>>,
     /// What makes it a body: its features, run in order, are what it shows
     /// in place of its mesh. See [`crate::feature`]. Empty for anything else.
     pub features: Vec<crate::feature::Feature>,
@@ -257,6 +260,7 @@ impl Object {
             geometry_nodes: None,
             sketch: Vec::new(),
             sketch_lines: Vec::new(),
+            drawing: None,
             features: Vec::new(),
             action: None,
             nla: Vec::new(),

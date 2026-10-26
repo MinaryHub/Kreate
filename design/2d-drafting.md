@@ -39,11 +39,13 @@
 
 ## 3. 데이터 모델
 
-### 3.1 도면 데이터블록
+### 3.1 도면
+
+구현 메모(1단계): `ObjectData`에 변형을 더하면 약 70곳의 `match`가 바뀌므로, 지금의 스케치·피처와 같이 **객체의 필드** `Object::drawing: Option<Box<Drawing>>`로 둔다. 엔티티 ID는 도면마다 세는 `EntityId(u32)`. 공유되는 블록·스타일만 문서 수준.
 
 ```rust
-// kreate-scene
-pub enum ObjectData { …, Drawing(DrawingId) }      // Sketch 객체를 대체
+// kreate-scene::drawing
+pub struct Object { …, pub drawing: Option<Box<Drawing>> }   // 스케치 필드를 대체
 
 pub struct Drawing {
     pub name: String,

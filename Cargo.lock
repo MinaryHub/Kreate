@@ -1629,6 +1629,7 @@ name = "kreate-scene"
 version = "0.3.1"
 dependencies = [
  "glam",
+ "kreate-geom2d",
  "kreate-math",
  "kreate-mesh",
  "kreate-reflect",

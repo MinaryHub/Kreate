@@ -458,6 +458,8 @@ impl Spline {
             ctrl,
             knots,
             weights,
+            // A part has no points it was drawn through of its own.
+            fit: Vec::new(),
         }
     }
 
@@ -506,6 +508,7 @@ impl Spline {
             ctrl: out.iter().map(|(c, w)| *c / *w).collect(),
             knots,
             weights: rational.then(|| out.iter().map(|(_, w)| *w).collect()),
+            fit: self.fit.clone(),
         }
     }
 
@@ -521,6 +524,7 @@ impl Spline {
                 .weights
                 .as_ref()
                 .map(|w| w.iter().rev().copied().collect()),
+            fit: self.fit.iter().rev().copied().collect(),
         }
     }
 }

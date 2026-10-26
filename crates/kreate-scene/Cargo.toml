@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 kreate-math.workspace = true
 kreate-mesh.workspace = true
+kreate-geom2d.workspace = true
 rayon.workspace = true
 kreate-reflect.workspace = true
 glam.workspace = true
