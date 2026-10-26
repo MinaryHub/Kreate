@@ -1,0 +1,3 @@
+# What tests compare byte for byte keeps its line ends on every checkout.
+*.expected.txt text eol=lf
+*.kreate binary
