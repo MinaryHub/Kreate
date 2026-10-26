@@ -123,6 +123,10 @@ pub enum Bound {
     /// A body's feature, by the body's identity and the feature's order:
     /// an extrude's distance, a revolve's angle, a round's radius.
     FeatureAmount { body: Uid, order: u64 },
+    /// A drawing's dimension, by the drawing object's identity and the
+    /// dimension's id — which, unlike a sketch constraint's place, does not
+    /// move when something before it is deleted.
+    DrawingDimension { drawing: Uid, dim: u32 },
 }
 
 /// A dimension held to an expression.
@@ -244,6 +248,36 @@ impl Document {
                         }
                     }
                 }
+                Bound::DrawingDimension { drawing, dim } => {
+                    let Some(id) = self.object_by_uid(drawing) else {
+                        continue;
+                    };
+                    let Some(d) = self
+                        .object_untouched_mut(id)
+                        .and_then(|o| o.drawing.as_deref_mut())
+                    else {
+                        continue;
+                    };
+                    let Some(crate::drawing::EntityKind::Dimension(x)) = d
+                        .entity_mut(crate::drawing::EntityId(dim))
+                        .map(|e| &mut e.kind)
+                    else {
+                        continue;
+                    };
+                    let want = if x.kind == crate::drawing::DimKind::Angular {
+                        v.to_radians()
+                    } else {
+                        v * unit
+                    };
+                    if (x.value - want).abs() > 1e-12 || !x.driving {
+                        x.value = want;
+                        x.driving = true;
+                        changed += 1;
+                        if !solve.contains(&id) {
+                            solve.push(id);
+                        }
+                    }
+                }
                 Bound::FeatureAmount { body, order } => {
                     let Some(id) = self.object_by_uid(body) else {
                         continue;
@@ -270,6 +304,12 @@ impl Document {
             }
         }
         for id in solve {
+            if let Some(o) = self.object_untouched_mut(id) {
+                if let Some(d) = o.drawing.as_deref_mut() {
+                    d.solve();
+                    continue;
+                }
+            }
             self.solve_sketch(id);
         }
         if changed > 0 {

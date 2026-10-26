@@ -148,7 +148,7 @@ impl Operator for ParameterRemove {
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct BindParams {
     /// A sketch's constraint or a body's feature.
-    #[param(variants("sketch", "feature"))]
+    #[param(variants("sketch", "feature", "drawing"))]
     pub kind: u32,
     /// The sketch or body, by name; empty for the active object.
     pub object: String,
@@ -207,6 +207,22 @@ impl Operator for Bind {
                     index: params.index,
                 }
             }
+            2 => {
+                let is_dim = o
+                    .drawing
+                    .as_deref()
+                    .and_then(|d| d.entity(kreate_scene::drawing::EntityId(params.index)))
+                    .is_some_and(|e| {
+                        matches!(e.kind, kreate_scene::drawing::EntityKind::Dimension(_))
+                    });
+                if !is_dim {
+                    return Err(OpError::Failed("no such dimension in the drawing".into()));
+                }
+                kreate_scene::design::Bound::DrawingDimension {
+                    drawing: uid,
+                    dim: params.index,
+                }
+            }
             _ => {
                 let order = u64::from(params.index);
                 if !o.features.iter().any(|f| f.order == order) {
@@ -227,7 +243,7 @@ impl Operator for Bind {
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct UnbindParams {
-    #[param(variants("sketch", "feature"))]
+    #[param(variants("sketch", "feature", "drawing"))]
     pub kind: u32,
     pub object: String,
     pub index: u32,
@@ -258,16 +274,19 @@ impl Operator for Unbind {
         }
         .ok_or_else(|| OpError::Failed("no such object".into()))?;
         let uid = d.object_uid(id).expect("an object");
-        let target = if params.kind == 0 {
-            kreate_scene::design::Bound::SketchDimension {
+        let target = match params.kind {
+            0 => kreate_scene::design::Bound::SketchDimension {
                 sketch: uid,
                 index: params.index,
-            }
-        } else {
-            kreate_scene::design::Bound::FeatureAmount {
+            },
+            2 => kreate_scene::design::Bound::DrawingDimension {
+                drawing: uid,
+                dim: params.index,
+            },
+            _ => kreate_scene::design::Bound::FeatureAmount {
                 body: uid,
                 order: u64::from(params.index),
-            }
+            },
         };
         let d = doc.document_mut();
         let before = d.design.bindings.len();

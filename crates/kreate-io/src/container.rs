@@ -2125,6 +2125,12 @@ pub fn write(
                         order,
                         b.expression.clone(),
                     ),
+                    kreate_scene::design::Bound::DrawingDimension { drawing, dim } => (
+                        "drawing".to_string(),
+                        drawing.raw(),
+                        u64::from(dim),
+                        b.expression.clone(),
+                    ),
                 })
                 .collect(),
         });
@@ -2926,6 +2932,10 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
                     "feature" => kreate_scene::design::Bound::FeatureAmount {
                         body: kreate_scene::Uid::from_raw(*a),
                         order: *b,
+                    },
+                    "drawing" => kreate_scene::design::Bound::DrawingDimension {
+                        drawing: kreate_scene::Uid::from_raw(*a),
+                        dim: u32::try_from(*b).ok()?,
                     },
                     _ => return None,
                 };

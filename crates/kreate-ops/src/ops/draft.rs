@@ -1610,3 +1610,100 @@ mod feature_tests {
         assert!((v - want).abs() < want * 3e-3, "{v} against {want}");
     }
 }
+
+#[cfg(test)]
+mod parameter_tests {
+    use super::*;
+    use crate::history::History;
+    use crate::operator::{Mode, OperatorRegistry};
+
+    /// A dimension held to a parameter: change the parameter and the
+    /// drawing follows, saved and loaded.
+    #[test]
+    fn a_drawing_dimension_follows_its_parameter() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mut run = |doc: &mut Document, line: &str| {
+            let call = crate::script::parse_call(&r, line).unwrap();
+            h.dispatch(
+                &r,
+                doc,
+                &Context { mode: Mode::Object },
+                call.op_id,
+                &call.params,
+            )
+            .unwrap_or_else(|e| panic!("{line}: {e}"));
+        };
+        run(&mut doc, "scene.units_set(length=\"millimetres\")");
+        run(
+            &mut doc,
+            "design.parameter_set(name=\"width\", expression=\"40\")",
+        );
+        run(&mut doc, "draft.new()");
+        run(&mut doc, "draft.rectangle(a=(0, 0, 0), b=(0.03, 0.02, 0))");
+        run(
+            &mut doc,
+            "draft.constrain(kind=\"fixed\", refs=\"1.start\")",
+        );
+        run(&mut doc, "draft.dimension(kind=\"aligned\", refs=\"1\")");
+        let dim = active_drawing(&doc)
+            .and_then(|id| doc.object(id)?.drawing.as_deref())
+            .and_then(|d| {
+                d.entities
+                    .iter()
+                    .find(|e| matches!(e.kind, EntityKind::Dimension(_)))
+                    .map(|e| e.id.0)
+            })
+            .expect("the dimension");
+        run(
+            &mut doc,
+            &format!("design.bind(kind=\"drawing\", object=\"Drawing\", index={dim}, expression=\"width / 2 + 10\")"),
+        );
+        let area = |doc: &Document| {
+            let id = active_drawing(doc).unwrap();
+            doc.object(id)
+                .unwrap()
+                .drawing
+                .as_deref()
+                .unwrap()
+                .regions(1e-9)[0]
+                .area
+        };
+        assert!(
+            (area(&doc) - 0.03 * 0.02).abs() < 1e-9,
+            "30 mm wide: {}",
+            area(&doc)
+        );
+        run(
+            &mut doc,
+            "design.parameter_set(name=\"width\", expression=\"60\")",
+        );
+        assert!(
+            (area(&doc) - 0.04 * 0.02).abs() < 1e-9,
+            "40 mm wide: {}",
+            area(&doc)
+        );
+        // Through a file.
+        let bytes =
+            kreate_io::container::write(&doc, &kreate_io::container::Manifest::default(), &[])
+                .unwrap();
+        let mut back = kreate_io::container::read(std::io::Cursor::new(bytes))
+            .unwrap()
+            .document;
+        let drawing = back
+            .objects()
+            .find(|(_, o)| o.drawing.is_some())
+            .map(|(id, _)| id);
+        back.selection.active = drawing;
+        assert_eq!(back.design.bindings, doc.design.bindings);
+        back.design.parameters[0].expression = "80".into();
+        back.apply_parameters();
+        assert!(
+            (area(&back) - 0.05 * 0.02).abs() < 1e-9,
+            "50 mm wide: {}",
+            area(&back)
+        );
+    }
+}
