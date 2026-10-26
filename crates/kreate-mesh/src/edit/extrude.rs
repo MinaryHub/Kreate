@@ -482,6 +482,12 @@ fn unspike(mesh: &mut BMesh, mut faces: Vec<FaceId>) -> Result<(), BmError> {
                 }
                 let mut mine = ring.clone();
                 mine.remove(i);
+                // Where the face beyond is in the list, found before either
+                // face goes: in a release build a handle carries no
+                // generation, so a face added next can take the removed
+                // one's slot and its very name — and a search after would
+                // find the new face where the old one was.
+                let beyond_at = faces.iter().position(|g| *g == beyond);
                 mesh.remove_face(f);
                 mesh.remove_face(beyond);
                 let f2 = mesh.add_face(&mine)?;
@@ -489,7 +495,7 @@ fn unspike(mesh: &mut BMesh, mut faces: Vec<FaceId>) -> Result<(), BmError> {
                 faces[fi] = f2;
                 // The face beyond is rebuilt too, under a new name; it may
                 // have a spike of its own still.
-                match faces.iter().position(|g| *g == beyond) {
+                match beyond_at {
                     Some(k) => faces[k] = beyond2,
                     None => faces.push(beyond2),
                 }
