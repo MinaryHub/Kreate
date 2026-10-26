@@ -10,7 +10,7 @@
 //! spaces or commas: the form a script and the connector write.
 
 use kreate_geom2d::{Curve2D, DVec2, Spline};
-use kreate_math::{DMat3, DQuat, DVec3};
+use kreate_math::{glam, DMat3, DQuat, DVec3};
 use kreate_scene::document::{Object, ObjectData, ObjectId};
 use kreate_scene::drawing::{
     Constraint, DimKind, Dimension, Drawing, EntityId, EntityKind, EntityRef, Part,
@@ -38,6 +38,11 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftTrim>();
     registry.register::<DraftOffset>();
     registry.register::<DraftFillet>();
+    registry.register::<DraftPolygon>();
+    registry.register::<DraftSlot>();
+    registry.register::<DraftMove>();
+    registry.register::<DraftMirror>();
+    registry.register::<DraftPattern>();
 }
 
 /// The active object, when it is a drawing.
@@ -80,6 +85,52 @@ fn edit(
         .expect("the drawing")
         .drawing = Some(Box::new(d));
     Ok(OpResult::Finished)
+}
+
+/// [`edit`] for what draws something new: each new point that lands on a
+/// point already drawn is joined to it, as a click on a snapped point
+/// means — the tools snap a click exactly onto the point under it.
+fn draw(
+    doc: &mut DocMut<'_>,
+    change: impl FnOnce(&mut Drawing) -> Result<(), OpError>,
+) -> Result<OpResult, OpError> {
+    edit(doc, |d| {
+        let first = d.counters().0;
+        change(d)?;
+        join_new(d, first);
+        Ok(())
+    })
+}
+
+/// Joins each point of the entities numbered from `first` on to a point of
+/// one drawn before them at the same place.
+fn join_new(d: &mut Drawing, first: u32) {
+    let old: Vec<(EntityRef, DVec2)> = d
+        .entities
+        .iter()
+        .filter(|e| e.id.0 < first)
+        .flat_map(|e| d.parts(e.id))
+        .collect();
+    let new: Vec<(EntityRef, DVec2)> = d
+        .entities
+        .iter()
+        .filter(|e| e.id.0 >= first)
+        .flat_map(|e| d.parts(e.id))
+        .collect();
+    for (r, p) in new {
+        let near = |q: DVec2| q.distance(p) <= kreate_geom2d::POINT_EPS * p.length().max(1.0);
+        if let Some((o, _)) = old.iter().find(|(_, q)| near(*q)) {
+            d.constraints.push(Constraint::Coincident(r, *o));
+        }
+    }
+}
+
+/// Whether anything holds an entity: a constraint or a driving dimension.
+fn held(d: &Drawing, id: EntityId) -> bool {
+    d.constraints.iter().any(|c| c.entities().contains(&id))
+        || d.entities.iter().any(|e| {
+            matches!(&e.kind, EntityKind::Dimension(x) if x.driving && x.refs.iter().any(|r| r.entity == id))
+        })
 }
 
 /// `3`, `3.start`, `3.v2`: an entity and the part of it.
@@ -255,7 +306,7 @@ impl Operator for DraftLine {
         if pts.len() < 2 {
             return Err(OpError::Failed("a line needs two points".into()));
         }
-        edit(doc, |d| {
+        draw(doc, |d| {
             chain(d, &pts, params.closed);
             Ok(())
         })
@@ -331,7 +382,7 @@ impl Operator for DraftRectangle {
             ));
         }
         let corners = [a, DVec2::new(b.x, a.y), b, DVec2::new(a.x, b.y)];
-        edit(doc, |d| {
+        draw(doc, |d| {
             chain(d, &corners, true);
             Ok(())
         })
@@ -367,7 +418,7 @@ impl Operator for DraftCircle {
         if params.radius <= 0.0 || !params.radius.is_finite() {
             return Err(OpError::Failed("a circle needs a radius".into()));
         }
-        edit(doc, |d| {
+        draw(doc, |d| {
             d.add_curve(Curve2D::Circle {
                 c: xy(params.centre),
                 r: params.radius,
@@ -409,7 +460,7 @@ impl Operator for DraftArc {
     ) -> Result<OpResult, OpError> {
         let arc = arc_through(xy(params.start), xy(params.through), xy(params.end))
             .ok_or_else(|| OpError::Failed("three points in a line make no arc".into()))?;
-        edit(doc, |d| {
+        draw(doc, |d| {
             d.add_curve(arc);
             Ok(())
         })
@@ -488,7 +539,7 @@ impl Operator for DraftSpline {
         if params.closed {
             pts.push(pts[0]);
         }
-        edit(doc, |d| {
+        draw(doc, |d| {
             d.add_curve(Curve2D::Spline(Spline::through(&pts)));
             Ok(())
         })
@@ -519,7 +570,7 @@ impl Operator for DraftPoint {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        edit(doc, |d| {
+        draw(doc, |d| {
             d.add(EntityKind::Point(xy(params.at)));
             Ok(())
         })
@@ -853,11 +904,7 @@ impl Operator for DraftDrag {
         // Free geometry follows the drag directly; held geometry through
         // the solver.
         let to = xy(params.to);
-        let held = d.constraints.iter().any(|c| c.entities().contains(&at.entity))
-            || d.entities.iter().any(|e| {
-                matches!(&e.kind, EntityKind::Dimension(x) if x.driving && x.refs.iter().any(|r| r.entity == at.entity))
-            });
-        if held {
+        if held(&d, at.entity) {
             d.solve_dragging(&[kreate_scene::drawing_solve::Drag { at, to }]);
         } else if let Some(from) = d.point_of(at) {
             translate_part(&mut d, at, to - from);
@@ -1218,6 +1265,435 @@ impl Operator for DraftFillet {
     }
 }
 
+/// Closed outlines into the active drawing, each one polyline: a text's
+/// letters, a face's edges.
+pub fn add_outlines(doc: &mut DocMut<'_>, rings: Vec<Vec<DVec2>>) -> Result<OpResult, OpError> {
+    draw(doc, |d| {
+        for ring in rings.into_iter().filter(|r| r.len() >= 3) {
+            d.add_curve(Curve2D::Polyline {
+                verts: ring.into_iter().map(|p| (p, 0.0)).collect(),
+                closed: true,
+            });
+        }
+        Ok(())
+    })
+}
+
+// --- more shapes ------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct DraftPolygonParams {
+    #[param(unit = "length")]
+    pub centre: [f64; 3],
+    /// From the centre to a corner.
+    #[param(unit = "length", min = 0.0)]
+    pub radius: f64,
+    #[param(min = 3.0, max = 64.0)]
+    pub sides: u32,
+    /// The first corner's direction from the centre, radians.
+    #[param(unit = "angle")]
+    pub rotation: f64,
+}
+
+impl Default for DraftPolygonParams {
+    fn default() -> Self {
+        Self {
+            centre: [0.0; 3],
+            radius: 0.01,
+            sides: 6,
+            rotation: 0.0,
+        }
+    }
+}
+
+/// A regular polygon: its sides held equal and its corners on a
+/// construction circle, so one dimension sizes it.
+pub struct DraftPolygon;
+
+impl Operator for DraftPolygon {
+    type Params = DraftPolygonParams;
+    fn id() -> &'static str {
+        "draft.polygon"
+    }
+    fn label() -> &'static str {
+        "Polygon"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        if params.radius <= 0.0 || !params.radius.is_finite() {
+            return Err(OpError::Failed("a polygon needs a size".into()));
+        }
+        let n = params.sides.clamp(3, 64);
+        let c = xy(params.centre);
+        let corners: Vec<DVec2> = (0..n)
+            .map(|k| {
+                let a = params.rotation + std::f64::consts::TAU * k as f64 / n as f64;
+                c + DVec2::from_angle(a) * params.radius
+            })
+            .collect();
+        draw(doc, |d| {
+            let sides = chain(d, &corners, true);
+            let ring = d.add_curve(Curve2D::Circle {
+                c,
+                r: params.radius,
+            });
+            if let Some(e) = d.entity_mut(ring) {
+                e.construction = true;
+            }
+            for (k, s) in sides.iter().enumerate() {
+                d.constraints
+                    .push(Constraint::PointOn(EntityRef::at(*s, Part::Start), ring));
+                if k > 0 {
+                    d.constraints.push(Constraint::Equal(sides[0], *s));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DraftSlotParams {
+    /// One end's centre.
+    #[param(unit = "length")]
+    pub a: [f64; 3],
+    /// The other's.
+    #[param(unit = "length")]
+    pub b: [f64; 3],
+    #[param(unit = "length", min = 0.0)]
+    pub width: f64,
+}
+
+/// A slot: two straight sides and a half circle round each end, tangent
+/// where they meet and the ends one radius.
+pub struct DraftSlot;
+
+impl Operator for DraftSlot {
+    type Params = DraftSlotParams;
+    fn id() -> &'static str {
+        "draft.slot"
+    }
+    fn label() -> &'static str {
+        "Slot"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let (a, b) = (xy(params.a), xy(params.b));
+        let r = params.width * 0.5;
+        if r <= 0.0 || !r.is_finite() || a.distance(b) < 1e-12 {
+            return Err(OpError::Failed("a slot needs a length and a width".into()));
+        }
+        let n = (b - a).normalize().perp() * r;
+        let pi = std::f64::consts::PI;
+        draw(doc, |d| {
+            let side1 = d.add_curve(Curve2D::Line { a: a + n, b: b + n });
+            let end_b = d.add_curve(Curve2D::Arc {
+                c: b,
+                r,
+                start: n.to_angle(),
+                sweep: -pi,
+            });
+            let side2 = d.add_curve(Curve2D::Line { a: b - n, b: a - n });
+            let end_a = d.add_curve(Curve2D::Arc {
+                c: a,
+                r,
+                start: (-n).to_angle(),
+                sweep: -pi,
+            });
+            let ring = [side1, end_b, side2, end_a];
+            for k in 0..4 {
+                let (x, y) = (ring[k], ring[(k + 1) % 4]);
+                d.constraints.push(Constraint::Coincident(
+                    EntityRef::at(x, Part::End),
+                    EntityRef::at(y, Part::Start),
+                ));
+                d.constraints.push(Constraint::Tangent(x, y));
+            }
+            d.constraints.push(Constraint::Equal(end_a, end_b));
+            Ok(())
+        })
+    }
+}
+
+// --- moving and copying -------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DraftMoveParams {
+    pub ids: Vec<u32>,
+    #[param(unit = "length")]
+    pub offset: [f64; 3],
+}
+
+/// Moves entities whole. What holds them has its say: held geometry goes
+/// as near as the constraints let it, and what is joined to it follows.
+pub struct DraftMove;
+
+impl Operator for DraftMove {
+    type Params = DraftMoveParams;
+    fn id() -> &'static str {
+        "draft.move"
+    }
+    fn label() -> &'static str {
+        "Move"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = need_drawing(doc.document())?;
+        let mut d = doc
+            .document()
+            .object(id)
+            .and_then(|o| o.drawing.as_deref())
+            .cloned()
+            .expect("a drawing");
+        let ids: Vec<EntityId> = params.ids.iter().map(|i| EntityId(*i)).collect();
+        known(
+            &d,
+            &ids.iter().map(|i| EntityRef::whole(*i)).collect::<Vec<_>>(),
+        )?;
+        let by = xy(params.offset);
+        // Free entities go exactly; held ones through the solver.
+        let (holding, free): (Vec<EntityId>, Vec<EntityId>) =
+            ids.iter().partition(|i| held(&d, **i));
+        for i in &free {
+            translate_part(&mut d, EntityRef::whole(*i), by);
+        }
+        if !holding.is_empty() {
+            let drags: Vec<kreate_scene::drawing_solve::Drag> = holding
+                .iter()
+                .flat_map(|i| d.parts(*i))
+                .map(|(at, p)| kreate_scene::drawing_solve::Drag { at, to: p + by })
+                .collect();
+            d.solve_dragging(&drags);
+        }
+        doc.document_mut()
+            .object_mut(id)
+            .expect("the drawing")
+            .drawing = Some(Box::new(d));
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Copies of entities moved by each of `moves`, with the constraints that
+/// hold the originals among themselves held on each copy too. The copies'
+/// ids.
+fn copy_moved(d: &mut Drawing, ids: &[EntityId], moves: &[glam::DAffine2]) -> Vec<EntityId> {
+    let mut made = Vec::new();
+    for m in moves {
+        let mut map: Vec<(EntityId, EntityId)> = Vec::new();
+        for id in ids {
+            let Some(e) = d.entity(*id).cloned() else {
+                continue;
+            };
+            let kind = match e.kind {
+                EntityKind::Point(p) => EntityKind::Point(m.transform_point2(p)),
+                EntityKind::Curve(c) => EntityKind::Curve(c.transformed(m)),
+                EntityKind::Text(mut t) => {
+                    t.at = m.transform_point2(t.at);
+                    EntityKind::Text(t)
+                }
+                EntityKind::Dimension(_) => continue,
+            };
+            let copy = d.add(kind);
+            if let Some(c) = d.entity_mut(copy) {
+                c.layer = e.layer;
+                c.color = e.color;
+                c.linetype = e.linetype;
+                c.lineweight = e.lineweight;
+                c.construction = e.construction;
+            }
+            map.push((*id, copy));
+            made.push(copy);
+        }
+        let to = |i: EntityId| map.iter().find(|(a, _)| *a == i).map(|(_, b)| *b);
+        let to_ref = |r: EntityRef| to(r.entity).map(|e| EntityRef::at(e, r.part));
+        let inner: Vec<Constraint> = d
+            .constraints
+            .iter()
+            .filter_map(|c| {
+                use Constraint::*;
+                Some(match c {
+                    Coincident(a, b) => Coincident(to_ref(*a)?, to_ref(*b)?),
+                    Parallel(a, b) => Parallel(to(*a)?, to(*b)?),
+                    Perpendicular(a, b) => Perpendicular(to(*a)?, to(*b)?),
+                    Tangent(a, b) => Tangent(to(*a)?, to(*b)?),
+                    Equal(a, b) => Equal(to(*a)?, to(*b)?),
+                    Concentric(a, b) => Concentric(to(*a)?, to(*b)?),
+                    Smooth(a, b) => Smooth(to(*a)?, to(*b)?),
+                    PointOn(p, c) => PointOn(to_ref(*p)?, to(*c)?),
+                    Midpoint(p, c) => Midpoint(to_ref(*p)?, to(*c)?),
+                    Symmetric(a, b, l) => Symmetric(to_ref(*a)?, to_ref(*b)?, to(*l)?),
+                    // Level and upright, and held places, do not survive a
+                    // turn; they are left to the person.
+                    Horizontal(..) | Vertical(..) | Fixed(..) => return None,
+                })
+            })
+            .collect();
+        d.constraints.extend(inner);
+    }
+    made
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DraftMirrorParams {
+    pub ids: Vec<u32>,
+    /// The line to mirror across, by its id.
+    pub axis: u32,
+}
+
+/// Copies of entities mirrored across a line.
+pub struct DraftMirror;
+
+impl Operator for DraftMirror {
+    type Params = DraftMirrorParams;
+    fn id() -> &'static str {
+        "draft.mirror"
+    }
+    fn label() -> &'static str {
+        "Mirror"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let ids: Vec<EntityId> = params
+            .ids
+            .iter()
+            .map(|i| EntityId(*i))
+            .filter(|i| i.0 != params.axis)
+            .collect();
+        edit(doc, |d| {
+            let Some(Curve2D::Line { a, b }) = d.curve(EntityId(params.axis)).cloned() else {
+                return Err(OpError::Failed("a mirror's axis is a line".into()));
+            };
+            let u = (b - a).normalize_or_zero();
+            if u == DVec2::ZERO {
+                return Err(OpError::Failed("a mirror's axis is a line".into()));
+            }
+            // Reflection across the line through `a` along `u`.
+            let r = glam::DMat2::from_cols(
+                DVec2::new(2.0 * u.x * u.x - 1.0, 2.0 * u.x * u.y),
+                DVec2::new(2.0 * u.x * u.y, 2.0 * u.y * u.y - 1.0),
+            );
+            let m = glam::DAffine2::from_mat2_translation(r, a - r * a);
+            copy_moved(d, &ids, &[m]);
+            Ok(())
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct DraftPatternParams {
+    pub ids: Vec<u32>,
+    /// In rows and columns, or round a centre.
+    #[param(variants("rectangular", "circular"))]
+    pub kind: u32,
+    /// How many along the first direction — or round the circle — the
+    /// original counted.
+    #[param(min = 1.0, max = 500.0)]
+    pub count: u32,
+    /// The step along the drawing's X.
+    #[param(unit = "length")]
+    pub spacing: f64,
+    #[param(min = 1.0, max = 500.0)]
+    pub count2: u32,
+    /// The step along the drawing's Y.
+    #[param(unit = "length")]
+    pub spacing2: f64,
+    /// What a circular pattern turns round.
+    #[param(unit = "length")]
+    pub centre: [f64; 3],
+    /// How far round a circular pattern goes. A full turn puts the copies
+    /// evenly round it; less, the last copy lands on the angle.
+    #[param(unit = "angle")]
+    pub angle: f64,
+}
+
+impl Default for DraftPatternParams {
+    fn default() -> Self {
+        let p = crate::ops::sketch_draw::PatternParams::default();
+        Self {
+            ids: Vec::new(),
+            kind: p.kind,
+            count: p.count,
+            spacing: p.spacing,
+            count2: p.count2,
+            spacing2: p.spacing2,
+            centre: p.centre,
+            angle: p.angle,
+        }
+    }
+}
+
+impl DraftPatternParams {
+    /// Where each copy goes, the original's place left out.
+    pub fn moves(&self) -> Vec<glam::DAffine2> {
+        crate::ops::sketch_draw::pattern_moves(&crate::ops::sketch_draw::PatternParams {
+            points: Vec::new(),
+            lines: Vec::new(),
+            kind: self.kind,
+            count: self.count,
+            spacing: self.spacing,
+            count2: self.count2,
+            spacing2: self.spacing2,
+            centre: self.centre,
+            angle: self.angle,
+        })
+    }
+}
+
+/// Copies of entities in rows and columns, or round a centre.
+pub struct DraftPattern;
+
+impl Operator for DraftPattern {
+    type Params = DraftPatternParams;
+    fn id() -> &'static str {
+        "draft.pattern"
+    }
+    fn label() -> &'static str {
+        "Pattern"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let ids: Vec<EntityId> = params.ids.iter().map(|i| EntityId(*i)).collect();
+        let moves = params.moves();
+        if moves.len() > 5000 {
+            return Err(OpError::Failed("that is too many copies".into()));
+        }
+        edit(doc, |d| {
+            copy_moved(d, &ids, &moves);
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,6 +1732,135 @@ mod tests {
             let id = active_drawing(&self.doc).expect("a drawing");
             self.doc.object(id).unwrap().drawing.as_deref().unwrap()
         }
+    }
+
+    fn areas(d: &Drawing) -> Vec<f64> {
+        let mut a: Vec<f64> = d.regions(1e-9).iter().map(|r| r.area).collect();
+        a.sort_by(f64::total_cmp);
+        a
+    }
+
+    /// A line begun where another ended is joined to it: dragging the
+    /// corner takes both.
+    #[test]
+    fn a_line_drawn_from_an_end_is_joined_to_it() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.line(points=[0, 0, 0.02, 0])").unwrap();
+        b.run("draft.line(points=[0.02, 0, 0.02, 0.01])").unwrap();
+        assert!(b.drawing().constraints.iter().any(|c| matches!(
+            c,
+            Constraint::Coincident(x, y) if x.entity == EntityId(2) && y.entity == EntityId(1)
+        )));
+        b.run("draft.drag(at=\"2.start\", to=(0.03, 0.005, 0))")
+            .unwrap();
+        let d = b.drawing();
+        let (e1, s2) = (
+            d.point_of(EntityRef::at(EntityId(1), Part::End)).unwrap(),
+            d.point_of(EntityRef::at(EntityId(2), Part::Start)).unwrap(),
+        );
+        assert!(e1.distance(s2) < 1e-9, "{e1} {s2}");
+    }
+
+    #[test]
+    fn a_polygon_is_equal_sides_on_a_circle_and_sizes_by_one_number() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.polygon(centre=(0, 0, 0), radius=0.01, sides=6)")
+            .unwrap();
+        let hexagon = |r: f64| 1.5 * 3f64.sqrt() * r * r;
+        let a = areas(b.drawing());
+        assert_eq!(a.len(), 1);
+        assert!((a[0] - hexagon(0.01)).abs() < 1e-12, "{a:?}");
+        // The ring's size drives every side.
+        b.run("draft.constrain(kind=\"fixed\", refs=\"7.center\")")
+            .unwrap();
+        b.run("draft.dimension(kind=\"radius\", refs=\"7\", value=0.02)")
+            .unwrap();
+        let a = areas(b.drawing());
+        assert!((a[0] - hexagon(0.02)).abs() < 1e-9, "{a:?}");
+    }
+
+    #[test]
+    fn a_slot_is_one_region_of_its_length_and_width() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.slot(a=(0, 0, 0), b=(0.03, 0, 0), width=0.01)")
+            .unwrap();
+        let a = areas(b.drawing());
+        let want = 0.03 * 0.01 + std::f64::consts::PI * 0.005 * 0.005;
+        assert_eq!(a.len(), 1);
+        assert!((a[0] - want).abs() < want * 1e-6, "{a:?} {want}");
+        // Held as drawn: solving moves nothing.
+        let mut d = b.drawing().clone();
+        assert!(d.solve().iter().all(|p| p.converged));
+        assert!((areas(&d)[0] - want).abs() < want * 1e-6);
+    }
+
+    /// Moved whole; held in place, it stays.
+    #[test]
+    fn a_move_takes_entities_whole_unless_held() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.circle(centre=(0, 0, 0), radius=0.01)")
+            .unwrap();
+        b.run("draft.rectangle(a=(0.02, 0, 0), b=(0.03, 0.01, 0))")
+            .unwrap();
+        b.run("draft.move(ids=[1, 2, 3, 4, 5], offset=(0.01, 0.02, 0))")
+            .unwrap();
+        let d = b.drawing();
+        assert_eq!(
+            d.point_of(EntityRef::at(EntityId(1), Part::Center)),
+            Some(DVec2::new(0.01, 0.02))
+        );
+        let corner = d.point_of(EntityRef::at(EntityId(2), Part::Start)).unwrap();
+        assert!(corner.distance(DVec2::new(0.03, 0.02)) < 1e-8, "{corner}");
+        b.run("draft.constrain(kind=\"fixed\", refs=\"1.center\")")
+            .unwrap();
+        b.run("draft.move(ids=[1], offset=(0.05, 0, 0))").unwrap();
+        let centre = b
+            .drawing()
+            .point_of(EntityRef::at(EntityId(1), Part::Center))
+            .unwrap();
+        assert!(centre.distance(DVec2::new(0.01, 0.02)) < 1e-9, "{centre}");
+    }
+
+    #[test]
+    fn mirrored_and_patterned_copies_make_regions_of_their_own() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.slot(a=(0.01, 0, 0), b=(0.03, 0, 0), width=0.004)")
+            .unwrap();
+        b.run("draft.line(points=[0, -0.05, 0, 0.05])").unwrap();
+        b.run("draft.mirror(ids=[1, 2, 3, 4], axis=5)").unwrap();
+        let a = areas(b.drawing());
+        assert_eq!(a.len(), 2, "{a:?}");
+        assert!((a[0] - a[1]).abs() < 1e-12);
+        let d = b.drawing();
+        let left = d.regions(1e-9)[0].outline(1e-6).iter().all(|p| p.x <= 1e-9)
+            || d.regions(1e-9)[1].outline(1e-6).iter().all(|p| p.x <= 1e-9);
+        assert!(left, "a copy across the axis");
+        // Held as the original is.
+        let mut d = d.clone();
+        assert!(d.solve().iter().all(|p| p.converged));
+        b.run("draft.pattern(ids=[1, 2, 3, 4], kind=\"rectangular\", count=3, spacing=0, count2=3, spacing2=0.01)")
+            .unwrap();
+        assert_eq!(areas(b.drawing()).len(), 4);
+        b.run("draft.pattern(ids=[1, 2, 3, 4], kind=\"circular\", count=4, centre=(0, 0, 0), angle=6.283185307179586)")
+            .unwrap();
+        assert!(areas(b.drawing()).len() >= 6);
+    }
+
+    /// Letters into a drawing are closed outlines: regions to extrude.
+    #[test]
+    fn text_in_a_drawing_is_closed_outlines() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("sketch.text(text=\"O\", size=0.02)").unwrap();
+        // The ring, and the counter inside it.
+        let rs = b.drawing().regions(1e-9);
+        assert_eq!(rs.len(), 2);
+        assert!(rs.iter().any(|r| r.holes.len() == 1), "an O is a ring");
     }
 
     #[test]

@@ -231,12 +231,29 @@ impl Operator for SketchText {
     }
     fn poll(_ctx: &Context, doc: &Document) -> bool {
         crate::ops::sketch_draw::active_sketch(doc).is_some()
+            || crate::ops::draft::active_drawing(doc).is_some()
     }
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
+        if crate::ops::draft::active_drawing(doc.document()).is_some() {
+            let l = laid_out(
+                &params.font,
+                &params.text,
+                params.size,
+                params.align,
+                params.line_spacing,
+            )?;
+            let at = DVec2::new(params.at[0], params.at[1]);
+            let rings = l
+                .contours
+                .iter()
+                .map(|c| c.iter().map(|p| at + p.as_dvec2()).collect())
+                .collect();
+            return crate::ops::draft::add_outlines(doc, rings);
+        }
         let id = crate::ops::sketch_draw::active_sketch(doc.document())
             .ok_or_else(|| OpError::Failed("no sketch is being drawn".into()))?;
         let l = laid_out(

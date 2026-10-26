@@ -115,6 +115,58 @@ impl Curve2D {
         }
     }
 
+    /// The curve moved by `m`, which keeps shapes: a turn, a mirror, a
+    /// shift, one scale both ways — what a copy, a mirror and a pattern do.
+    /// A mirror turns arcs and bulges the other way round, so each still
+    /// runs from its start to its end.
+    pub fn transformed(&self, m: &glam::DAffine2) -> Curve2D {
+        let p = |q: DVec2| m.transform_point2(q);
+        let det = m.matrix2.determinant();
+        let flip = det < 0.0;
+        let scale = det.abs().sqrt();
+        let angle_of = |c: DVec2, a: f64| (p(c + DVec2::from_angle(a)) - p(c)).to_angle();
+        match self {
+            Curve2D::Line { a, b } => Curve2D::Line { a: p(*a), b: p(*b) },
+            Curve2D::Circle { c, r } => Curve2D::Circle {
+                c: p(*c),
+                r: r * scale,
+            },
+            Curve2D::Arc { c, r, start, sweep } => Curve2D::Arc {
+                c: p(*c),
+                r: r * scale,
+                start: angle_of(*c, *start),
+                sweep: if flip { -sweep } else { *sweep },
+            },
+            Curve2D::Ellipse {
+                c,
+                major,
+                ratio,
+                start,
+                sweep,
+            } => Curve2D::Ellipse {
+                c: p(*c),
+                major: m.transform_vector2(*major),
+                ratio: *ratio,
+                start: if flip { -start } else { *start },
+                sweep: if flip { -sweep } else { *sweep },
+            },
+            Curve2D::Polyline { verts, closed } => Curve2D::Polyline {
+                verts: verts
+                    .iter()
+                    .map(|(v, b)| (p(*v), if flip { -b } else { *b }))
+                    .collect(),
+                closed: *closed,
+            },
+            Curve2D::Spline(s) => Curve2D::Spline(Spline {
+                degree: s.degree,
+                ctrl: s.ctrl.iter().map(|q| p(*q)).collect(),
+                knots: s.knots.clone(),
+                weights: s.weights.clone(),
+                fit: s.fit.iter().map(|q| p(*q)).collect(),
+            }),
+        }
+    }
+
     /// The curve `distance` to the left of its direction of travel (to the
     /// right when negative), or `None` when nothing is left of it — a
     /// circle offset inward past its centre. Lines, arcs and circles are
@@ -536,6 +588,54 @@ mod tests {
 
     fn v(x: f64, y: f64) -> DVec2 {
         DVec2::new(x, y)
+    }
+
+    /// Mirrored, turned or scaled, every kind is the moved points of the
+    /// original, still from its start to its end.
+    #[test]
+    fn a_moved_curve_is_the_moved_points() {
+        let curves = [
+            Curve2D::Line {
+                a: v(0.0, 0.0),
+                b: v(2.0, 1.0),
+            },
+            Curve2D::Arc {
+                c: v(1.0, 1.0),
+                r: 2.0,
+                start: 0.3,
+                sweep: 2.0,
+            },
+            Curve2D::Ellipse {
+                c: v(0.0, 1.0),
+                major: v(2.0, 0.5),
+                ratio: 0.4,
+                start: 0.2,
+                sweep: 3.0,
+            },
+            Curve2D::Polyline {
+                verts: vec![(v(0.0, 0.0), 0.5), (v(2.0, 0.0), -0.3), (v(2.0, 2.0), 0.0)],
+                closed: false,
+            },
+            Curve2D::Spline(Spline::through(&[v(0.0, 0.0), v(1.0, 2.0), v(3.0, 1.0)])),
+        ];
+        let moves = [
+            glam::DAffine2::from_scale_angle_translation(DVec2::splat(1.5), 0.7, v(3.0, -1.0)),
+            // A mirror across the line y = x.
+            glam::DAffine2::from_cols(v(0.0, 1.0), v(1.0, 0.0), v(0.0, 0.0)),
+        ];
+        for c in &curves {
+            for m in &moves {
+                let moved = c.transformed(m);
+                let (lo, hi) = c.domain();
+                let (mlo, mhi) = moved.domain();
+                for k in 0..=8 {
+                    let s = k as f64 / 8.0;
+                    let want = m.transform_point2(c.point(lo + (hi - lo) * s));
+                    let got = moved.point(mlo + (mhi - mlo) * s);
+                    assert!(want.distance(got) < 1e-9, "{c:?} by {m:?}: {want} vs {got}");
+                }
+            }
+        }
     }
 
     /// Any curve's part is the same points over the shorter span.

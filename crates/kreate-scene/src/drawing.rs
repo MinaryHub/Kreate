@@ -430,6 +430,48 @@ impl Drawing {
         }
     }
 
+    /// The points an entity has, each by the part it is: a line's ends, a
+    /// circle's centre, an arc's centre and ends, a polyline's vertices, a
+    /// spline's fit points (or its ends, given by control points), a lone
+    /// point. What is snapped to, picked, joined and dragged.
+    pub fn parts(&self, id: EntityId) -> Vec<(EntityRef, DVec2)> {
+        let Some(e) = self.entity(id) else {
+            return Vec::new();
+        };
+        let at = |part| EntityRef::at(id, part);
+        match &e.kind {
+            EntityKind::Point(p) => vec![(EntityRef::whole(id), *p)],
+            EntityKind::Text(_) | EntityKind::Dimension(_) => Vec::new(),
+            EntityKind::Curve(c) => match c {
+                Curve2D::Line { a, b } => vec![(at(Part::Start), *a), (at(Part::End), *b)],
+                Curve2D::Circle { c, .. } => vec![(at(Part::Center), *c)],
+                Curve2D::Arc { c: centre, .. } | Curve2D::Ellipse { c: centre, .. } => {
+                    if c.is_closed() {
+                        vec![(at(Part::Center), *centre)]
+                    } else {
+                        vec![
+                            (at(Part::Center), *centre),
+                            (at(Part::Start), c.start()),
+                            (at(Part::End), c.end()),
+                        ]
+                    }
+                }
+                Curve2D::Polyline { verts, .. } => verts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (at(Part::Vertex(i as u32)), v.0))
+                    .collect(),
+                Curve2D::Spline(s) if !s.fit.is_empty() => s
+                    .fit
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (at(Part::Vertex(i as u32)), *p))
+                    .collect(),
+                Curve2D::Spline(_) => vec![(at(Part::Start), c.start()), (at(Part::End), c.end())],
+            },
+        }
+    }
+
     /// The curves that bound regions: every curve not for construction.
     /// With each, the entity it is.
     pub fn profile_curves(&self) -> Vec<(EntityId, &Curve2D)> {
