@@ -12,6 +12,21 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- A 2D drafting mode, the first part of it: drawings of exact lines,
+  circles, arcs, ellipses, polylines and splines, held by constraints
+  (coincident, horizontal, vertical, parallel, perpendicular, tangent,
+  equal, concentric, on a curve, symmetric, midpoint, fixed) and by
+  dimensions that drive the drawing or, switched to driven, only measure
+  it, shown in brackets. Every sketch tool draws in one — line, rectangle,
+  circle, arc, spline, polygon, slot, point, text, trim (showing the piece
+  first), offset, fillet, mirror, pattern — and what is drawn from a point
+  already there is joined to it. A drawing's closed regions extrude and
+  revolve, and its dimensions bind to parameters. Its panel lists its
+  dimensions and constraints. The connector reads one with `get_drawing`
+  and draws with the `draft.*` operators.
+- F2 goes between 2D and 3D: into the selected drawing (or the scene's
+  first, or a new one) and back out. In 2D the view stays square to the
+  drawing; what would turn it pans it.
 - A welcome card over the empty document at the first start: what Kreate
   does, in four lines each saying how to begin — modelling, designing a
   part, shading and rendering, working with an assistant — and a button
@@ -34,6 +49,12 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- New sketches are drawings, and a file's sketches open as drawings: the
+  same objects, building the same solids, their revolve axes and the
+  parameters bound to their dimensions carried across. The file format is
+  1.5; Kreate 0.3 keeps a drawing in a file it saves but does not show it.
+- Rename is Ctrl+F2 (or a double-click in the outliner); F2 is the 2D/3D
+  switch.
 - The zip reader is `zip` 9: three advisories on 6's extraction, one on
   permissions kept through symbolic links, no longer apply. File dialogs
   are `rfd` 0.17, which drops the unmaintained D-Bus crates 0.15 carried.
@@ -44,6 +65,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- Pushing a box's end or middle band in to make a notch left a spike on
+  the face beside it in the released program (not in a development build).
 - A damaged file no longer takes the program down with it. Every reader
   is now tested against thousands of broken copies of a sound file — bits
   flipped, cut short, numbers swapped for impossible ones — and what that
