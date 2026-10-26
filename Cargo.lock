@@ -1577,6 +1577,7 @@ name = "kreate-ops"
 version = "0.3.1"
 dependencies = [
  "glam",
+ "kreate-geom2d",
  "kreate-io",
  "kreate-math",
  "kreate-mesh",

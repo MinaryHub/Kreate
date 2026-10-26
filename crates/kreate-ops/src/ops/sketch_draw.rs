@@ -195,7 +195,7 @@ impl Default for NewSketchParams {
 
 /// A sketch's plane on a part's face, from the parameters: its origin, its
 /// turn, and the face's outlines in the sketch's plane.
-fn face_plane(
+pub(crate) fn face_plane(
     doc: &Document,
     params: &NewSketchParams,
 ) -> Result<crate::ops::sketch_face::FaceFrame, OpError> {
@@ -251,7 +251,7 @@ fn face_plane(
 }
 
 /// The part a sketch on a face was made on: the object `face_plane` reads.
-fn face_host(doc: &Document, params: &NewSketchParams) -> Option<ObjectId> {
+pub(crate) fn face_host(doc: &Document, params: &NewSketchParams) -> Option<ObjectId> {
     if params.object.trim().is_empty() {
         doc.selection.active
     } else {

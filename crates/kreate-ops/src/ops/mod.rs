@@ -11,6 +11,7 @@ pub mod armature;
 pub mod collection;
 pub mod curve;
 pub mod design;
+pub mod draft;
 pub mod driver;
 pub mod edges_sketch;
 pub mod feature;
@@ -55,6 +56,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     design::register(registry);
     sketch::register(registry);
     sketch_draw::register(registry);
+    draft::register(registry);
     registry.register::<sketch_trim::Trim>();
     registry.register::<edges_sketch::EdgesToSketch>();
     curve::register(registry);
