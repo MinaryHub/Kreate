@@ -11,6 +11,7 @@ pub mod curve;
 pub mod design;
 pub mod document;
 pub mod drawing;
+pub mod drawing_solve;
 pub mod driver;
 pub mod edit_session;
 pub mod expression;
