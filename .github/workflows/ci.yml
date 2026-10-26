@@ -70,6 +70,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          KREATE_PUSH_TRACE=1 cargo test -p kreate-mesh --lib push_tests
           cargo test --workspace --exclude kreate --exclude kreate-render --no-fail-fast
           cargo test -p kreate-render --no-fail-fast -- --test-threads=1
           cargo test -p kreate --no-fail-fast -- --test-threads=1

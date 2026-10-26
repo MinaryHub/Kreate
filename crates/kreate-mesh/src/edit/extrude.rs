@@ -200,6 +200,31 @@ pub fn extrude_selected_faces(mesh: &mut BMesh, distance: f32) -> Result<Extrusi
 /// the other, and the wall over the top is then a triangle in the top's own
 /// plane. Any wall left lying in the plane of the face beyond it is merged
 /// into that face, which is then the top with a notch in it.
+/// `KREATE_PUSH_TRACE=1`: every face's ring, with positions, to stderr at
+/// each stage of a push — a diagnostic for a result that differs between
+/// machines.
+fn trace(mesh: &BMesh, label: &str) {
+    if std::env::var_os("KREATE_PUSH_TRACE").is_none() {
+        return;
+    }
+    eprintln!("== {label}");
+    for f in mesh.face_ids() {
+        let ring: Vec<String> = mesh
+            .face_verts(f)
+            .iter()
+            .map(|v| {
+                let p = mesh.position(*v).unwrap_or(Vec3::ZERO);
+                format!("{}@({},{},{})", v.index(), p.x, p.y, p.z)
+            })
+            .collect();
+        eprintln!("  f{} [{}]", f.index(), ring.join(" "));
+    }
+}
+
+fn tracing_on() -> bool {
+    std::env::var_os("KREATE_PUSH_TRACE").is_some()
+}
+
 pub fn push_faces(mesh: &mut BMesh, faces: &[FaceId], offset: Vec3) -> Result<Extrusion, BmError> {
     let dir = offset.normalize_or_zero();
     if dir == Vec3::ZERO {
@@ -279,7 +304,15 @@ pub fn push_faces(mesh: &mut BMesh, faces: &[FaceId], offset: Vec3) -> Result<Ex
             }
         }
     }
+    trace(mesh, "before");
+    if tracing_on() {
+        eprintln!(
+            "sliding {:?}",
+            sliding.iter().map(|v| v.index()).collect::<Vec<_>>()
+        );
+    }
     let out = extrude_faces(mesh, faces, offset)?;
+    trace(mesh, "extruded");
     // Each sliding vertex's copy: the new vertex where it was, moved.
     let mut groups: Vec<Vec<VertId>> = Vec::new();
     for (v, p) in &positions {
@@ -312,7 +345,24 @@ pub fn push_faces(mesh: &mut BMesh, faces: &[FaceId], offset: Vec3) -> Result<Ex
             Some((*v, copy))
         })
         .collect();
+    if tracing_on() {
+        eprintln!(
+            "groups {:?}",
+            groups
+                .iter()
+                .map(|g| g.iter().map(|v| v.index()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "standing {:?}",
+            standing
+                .iter()
+                .map(|(a, b)| (a.index(), b.index()))
+                .collect::<Vec<_>>()
+        );
+    }
     crate::edit::merge::merge_groups(mesh, &groups, crate::edit::merge::MergeTarget::First)?;
+    trace(mesh, "merged");
     let lifted: Vec<VertId> = lifted
         .into_iter()
         .filter(|v| mesh.vert(*v).is_some())
@@ -379,11 +429,32 @@ pub fn push_faces(mesh: &mut BMesh, faces: &[FaceId], offset: Vec3) -> Result<Ex
             }
         }
     }
+    if tracing_on() {
+        eprintln!(
+            "walls {:?}",
+            walls.iter().map(|f| f.index()).collect::<Vec<_>>()
+        );
+        eprintln!(
+            "joined {:?}",
+            joined
+                .iter()
+                .map(|g| g.iter().map(|f| f.index()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+    }
     let mut merged = Vec::new();
     for group in &joined {
         merged.extend(crate::edit::dissolve_faces(mesh, group, &[])?.faces);
     }
+    trace(mesh, "dissolved");
+    if tracing_on() {
+        eprintln!(
+            "merged {:?}",
+            merged.iter().map(|f| f.index()).collect::<Vec<_>>()
+        );
+    }
     unspike(mesh, merged)?;
+    trace(mesh, "unspiked");
     // The pushed faces themselves are untouched by that, but look again.
     new_faces.retain(|f| mesh.face(*f).is_some());
     let side_faces: Vec<FaceId> = out
