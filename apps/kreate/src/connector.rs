@@ -242,6 +242,7 @@ impl App {
             }
             "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
             "sketch" => self.sketch_json(text("object").as_deref()),
+            "drawing" => self.drawing_json(text("object").as_deref()),
             "measure" => {
                 let names: Vec<String> = params
                     .get("objects")
@@ -1364,6 +1365,70 @@ impl App {
             "constraints": constraints,
             "regions": regions,
             "made_solid": o.geometry_nodes.is_some(),
+        }))
+    }
+
+    /// A drawing read out: its plane, its layers, its entities, constraints
+    /// and dimensions as the file holds them, how held each connected piece
+    /// is, and the regions it closes with a point inside each — what
+    /// feature.extrude's seeds take.
+    pub(super) fn drawing_json(&self, name: Option<&str>) -> Result<serde_json::Value, String> {
+        use serde_json::json;
+        let doc = &self.doc;
+        let id = match name {
+            Some(name) => doc
+                .objects()
+                .find(|(_, o)| o.name == name)
+                .map(|(id, _)| id)
+                .ok_or_else(|| format!("no object called {name:?}"))?,
+            None => kreate_ops::ops::draft::active_drawing(doc)
+                .ok_or("no drawing is active: name one with object=, or select it")?,
+        };
+        let o = doc.object(id).ok_or("no such object")?;
+        let drawing = o
+            .drawing
+            .as_deref()
+            .ok_or_else(|| format!("{:?} is not a drawing", o.name))?;
+        let world = doc.world_transform(id);
+        let record = kreate_io::drawing_record::record(drawing);
+        let pieces: Vec<_> = drawing
+            .clone()
+            .solve()
+            .iter()
+            .map(|p| {
+                json!({
+                    "entities": p.entities.iter().map(|e| e.0).collect::<Vec<_>>(),
+                    "converged": p.converged,
+                    "freedom": p.freedom,
+                })
+            })
+            .collect();
+        let seeds = kreate_scene::feature::profile_seeds(doc, id);
+        let regions: Vec<_> = drawing
+            .regions(1e-7)
+            .iter()
+            .map(|r| {
+                let seed = seeds
+                    .iter()
+                    .find(|s| r.contains(kreate_math::DVec2::new(s[0], s[1])));
+                json!({ "area": r.area, "holes": r.holes.len(), "seed": seed })
+            })
+            .collect();
+        Ok(json!({
+            "object": o.name,
+            "parent": o.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone()),
+            "plane": {
+                "origin": world.translation.to_array(),
+                "x_axis": world.transform_vector3(kreate_math::DVec3::X).normalize_or_zero().to_array(),
+                "y_axis": world.transform_vector3(kreate_math::DVec3::Y).normalize_or_zero().to_array(),
+                "normal": world.transform_vector3(kreate_math::DVec3::Z).normalize_or_zero().to_array(),
+            },
+            "layers": record.layers,
+            "current_layer": record.current_layer,
+            "entities": record.entities,
+            "constraints": record.constraints,
+            "pieces": pieces,
+            "regions": regions,
         }))
     }
 

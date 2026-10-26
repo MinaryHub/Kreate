@@ -72,7 +72,7 @@ object. Placement: object.place_on(target=...) stands the active object on anoth
 object.align lines up sides of bounding boxes; check_overlaps finds parts that run into \
 each other. mesh.select_where selects elements by a world-space box, a face direction or a \
 material slot instead of by index. data.purge removes unused meshes, materials and images.\n\
-Reading: get_sketch gives a sketch's points, lines, constraints and regions by index; measure gives volume, mass, area, bounds and the gap between two parts; get_history the steps done so far. \
+Reading: get_drawing gives a drawing's entities, constraints, dimensions, how held it is and the regions it closes with a seed in each (draft.new starts one; draft.line, draft.rectangle, draft.circle, draft.arc, draft.spline draw; draft.constrain and draft.dimension hold; draft.trim, draft.offset, draft.fillet edit; feature.extrude and feature.revolve make solids of its regions); get_sketch gives an older sketch's points, lines, constraints and regions by index; measure gives volume, mass, area, bounds and the gap between two parts; get_history the steps done so far. \
 Looking: get_context says what the user has selected and where they look — read it when they \
 say \"this\" or \"here\". capture_viewport(views=[\"front\",\"right\",\"top\"]) shows a shape \
 from three sides at once; only=[...] shows some objects alone.\n\
@@ -424,6 +424,17 @@ pub fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "get_drawing",
+            "description": "A drawing read out (the 2D drafting mode's, made by draft.new): its plane in the world (origin, X and Y axes, normal); its layers; its entities, each with its id, type (point, curve, text, dimension), layer and, for a curve, the curve exactly — line a/b, circle c/r, arc c/r/start/sweep in radians, ellipse, polyline verts [x, y, bulge], spline; its constraints, naming entities by id and parts as [id, \"start\"|\"end\"|\"center\"|\"mid\"|\"vN\"]; each connected piece's entities with whether it converged and its degrees of freedom (0 is fully held); and the regions it closes, each with its area in square metres, its holes and a seed point inside it for feature.extrude. Coordinates are metres on the plane. Entity ids are what draft.constrain, draft.dimension, draft.trim, draft.delete and the rest take, as `3` or `3.start`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "The drawing object's name; left out, the active drawing." }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "measure",
             "description": "Measures one or two mesh objects in the world: for each its volume in cubic metres and mass in kilograms (at the scene's density, or `density` kg/m3) when its surface is closed, surface area, centre of mass, bounds and dimensions. For two, how far apart their surfaces are (zero when they touch or overlap), the distance between their centres, and the gap between their bounding boxes on each axis (negative where the boxes overlap). What a part's weight, a clearance or a wall's thickness is asked by.",
             "inputSchema": {
@@ -564,6 +575,7 @@ fn method_of(tool: &str) -> Option<&'static str> {
         "save_file" => "save",
         "export_file" => "export",
         "get_sketch" => "sketch",
+        "get_drawing" => "drawing",
         "measure" => "measure",
         "get_history" => "history",
         // Offered for weeks and never reachable: the list stopped at
