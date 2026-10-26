@@ -1476,3 +1476,137 @@ mod tests {
         let _ = (PropertyMap::new(), PropertyValue::Bool(true));
     }
 }
+
+#[cfg(test)]
+mod feature_tests {
+    use super::*;
+    use crate::history::History;
+    use crate::operator::{Mode, OperatorRegistry};
+    use kreate_scene::modifier::{EvalCtx, ModifierCache};
+
+    fn run(r: &OperatorRegistry, h: &mut History, doc: &mut Document, line: &str) {
+        let call = crate::script::parse_call(r, line).unwrap_or_else(|e| panic!("{line}: {e}"));
+        h.dispatch(
+            r,
+            doc,
+            &Context { mode: Mode::Object },
+            call.op_id,
+            &call.params,
+        )
+        .unwrap_or_else(|e| panic!("{line}: {e}"));
+    }
+
+    fn body_volume(doc: &Document) -> f64 {
+        let (id, _) = doc
+            .objects()
+            .find(|(_, o)| !o.features.is_empty())
+            .expect("a body");
+        let mesh = ModifierCache::new()
+            .evaluated(doc, id, &EvalCtx::still())
+            .expect("its solid");
+        assert!(kreate_mesh::measure::is_closed(&mesh), "a closed solid");
+        kreate_mesh::measure::mass_properties(&mesh, |p| p).volume
+    }
+
+    /// The flow the sketch had, on a drawing: a plate with a hole, 10 mm
+    /// up; its width changed on its dimension, and the body following.
+    #[test]
+    fn a_plate_with_a_hole_drawn_and_extruded_follows_its_dimension() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        run(&r, &mut h, &mut doc, "draft.new()");
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.rectangle(a=(0, 0, 0), b=(0.04, 0.02, 0))",
+        );
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.constrain(kind=\"fixed\", refs=\"1.start\")",
+        );
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.dimension(kind=\"aligned\", refs=\"1\", value=0.04)",
+        );
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.circle(centre=(0.02, 0.01, 0), radius=0.005)",
+        );
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.extrude(seeds=[0.002, 0.002], distance=0.01)",
+        );
+        let disc = std::f64::consts::PI * 0.005f64.powi(2) * 0.01;
+        let want = 0.04 * 0.02 * 0.01 - disc;
+        let v = body_volume(&doc);
+        assert!((v - want).abs() < want * 1e-3, "{v} against {want}");
+        // Wider, by its dimension: the body follows.
+        let drawing = doc
+            .objects()
+            .find(|(_, o)| o.drawing.is_some())
+            .map(|(id, _)| id)
+            .unwrap();
+        let dim = doc
+            .object(drawing)
+            .unwrap()
+            .drawing
+            .as_deref()
+            .unwrap()
+            .entities
+            .iter()
+            .find(|e| matches!(e.kind, EntityKind::Dimension(_)))
+            .unwrap()
+            .id;
+        doc.selection.active = Some(drawing);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            &format!(
+                "draft.dimension_set(id={}, value=0.06, driving=true)",
+                dim.0
+            ),
+        );
+        let want = 0.06 * 0.02 * 0.01 - disc;
+        let v = body_volume(&doc);
+        assert!((v - want).abs() < want * 1e-3, "{v} against {want}");
+    }
+
+    /// An open profile turned about one of the drawing's lines.
+    #[test]
+    fn an_open_profile_turned_about_a_drawn_line_is_a_solid() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        run(&r, &mut h, &mut doc, "draft.new()");
+        // The axis first (entity 1), then the profile beside it.
+        run(&r, &mut h, &mut doc, "draft.line(points=[0, 0, 0, 0.05])");
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.line(points=[0, 0, 0.03, 0, 0.03, 0.05, 0, 0.05])",
+        );
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.revolve(seeds=[0.015, 0.025], axis=[1, 1], about=\"line\", angle=6.283185307179586)",
+        );
+        let v = body_volume(&doc);
+        let want = std::f64::consts::PI * 0.03f64.powi(2) * 0.05;
+        assert!((v - want).abs() < want * 3e-3, "{v} against {want}");
+    }
+}

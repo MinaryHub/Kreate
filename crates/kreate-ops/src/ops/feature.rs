@@ -11,7 +11,11 @@ use kreate_scene::feature::{self, Feature, Operation, Shape};
 use kreate_scene::{DocMut, Document};
 
 use crate::operator::{Context, OpError, OpResult, Operator};
-use crate::ops::sketch_draw::active_sketch;
+/// The profile a feature is made from: the active sketch, or the active
+/// drawing.
+fn active_sketch(doc: &kreate_scene::Document) -> Option<kreate_scene::document::ObjectId> {
+    crate::ops::sketch_draw::active_sketch(doc).or_else(|| crate::ops::draft::active_drawing(doc))
+}
 use crate::OpParams;
 
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
@@ -510,15 +514,20 @@ impl Operator for Revolve {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
+        // A drawing names its axis line by its id: one number, or the same
+        // twice. A sketch names the line's two points.
+        let drawing = crate::ops::draft::active_drawing(doc.document()).is_some();
         let [a, b] = match params.about {
             1 => [feature::AXIS_X; 2],
             2 => [feature::AXIS_Y; 2],
             _ => match params.axis[..] {
+                [a] if drawing => [a, a],
                 [a, b] => [a, b],
                 _ => return Err(OpError::Failed("pick the line to turn about".into())),
             },
         };
-        if (a == b && params.about == 0) || !params.angle.is_finite() || params.angle == 0.0 {
+        let no_line = if drawing { a != b } else { a == b };
+        if (no_line && params.about == 0) || !params.angle.is_finite() || params.angle == 0.0 {
             return Err(OpError::Failed(
                 "a revolve needs an axis and an angle".into(),
             ));

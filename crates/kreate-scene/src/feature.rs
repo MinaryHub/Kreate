@@ -140,6 +140,19 @@ pub fn revolve_axis(
         [AXIS_Y, AXIS_Y] => return Some((Vec2::ZERO, Vec2::Y)),
         _ => {}
     }
+    // A drawing names its axis line by its id, twice.
+    if let Some(drawing) = doc.object(sketch).and_then(|o| o.drawing.as_deref()) {
+        if axis[0] != axis[1] {
+            return None;
+        }
+        let kreate_geom2d::Curve2D::Line { a, b } =
+            drawing.curve(crate::drawing::EntityId(axis[0]))?
+        else {
+            return None;
+        };
+        let (a, b) = (a.as_vec2(), b.as_vec2());
+        return (a.distance(b) > 0.0).then_some((a, b - a));
+    }
     let mesh = doc
         .object(sketch)
         .and_then(|o| o.mesh())
@@ -212,25 +225,37 @@ fn seeds_among(
     sketch: crate::document::ObjectId,
     regions: &[Region],
 ) -> Vec<[f64; 2]> {
-    let (Some(object), Some(mesh)) = (
-        doc.object(sketch),
-        doc.object(sketch)
-            .and_then(|o| o.mesh())
-            .and_then(|m| doc.mesh(m)),
-    ) else {
+    let Some(object) = doc.object(sketch) else {
         return Vec::new();
     };
-    let fixed: Vec<Vec2> = object
-        .sketch
-        .iter()
-        .filter_map(|c| match c {
-            crate::sketch::Constraint::Fixed { a, .. } => mesh
-                .positions()
-                .get(*a as usize)
-                .map(|p| Vec2::new(p.x, p.y)),
-            _ => None,
-        })
-        .collect();
+    // Points held where they are — a face's projected outline — whose
+    // regions alone are no profile.
+    let fixed: Vec<Vec2> = match object.drawing.as_deref() {
+        Some(drawing) => drawing
+            .constraints
+            .iter()
+            .filter_map(|c| match c {
+                crate::drawing::Constraint::Fixed(_, at) => Some(at.as_vec2()),
+                _ => None,
+            })
+            .collect(),
+        None => {
+            let Some(mesh) = object.mesh().and_then(|m| doc.mesh(m)) else {
+                return Vec::new();
+            };
+            object
+                .sketch
+                .iter()
+                .filter_map(|c| match c {
+                    crate::sketch::Constraint::Fixed { a, .. } => mesh
+                        .positions()
+                        .get(*a as usize)
+                        .map(|p| Vec2::new(p.x, p.y)),
+                    _ => None,
+                })
+                .collect()
+        }
+    };
     let on_fixed = |p: &Vec2| fixed.iter().any(|f| f.distance(*p) < 1e-7);
     // A ring as its set of points, which way round it runs left out.
     let key = |ring: &[Vec2]| -> Vec<(u32, u32)> {
@@ -298,6 +323,9 @@ fn sketch_drawing(
     sketch: crate::document::ObjectId,
 ) -> Option<(Vec<Vec2>, Vec<[u32; 2]>)> {
     let object = doc.object(sketch)?;
+    if let Some(drawing) = object.drawing.as_deref() {
+        return Some(drawn_edges(drawing));
+    }
     let mesh = object.mesh().and_then(|m| doc.mesh(m))?;
     let points: Vec<Vec2> = mesh
         .positions()
@@ -314,6 +342,37 @@ fn sketch_drawing(
             .filter(|l| !crate::sketch::Constraint::is_construction(&object.sketch, *l)),
     );
     Some((points, edges))
+}
+
+/// How finely a drawing's curves are drawn for a feature: a hundredth of a
+/// millimetre from the true curve, which no part shows and no machine
+/// holds.
+pub const DRAWING_CHORD: f64 = 1e-5;
+
+/// A drawing's profile curves as points and the edges between them, for
+/// the region finder and the sweeps that take points: each curve drawn to
+/// [`DRAWING_CHORD`], its ends shared with whatever else ends there.
+fn drawn_edges(drawing: &crate::drawing::Drawing) -> (Vec<Vec2>, Vec<[u32; 2]>) {
+    let mut points: Vec<Vec2> = Vec::new();
+    let mut edges: Vec<[u32; 2]> = Vec::new();
+    let index = |p: kreate_geom2d::DVec2, points: &mut Vec<Vec2>| -> u32 {
+        let q = Vec2::new(p.x as f32, p.y as f32);
+        if let Some(i) = points.iter().position(|o| o.distance(q) < 1e-7) {
+            return i as u32;
+        }
+        points.push(q);
+        (points.len() - 1) as u32
+    };
+    for (_, curve) in drawing.profile_curves() {
+        let drawn = curve.tessellate(DRAWING_CHORD);
+        let ids: Vec<u32> = drawn.iter().map(|p| index(*p, &mut points)).collect();
+        for w in ids.windows(2) {
+            if w[0] != w[1] {
+                edges.push([w[0], w[1]]);
+            }
+        }
+    }
+    (points, edges)
 }
 
 /// The solid one feature makes, in its sketch's own space; empty when its
