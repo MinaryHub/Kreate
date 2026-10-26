@@ -69,7 +69,8 @@ impl Default for AddPrimitiveParams {
     fn default() -> Self {
         Self {
             shape: 1, // cube
-            size: 2.0,
+            // A 500 mm cube: the size of a part on a desk, not a room.
+            size: 0.5,
             segments: 32,
             rings: 16,
             location: [0.0; 3],
@@ -5053,7 +5054,7 @@ mod tests {
         );
     }
 
-    /// On the floor: a 2 m cube's bottom at the location, not its middle;
+    /// On the floor: a 0.5 m cube's bottom at the location, not its middle;
     /// turned on its edge, its lowest corner there.
     #[test]
     fn a_primitive_on_the_floor_stands_on_its_location() {
@@ -5071,7 +5072,7 @@ mod tests {
         );
         let id = d.selection.active.unwrap();
         let t = d.object(id).unwrap().transform.translation;
-        assert!((t - DVec3::new(1.0, 2.0, 1.5)).length() < 1e-9, "{t:?}");
+        assert!((t - DVec3::new(1.0, 2.0, 0.75)).length() < 1e-9, "{t:?}");
         run(
             &r,
             &mut h,
@@ -5088,7 +5089,10 @@ mod tests {
         );
         let id = d.selection.active.unwrap();
         let t = d.object(id).unwrap().transform.translation;
-        assert!((t.z - 2f64.sqrt()).abs() < 1e-6, "on its edge: {t:?}");
+        assert!(
+            (t.z - 0.25 * 2f64.sqrt()).abs() < 1e-6,
+            "on its edge: {t:?}"
+        );
     }
 
     #[test]

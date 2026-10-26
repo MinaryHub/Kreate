@@ -16866,7 +16866,7 @@ mod tests {
         let mut app = app();
         let report = app.run_script_reporting(
             "kreate.ops.mesh.select_nothing()
-kreate.ops.object.add_primitive()",
+kreate.ops.object.add_primitive(size=2.0)",
         );
         assert_eq!(report.len(), 2);
         let why = report[0].result.as_ref().unwrap_err();
@@ -16905,8 +16905,8 @@ kreate.ops.sketch.rectangle(a=(0, 0, 0), b=(0.02, 0.01, 0))",
     fn two_objects_are_measured_and_the_gap_between_them() {
         let mut app = app();
         app.run_script_reporting(
-            "kreate.ops.object.add_primitive()
-kreate.ops.object.add_primitive(location=(2.5, 0, 0))",
+            "kreate.ops.object.add_primitive(size=2.0)
+kreate.ops.object.add_primitive(size=2.0, location=(2.5, 0, 0))",
         );
         let out = app
             .bridge_call(
@@ -16946,7 +16946,7 @@ kreate.ops.object.add_primitive(location=(2.5, 0, 0))",
     fn the_history_is_read_out_as_its_lines() {
         let mut app = app();
         app.run_script_reporting(
-            "kreate.ops.object.add_primitive()
+            "kreate.ops.object.add_primitive(size=2.0)
 kreate.ops.object.set_transform(location=(1, 0, 0))",
         );
         app.undo();
@@ -16972,7 +16972,7 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
     fn the_scene_is_listed_in_part_when_asked_and_in_short_when_big() {
         let mut app = app();
         for _ in 0..3 {
-            app.run_op("object.add_primitive", PropertyMap::new());
+            app.run_op("object.add_primitive", two_metre_cube());
         }
         let scene =
             |app: &mut App, params: serde_json::Value| app.bridge_call("scene", &params).unwrap();
@@ -17012,9 +17012,9 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
     fn overlaps_are_checked_among_the_objects_named() {
         let mut app = app();
         app.run_script_reporting(
-            "kreate.ops.object.add_primitive()
-kreate.ops.object.add_primitive(location=(1, 0, 0))
-kreate.ops.object.add_primitive(location=(0, 1, 0))",
+            "kreate.ops.object.add_primitive(size=2.0)
+kreate.ops.object.add_primitive(size=2.0, location=(1, 0, 0))
+kreate.ops.object.add_primitive(size=2.0, location=(0, 1, 0))",
         );
         let all = app.bridge_call("overlaps", &serde_json::json!({})).unwrap();
         assert_eq!(all["overlapping"].as_array().unwrap().len(), 3);
@@ -17040,8 +17040,8 @@ kreate.ops.object.add_primitive(location=(0, 1, 0))",
     fn a_line_selects_its_object_and_enters_the_mode_it_needs() {
         let mut app = app();
         let report = app.run_script_reporting(
-            "kreate.ops.object.add_primitive()
-kreate.ops.object.add_primitive(location=(3, 0, 0))
+            "kreate.ops.object.add_primitive(size=2.0)
+kreate.ops.object.add_primitive(size=2.0, location=(3, 0, 0))
 kreate.ops.mesh.select(action=\"all\", object=\"Cube\")
 kreate.ops.mesh.translate(translation=(0, 0, 1))
 kreate.ops.object.set_transform(object=\"Cube.001\", location=(3, 0, 2))",
@@ -17091,9 +17091,9 @@ kreate.ops.object.set_transform(object=\"Cube.001\", location=(3, 0, 2))",
         let out = app
             .bridge_call(
                 "run",
-                &serde_json::json!({ "script": "kreate.ops.object.add_primitive()
+                &serde_json::json!({ "script": "kreate.ops.object.add_primitive(size=2.0)
 kreate.ops.object.set_transform(location=(0, 0, 0))
-kreate.ops.object.add_primitive()" }),
+kreate.ops.object.add_primitive(size=2.0)" }),
             )
             .unwrap();
         let lines = out["lines"].as_array().unwrap();
@@ -17111,7 +17111,7 @@ kreate.ops.object.add_primitive()" }),
     #[test]
     fn edit_mode_finds_the_selected_mesh_when_the_active_object_is_not_one() {
         let mut app = app();
-        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.add_primitive", two_metre_cube());
         let cube = app.doc.selection.active.unwrap();
         app.run_op("object.add_light", PropertyMap::new());
         let light = app.doc.selection.active.unwrap();
@@ -17128,7 +17128,7 @@ kreate.ops.object.add_primitive()" }),
     #[test]
     fn step_parts_list_and_drawing_are_written_in_the_scenes_unit() {
         let mut app = app();
-        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.add_primitive", two_metre_cube());
         app.run_op("object.duplicate", {
             let mut p = PropertyMap::new();
             p.set("linked", PropertyValue::Bool(true));
@@ -17175,7 +17175,7 @@ kreate.ops.object.add_primitive()" }),
     #[test]
     fn a_3mf_export_is_in_the_scenes_unit() {
         let mut app = app();
-        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.add_primitive", two_metre_cube());
         let mut p = PropertyMap::new();
         p.set("length", PropertyValue::Enum(2));
         app.run_op("scene.units_set", p);
@@ -17200,7 +17200,7 @@ kreate.ops.object.add_primitive()" }),
     #[test]
     fn a_section_cuts_the_view_but_not_the_part() {
         let mut app = app();
-        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.add_primitive", two_metre_cube());
         let mut p = PropertyMap::new();
         p.set("enabled", PropertyValue::Bool(true));
         p.set("axis", PropertyValue::Enum(0));
@@ -17216,6 +17216,13 @@ kreate.ops.object.add_primitive()" }),
         app.run_op("scene.section_set", p);
         app.evaluate_scene();
         assert!(app.evaluated[0].1.bounds().max.x > 0.9);
+    }
+
+    /// The cube these tests measure: 2 m on a side, so its volume is 8 m³.
+    fn two_metre_cube() -> PropertyMap {
+        let mut p = PropertyMap::new();
+        p.set("size", PropertyValue::Float(2.0));
+        p
     }
 
     /// Mesh Check finds a plane's open rim, and Select takes the user into
@@ -17250,7 +17257,7 @@ kreate.ops.object.add_primitive()" }),
     #[test]
     fn the_active_object_is_measured_as_it_stands() {
         let mut app = app();
-        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.add_primitive", two_metre_cube());
         let id = app.doc.selection.active.unwrap();
         app.doc.object_mut(id).unwrap().transform.scale = DVec3::new(1.0, 1.0, 0.5);
         app.evaluate_scene();
@@ -17278,7 +17285,7 @@ kreate.ops.object.add_primitive()" }),
         app.place_cursor_turned(DVec3::new(0.0, 0.0, 1.0), q);
         assert!(app.doc.cursor_rotation.abs_diff_eq(q, 1e-9));
         app.ui.tools.orientation = 2;
-        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.add_primitive", two_metre_cube());
         let added = app.doc.selection.active.unwrap();
         let turn = app.doc.object(added).unwrap().transform.rotation;
         assert!(
@@ -17286,7 +17293,7 @@ kreate.ops.object.add_primitive()" }),
             "square to the plane"
         );
         app.ui.tools.orientation = 0;
-        app.run_op("object.add_primitive", PropertyMap::new());
+        app.run_op("object.add_primitive", two_metre_cube());
         let added = app.doc.selection.active.unwrap();
         let turn = app.doc.object(added).unwrap().transform.rotation;
         assert!(turn.abs_diff_eq(kreate_math::DQuat::IDENTITY, 1e-12));
