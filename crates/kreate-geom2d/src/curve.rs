@@ -14,8 +14,10 @@ pub enum Curve2D {
         c: DVec2,
         r: f64,
     },
-    /// Anticlockwise from `start` through `sweep` (both radians, `sweep` in
-    /// `(0, TAU)`), as DXF's ARC.
+    /// From `start` through `sweep` (radians): anticlockwise when `sweep`
+    /// is positive, as DXF's ARC always is, and clockwise when negative —
+    /// which an arc run backwards along a region's boundary needs. Writers
+    /// for formats with only anticlockwise arcs turn it round.
     Arc {
         c: DVec2,
         r: f64,

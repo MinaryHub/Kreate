@@ -30,12 +30,14 @@ mod curve;
 mod edit;
 mod intersect;
 mod prim;
+mod regions;
 mod spline;
 
 pub use curve::Curve2D;
 pub use edit::{fillet, Fillet};
 pub use intersect::{intersect, Intersection};
 pub use prim::Prim;
+pub use regions::{regions, BoundaryPiece, Loop, Region};
 pub use spline::Spline;
 
 pub use glam::DVec2;

@@ -31,7 +31,7 @@ impl Curve2D {
             Curve2D::Arc { c, r, start, sweep } => Curve2D::Arc {
                 c: *c,
                 r: *r,
-                start: (start + sweep * t0).rem_euclid(TAU),
+                start: start + sweep * t0,
                 sweep: sweep * (t1 - t0),
             },
             Curve2D::Ellipse {
@@ -64,8 +64,31 @@ impl Curve2D {
     pub fn reversed(&self) -> Curve2D {
         match self {
             Curve2D::Line { a, b } => Curve2D::Line { a: *b, b: *a },
-            Curve2D::Circle { .. } => self.clone(),
-            Curve2D::Arc { .. } | Curve2D::Ellipse { .. } => self.clone(),
+            Curve2D::Circle { c, r } => Curve2D::Arc {
+                c: *c,
+                r: *r,
+                start: 0.0,
+                sweep: -TAU,
+            },
+            Curve2D::Arc { c, r, start, sweep } => Curve2D::Arc {
+                c: *c,
+                r: *r,
+                start: start + sweep,
+                sweep: -sweep,
+            },
+            Curve2D::Ellipse {
+                c,
+                major,
+                ratio,
+                start,
+                sweep,
+            } => Curve2D::Ellipse {
+                c: *c,
+                major: *major,
+                ratio: *ratio,
+                start: start + sweep,
+                sweep: -sweep,
+            },
             Curve2D::Polyline { verts, closed } => {
                 // The segment that arrived at a vertex now leaves it, its
                 // bulge negated. Closed, the first vertex stays first and
@@ -719,6 +742,40 @@ mod tests {
         for i in 0..=10 {
             let u = lo + (hi - lo) * i as f64 / 10.0;
             assert!(s.point(u).distance(r.point(lo + hi - u)) < 1e-12);
+        }
+    }
+
+    /// Every curve reversed passes the same points the other way.
+    #[test]
+    fn a_reversed_curve_runs_back_over_the_same_points() {
+        let curves = [
+            Curve2D::Arc {
+                c: v(0.0, 0.0),
+                r: 1.0,
+                start: 0.2,
+                sweep: 2.0,
+            },
+            Curve2D::Circle {
+                c: v(1.0, 0.0),
+                r: 0.5,
+            },
+            Curve2D::Ellipse {
+                c: v(0.0, 0.0),
+                major: v(2.0, 0.5),
+                ratio: 0.3,
+                start: 0.5,
+                sweep: 2.5,
+            },
+        ];
+        for c in curves {
+            let r = c.reversed();
+            let (lo, hi) = c.domain();
+            for i in 0..=10 {
+                let t = lo + (hi - lo) * i as f64 / 10.0;
+                let back = r.point(lo + hi - t);
+                assert!(c.point(t).distance(back) < 1e-12, "{c:?} at {t}");
+            }
+            assert!((c.length() - r.length()).abs() < 1e-9);
         }
     }
 
