@@ -2124,3 +2124,5 @@ sketch-prompt-circle2-second = 다른 쪽 끝을 클릭
 sketch-prompt-circle3 = 원 위의 세 점을 클릭
 sketch-prompt-arc-centre-start = 호가 시작할 곳을 클릭 (반지름이 정해짐)
 sketch-prompt-arc-centre-end = 끝날 곳을 클릭 (반시계 방향)
+sketch-open = 기존 스케치 열기
+outliner-sketches = 스케치

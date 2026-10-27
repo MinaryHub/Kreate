@@ -148,6 +148,10 @@ pub struct OutlinerGroup {
     pub start: usize,
     pub name: String,
     pub hidden: bool,
+    /// A heading the application makes rather than a collection — the
+    /// sketches, gathered — which cannot be renamed, removed, hidden or
+    /// dropped on.
+    pub fixed: bool,
 }
 
 /// [`visible_rows`], with a heading row before each collection's objects.
@@ -540,6 +544,10 @@ fn draw_collection_row(
         ui.add_space(indent(ui));
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         collection_icon(ui, rect);
+        if group.fixed {
+            ui.label(egui::RichText::new(&group.name).weak());
+            return;
+        }
         let typing = match renaming {
             Some(Renaming::Collection(name, text)) if *name == group.name => Some(text),
             _ => None,

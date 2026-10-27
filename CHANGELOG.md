@@ -10,6 +10,29 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- The outliner gathers the sketches under a Sketches heading, a sketch on
+  a part's face among them.
+- The sketch-plane menu lists the sketches there are, to open one.
+- An extrude's join or cut can go into any part, picked in its dialog.
+- Offset and mirror take a distance: an offset's, typed first or changed
+  in the last-operation panel (negative for the other side), and a
+  mirror's, which moves its line and so the gap to the copy.
+
+### Changed
+
+- F2 with no sketch selected asks where a new one goes, rather than
+  opening the first sketch in the scene.
+- A join or cut into a part that is not a sketch body leaves only the
+  result: no body of the extrude's own beside it.
+- An offset of several curves is one step.
+
+### Fixed
+
+- Choosing what to mirror, offset or pattern and then the tool lost the
+  selection.
+
 ## [0.5.1] - 2026-10-27
 
 ### Added

@@ -2118,3 +2118,5 @@ sketch-prompt-circle2-second = click the other end
 sketch-prompt-circle3 = click three points on the circle
 sketch-prompt-arc-centre-start = click where the arc starts: its radius
 sketch-prompt-arc-centre-end = click where it ends, anticlockwise
+sketch-open = Open a sketch
+outliner-sketches = Sketches

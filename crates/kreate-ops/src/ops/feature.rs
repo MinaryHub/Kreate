@@ -352,10 +352,14 @@ fn add(
     Ok(OpResult::Finished)
 }
 
-/// A feature joined to or cut from a mesh that is not a body: what it makes
-/// becomes a hidden object of its own, and the mesh gains a boolean against
-/// it — so the cut can be moved, changed or taken off later, as Blender's
-/// boolean cutters are.
+/// A feature joined to or cut from a mesh that is not a body: the result is
+/// all that is left, as Fusion's join and cut leave it — the mesh made the
+/// joined or cut shape, and no body of the extrude's own beside it.
+///
+/// Baked straight in when it can be: a mesh of its own, with no modifiers
+/// that would come after the cut. Otherwise — a mesh shared by linked
+/// copies, a stack already on it, a boolean too large to finish — the cut
+/// stays a boolean against a hidden cutter, which gives the same shape.
 fn join_or_cut_mesh(
     doc: &mut DocMut<'_>,
     f: Feature,
@@ -391,12 +395,23 @@ fn join_or_cut_mesh(
     } else {
         kreate_mesh::modifiers::BooleanOp::Union
     };
-    d.object_mut(target)
-        .expect("the target")
+    let object = d.object_mut(target).expect("the target");
+    let bakeable = object.modifiers.is_empty();
+    object
         .modifiers
         .push(ModifierInstance::new(ModifierKind::Boolean(
             BooleanModifier { operand, op },
         )));
+    let mesh = object.mesh();
+    if let Some(mesh) = mesh.filter(|m| bakeable && d.mesh_users(*m) == 1) {
+        let baked = kreate_scene::modifier::apply_one(d, target, 0);
+        let gave_up = kreate_scene::modifier::take_boolean_gave_up();
+        if let Some(baked) = baked.filter(|b| !gave_up && b.num_faces() > 0) {
+            *d.mesh_mut(mesh).expect("the target's mesh") = baked;
+            d.object_mut(target).expect("the target").modifiers.clear();
+            d.remove_object(tool);
+        }
+    }
     Ok(OpResult::Finished)
 }
 
@@ -1033,7 +1048,7 @@ mod tests {
     /// A cut into a mesh that is not a body: the extrude becomes a hidden
     /// cutter and the mesh a boolean against it — one step.
     #[test]
-    fn a_cut_into_a_plain_mesh_is_a_boolean_against_a_hidden_cutter() {
+    fn a_cut_into_a_plain_mesh_leaves_only_the_cut_mesh() {
         let mut r = OperatorRegistry::new();
         crate::register_builtin(&mut r);
         let mut h = History::new();
@@ -1068,14 +1083,15 @@ mod tests {
         .unwrap();
         assert_eq!(h.entries().len(), steps + 1, "one step");
         let o = doc.object(cube).unwrap();
-        assert_eq!(o.modifiers.len(), 1);
-        let kreate_scene::modifier::ModifierKind::Boolean(b) = o.modifiers[0].kind else {
-            panic!("a boolean");
-        };
-        let cutter = doc.object_by_uid(b.operand).expect("the cutter");
-        assert!(!doc.object(cutter).unwrap().visible, "hidden");
-        let cut = kreate_scene::modifier::apply_one(&doc, cube, 0).unwrap();
-        let volume = kreate_mesh::measure::mass_properties(&cut, |p| p).volume;
+        // Baked in: no boolean on it, and no body of the extrude's own.
+        assert!(o.modifiers.is_empty());
+        assert!(
+            doc.objects()
+                .all(|(_, o)| o.features.is_empty() && !o.name.contains("Cut")),
+            "only the box and the sketch are left"
+        );
+        let cut = doc.mesh(o.mesh().unwrap()).unwrap();
+        let volume = kreate_mesh::measure::mass_properties(cut, |p| p).volume;
         // 8 less a 1 x 1 x 0.5 pocket.
         assert!((volume - 7.5).abs() < 1e-3, "{volume}");
     }

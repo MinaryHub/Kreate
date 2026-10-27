@@ -1165,12 +1165,18 @@ pub fn trim_plan(
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct DraftOffsetParams {
+    /// The curve, when there is one.
+    #[param(hidden)]
     pub id: u32,
-    /// How far, in metres.
+    /// The curves, when there are several: one step for them all, so the
+    /// distance changed afterwards moves every copy.
+    #[param(hidden)]
+    pub ids: Vec<u32>,
+    /// How far, in metres. Negative goes to the other side.
     #[param(unit = "length")]
     pub distance: f64,
     /// A point on the side to offset to.
-    #[param(unit = "length")]
+    #[param(unit = "length", hidden)]
     pub toward: [f64; 3],
 }
 
@@ -1194,27 +1200,39 @@ impl Operator for DraftOffset {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let toward = xy(params.toward);
+        if params.distance == 0.0 || !params.distance.is_finite() {
+            return Err(OpError::Failed("an offset needs a distance".into()));
+        }
+        let ids = if params.ids.is_empty() {
+            vec![params.id]
+        } else {
+            params.ids.clone()
+        };
         edit(doc, |d| {
-            let curve = d
-                .curve(EntityId(params.id))
-                .cloned()
-                .ok_or_else(|| OpError::Failed(format!("{} is not a curve", params.id)))?;
-            // Left of travel or right: whichever is nearer the point.
-            let tol = params.distance.abs() * 1e-3;
-            let left = curve.offset(params.distance.abs(), tol);
-            let right = curve.offset(-params.distance.abs(), tol);
-            let near = |c: &Option<Curve2D>| {
-                c.as_ref()
-                    .map_or(f64::MAX, |c| c.closest(toward).1.distance(toward))
-            };
-            let chosen = if near(&left) <= near(&right) {
-                left
-            } else {
-                right
-            };
-            let made =
-                chosen.ok_or_else(|| OpError::Failed("nothing is left that far in".into()))?;
-            d.add_curve(made);
+            for id in &ids {
+                let curve = d
+                    .curve(EntityId(*id))
+                    .cloned()
+                    .ok_or_else(|| OpError::Failed(format!("{id} is not a curve")))?;
+                // Left of travel or right: whichever is nearer the point —
+                // and the other, for a distance given negative.
+                let tol = params.distance.abs() * 1e-3;
+                let left = curve.offset(params.distance.abs(), tol);
+                let right = curve.offset(-params.distance.abs(), tol);
+                let near = |c: &Option<Curve2D>| {
+                    c.as_ref()
+                        .map_or(f64::MAX, |c| c.closest(toward).1.distance(toward))
+                };
+                let toward_left = near(&left) <= near(&right);
+                let chosen = if toward_left == (params.distance > 0.0) {
+                    left
+                } else {
+                    right
+                };
+                let made =
+                    chosen.ok_or_else(|| OpError::Failed("nothing is left that far in".into()))?;
+                d.add_curve(made);
+            }
             Ok(())
         })
     }
@@ -1599,9 +1617,16 @@ fn copy_moved(d: &mut Drawing, ids: &[EntityId], moves: &[glam::DAffine2]) -> Ve
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct DraftMirrorParams {
+    #[param(hidden)]
     pub ids: Vec<u32>,
     /// The line to mirror across, by its id.
+    #[param(hidden)]
     pub axis: u32,
+    /// The mirror line moved square to itself by this much, before the
+    /// copy is made: the copy lands twice as far, so the gap between the
+    /// two is set here. Positive away from what is mirrored.
+    #[param(unit = "length")]
+    pub distance: f64,
 }
 
 /// Copies of entities mirrored across a line.
@@ -1637,6 +1662,31 @@ impl Operator for DraftMirror {
             if u == DVec2::ZERO {
                 return Err(OpError::Failed("a mirror's axis is a line".into()));
             }
+            // Moved away from what is mirrored: the side its middle is not.
+            let a = if params.distance != 0.0 {
+                let side = DVec2::new(-u.y, u.x);
+                let middle = ids
+                    .iter()
+                    .filter_map(|i| d.curve(*i))
+                    .map(|c| {
+                        let (lo, hi) = c.bounds();
+                        (lo + hi) * 0.5
+                    })
+                    .fold((DVec2::ZERO, 0.0), |(s, n), p| (s + p, n + 1.0));
+                let middle = if middle.1 > 0.0 {
+                    middle.0 / middle.1
+                } else {
+                    a
+                };
+                let away = if (middle - a).dot(side) > 0.0 {
+                    -side
+                } else {
+                    side
+                };
+                a + away * params.distance
+            } else {
+                a
+            };
             // Reflection across the line through `a` along `u`.
             let r = glam::DMat2::from_cols(
                 DVec2::new(2.0 * u.x * u.x - 1.0, 2.0 * u.x * u.y),
@@ -2114,6 +2164,62 @@ mod tests {
         assert!(
             (radii[0] - 0.008).abs() < 1e-12 && (radii[2] - 0.012).abs() < 1e-12,
             "{radii:?}"
+        );
+    }
+
+    /// Several curves in one offset, and a negative distance to the other
+    /// side than the point asked.
+    #[test]
+    fn an_offset_of_several_is_one_step_and_a_negative_one_goes_the_other_way() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.circle(centre=(0, 0, 0), radius=0.01)")
+            .unwrap();
+        b.run("draft.circle(centre=(0.05, 0, 0), radius=0.01)")
+            .unwrap();
+        b.run("draft.offset(ids=[1, 2], distance=-0.002, toward=(0.02, 0, 0))")
+            .unwrap();
+        let mut radii: Vec<f64> = b
+            .drawing()
+            .profile_curves()
+            .into_iter()
+            .filter_map(|(_, c)| match c {
+                Curve2D::Circle { r, .. } => Some(*r),
+                _ => None,
+            })
+            .collect();
+        radii.sort_by(f64::total_cmp);
+        // Both copies inside, though the point asked for outside the first.
+        assert_eq!(radii.len(), 4, "{radii:?}");
+        assert!((radii[0] - 0.008).abs() < 1e-12 && (radii[1] - 0.008).abs() < 1e-12);
+    }
+
+    /// A mirror's distance moves its line away from what is mirrored: the
+    /// copy lands twice that further.
+    #[test]
+    fn a_mirrors_distance_moves_the_copy_away() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.circle(centre=(0.02, 0, 0), radius=0.005)")
+            .unwrap();
+        b.run("draft.line(points=[0, -0.05, 0, 0.05])").unwrap();
+        b.run("draft.mirror(ids=[1], axis=2, distance=0.01)")
+            .unwrap();
+        let centres: Vec<DVec2> = b
+            .drawing()
+            .profile_curves()
+            .into_iter()
+            .filter_map(|(_, c)| match c {
+                Curve2D::Circle { c, .. } => Some(*c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(centres.len(), 2);
+        assert!(
+            centres
+                .iter()
+                .any(|c| c.distance(DVec2::new(-0.04, 0.0)) < 1e-12),
+            "{centres:?}"
         );
     }
 

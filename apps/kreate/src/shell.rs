@@ -1013,6 +1013,9 @@ pub struct OutlinerOrder {
     mesh_users: Vec<u32>,
     /// The collections, as headings: where each one's objects start.
     groups: Vec<kreate_ui::outliner::OutlinerGroup>,
+    /// The heading the sketches are gathered under, in the interface's
+    /// language; set by whoever shows the outliner.
+    pub sketch_heading: String,
     /// The document version this was built from.
     version: Option<u64>,
 }
@@ -1036,17 +1039,36 @@ impl OutlinerOrder {
             .collections()
             .map(|(id, c)| (id, c.name.clone(), c.hide))
             .collect();
-        let mut buckets: Vec<Vec<(u32, u16)>> = vec![Vec::new(); collections.len() + 1];
-        let mut bucket = collections.len();
+        // The sketches, wherever they hang — on the ground or on a part's
+        // face — gathered under a heading of their own after the
+        // collections, as Fusion's browser keeps its Sketches folder; what
+        // hangs from a sketch goes with it.
+        let mut buckets: Vec<Vec<(u32, u16)>> = vec![Vec::new(); collections.len() + 2];
+        let sketches = collections.len();
+        let scene = collections.len() + 1;
+        let is_sketch = |o: &kreate_scene::document::Object| {
+            o.drawing.is_some() || !o.sketch_lines.is_empty() || !o.sketch.is_empty()
+        };
+        let mut bucket = scene;
+        let mut in_sketch: Option<usize> = None;
         for (id, depth) in hierarchy {
+            if in_sketch.is_some_and(|d| depth <= d) {
+                in_sketch = None;
+            }
             if depth == 0 {
                 bucket = doc
                     .collection_of(id)
                     .and_then(|c| collections.iter().position(|(x, _, _)| *x == c))
-                    .unwrap_or(collections.len());
+                    .unwrap_or(scene);
             }
-            let indent = depth + usize::from(bucket < collections.len());
-            buckets[bucket].push((object_key(id), indent.min(u16::MAX as usize) as u16));
+            if in_sketch.is_none() && doc.object(id).is_some_and(is_sketch) {
+                in_sketch = Some(depth);
+            }
+            let (into, indent) = match in_sketch {
+                Some(top) => (sketches, 1 + depth - top),
+                None => (bucket, depth + usize::from(bucket < collections.len())),
+            };
+            buckets[into].push((object_key(id), indent.min(u16::MAX as usize) as u16));
         }
         for (i, rows) in buckets.into_iter().enumerate() {
             if let Some((_, name, hide)) = collections.get(i) {
@@ -1054,6 +1076,19 @@ impl OutlinerOrder {
                     start: self.ids.len(),
                     name: name.clone(),
                     hidden: *hide,
+                    fixed: false,
+                });
+            }
+            if i == sketches && !rows.is_empty() {
+                self.groups.push(kreate_ui::outliner::OutlinerGroup {
+                    start: self.ids.len(),
+                    name: if self.sketch_heading.is_empty() {
+                        "Sketches".to_string()
+                    } else {
+                        self.sketch_heading.clone()
+                    },
+                    hidden: false,
+                    fixed: true,
                 });
             }
             for (key, depth) in rows {
@@ -2467,6 +2502,9 @@ pub fn draw(
     );
     // Rebuilt only when the document changes, and the rows themselves only for
     // what is on screen — see `OutlinerOrder`.
+    if state.outliner.sketch_heading.is_empty() {
+        state.outliner.sketch_heading = state.catalog.get("outliner-sketches");
+    }
     state.outliner.sync(doc);
     let selected: Vec<u32> = doc
         .selection
@@ -15143,8 +15181,11 @@ pub struct SolidDialog {
     /// into something, join coming out of it, Fusion's — stands aside.
     pub chosen: bool,
     /// What a join or cut acts on, by name, as the automatic choice found
-    /// it; empty for the latest body.
+    /// it or as picked; empty for the latest body.
     pub target: String,
+    /// What it could act on: the parts there are, those the extrude meets
+    /// first.
+    pub targets: Vec<String>,
 }
 
 impl Default for SolidDialog {
@@ -15156,6 +15197,7 @@ impl Default for SolidDialog {
             angle: 360.0,
             chosen: false,
             target: String::new(),
+            targets: Vec::new(),
         }
     }
 }
@@ -15841,9 +15883,22 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                                 }
                             });
                         ui.end_row();
-                        if d.operation != 0 && !d.target.is_empty() {
+                        // What it joins or cuts: the part the extrude meets,
+                        // or any other picked here.
+                        if d.operation != 0 && !d.targets.is_empty() {
                             ui.label(state.catalog.get("feature-target"));
-                            ui.label(&d.target);
+                            egui::ComboBox::from_id_salt("solid-target")
+                                .selected_text(d.target.clone())
+                                .show_ui(ui, |ui| {
+                                    for name in d.targets.clone() {
+                                        if ui
+                                            .selectable_value(&mut d.target, name.clone(), name)
+                                            .clicked()
+                                        {
+                                            d.chosen = true;
+                                        }
+                                    }
+                                });
                             ui.end_row();
                         }
                     });
@@ -17858,6 +17913,47 @@ mod tests {
             }
             other => panic!("ran {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod outliner_sketches {
+    use super::*;
+
+    /// The sketches go under a heading of their own, even one hanging
+    /// from a part's face; the part stays where it was.
+    #[test]
+    fn sketches_are_gathered_under_their_own_heading() {
+        let mut doc = Document::new();
+        let part = doc.add_mesh_object("Part", kreate_mesh::primitives::cube(1.0));
+        let mut on_face = kreate_scene::document::Object::new(
+            "Drawing".to_string(),
+            kreate_scene::document::ObjectData::Empty,
+        );
+        on_face.drawing = Some(Box::default());
+        let on_face = doc.add_object(on_face);
+        doc.set_parent(on_face, Some(part)).unwrap();
+        let mut order = OutlinerOrder::default();
+        order.sync(&doc);
+        let heading = order
+            .groups()
+            .iter()
+            .find(|g| g.fixed)
+            .expect("a sketches heading");
+        assert_eq!(order.ids()[heading.start], object_key(on_face));
+        assert_eq!(order.depths()[heading.start], 1);
+        let part_at = order
+            .ids()
+            .iter()
+            .position(|k| *k == object_key(part))
+            .unwrap();
+        assert!(part_at > heading.start && order.depths()[part_at] == 0);
+        // With no sketch, no heading.
+        let mut plain = Document::new();
+        plain.add_mesh_object("Part", kreate_mesh::primitives::cube(1.0));
+        let mut order = OutlinerOrder::default();
+        order.sync(&plain);
+        assert!(order.groups().iter().all(|g| !g.fixed));
     }
 }
 

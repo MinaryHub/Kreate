@@ -940,10 +940,24 @@ pub struct SketchUi {
 
 impl SketchUi {
     /// A tool taken up: whatever the last one was doing is dropped.
+    /// A tool in hand. One that acts on what is selected — mirror, offset,
+    /// pattern — keeps the selection, so choosing what to work on first and
+    /// the tool after works; the rest start clean.
     pub fn take(&mut self, tool: Tool) {
+        let keeps = matches!(tool, Tool::Mirror | Tool::Offset | Tool::Pattern);
+        let (points, lines) = if keeps {
+            (
+                std::mem::take(&mut self.points),
+                std::mem::take(&mut self.lines),
+            )
+        } else {
+            Default::default()
+        };
         *self = SketchUi {
             tool,
             hover: self.hover,
+            points,
+            lines,
             ..Default::default()
         };
     }
@@ -2009,6 +2023,32 @@ fn crossing(p0: DVec2, p1: DVec2, q0: DVec2, q1: DVec2) -> Option<DVec2> {
 
 #[cfg(test)]
 mod tests {
+
+    /// What is selected stays selected when a tool that works on it is
+    /// taken — so choosing first and the tool after works — and goes when
+    /// one that draws is.
+    #[test]
+    fn a_tool_that_works_on_the_selection_keeps_it() {
+        use super::{SketchUi, Tool};
+        for (tool, keeps) in [
+            (Tool::Offset, true),
+            (Tool::Mirror, true),
+            (Tool::Pattern, true),
+            (Tool::Line, false),
+        ] {
+            let mut ui = SketchUi {
+                points: vec![1, 2],
+                lines: vec![3],
+                ..Default::default()
+            };
+            ui.take(tool);
+            assert_eq!(
+                !ui.lines.is_empty() && ui.points.len() == 2,
+                keeps,
+                "{tool:?}"
+            );
+        }
+    }
 
     /// A centre-point arc runs anticlockwise from its start to the end's
     /// direction, at the start's radius, wherever the centre is.

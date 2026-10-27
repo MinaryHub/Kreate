@@ -2253,7 +2253,7 @@ impl App {
                         &[("plane", PropertyValue::Enum(i))],
                     )
                 };
-                vec![Group {
+                let mut groups = vec![Group {
                     title: t("sketch-plane"),
                     entries: vec![
                         plane(self, "sketch-plane-xy", 0),
@@ -2262,7 +2262,28 @@ impl App {
                         plane(self, "sketch-plane-cursor", 3),
                         row(self, t("sketch-plane-face"), "app.sketch_on_face", &[]),
                     ],
-                }]
+                }];
+                // The sketches there already, to go back into one.
+                let open: Vec<Entry> = self
+                    .doc
+                    .objects()
+                    .filter(|(id, o)| o.drawing.is_some() && self.doc.is_shown(*id))
+                    .map(|(_, o)| {
+                        row(
+                            self,
+                            o.name.clone(),
+                            "object.select",
+                            &[("name", PropertyValue::Text(o.name.clone()))],
+                        )
+                    })
+                    .collect();
+                if !open.is_empty() {
+                    groups.push(Group {
+                        title: t("sketch-open"),
+                        entries: open,
+                    });
+                }
+                groups
             }
             "apply" => {
                 let apply = |app: &App, key: &str, l: bool, r: bool, s: bool| {
@@ -5758,16 +5779,16 @@ impl App {
                     let (_, near) = first.closest(p);
                     let distance = typed.first().map(|t| t.abs()).unwrap_or(near.distance(p));
                     if distance > 1e-9 {
-                        for id in ids {
-                            self.run_op_with(
-                                "draft.offset",
-                                &[
-                                    ("id", PropertyValue::Int(id as i64)),
-                                    ("distance", PropertyValue::Float(distance)),
-                                    ("toward", v3(p)),
-                                ],
-                            );
-                        }
+                        // One step for them all: the panel's distance after
+                        // moves every copy.
+                        self.run_op_with(
+                            "draft.offset",
+                            &[
+                                ("ids", PropertyValue::Ints(ids.clone())),
+                                ("distance", PropertyValue::Float(distance)),
+                                ("toward", v3(p)),
+                            ],
+                        );
                     }
                     self.sketch_tool_done();
                 }
@@ -6064,7 +6085,7 @@ impl App {
         };
         // A fillet's radius is typed before its corner is clicked, and kept
         // for the corners after it.
-        let typing = drawing || tool == Tool::Fillet;
+        let typing = drawing || matches!(tool, Tool::Fillet | Tool::Offset);
         if let (true, Some(ch)) = (typing, typed) {
             self.sketching.typed.push(ch);
             self.redraw.set(RedrawReason::UI);
@@ -6072,7 +6093,7 @@ impl App {
         }
         let unit = self.doc.design.length_unit.metres();
         match code {
-            KeyCode::Backspace if tool == Tool::Fillet && !drawing => {
+            KeyCode::Backspace if matches!(tool, Tool::Fillet | Tool::Offset) && !drawing => {
                 self.sketching.typed.pop();
                 self.redraw.set(RedrawReason::UI);
                 true
@@ -6391,7 +6412,25 @@ impl App {
             self.solid_auto = None;
             return;
         }
-        if self.sketching.tool != kreate::sketching::Tool::Extrude || self.ui.solid_dialog.chosen {
+        if self.sketching.tool != kreate::sketching::Tool::Extrude {
+            return;
+        }
+        // Every part a join or cut could go into, for the dialog to offer.
+        let parts: Vec<String> = self
+            .evaluated
+            .iter()
+            .filter_map(|(id, _)| {
+                let o = self.doc.object(*id)?;
+                (*id != sketch
+                    && self.doc.is_shown(*id)
+                    && o.sketch.is_empty()
+                    && o.sketch_lines.is_empty()
+                    && o.drawing.is_none())
+                .then(|| o.name.clone())
+            })
+            .collect();
+        if self.ui.solid_dialog.chosen {
+            self.ui.solid_dialog.targets = parts;
             return;
         }
         let d = self.ui.solid_dialog.distance * self.ui.length_unit;
@@ -6445,7 +6484,18 @@ impl App {
             (None, None) => (0, String::new()),
         };
         self.ui.solid_dialog.operation = choice.0;
-        self.ui.solid_dialog.target = choice.1.clone();
+        self.ui.solid_dialog.target = if choice.1.is_empty() {
+            parts.first().cloned().unwrap_or_default()
+        } else {
+            choice.1.clone()
+        };
+        // The part it meets first in the list.
+        let mut parts = parts;
+        if let Some(at) = parts.iter().position(|p| *p == choice.1) {
+            let met = parts.remove(at);
+            parts.insert(0, met);
+        }
+        self.ui.solid_dialog.targets = parts;
         self.solid_auto = Some((key, choice));
     }
 
@@ -13779,21 +13829,13 @@ impl App {
             // Between 2D and 3D: out of drawing to the 3D view, or into the
             // drawing selected — or the scene's first, or a new one.
             "app.toggle_2d" => {
+                // Into the drawing that is selected; with none, the plane
+                // menu, which asks where a new one goes — or which of the
+                // drawings there are to open. Opening the first drawing found
+                // left no way to start a second on another plane or a face.
                 if self.op_ctx.mode == OpMode::Sketch {
                     self.set_mode(OpMode::RESTING);
                 } else {
-                    if self.active_sketching().is_none() {
-                        let first = self
-                            .doc
-                            .objects()
-                            .find(|(id, o)| o.drawing.is_some() && self.doc.is_shown(*id))
-                            .map(|(id, _)| id);
-                        if let Some(id) = first {
-                            self.doc.selection.clear();
-                            self.doc.selection.add(id);
-                            self.doc.selection.active = Some(id);
-                        }
-                    }
                     self.set_mode(OpMode::Sketch);
                 }
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -18531,8 +18573,30 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         };
         assert_eq!(f2(&app, false).as_deref(), Some("app.toggle_2d"));
         assert_eq!(f2(&app, true).as_deref(), Some("app.rename"));
+        // Nothing selected: the plane menu, which offers the drawing there
+        // to open as well as the planes a new one can go on.
         app.dispatch(&Action::new("app.toggle_2d"));
-        assert_eq!(app.op_ctx.mode, OpMode::Sketch, "into the scene's drawing");
+        assert_eq!(app.op_ctx.mode, OpMode::Object);
+        let rows: Vec<String> = app
+            .ui
+            .context_menu
+            .groups
+            .iter()
+            .flat_map(|g| g.entries.iter().map(|e| e.info.name.clone()))
+            .collect();
+        assert!(rows.iter().any(|r| r == "Drawing"), "{rows:?}");
+        app.ui.context_menu.groups.clear();
+        // The drawing selected: into it.
+        let drawing = app
+            .doc
+            .objects()
+            .find(|(_, o)| o.drawing.is_some())
+            .map(|(id, _)| id)
+            .unwrap();
+        app.doc.selection.add(drawing);
+        app.doc.selection.active = Some(drawing);
+        app.dispatch(&Action::new("app.toggle_2d"));
+        assert_eq!(app.op_ctx.mode, OpMode::Sketch, "into the drawing selected");
         assert!(app.active_drawing().is_some());
         let turned = app.camera.rotation;
         app.input.orbit_delta = (40.0, 10.0);
@@ -18578,6 +18642,51 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         app.sketch_face_pick = true;
         app.sketch_on_face_under_cursor();
         assert_eq!(app.doc.objects().count(), before);
+    }
+
+    /// The same on a body made from a sketch, whose own mesh is empty and
+    /// whose surface is its features: the face clicked is the one drawn.
+    #[test]
+    fn a_click_on_a_bodys_face_starts_a_sketch_on_it() {
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        app.run_op_with(
+            "draft.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([-0.5, -0.5, 0.0])),
+                ("b", PropertyValue::Vec3([0.5, 0.5, 0.0])),
+            ],
+        );
+        app.run_op_with(
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![0.0, 0.0])),
+                ("distance", PropertyValue::Float(0.5)),
+            ],
+        );
+        let body = app
+            .doc
+            .objects()
+            .find(|(_, o)| !o.features.is_empty())
+            .map(|(id, _)| id)
+            .expect("a body");
+        app.set_mode(OpMode::Object);
+        app.doc.selection.clear();
+        app.camera = kreate::startup::starting_camera();
+        app.evaluate_scene();
+        let drawings = |app: &App| {
+            app.doc
+                .objects()
+                .filter(|(_, o)| o.drawing.is_some())
+                .count()
+        };
+        let before = drawings(&app);
+        app.sketch_face_pick = true;
+        app.sketch_on_face_under_cursor();
+        assert_eq!(drawings(&app), before + 1, "{:?}", app.ui.status);
+        let s = kreate_ops::ops::draft::active_drawing(&app.doc).expect("the new drawing");
+        assert_eq!(app.doc.object(s).unwrap().parent, Some(body));
     }
 
     #[test]
