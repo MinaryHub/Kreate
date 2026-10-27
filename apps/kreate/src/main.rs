@@ -5411,6 +5411,10 @@ impl App {
                             self.run_op_with("sketch.fillet", &args);
                         }
                     }
+                    // Drawn in drawings, which every sketch now is.
+                    Tool::Circle2 | Tool::Circle3 | Tool::ArcCentre => {
+                        self.status("this tool draws in a drawing: F2 to open one");
+                    }
                     Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
                         self.sketching.clicks.push((p, join));
                         let c = self.sketching.clicks.clone();
@@ -5811,7 +5815,14 @@ impl App {
                     ],
                 );
             }
-            Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
+            Tool::Rectangle
+            | Tool::Circle
+            | Tool::Circle2
+            | Tool::Circle3
+            | Tool::Arc
+            | Tool::ArcCentre
+            | Tool::Polygon
+            | Tool::Slot => {
                 self.sketching.clicks.push((p, 0));
                 let c: Vec<glam::DVec2> = self.sketching.clicks.iter().map(|c| c.0).collect();
                 match (tool, c.len()) {
@@ -5862,6 +5873,59 @@ impl App {
                             self.run_op_with(
                                 "draft.circle",
                                 &[("centre", v3(c[0])), ("radius", PropertyValue::Float(r))],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    // The two ends of a diameter.
+                    (Tool::Circle2, 2) => {
+                        let r = c[0].distance(c[1]) * 0.5;
+                        if r > 1e-9 {
+                            self.run_op_with(
+                                "draft.circle",
+                                &[
+                                    ("centre", v3((c[0] + c[1]) * 0.5)),
+                                    ("radius", PropertyValue::Float(r)),
+                                ],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    // Three points on it.
+                    (Tool::Circle3, 3) => {
+                        if let Some(centre) =
+                            kreate_ops::ops::sketch_draw::circumcentre(c[0], c[1], c[2])
+                        {
+                            self.run_op_with(
+                                "draft.circle",
+                                &[
+                                    ("centre", v3(centre)),
+                                    ("radius", PropertyValue::Float(centre.distance(c[0]))),
+                                ],
+                            );
+                        } else {
+                            self.status("three points in a line make no circle");
+                        }
+                        self.sketch_tool_done();
+                    }
+                    // The centre, the start, the end: made as the arc
+                    // through its start, its middle and its end.
+                    (Tool::ArcCentre, 3) => {
+                        if let Some(kreate_geom2d::Curve2D::Arc {
+                            c: centre,
+                            r,
+                            start,
+                            sweep,
+                        }) = kreate::sketching::arc_about(c[0], c[1], c[2])
+                        {
+                            let at = |a: f64| centre + glam::DVec2::new(a.cos(), a.sin()) * r;
+                            self.run_op_with(
+                                "draft.arc",
+                                &[
+                                    ("start", v3(at(start))),
+                                    ("through", v3(at(start + sweep * 0.5))),
+                                    ("end", v3(at(start + sweep))),
+                                ],
                             );
                         }
                         self.sketch_tool_done();

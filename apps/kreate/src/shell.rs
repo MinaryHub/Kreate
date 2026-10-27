@@ -4713,7 +4713,10 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "line",
                         "rectangle",
                         "circle",
+                        "circle_2pt",
+                        "circle_3pt",
                         "arc",
+                        "arc_centre",
                         "spline",
                         "polygon",
                         "slot",
@@ -13880,7 +13883,10 @@ enum RibbonIcon {
     SkLine,
     SkRect,
     SkCircle,
+    SkCircle2,
+    SkCircle3,
     SkArc,
+    SkArcCentre,
     SkPoint,
     SkDimension,
     SkCoincident,
@@ -13929,7 +13935,10 @@ impl RibbonIcon {
                 "line" => Self::SkLine,
                 "rectangle" => Self::SkRect,
                 "circle" => Self::SkCircle,
+                "circle_2pt" => Self::SkCircle2,
+                "circle_3pt" => Self::SkCircle3,
                 "arc" => Self::SkArc,
+                "arc_centre" => Self::SkArcCentre,
                 "point" => Self::SkPoint,
                 "select" => Self::SkSelect,
                 "pattern" => Self::SkPattern,
@@ -14028,7 +14037,10 @@ impl RibbonIcon {
             | Self::SkLine
             | Self::SkRect
             | Self::SkCircle
+            | Self::SkCircle2
+            | Self::SkCircle3
             | Self::SkArc
+            | Self::SkArcCentre
             | Self::SkPoint
             | Self::SkPattern => theme.accent,
             Self::SkSelect => theme.text,
@@ -14285,6 +14297,25 @@ impl RibbonIcon {
             }
             Self::SkArc => {
                 line(ellipse(0.5, 0.65, 0.38, 0.38, pi, tau));
+            }
+            // A circle and the two ends of the diameter it is drawn by.
+            Self::SkCircle2 => {
+                painter.circle_stroke(p(0.5, 0.5), 0.36 * s, stroke);
+                painter.circle_filled(p(0.18, 0.66), 0.08 * s, colour);
+                painter.circle_filled(p(0.82, 0.34), 0.08 * s, colour);
+            }
+            // A circle and three points on it.
+            Self::SkCircle3 => {
+                painter.circle_stroke(p(0.5, 0.5), 0.36 * s, stroke);
+                for (x, y) in [(0.14, 0.5), (0.68, 0.19), (0.68, 0.81)] {
+                    painter.circle_filled(p(x, y), 0.08 * s, colour);
+                }
+            }
+            // An arc and the centre it turns about.
+            Self::SkArcCentre => {
+                line(ellipse(0.5, 0.65, 0.38, 0.38, pi, tau));
+                painter.circle_filled(p(0.5, 0.65), 0.07 * s, colour);
+                line(vec![p(0.5, 0.65), p(0.12, 0.65)]);
             }
             Self::SkSelect => {
                 // An arrow pointer.
@@ -14695,7 +14726,13 @@ fn draw_tool_group(
     }
     // The sketch's drawing tools are what it is used for: all of them on
     // show, selecting first.
-    let most = if menu.label == l.menu_sketch { 6 } else { 3 };
+    let most = if menu.label == l.menu_sketch {
+        9
+    } else if menu.label == l.menu_modify {
+        5
+    } else {
+        3
+    };
     let mut buttons = Vec::new();
     featured(&menu.nodes, most, &mut buttons);
     // The sketch tool in hand, lit, so it is plain whether a click draws.
@@ -14877,13 +14914,16 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 27] = [
+const SKETCH_TOOLS: [&str; 30] = [
     "select",
     "pattern",
     "line",
     "rectangle",
     "circle",
+    "circle_2pt",
+    "circle_3pt",
     "arc",
+    "arc_centre",
     "spline",
     "polygon",
     "slot",

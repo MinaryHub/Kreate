@@ -21,6 +21,9 @@ use; `scripts/release.sh` turns that section into the next release.
 - F2 into a drawing frames what is drawn in it.
 - A sketch fillet's radius can be typed before its corner is clicked, and
   it stays a radius dimension that can be changed afterwards.
+- More ways to draw a circle and an arc: a 2-point circle (the ends of a
+  diameter), a 3-point circle, and a centre-point arc (centre, start,
+  end), beside the centre-and-rim circle and the 3-point arc.
 - The sketch ribbon has a Modify group — fillet, trim, offset, mirror,
   pattern — apart from the tools that draw.
 
@@ -34,6 +37,8 @@ use; `scripts/release.sh` turns that section into the next release.
   across lit faces when the DirectX shader compiler was installed.
 - Changing a trim's numbers in the last-operation panel broke the line
   apart; it no longer offers them.
+- A 3-point arc in a drawing away from the origin came out on the wrong
+  circle.
 
 ## [0.5.0] - 2026-10-27
 

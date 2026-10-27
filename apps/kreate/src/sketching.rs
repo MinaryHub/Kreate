@@ -22,7 +22,14 @@ pub enum Tool {
     Line,
     Rectangle,
     Circle,
+    /// A circle by the two ends of a diameter.
+    Circle2,
+    /// A circle through three points.
+    Circle3,
     Arc,
+    /// An arc about a centre: the centre, where it starts (its radius),
+    /// where it ends, anticlockwise.
+    ArcCentre,
     Point,
     /// A smooth curve through the points clicked: Fusion's fit-point spline.
     Spline,
@@ -59,7 +66,10 @@ impl Tool {
             "line" => Tool::Line,
             "rectangle" => Tool::Rectangle,
             "circle" => Tool::Circle,
+            "circle_2pt" => Tool::Circle2,
+            "circle_3pt" => Tool::Circle3,
             "arc" => Tool::Arc,
+            "arc_centre" => Tool::ArcCentre,
             "point" => Tool::Point,
             "spline" => Tool::Spline,
             "polygon" => Tool::Polygon,
@@ -92,7 +102,10 @@ impl Tool {
             Tool::Line => "line",
             Tool::Rectangle => "rectangle",
             Tool::Circle => "circle",
+            Tool::Circle2 => "circle_2pt",
+            Tool::Circle3 => "circle_3pt",
             Tool::Arc => "arc",
+            Tool::ArcCentre => "arc_centre",
             Tool::Point => "point",
             Tool::Spline => "spline",
             Tool::Polygon => "polygon",
@@ -118,13 +131,35 @@ impl Tool {
             Tool::Line
                 | Tool::Rectangle
                 | Tool::Circle
+                | Tool::Circle2
+                | Tool::Circle3
                 | Tool::Arc
+                | Tool::ArcCentre
                 | Tool::Point
                 | Tool::Spline
                 | Tool::Polygon
                 | Tool::Slot
         )
     }
+}
+
+/// The arc about `c` from `start` anticlockwise to the direction of
+/// `toward`, at the radius `start` is at: AutoCAD's and Fusion's centre-point
+/// arc. `None` for a start on the centre or an end along the start.
+pub fn arc_about(c: DVec2, start: DVec2, toward: DVec2) -> Option<kreate_geom2d::Curve2D> {
+    let r = c.distance(start);
+    if r < 1e-12 || c.distance(toward) < 1e-12 {
+        return None;
+    }
+    let a0 = (start - c).y.atan2((start - c).x);
+    let a1 = (toward - c).y.atan2((toward - c).x);
+    let sweep = (a1 - a0).rem_euclid(std::f64::consts::TAU);
+    (sweep > 1e-9).then_some(kreate_geom2d::Curve2D::Arc {
+        c,
+        r,
+        start: a0,
+        sweep,
+    })
 }
 
 /// A drag of the select tool: the points that move, and the place on the
@@ -1521,6 +1556,22 @@ fn overlay(
                 pts.push(pts[0]);
                 view.preview.push(polyline(pts));
             }
+            (Tool::Circle2, [a]) => view
+                .preview
+                .push(circle((*a + h) * 0.5, a.distance(h) * 0.5)),
+            (Tool::Circle3, [a]) => view.preview.push(polyline(vec![*a, h])),
+            (Tool::Circle3, [a, b]) => {
+                if let Some(c) = kreate_ops::ops::sketch_draw::circumcentre(*a, *b, h) {
+                    view.preview.push(circle(c, c.distance(*a)));
+                }
+            }
+            (Tool::ArcCentre, [c]) => view.preview.push(polyline(vec![*c, h])),
+            (Tool::ArcCentre, [c, s]) => {
+                if let Some(arc) = arc_about(*c, *s, h) {
+                    let tol = c.distance(*s).max(1e-6) * 1e-3;
+                    view.preview.push(polyline(arc.tessellate(tol)));
+                }
+            }
             (Tool::Arc, [s]) => view.preview.push(polyline(vec![*s, h])),
             // The arc it will make, from the start by the pointer to the
             // end — not the whole circle it lies on.
@@ -1616,6 +1667,12 @@ fn overlay(
         (Tool::Rectangle, _) => "sketch-prompt-rectangle-far",
         (Tool::Circle, 0) => "sketch-prompt-centre",
         (Tool::Circle, _) => "sketch-prompt-diameter",
+        (Tool::Circle2, 0) => "sketch-prompt-circle2-first",
+        (Tool::Circle2, _) => "sketch-prompt-circle2-second",
+        (Tool::Circle3, _) => "sketch-prompt-circle3",
+        (Tool::ArcCentre, 0) => "sketch-prompt-centre",
+        (Tool::ArcCentre, 1) => "sketch-prompt-arc-centre-start",
+        (Tool::ArcCentre, _) => "sketch-prompt-arc-centre-end",
         (Tool::Arc, 0) => "sketch-prompt-arc-start",
         (Tool::Arc, 1) => "sketch-prompt-arc-end",
         (Tool::Arc, _) => "sketch-prompt-arc-through",
@@ -1952,6 +2009,29 @@ fn crossing(p0: DVec2, p1: DVec2, q0: DVec2, q1: DVec2) -> Option<DVec2> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A centre-point arc runs anticlockwise from its start to the end's
+    /// direction, at the start's radius, wherever the centre is.
+    #[test]
+    fn a_centre_point_arc_turns_anticlockwise_from_its_start() {
+        use super::{arc_about, DVec2};
+        let c = DVec2::new(0.05, 0.03);
+        let arc = arc_about(c, c + DVec2::new(0.01, 0.0), c + DVec2::new(0.0, 0.02)).unwrap();
+        let kreate_geom2d::Curve2D::Arc { r, sweep, .. } = arc else {
+            panic!()
+        };
+        assert!((r - 0.01).abs() < 1e-12);
+        assert!((sweep - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        // The end at the start's radius, along the end's direction.
+        assert!(arc.point(1.0).distance(c + DVec2::new(0.0, 0.01)) < 1e-12);
+        // Ended below, it goes the long way round: three quarters.
+        let long = arc_about(c, c + DVec2::new(0.01, 0.0), c - DVec2::new(0.0, 1.0)).unwrap();
+        let kreate_geom2d::Curve2D::Arc { sweep, .. } = long else {
+            panic!()
+        };
+        assert!((sweep - 1.5 * std::f64::consts::PI).abs() < 1e-12);
+        assert!(arc_about(c, c, c + DVec2::X).is_none());
+    }
 
     #[test]
     fn a_selected_sketchs_lines_are_marked_so_and_the_active_ones_more() {
