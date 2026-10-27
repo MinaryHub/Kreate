@@ -405,7 +405,7 @@ pub fn shadow_views(
             if far <= near {
                 continue;
             }
-            let slice = frustum_slice(camera.rotation, camera.fov_y, camera.aspect, near, far);
+            let slice = camera.slice(near, far);
             if let Some(view) = sun_view_of(direction, &slice, bounds, source) {
                 out.push((index, view));
             }
@@ -571,6 +571,36 @@ pub struct CameraFrustum {
     /// Width over height.
     pub aspect: f32,
     pub near: f32,
+    /// Half the view's height in an orthographic view, which has no field of
+    /// view to widen with distance: every slice of it is as wide as the
+    /// screen. `None` in perspective.
+    pub ortho_half_height: Option<f32>,
+}
+
+impl CameraFrustum {
+    /// The corners of the view between two distances from the eye.
+    ///
+    /// An orthographic view is a box, not a pyramid. Cut as a pyramid, its
+    /// first slices were a few centimetres across at the eye, so what the view
+    /// showed fell to whichever slice happened to reach it — and the sun's
+    /// shadow came across a lit face in a straight line where one slice gave
+    /// way to the next.
+    pub fn slice(&self, near: f32, far: f32) -> [glam::Vec3; 8] {
+        let Some(h) = self.ortho_half_height else {
+            return frustum_slice(self.rotation, self.fov_y, self.aspect, near, far);
+        };
+        let w = h * self.aspect;
+        let mut out = [glam::Vec3::ZERO; 8];
+        for (i, d) in [near, far].into_iter().enumerate() {
+            for (j, (sx, sy)) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+                .into_iter()
+                .enumerate()
+            {
+                out[i * 4 + j] = self.rotation * glam::Vec3::new(sx * w, sy * h, -d);
+            }
+        }
+        out
+    }
 }
 
 /// The falloff id a parallel light packs. See `lights::Falloff`.
@@ -1464,7 +1494,26 @@ mod tests {
             fov_y: 45f32.to_radians(),
             aspect: 16.0 / 9.0,
             near,
+            ortho_half_height: None,
         }
+    }
+
+    /// An orthographic view's slices are the screen's width at every
+    /// distance: the first one covers what the last does, across.
+    #[test]
+    fn an_orthographic_views_slices_are_all_as_wide_as_the_screen() {
+        let camera = CameraFrustum {
+            ortho_half_height: Some(2.0),
+            ..a_camera(0.1)
+        };
+        let near = camera.slice(0.1, 0.5);
+        let far = camera.slice(50.0, 100.0);
+        let width = |c: &[glam::Vec3; 8]| (c[1] - c[0]).length();
+        assert!((width(&near) - 2.0 * 2.0 * 16.0 / 9.0).abs() < 1e-4);
+        assert!((width(&near) - width(&far)).abs() < 1e-4);
+        // In perspective the near slice is a sliver of the far one.
+        let p = a_camera(0.1);
+        assert!(width(&p.slice(0.1, 0.5)) * 50.0 < width(&p.slice(50.0, 100.0)));
     }
 
     /// Ground stretching away in front of `a_camera`, with room above it.

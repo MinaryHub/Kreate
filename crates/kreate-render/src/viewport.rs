@@ -3563,6 +3563,8 @@ impl Viewport {
                 fov_y: camera.fov_y as f32,
                 aspect,
                 near: camera.near() as f32,
+                ortho_half_height: (camera.projection == crate::camera::Projection::Orthographic)
+                    .then(|| (camera.ortho_height() * 0.5) as f32),
             },
             // The grid's plane, world zero, eye-relative.
             -camera.eye().z as f32,
