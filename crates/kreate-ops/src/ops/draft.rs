@@ -1229,14 +1229,16 @@ impl Operator for DraftOffset {
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct DraftFilletParams {
+    #[param(hidden)]
     pub a: u32,
+    #[param(hidden)]
     pub b: u32,
     #[param(unit = "length", min = 0.0)]
     pub radius: f64,
     /// Where each was picked: which corner is rounded.
-    #[param(unit = "length")]
+    #[param(unit = "length", hidden)]
     pub near_a: [f64; 3],
-    #[param(unit = "length")]
+    #[param(unit = "length", hidden)]
     pub near_b: [f64; 3],
 }
 
@@ -1294,9 +1296,23 @@ impl Operator for DraftFillet {
                 !matches!(c, Constraint::Coincident(x, y)
                     if (x.entity == ia && y.entity == ib) || (x.entity == ib && y.entity == ia))
             });
+            let (lo, hi) = f.arc.domain();
+            let label = f.arc.point((lo + hi) * 0.5);
             let arc = d.add_curve(f.arc);
             d.constraints.push(Constraint::Tangent(ia, arc));
             d.constraints.push(Constraint::Tangent(ib, arc));
+            // The radius stays a driving dimension, so the round can be
+            // made larger or smaller afterwards as any other size is.
+            d.add(EntityKind::Dimension(Dimension {
+                kind: DimKind::Radius,
+                refs: vec![EntityRef::whole(arc)],
+                text_at: label,
+                style: String::new(),
+                driving: true,
+                value: params.radius,
+                text: None,
+                tolerance: None,
+            }));
             Ok(())
         })
     }
@@ -2038,6 +2054,46 @@ mod tests {
         assert!(
             (end.x - 0.035).abs() < 1e-9,
             "trimmed back to the arc: {end}"
+        );
+    }
+
+    /// A fillet leaves its radius as a driving dimension: set to another
+    /// value, the round follows and stays tangent to both lines.
+    #[test]
+    fn a_fillets_radius_is_a_dimension_that_can_be_changed() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.line(points=[0, 0, 0.04, 0, 0.04, 0.03])")
+            .unwrap();
+        b.run("draft.fillet(a=1, b=2, radius=0.005, near_a=(0.02, 0, 0), near_b=(0.04, 0.02, 0))")
+            .unwrap();
+        let radius_of = |d: &Drawing| {
+            d.profile_curves().into_iter().find_map(|(_, c)| match c {
+                Curve2D::Arc { r, .. } => Some(*r),
+                _ => None,
+            })
+        };
+        let dim = b
+            .drawing()
+            .entities
+            .iter()
+            .find_map(|e| match &e.kind {
+                EntityKind::Dimension(dim) if dim.kind == DimKind::Radius => {
+                    Some((e.id, dim.value))
+                }
+                _ => None,
+            })
+            .expect("a radius dimension");
+        assert!((dim.1 - 0.005).abs() < 1e-12);
+        b.run(&format!(
+            "draft.dimension_set(id={}, value=0.008, driving=true)",
+            dim.0 .0
+        ))
+        .unwrap();
+        let r = radius_of(b.drawing()).expect("an arc");
+        assert!(
+            (r - 0.008).abs() < 1e-6,
+            "the round follows its dimension: {r}"
         );
     }
 

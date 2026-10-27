@@ -5409,7 +5409,6 @@ impl App {
                                 args.push(("radius", PropertyValue::Float(r.abs())));
                             }
                             self.run_op_with("sketch.fillet", &args);
-                            self.sketching.typed.clear();
                         }
                     }
                     Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
@@ -5811,7 +5810,6 @@ impl App {
                         ("near_b", v3(near_b)),
                     ],
                 );
-                self.sketching.typed.clear();
             }
             Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
                 self.sketching.clicks.push((p, 0));
@@ -6000,13 +5998,21 @@ impl App {
             KeyCode::Comma | KeyCode::Space => Some(','),
             _ => None,
         };
-        if let (true, Some(ch)) = (drawing, typed) {
+        // A fillet's radius is typed before its corner is clicked, and kept
+        // for the corners after it.
+        let typing = drawing || tool == Tool::Fillet;
+        if let (true, Some(ch)) = (typing, typed) {
             self.sketching.typed.push(ch);
             self.redraw.set(RedrawReason::UI);
             return true;
         }
         let unit = self.doc.design.length_unit.metres();
         match code {
+            KeyCode::Backspace if tool == Tool::Fillet && !drawing => {
+                self.sketching.typed.pop();
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
             KeyCode::Backspace if drawing => {
                 if self.sketching.typed.pop().is_none() {
                     self.sketching.clicks.pop();
