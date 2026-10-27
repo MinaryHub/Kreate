@@ -1522,9 +1522,12 @@ fn overlay(
                 view.preview.push(polyline(pts));
             }
             (Tool::Arc, [s]) => view.preview.push(polyline(vec![*s, h])),
+            // The arc it will make, from the start by the pointer to the
+            // end — not the whole circle it lies on.
             (Tool::Arc, [s, e]) => {
-                if let Some(c) = kreate_ops::ops::sketch_draw::circumcentre(*s, *e, h) {
-                    view.preview.push(circle(c, c.distance(*s)));
+                if let Some(arc) = kreate_ops::ops::draft::arc_through(*s, h, *e) {
+                    let tol = s.distance(*e).max(1e-6) * 1e-3;
+                    view.preview.push(polyline(arc.tessellate(tol)));
                 }
             }
             _ => {}

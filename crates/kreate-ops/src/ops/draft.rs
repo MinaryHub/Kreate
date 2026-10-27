@@ -470,20 +470,10 @@ impl Operator for DraftArc {
 
 /// The arc from `a` by `m` to `b`, or none when they are in a line.
 pub fn arc_through(a: DVec2, m: DVec2, b: DVec2) -> Option<Curve2D> {
-    // The centre: where the perpendicular bisectors of am and mb meet.
-    let (d1, d2) = (m - a, b - m);
-    let den = 2.0 * d1.perp_dot(d2);
-    if den.abs() < 1e-18 {
-        return None;
-    }
-    let (s1, s2) = (
-        a.length_squared() - m.length_squared(),
-        m.length_squared() - b.length_squared(),
-    );
-    let c = DVec2::new(
-        (s1 * (m.y - b.y) - s2 * (a.y - m.y)) / -den,
-        (s2 * (a.x - m.x) - s1 * (m.x - b.x)) / -den,
-    );
+    // The centre: the one point as far from all three. Worked out here once
+    // with its signs turned, which put it mirrored through the origin — right
+    // only for an arc centred there, as the first test's was.
+    let c = crate::ops::sketch_draw::circumcentre(a, m, b)?;
     let r = c.distance(a);
     let (ta, tm, tb) = ((a - c).to_angle(), (m - c).to_angle(), (b - c).to_angle());
     let tau = std::f64::consts::TAU;
@@ -2174,6 +2164,24 @@ mod tests {
             "the other way round"
         );
         assert!(arc_through(DVec2::ZERO, DVec2::X, DVec2::X * 2.0).is_none());
+        // Away from the origin, where a centre found with the wrong sign
+        // lands somewhere else: each point on the arc, and the arc on the
+        // side of the one it passes.
+        let (a, m, b) = (
+            DVec2::new(0.05, 0.02),
+            DVec2::new(0.07, 0.035),
+            DVec2::new(0.09, 0.02),
+        );
+        let Some(Curve2D::Arc { c, r, .. }) = arc_through(a, m, b) else {
+            panic!()
+        };
+        for p in [a, m, b] {
+            assert!((c.distance(p) - r).abs() < 1e-12, "{c} {r} {p}");
+        }
+        let arc = arc_through(a, m, b).unwrap();
+        assert!(arc.point(0.0).distance(a) < 1e-12 && arc.point(1.0).distance(b) < 1e-12);
+        let (lo, hi) = arc.bounds();
+        assert!(hi.y >= m.y - 1e-12 && lo.y >= 0.02 - 1e-12, "{lo} {hi}");
         let _ = (PropertyMap::new(), PropertyValue::Bool(true));
     }
 }
