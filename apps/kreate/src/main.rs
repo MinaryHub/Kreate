@@ -4879,7 +4879,10 @@ impl App {
         let snapping = self.snap.enabled != self.input.ctrl_down;
         let (hover, snapped) = match caught {
             Some((v, g)) => ((g.points[v as usize], v + 1), false),
-            None => match self.sketch_other_snap() {
+            None => match self
+                .sketch_other_snap()
+                .or_else(|| self.sketch_object_snap())
+            {
                 Some(p) => ((p, 0), true),
                 None => match snapping.then(|| self.sketch_snap(on_plane)).flatten() {
                     Some(p) => ((p, 0), true),
@@ -4961,6 +4964,35 @@ impl App {
         best.map(|(p, _)| to_plane(p))
     }
 
+    /// The parts in the scene near the pointer, laid onto this sketch's
+    /// plane: a corner first, then an edge's middle, then a place along an
+    /// edge. Whatever the snap toggle says, as the other sketches are — a
+    /// sketch is most often drawn against what is already modelled, and
+    /// Fusion catches a body's edges the same way. Not faces: over a part,
+    /// every point would be caught.
+    fn sketch_object_snap(&mut self) -> Option<glam::DVec2> {
+        use kreate::snap::Mode;
+        let (id, world) = self.sketch_target()?;
+        let (x, y) = self.cursor_viewport_px()?;
+        let (w, h) = self.gfx.as_ref()?.viewport.render_size();
+        let scene = self.sketch_snap_world(id, Mode::Element);
+        [Mode::Vertex, Mode::EdgeMidpoint, Mode::Edge]
+            .into_iter()
+            .find_map(|mode| {
+                kreate::snap::resolve(
+                    &scene,
+                    mode,
+                    (x as f32, y as f32),
+                    &self.camera,
+                    (w as f32, h as f32),
+                )
+            })
+            .map(|hit| {
+                let local = world.inverse().transform_point3(hit.point);
+                glam::DVec2::new(local.x, local.y)
+            })
+    }
+
     /// Where drawing snaps to near `on_plane`, by the snap mode: the grid
     /// for increment; otherwise the sketch's own middles and crossings, the
     /// rest of the scene — other sketches, meshes, bodies — laid onto the
@@ -5003,7 +5035,9 @@ impl App {
         // The rest of the scene, laid onto the plane.
         let size = self.gfx.as_ref().map(|g| g.viewport.render_size());
         if let (Some((x, y)), Some((w, h))) = (self.cursor_viewport_px(), size) {
-            let scene = self.sketch_snap_world(id, mode);
+            // The whole scene's candidates, the one gathering the object
+            // snap keeps too, so the two do not take turns rebuilding it.
+            let scene = self.sketch_snap_world(id, Mode::Element);
             if let Some(hit) = kreate::snap::resolve(
                 &scene,
                 mode,
