@@ -298,12 +298,17 @@ fn average_blocker(
 /// casts it. It is measured in texels, so it scales with the scene by
 /// construction — which is exactly what the depth bias cannot do.
 fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
-    let info = shadows[index];
+    // Read from the buffer at each use, never copied whole into a local. DXC
+    // compiled `let info = shadows[index];` so that `info.view_proj[i]`
+    // with `i` a variable read another frame's matrix: every sun shadow
+    // came out of the wrong cascade, as a hard straight band across lit
+    // faces, while FXC drew it right.
+    //
     // A light with no frame this frame. Redundant with the empty faces such a
     // light carries — every layer is -1 and the test below catches it — and
     // kept because the intent should be stated rather than implied. See
     // `GpuShadow::NONE`.
-    if info.params.w == 0.0 {
+    if shadows[index].params.w == 0.0 {
         return 1.0;
     }
 
@@ -322,7 +327,7 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     var face = 0;
     if is_cube(light) {
         face = cube_face(-to_light);
-        if info.layers[face] < 0 {
+        if shadows[index].layers[face] < 0 {
             // A face this light was not given — either nothing is in it, or
             // the frame budget ran out before it. Lit, for the same reason as
             // outside a frustum: the map says nothing about it.
@@ -331,10 +336,10 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     } else if light.falloff == FALLOFF_PARALLEL {
         var found = -1;
         for (var i = 0; i < 6; i = i + 1) {
-            if info.layers[i] < 0 {
+            if shadows[index].layers[i] < 0 {
                 continue;
             }
-            let c = info.view_proj[i] * vec4<f32>(position, 1.0);
+            let c = shadows[index].view_proj[i] * vec4<f32>(position, 1.0);
             let n = c.xyz / c.w;
             if c.w > 0.0 && abs(n.x) <= 1.0 && abs(n.y) <= 1.0 && n.z > 0.0 {
                 found = i;
@@ -358,16 +363,16 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
             return 1.0;
         }
         face = found;
-    } else if info.layers[0] < 0 {
+    } else if shadows[index].layers[0] < 0 {
         return 1.0;
     }
-    let layer = info.layers[face];
-    let frame = info.view_proj[face];
+    let layer = shadows[index].layers[face];
+    let frame = shadows[index].view_proj[face];
     // One texel in metres, here: for an orthographic frustum `w` is one and
     // the size is constant; for a perspective one `w` is the distance along the
     // light's axis and a texel grows with it.
     let first = frame * vec4<f32>(position, 1.0);
-    let texel_world = info.texels[face] * max(first.w, 1.0);
+    let texel_world = shadows[index].texels[face] * max(first.w, 1.0);
     // More offset at a glancing angle, where one texel spans more surface.
     let incidence = clamp(dot(normal, to_light), 1e-3, 1.0);
     let lateral = sqrt(1.0 - incidence * incidence);
@@ -396,7 +401,7 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     // the bias would push the comparison past the far plane, unshadowing the
     // whole surface.
     let slope = min(lateral / incidence, 8.0);
-    let bias = info.params.z * (1.0 + slope);
+    let bias = shadows[index].params.z * (1.0 + slope);
 
     // How wide to filter. A source with size casts a penumbra that grows with
     // how far the thing casting it is from the thing it falls on — which is why
@@ -408,7 +413,7 @@ fn shadow_factor(index: u32, position: vec3<f32>, normal: vec3<f32>, to_light: v
     // resolution however small the source is.
     var radius = 1.0;
     let spin = tap_spin(position, texel_world);
-    let scale = info.penumbra[face];
+    let scale = shadows[index].penumbra[face];
     if scale > 0.0 {
         let blocker = average_blocker(layer, texel, size, ndc.z + bias, spin);
         if blocker < 0.0 {

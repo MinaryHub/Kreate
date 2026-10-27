@@ -67,7 +67,10 @@ fn a_scene_a_user_would_build(kind: u32) -> Document {
         &mut history,
         &mut doc,
         "object.add_primitive",
-        &[("shape", PropertyValue::Enum(1))],
+        &[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ],
     );
     menu(
         &registry,
@@ -747,7 +750,10 @@ fn the_material_preview_shows_a_material_without_a_lamp() {
         &mut history,
         &mut doc,
         "object.add_primitive",
-        &[("shape", PropertyValue::Enum(1))],
+        &[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ],
     );
     let shot = shoot_mode(&gpu, &doc, Camera::default(), false, true);
     if let Ok(dir) = std::env::var("KREATE_SHOT_DIR") {
@@ -794,7 +800,10 @@ fn a_scene_with_no_lamp_is_black_and_that_is_why_the_menu_matters() {
         &mut history,
         &mut doc,
         "object.add_primitive",
-        &[("shape", PropertyValue::Enum(1))],
+        &[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ],
     );
 
     let pixels = shoot(&gpu, &doc);

@@ -223,7 +223,13 @@ fn a_session_of_operators_builds_a_scene_and_undoes_cleanly() {
     let ctx = Context::default();
 
     let steps: &[(&str, &[(&'static str, PropertyValue)])] = &[
-        ("object.add_primitive", &[("shape", PropertyValue::Enum(1))]),
+        (
+            "object.add_primitive",
+            &[
+                ("size", PropertyValue::Float(2.0)),
+                ("shape", PropertyValue::Enum(1)),
+            ],
+        ),
         ("object.duplicate", &[("linked", PropertyValue::Bool(true))]),
         (
             "object.translate",
@@ -232,6 +238,7 @@ fn a_session_of_operators_builds_a_scene_and_undoes_cleanly() {
         (
             "object.add_primitive",
             &[
+                ("size", PropertyValue::Float(2.0)),
                 ("shape", PropertyValue::Enum(5)),
                 ("location", PropertyValue::Vec3([4.0, 0.0, 0.0])),
             ],
@@ -275,7 +282,10 @@ fn the_session_reads_back_as_a_runnable_script() {
         &mut doc,
         &ctx,
         "object.add_primitive",
-        &params(&[("shape", PropertyValue::Enum(5))]),
+        &params(&[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(5)),
+        ]),
     )
     .unwrap();
     h.dispatch(
@@ -314,7 +324,10 @@ fn an_operator_changes_what_is_drawn() {
         &mut doc,
         &ctx,
         "object.add_primitive",
-        &params(&[("shape", PropertyValue::Enum(1))]),
+        &params(&[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ]),
     )
     .unwrap();
 
@@ -354,7 +367,10 @@ fn undo_restores_the_rendered_image() {
         &mut doc,
         &ctx,
         "object.add_primitive",
-        &params(&[("shape", PropertyValue::Enum(1))]),
+        &params(&[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ]),
     )
     .unwrap();
 
@@ -398,7 +414,10 @@ fn adjusting_the_last_operation_is_visible_and_does_not_compound() {
         &mut doc,
         &ctx,
         "object.add_primitive",
-        &params(&[("shape", PropertyValue::Enum(1))]),
+        &params(&[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ]),
     )
     .unwrap();
     h.dispatch(
@@ -450,7 +469,10 @@ fn linked_duplicates_draw_twice_from_one_upload() {
         &mut doc,
         &ctx,
         "object.add_primitive",
-        &params(&[("shape", PropertyValue::Enum(1))]),
+        &params(&[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ]),
     )
     .unwrap();
     let one = gpu_or_skip!(render(&doc, &camera()));
@@ -637,7 +659,10 @@ fn a_parented_child_follows_its_parent_on_screen() {
         &mut doc,
         &ctx,
         "object.add_primitive",
-        &params(&[("shape", PropertyValue::Enum(1))]),
+        &params(&[
+            ("size", PropertyValue::Float(2.0)),
+            ("shape", PropertyValue::Enum(1)),
+        ]),
     )
     .unwrap();
     let parent = doc.selection.active.unwrap();
@@ -647,6 +672,7 @@ fn a_parented_child_follows_its_parent_on_screen() {
         &ctx,
         "object.add_primitive",
         &params(&[
+            ("size", PropertyValue::Float(2.0)),
             ("shape", PropertyValue::Enum(1)),
             ("location", PropertyValue::Vec3([3.0, 0.0, 0.0])),
         ]),
