@@ -66,6 +66,10 @@ pub const IMPORT: &[Format] = &[
         name: "STEP (CAD)",
         extensions: &["step", "stp"],
     },
+    Format {
+        name: "DXF (2D drawing)",
+        extensions: &["dxf"],
+    },
 ];
 
 /// What Export writes, in the order the menu offers it.

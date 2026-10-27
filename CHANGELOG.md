@@ -10,6 +10,31 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- DXF import: File ▸ Import, a drop on the window or the connector brings a
+  2D drawing in as a drawing — lines, circles, arcs, ellipses, polylines
+  with their bulges, splines, points, TEXT and MTEXT, on their layers with
+  their colours, blocks drawn out where they are inserted, in the unit the
+  file declares (millimetres when it says none). One step to undo.
+- A drawing's text is shown in 2D, at its size and turned as it is.
+- F2 into a drawing frames what is drawn in it.
+- A sketch fillet's radius can be typed before its corner is clicked, and
+  it stays a radius dimension that can be changed afterwards.
+- The sketch ribbon has a Modify group — fillet, trim, offset, mirror,
+  pattern — apart from the tools that draw.
+
+### Changed
+
+- New objects are added at 500 mm, a cube's edge.
+
+### Fixed
+
+- In the material preview, a sun's shadow fell as a hard straight band
+  across lit faces when the DirectX shader compiler was installed.
+- Changing a trim's numbers in the last-operation panel broke the line
+  apart; it no longer offers them.
+
 ## [0.5.0] - 2026-10-27
 
 ### Added

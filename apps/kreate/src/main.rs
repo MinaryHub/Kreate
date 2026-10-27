@@ -6159,6 +6159,28 @@ impl App {
             camera.rotation = rotation;
             camera.pivot = translation;
             camera.projection = kreate_render::Projection::Orthographic;
+            // A drawing with something in it is framed on what is drawn: an
+            // imported one can be a metre across or a millimetre, and far
+            // from its origin.
+            let drawn = self
+                .doc
+                .object(id)
+                .and_then(|o| o.drawing.as_deref())
+                .and_then(|d| d.extents());
+            if let Some((lo, hi)) = drawn {
+                let centre = (lo + hi) * 0.5;
+                let radius = ((hi - lo).length() * 0.5).max(1e-4);
+                let aspect = self
+                    .gfx
+                    .as_ref()
+                    .map(|g| g.viewport.aspect())
+                    .unwrap_or(16.0 / 9.0);
+                camera.frame_sphere(
+                    world.transform_point3(DVec3::new(centre.x, centre.y, 0.0)),
+                    radius * world.matrix3.x_axis.length(),
+                    aspect,
+                );
+            }
             self.camera = camera;
             self.motion = kreate_render::CameraMotion::new(camera);
             self.redraw.set(RedrawReason::SCENE_CHANGED);
@@ -16692,6 +16714,40 @@ mod tests {
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A DXF comes in as a drawing, selected, as one step to undo — the
+    /// same way in as a mesh file, so drop, Import and the connector all
+    /// take it.
+    #[test]
+    fn a_dxf_imports_as_a_drawing_and_undoes_as_one_step() {
+        let dir = std::env::temp_dir().join(format!("kreate-import-dxf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("made");
+        let path = dir.join("plate.dxf");
+        std::fs::write(
+            &path,
+            "0\nSECTION\n2\nENTITIES\n0\nLINE\n10\n0\n20\n0\n11\n100\n21\n0\n\
+             0\nCIRCLE\n10\n50\n20\n20\n40\n5\n0\nENDSEC\n0\nEOF\n",
+        )
+        .expect("written");
+        let mut app = app();
+        let before = app.doc.objects().count();
+        app.import_into(&path);
+        let start = std::time::Instant::now();
+        while app.doc.objects().count() == before && start.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.serve_imports();
+        }
+        let (id, object) = app
+            .doc
+            .objects()
+            .find(|(_, o)| o.drawing.is_some())
+            .expect("a drawing came in");
+        assert_eq!(object.drawing.as_ref().unwrap().entities.len(), 2);
+        assert_eq!(app.doc.selection.active, Some(id));
+        app.undo();
+        assert!(app.doc.objects().all(|(_, o)| o.drawing.is_none()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

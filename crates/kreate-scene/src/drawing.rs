@@ -347,6 +347,24 @@ impl Drawing {
         self.add(EntityKind::Curve(curve))
     }
 
+    /// The corners of what is drawn, in the drawing's plane: its curves,
+    /// points and where its text stands. `None` for an empty drawing.
+    pub fn extents(&self) -> Option<(DVec2, DVec2)> {
+        let mut lo = DVec2::splat(f64::INFINITY);
+        let mut hi = DVec2::splat(f64::NEG_INFINITY);
+        for e in &self.entities {
+            let (a, b) = match &e.kind {
+                EntityKind::Curve(c) => c.bounds(),
+                EntityKind::Point(p) => (*p, *p),
+                EntityKind::Text(t) => (t.at, t.at + DVec2::splat(t.height)),
+                EntityKind::Dimension(_) => continue,
+            };
+            lo = lo.min(a);
+            hi = hi.max(b);
+        }
+        (lo.x <= hi.x && lo.y <= hi.y).then_some((lo, hi))
+    }
+
     pub fn add_layer(&mut self, name: &str) -> LayerId {
         let id = LayerId(self.next_layer);
         self.next_layer += 1;

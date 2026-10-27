@@ -25,7 +25,7 @@ use crate::build::BuildNote;
 /// The extensions read as scenes, beside Kreate's own `.kreate`.
 pub const SCENE_FORMATS: &[&str] = &[
     "gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off", "usd", "usda", "usdc", "usdz", "dae",
-    "urdf", "step", "stp",
+    "urdf", "step", "stp", "dxf",
 ];
 
 /// Whether `path` names a file this module reads.
@@ -131,6 +131,14 @@ pub fn read_scene_file_with(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Import".to_string());
     let text = |bytes: Vec<u8>| String::from_utf8(bytes).map_err(|e| format!("not utf-8: {e}"));
+    // A 2D drawing comes in as a drawing, not through the mesh IR: its
+    // circles stay circles a dimension can take hold of. Read lossily, as a
+    // drafting program's text is often in its own code page.
+    if lower == "dxf" {
+        progress.start(ReadStage::Building, 0);
+        let doc = crate::dxf_read::parse_dxf(&String::from_utf8_lossy(&bytes), &name)?;
+        return Ok((doc, Vec::new()));
+    }
     let scene = match lower.as_str() {
         // A texture an FBX names but does not carry is looked for beside it:
         // where it says, then by its file name alone — what a model copied

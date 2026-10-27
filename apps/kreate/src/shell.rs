@@ -13889,6 +13889,9 @@ enum RibbonIcon {
     SkFinish,
     SkSelect,
     SkPattern,
+    SkTrim,
+    SkOffset,
+    SkMirror,
     SelectAll,
     SelectNone,
     SelectInvert,
@@ -13930,6 +13933,10 @@ impl RibbonIcon {
                 "point" => Self::SkPoint,
                 "select" => Self::SkSelect,
                 "pattern" => Self::SkPattern,
+                "fillet" => Self::Fillet,
+                "trim" => Self::SkTrim,
+                "offset" => Self::SkOffset,
+                "mirror" => Self::SkMirror,
                 "dimension" => Self::SkDimension,
                 "coincident" => Self::SkCoincident,
                 "perpendicular" => Self::SkPerpendicular,
@@ -14036,6 +14043,9 @@ impl RibbonIcon {
             | Self::Subdivide
             | Self::Merge
             | Self::Unwrap
+            | Self::SkTrim
+            | Self::SkOffset
+            | Self::SkMirror
             | Self::Fillet
             | Self::Chamfer
             | Self::Shell
@@ -14298,6 +14308,27 @@ impl RibbonIcon {
                         p(x, y + 0.2),
                     ]);
                 }
+            }
+            // A line cut where another crosses it, the piece past the
+            // crossing gone to dashes.
+            Self::SkTrim => {
+                line(vec![p(0.5, 0.15), p(0.5, 0.85)]);
+                line(vec![p(0.1, 0.5), p(0.5, 0.5)]);
+                line(vec![p(0.6, 0.5), p(0.68, 0.5)]);
+                line(vec![p(0.78, 0.5), p(0.88, 0.5)]);
+            }
+            // A corner and the same corner a step inside it.
+            Self::SkOffset => {
+                line(vec![p(0.15, 0.88), p(0.15, 0.15), p(0.88, 0.15)]);
+                line(vec![p(0.38, 0.88), p(0.38, 0.38), p(0.88, 0.38)]);
+            }
+            // A shape and its reflection across a dashed line.
+            Self::SkMirror => {
+                for y in [0.1, 0.32, 0.54, 0.76] {
+                    line(vec![p(0.5, y), p(0.5, y + 0.12)]);
+                }
+                closed(vec![p(0.38, 0.25), p(0.38, 0.8), p(0.1, 0.8)]);
+                closed(vec![p(0.62, 0.25), p(0.62, 0.8), p(0.9, 0.8)]);
             }
             Self::SkPoint => {
                 painter.circle_filled(p(0.5, 0.5), 0.12 * s, colour);
@@ -14916,6 +14947,8 @@ pub struct SketchView {
     pub points: Vec<(kreate_math::DVec3, bool, bool)>,
     /// A constraint's mark, where it is drawn.
     pub glyphs: Vec<(kreate_math::DVec3, String)>,
+    /// A drawing's text, as it stands on the page.
+    pub texts: Vec<SketchText>,
     pub dims: Vec<SketchDim>,
     /// What the tool in hand would draw, as polylines.
     pub preview: Vec<Vec<kreate_math::DVec3>>,
@@ -14959,6 +14992,19 @@ pub struct SketchView {
 pub struct RegionShape {
     pub rings: Vec<Vec<kreate_math::DVec3>>,
     pub tris: Vec<[kreate_math::DVec3; 3]>,
+}
+
+/// A line of a drawing's text, in the world: where its baseline starts,
+/// and the points one cap height up and one height along from there, which
+/// say how big it is on screen and which way it runs.
+#[derive(Clone, Debug)]
+pub struct SketchText {
+    pub at: kreate_math::DVec3,
+    pub up: kreate_math::DVec3,
+    pub along: kreate_math::DVec3,
+    pub content: String,
+    /// Where `at` is along the line: 0 its start, 0.5 its middle, 1 its end.
+    pub anchor: f32,
 }
 
 /// One dimension on the sketch.
@@ -15251,6 +15297,34 @@ fn draw_sketches(
             );
             painter.galley(r.min, galley, theme.text);
         }
+    }
+    // A drawing's text, at its size and turned as it is on the page. Too
+    // small to read, it is left out rather than drawn as a smudge.
+    for t in &view.texts {
+        let (Some(p), Some(up), Some(along)) = (project(&t.at), project(&t.up), project(&t.along))
+        else {
+            continue;
+        };
+        let cap = (up - p).length();
+        if !(3.0..=400.0).contains(&cap) {
+            continue;
+        }
+        let run = (along - p).normalized();
+        let down = egui::vec2(-run.y, run.x);
+        // A font's capitals are about seven tenths of its size.
+        let galley = painter.layout(
+            t.content.clone(),
+            egui::FontId::proportional(cap / 0.7),
+            blue,
+            f32::INFINITY,
+        );
+        let size = galley.size();
+        // The galley hangs from its top-left corner; the text stands on its
+        // baseline, about four fifths of a line down.
+        let top_left = p - down * (size.y * 0.8) - run * (size.x * t.anchor);
+        painter.add(
+            egui::epaint::TextShape::new(top_left, galley, blue).with_angle(run.y.atan2(run.x)),
+        );
     }
     // Dimensions: a thin line between what they measure and the number.
     let pointer = ui.ctx().pointer_hover_pos();

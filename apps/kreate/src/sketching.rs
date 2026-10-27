@@ -1726,6 +1726,24 @@ pub fn drawing_view(
             ui.points.contains(&(v as u32)),
         ));
     }
+    for e in &d.entities {
+        let kreate_scene::drawing::EntityKind::Text(t) = &e.kind else {
+            continue;
+        };
+        let along = DVec2::new(t.rotation.cos(), t.rotation.sin());
+        let up = DVec2::new(-along.y, along.x);
+        view.texts.push(crate::shell::SketchText {
+            at: to_world(t.at),
+            up: to_world(t.at + up * t.height),
+            along: to_world(t.at + along * t.height),
+            content: t.content.clone(),
+            anchor: match t.align {
+                kreate_scene::drawing::TextAlign::Left => 0.0,
+                kreate_scene::drawing::TextAlign::Center => 0.5,
+                kreate_scene::drawing::TextAlign::Right => 1.0,
+            },
+        });
+    }
     // The marks: at a point for what holds a point, at a curve's middle for
     // what holds a curve.
     let at = |r: EntityRef| d.point_of(r);
