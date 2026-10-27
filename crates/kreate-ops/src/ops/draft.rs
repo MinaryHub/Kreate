@@ -1050,10 +1050,13 @@ impl Operator for DraftUnconstrain {
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct DraftTrimParams {
     /// The curve to trim.
+    #[param(hidden)]
     pub id: u32,
     /// A point on the piece to take away: between the crossings either
     /// side of it, or to the curve's end when there is none that side.
-    #[param(unit = "length")]
+    /// Where it was clicked, so not a number to adjust afterwards: moved,
+    /// it names another piece or none, and the curve came apart wrong.
+    #[param(unit = "length", hidden)]
     pub at: [f64; 3],
 }
 

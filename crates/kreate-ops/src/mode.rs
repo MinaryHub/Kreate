@@ -122,6 +122,9 @@ pub enum Menu {
     Texture,
     /// The sketch tools: lines, rectangles, circles, arcs, points.
     Sketch,
+    /// Changing what is drawn: fillet, trim, offset, mirror, pattern —
+    /// Fusion's Modify, apart from what creates.
+    Modify,
     /// Constraints and dimensions on what is drawn.
     Constrain,
     /// The sketch made solid: extrude, revolve, and finishing the sketch.
@@ -276,7 +279,7 @@ pub const MODES: [ModeInfo; 8] = [
         needs: Needs::Nothing,
         acts_on: ActsOn::Sketch,
         keymap: "sketch",
-        menus: &[Menu::Sketch, Menu::Constrain, Menu::Solid],
+        menus: &[Menu::Sketch, Menu::Modify, Menu::Constrain, Menu::Solid],
         element_buttons: false,
         edit_tools: false,
         shows_elements: false,

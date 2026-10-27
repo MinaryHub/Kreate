@@ -33,8 +33,9 @@ pub struct TrimParams {
     /// The line clicked, by its place in the sketch's list.
     #[param(hidden)]
     pub line: u32,
-    /// Where on it, in the sketch's plane.
-    #[param(unit = "length")]
+    /// Where on it, in the sketch's plane: where it was clicked, not a
+    /// number to adjust afterwards.
+    #[param(unit = "length", hidden)]
     pub at: [f64; 3],
 }
 

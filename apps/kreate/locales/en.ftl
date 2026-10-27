@@ -1475,6 +1475,7 @@ collab-need-address = Type the address the host gave you, such as 192.168.0.12:7
 mode-sketch = Sketch
 menu-sketch = Create
 menu-constrain = Constrain
+menu-modify = Modify
 menu-solid = Solid
 sketch-finish = Finish Sketch
 sketch-plane = Sketch Plane

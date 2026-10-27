@@ -1753,6 +1753,7 @@ struct Labels {
     menu_texture: String,
     menu_sketch: String,
     menu_constrain: String,
+    menu_modify: String,
     menu_solid: String,
     finish_sketch: String,
     sketch_free: String,
@@ -2154,6 +2155,7 @@ impl Labels {
             menu_texture: t("menu-texture"),
             menu_sketch: t("menu-sketch"),
             menu_constrain: t("menu-constrain"),
+            menu_modify: t("menu-modify"),
             menu_solid: t("menu-solid"),
             finish_sketch: t("sketch-finish"),
             sketch_free: t("sketch-free"),
@@ -4715,12 +4717,7 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "spline",
                         "polygon",
                         "slot",
-                        "pattern",
-                        "mirror",
-                        "offset",
                         "point",
-                        "fillet",
-                        "trim",
                         "text",
                     ],
                 )
@@ -4734,6 +4731,10 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                     ),
                 ])
                 .collect(),
+            }),
+            kreate_ops::mode::Menu::Modify => out.push(TopMenu {
+                label: l.menu_modify.clone(),
+                nodes: sketch_tool_nodes(l, &["fillet", "trim", "offset", "mirror", "pattern"]),
             }),
             kreate_ops::mode::Menu::Constrain => out.push(TopMenu {
                 label: l.menu_constrain.clone(),

@@ -1481,6 +1481,7 @@ collab-need-address = 호스트가 알려 준 주소를 입력하세요. 예: 19
 mode-sketch = 스케치
 menu-sketch = 만들기
 menu-constrain = 구속
+menu-modify = 수정
 menu-solid = 입체
 sketch-finish = 스케치 끝내기
 sketch-plane = 스케치 평면
