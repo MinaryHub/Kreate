@@ -22,8 +22,17 @@ use; `scripts/release.sh` turns that section into the next release.
 - Offset and mirror take a distance: an offset's, typed first or changed
   in the last-operation panel (negative for the other side), and a
   mirror's, which moves its line and so the gap to the copy.
+- Environment presets in the Render tab — Studio, Bright Studio, Grey Room
+  and Outdoor — each its own lights, backdrop and exposure, remembered
+  between sessions.
+- Final renders and the rendered view stand the parts on an invisible
+  floor that catches their shadows and a faint reflection, in front of a
+  light studio backdrop, as a product shot has.
 
 ### Changed
+
+- The studio light has an overhead strip and two side strips beside its
+  key, fill and rim, for longer highlights on curved parts.
 
 - F2 with no sketch selected asks where a new one goes, rather than
   opening the first sketch in the scene.

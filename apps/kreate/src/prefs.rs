@@ -134,7 +134,28 @@ pub fn load_resolution_scale(path: &Path) -> f32 {
 }
 
 pub fn save_resolution_scale(path: &Path, scale: f32) -> Result<(), std::io::Error> {
-    save_viewport(path, scale, load_punchy(path), load_trace_when_still(path))
+    save_viewport(
+        path,
+        scale,
+        load_punchy(path),
+        load_trace_when_still(path),
+        load_room(path),
+    )
+}
+
+/// The room the lit views and renders show a part in, from the same file;
+/// the studio when it does not say, or names one this build does not know.
+pub fn load_room(path: &Path) -> kreate_render::studio::Preset {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|l| {
+                let (key, value) = l.split_once('=')?;
+                (key.trim() == "environment")
+                    .then(|| kreate_render::studio::Preset::from_name(value.trim()))?
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// Whether the rendered view traces whenever it is still, from the same
@@ -173,12 +194,14 @@ pub fn save_viewport(
     scale: f32,
     punchy: bool,
     trace_when_still: bool,
+    room: kreate_render::studio::Preset,
 ) -> Result<(), std::io::Error> {
     let look = if punchy { "punchy" } else { "base" };
     write_atomic(
         path,
         &format!(
-            "resolution_scale = {scale}\nlook = {look}\ntrace_when_still = {trace_when_still}\n"
+            "resolution_scale = {scale}\nlook = {look}\ntrace_when_still = {trace_when_still}\nenvironment = {}\n",
+            room.name()
         ),
     )
 }

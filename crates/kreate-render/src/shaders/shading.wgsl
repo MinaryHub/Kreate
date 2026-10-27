@@ -56,6 +56,18 @@ struct Shading {
     /// shown, zero for as bright as it is (see `shown_glow`). z: which frame
     /// of a still view's average this is, and one while the view moves.
     flags: vec4<f32>,
+    /// What is seen behind the scene in place of the environment: rgb the
+    /// top of the frame, w nonzero when there is a backdrop; and the bottom.
+    backdrop: vec4<f32>,
+    backdrop_low: vec4<f32>,
+}
+
+/// The backdrop at a height in the frame, clip y from -1 at the bottom to 1
+/// at the top: a sweep from the low colour to the top one, eased, as light
+/// falls off a paper backdrop.
+fn backdrop_at(ndc_y: f32) -> vec3<f32> {
+    let t = smoothstep(-1.0, 1.0, ndc_y);
+    return mix(shading.backdrop_low.rgb, shading.backdrop.rgb, t);
 }
 
 /// A glow as it is shown: as it is, or in the preview held to `flags.y`.

@@ -36,32 +36,44 @@ pub struct Preview {
     /// How far the studio is turned about up, in radians: see
     /// [`kreate_render::studio`].
     pub yaw: f32,
+    /// What is seen behind the scene, top and bottom: the room's backdrop.
+    pub backdrop: Option<[[f32; 3]; 2]>,
 }
 
-/// How bright the studio's key lamp is, beside the softbox it stands for:
-/// the softbox lights through the environment and casts no shadow, so the
-/// lamp is the share of its light that does.
-const STUDIO_KEY_LUX: f32 = 10.0;
-
-/// The exposure the studio is shown at.
+/// The exposure the default studio is shown at.
 pub const STUDIO_EXPOSURE: f32 = -0.6;
 
-/// The studio, turned by `yaw` about up.
-fn studio(yaw: f32) -> Preview {
+/// The exposure a room is shown at: each is lit to its own level.
+pub fn exposure_of(room: Room) -> f32 {
+    match room {
+        Room::Studio => STUDIO_EXPOSURE,
+        Room::Bright => -0.9,
+        Room::GreyRoom => -0.3,
+        Room::Outdoor => -1.6,
+    }
+}
+
+pub use kreate_render::studio::Preset as Room;
+
+/// A room, turned by `yaw` about up. Its key lamp is the share of the key
+/// softbox's light that casts a shadow: the softbox lights through the
+/// environment and casts none.
+fn studio(yaw: f32, room: Room) -> Preview {
     let turn = glam::Quat::from_rotation_z(yaw);
-    let from = turn * kreate_render::studio::key_direction();
+    let from = turn * room.key_direction();
     Preview {
         world: [0.5, 0.5, 0.52],
         lights: vec![PlacedLight {
             falloff: Falloff::Parallel,
             direction: -from.normalize(),
-            amount: [STUDIO_KEY_LUX; 3],
-            angular_radius: 0.1,
+            amount: [room.key_lux(); 3],
+            angular_radius: if room == Room::Outdoor { 0.01 } else { 0.1 },
             cast_shadow: true,
             ..Default::default()
         }],
-        exposure: STUDIO_EXPOSURE,
+        exposure: exposure_of(room),
         yaw,
+        backdrop: room.backdrop(),
     }
 }
 
@@ -69,7 +81,12 @@ fn studio(yaw: f32) -> Preview {
 /// about up, as Blender's preview light does, so the key is always over the
 /// viewer's left shoulder and the side being looked at is lit.
 pub fn material_preview(view: glam::DQuat) -> Preview {
-    studio(yaw_of(view.as_quat() * -glam::Vec3::Z))
+    material_preview_in(view, Room::Studio)
+}
+
+/// The same, in the room chosen.
+pub fn material_preview_in(view: glam::DQuat, room: Room) -> Preview {
+    studio(yaw_of(view.as_quat() * -glam::Vec3::Z), room)
 }
 
 /// How far a view looking along `ahead` is turned about up from +Y, which
@@ -86,6 +103,11 @@ fn yaw_of(ahead: glam::Vec3) -> f32 {
 /// own: fixed in the world, so turning round a part shows its other side
 /// in shadow, as a real room would.
 pub fn rendered_studio(doc: &Document) -> Preview {
+    rendered_studio_in(doc, Room::Studio)
+}
+
+/// The same, in the room chosen.
+pub fn rendered_studio_in(doc: &Document, room: Room) -> Preview {
     // Turned to the scene's camera, so the shot it renders has the key over
     // its left shoulder whichever way it looks — fixed to the default view,
     // a camera on the far side shot the part against its own key, dark. With
@@ -97,7 +119,7 @@ pub fn rendered_studio(doc: &Document) -> Preview {
     let yaw = camera.map_or(DEFAULT_VIEW_YAW, |t| {
         yaw_of(t.matrix3.as_mat3() * -glam::Vec3::Z)
     });
-    studio(yaw)
+    studio(yaw, room)
 }
 
 /// The default view's turn about up from +Y, as `material_preview` measures

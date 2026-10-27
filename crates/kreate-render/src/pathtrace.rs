@@ -224,7 +224,14 @@ struct Params {
     /// x: nonzero when this sample may carry the last frame's mean over.
     /// y: the most frames of it a pixel keeps.
     reproject: [u32; 4],
+    /// x: the floor's height in the world. y: nonzero when there is one.
+    /// z: how much of a mirror it is.
+    ground: [f32; 4],
 }
+
+/// How much of what stands on the floor it shows, looking straight down; a
+/// grazing look sees more, as a polished floor does.
+const FLOOR_REFLECTION: f32 = 0.08;
 
 /// The most of the last frames a pixel carries over when the view moves:
 /// its own samples outweigh them from this many on.
@@ -259,6 +266,9 @@ struct Scene {
     local: wgpu::Buffer,
     emitter_count: u32,
     emitter_total: f32,
+    /// The lowest point of the scene: where its floor is, when it is below
+    /// the ground.
+    lowest: f32,
 }
 
 /// The glowing triangles, for the path tracer to aim at: each one's index
@@ -348,6 +358,10 @@ pub struct PathTracer {
     pub noise_threshold: f32,
     /// How many times a path bounces before it stops.
     pub max_bounces: u32,
+    /// A floor under the scene that catches its shadows and, faintly, its
+    /// reflections, and is otherwise the backdrop: a product shot's. At the
+    /// ground, or under the scene when it reaches below.
+    pub ground: bool,
     /// A baked gas the paths travel through: group 1.
     volume: PtVolumeGpu,
 }
@@ -778,6 +792,7 @@ impl PathTracer {
             resolve_bind: None,
             size: (0, 0),
             sample: 0,
+            ground: false,
             noise_threshold: 0.01,
             max_bounces: 4,
             volume,
@@ -1133,6 +1148,9 @@ impl PathTracer {
         }
         let (emitter_data, emitter_total) = emitters_of(&positions, &triangles, surfaces);
         let emitter_count = emitter_data.len() as u32;
+        // The lowest point, for where the floor goes when the scene reaches
+        // below the ground.
+        let lowest = positions.iter().map(|p| p.z).fold(f32::INFINITY, f32::min);
         let positions: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
         let upload = |label, bytes: &[u8]| {
             let bytes = if bytes.is_empty() {
@@ -1175,6 +1193,7 @@ impl PathTracer {
             local: upload("path trace local", bytemuck::cast_slice(&local)),
             emitter_count,
             emitter_total,
+            lowest: if lowest.is_finite() { lowest } else { 0.0 },
         });
         self.scene_bind = None;
         self.sample = 0;
@@ -1383,6 +1402,12 @@ impl PathTracer {
             // this eye's plus an offset, kept small for f32.
             prev_eye: [moved.x, moved.y, moved.z, 0.0],
             reproject: [u32::from(self.reproject_now), HISTORY, 0, 0],
+            ground: [
+                self.scene.as_ref().map_or(0.0, |s| s.lowest.min(0.0)),
+                f32::from(u8::from(self.ground && self.scene.is_some())),
+                FLOOR_REFLECTION,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         queue.write_buffer(

@@ -103,6 +103,9 @@ struct Shading {
     /// The camera for contact shadows, which the probe leaves off.
     view_proj: [[f32; 4]; 4],
     flags: [f32; 4],
+    /// No backdrop: the probe shades, it draws no background.
+    backdrop: [f32; 4],
+    backdrop_low: [f32; 4],
 }
 
 /// Runs the composed probe over `points` against `lights`.
@@ -191,6 +194,8 @@ fn on_gpu_under(
                 inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 flags: [0.0; 4],
+                backdrop: [0.0; 4],
+                backdrop_low: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });

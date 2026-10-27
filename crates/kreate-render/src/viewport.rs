@@ -170,6 +170,10 @@ struct ShadingGlobals {
     view_proj: [[f32; 4]; 4],
     /// x: contact shadows on.
     flags: [f32; 4],
+    /// What is seen behind the scene, top of the frame (rgb, and w nonzero
+    /// when there is a backdrop) and bottom. See `shading.wgsl`.
+    backdrop: [f32; 4],
+    backdrop_low: [f32; 4],
 }
 
 #[repr(C)]
@@ -1482,6 +1486,12 @@ pub struct Viewport {
     world_rotation: f32,
     /// Draws the environment where there is no geometry.
     background_pipeline: wgpu::RenderPipeline,
+    /// A backdrop behind the scene in place of the environment, top of the
+    /// frame and bottom, linear — a studio's paper sweep, as a product shot
+    /// has. The environment still lights the scene; this is only what is
+    /// seen where there is nothing. With it, a final render stands its parts
+    /// on a floor that catches their shadows (see `PathTracer::ground`).
+    pub backdrop: Option<[[f32; 3]; 2]>,
     /// The camera's inverse, for the background's rays.
     ///
     /// Kept rather than recomputed where it is used, because `prepare` is the
@@ -2798,6 +2808,7 @@ impl Viewport {
             world: [0.0; 3],
             environment: environment_0,
             background_pipeline,
+            backdrop: None,
             has_environment: false,
             world_rotation: 0.0,
             world_strength: 1.0,
@@ -3194,6 +3205,8 @@ impl Viewport {
         if self.path_tracing() {
             if let Some(n) = self.frame_sample {
                 self.pathtracer.noise_threshold = self.path_trace_noise_threshold;
+                // A floor under a backdrop, as the rasterised view has one.
+                self.pathtracer.ground = self.backdrop.is_some() && self.show_ground_shadow;
                 self.pathtracer.max_bounces = self.path_trace_bounces;
                 self.pathtracer.prepare(
                     device,
@@ -3986,6 +3999,14 @@ impl Viewport {
                 self.accum_samples as f32,
                 0.0,
             ],
+            backdrop: match self.backdrop {
+                Some([top, _]) => [top[0], top[1], top[2], 1.0],
+                None => [0.0; 4],
+            },
+            backdrop_low: match self.backdrop {
+                Some([_, low]) => [low[0], low[1], low[2], 0.0],
+                None => [0.0; 4],
+            },
         }
     }
 

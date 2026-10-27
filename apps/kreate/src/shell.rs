@@ -307,6 +307,9 @@ pub struct ShellState {
     /// Whether the lit views use the Punchy look of AgX. See
     /// `prefs::load_punchy`.
     pub punchy: bool,
+    /// The room the lit views and renders show a part in when the scene
+    /// brings no light of its own. See `prefs::load_room`.
+    pub studio_preset: kreate_render::studio::Preset,
     /// Whether the rendered view traces whenever it is still.
     pub trace_when_still: bool,
     /// The open document's name, `*` in front while it has unsaved changes:
@@ -899,6 +902,7 @@ impl Default for ShellState {
             node_clipboard: None,
             resolution_scale: 1.0,
             punchy: true,
+            studio_preset: Default::default(),
             trace_when_still: true,
             document_title: "untitled".into(),
             adjust_open: false,
@@ -3778,6 +3782,7 @@ fn draw_area(
                                     scale,
                                     state.punchy,
                                     state.trace_when_still,
+                                    state.studio_preset,
                                 );
                             }
                         }
@@ -3800,6 +3805,7 @@ fn draw_area(
                                 state.resolution_scale,
                                 state.punchy,
                                 state.trace_when_still,
+                                state.studio_preset,
                             );
                         }
                     }
@@ -8191,6 +8197,39 @@ fn draw_render_tab(
     });
     ui.weak(&l.render_hint);
     ui.separator();
+    // The room a part is shown in when the scene brings no light of its own:
+    // Fusion's environment library. What it lights, what its metal reflects
+    // and what is behind it.
+    ui.horizontal(|ui| {
+        use kreate_render::studio::Preset;
+        ui.label(state.catalog.get("render-environment"))
+            .on_hover_text(state.catalog.get("render-environment-desc"));
+        let name = |p: Preset| {
+            state
+                .catalog
+                .get(&format!("render-environment-{}", p.name()))
+        };
+        let mut chosen = state.studio_preset;
+        egui::ComboBox::from_id_salt("render-environment")
+            .selected_text(name(chosen))
+            .show_ui(ui, |ui| {
+                for p in Preset::ALL {
+                    ui.selectable_value(&mut chosen, p, name(p));
+                }
+            });
+        if chosen != state.studio_preset {
+            state.studio_preset = chosen;
+            if let Some(path) = crate::prefs::viewport_path() {
+                let _ = crate::prefs::save_viewport(
+                    &path,
+                    state.resolution_scale,
+                    state.punchy,
+                    state.trace_when_still,
+                    chosen,
+                );
+            }
+        }
+    });
     // The quality in one choice: samples, bounces and the denoiser together.
     ui.horizontal(|ui| {
         ui.label(state.catalog.get("render-quality"));

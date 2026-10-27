@@ -42,6 +42,11 @@ fn background_vertex(@builtin(vertex_index) index: u32) -> Vertex {
 
 @fragment
 fn background_fragment(in: Vertex) -> @location(0) vec4<f32> {
+    // A studio's backdrop, where there is one: what is seen, while the
+    // environment still lights.
+    if shading.backdrop.w > 0.0 {
+        return vec4<f32>(backdrop_at(in.ndc.y), 1.0);
+    }
     if shading.world.w <= 0.0 {
         // A flat world. Written rather than left to the clear colour, because
         // the clear happens once and this pass runs over the same pixels — and

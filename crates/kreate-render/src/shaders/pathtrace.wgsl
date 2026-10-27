@@ -46,6 +46,9 @@ struct PtParams {
     // x: this sample carries the last frame's mean over; y: the most frames
     // a pixel keeps.
     reproject: vec4<u32>,
+    // x: the floor's height. y: nonzero when there is a floor. z: how much
+    // of a mirror it is.
+    ground: vec4<f32>,
 };
 
 struct PtNode {
@@ -834,12 +837,81 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // went, for weighting a glow it finds; negative when the light-aiming
     // could not have found it (the camera's ray, glass), and it counts whole.
     var last_pdf = -1.0;
+    // The floor: whether the camera's ray has been tried against it, and,
+    // once it was met, the backdrop it stands for — what a reflection off it
+    // that finds nothing shows.
+    var floor_tried = false;
+    var floor_back = vec3<f32>(-1.0);
     loop {
         if (bounce > pt.max_bounces || crossings > 16u) {
             break;
         }
         let hit = pt_trace(origin, dir, 1e30, false, skip);
         skip = PT_NONE;
+        // A product shot's floor, met by the camera's ray before anything
+        // else: the backdrop where it is, darkened where what stands on it
+        // keeps the light off, and a faint mirror of what is above. Only the
+        // camera's ray meets it — it is a backdrop, not a thing in the room,
+        // and the light the scene's surfaces get is the room's as before.
+        if (pt.ground.y > 0.0 && !floor_tried && bounce == 0u && crossings == 0u && !met_surface) {
+            floor_tried = true;
+            let tg = select(-1.0, (pt.ground.x - origin.z) / dir.z, dir.z < -1e-6);
+            if (tg > 0.0 && (hit.t < 0.0 || tg < hit.t)) {
+                let g = origin + dir * tg;
+                let back = backdrop_at(ndc.y);
+                // The lamps, by how much each gives here, and how much of
+                // that gets past what stands between.
+                var lamp_all = 0.0;
+                var lamp_seen = 0.0;
+                for (var k = 0u; k < pt.light_count; k = k + 1u) {
+                    let light = lights[k];
+                    if ((light.flags & FLAG_GEOMETRY) != 0u) {
+                        continue;
+                    }
+                    let rel = g - pt.eye.xyz;
+                    let to_light = direction_to(light, rel);
+                    let e = pt_luminance(illuminance_at(light, rel)) * max(to_light.z, 0.0);
+                    if (e <= 0.0) {
+                        continue;
+                    }
+                    var reach = 1e30;
+                    if (light.falloff != FALLOFF_PARALLEL) {
+                        reach = length(light.position.xyz - rel) * 0.999;
+                    }
+                    lamp_all += e;
+                    if (!casts_shadow(light) || pt_trace(g, to_light, reach, true, PT_NONE).t < 0.0) {
+                        lamp_seen += e;
+                    }
+                }
+                // The room: one direction over the sky, cosine weighted —
+                // the soft dark under and round a part.
+                let r1 = pt_random();
+                let phi = 6.2831853 * pt_random();
+                let rr = sqrt(r1);
+                let up = vec3<f32>(rr * cos(phi), rr * sin(phi), sqrt(max(1.0 - r1, 0.0)));
+                let sky = select(1.0, 0.0, pt_trace(g, up, 1e30, true, PT_NONE).t >= 0.0);
+                var seen = sky;
+                if (lamp_all > 0.0) {
+                    seen = mix(sky, lamp_seen / lamp_all, 0.6);
+                }
+                let shade = mix(1.0, seen, 0.8);
+                let c = max(-dir.z, 0.0);
+                let f = pt.ground.z * (1.0 + 4.0 * pow(1.0 - c, 5.0));
+                radiance += throughput * back * shade * (1.0 - f);
+                // The floor is the first surface, for the denoiser: plain,
+                // facing up.
+                met_surface = true;
+                first_albedo = vec3<f32>(1.0);
+                first_at = vec4<f32>(g - pt.eye.xyz, 1.0);
+                first_normal = vec3<f32>(0.0, 0.0, 1.0);
+                throughput *= f;
+                floor_back = back;
+                origin = g;
+                dir = reflect(dir, vec3<f32>(0.0, 0.0, 1.0));
+                last_pdf = -1.0;
+                continue;
+            }
+        }
         // Through the smoke first, as far as the surface it would meet:
         // delta tracking. Tentative collisions every so far by the thickest
         // the smoke can be; at each the flame there adds its glow, and the
@@ -926,6 +998,17 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
         if (hit.t < 0.0) {
+            // Off the floor into nothing: the floor's own backdrop.
+            if (floor_back.x >= 0.0) {
+                radiance += throughput * floor_back;
+                break;
+            }
+            // The camera's ray into nothing, with a backdrop: the backdrop,
+            // as the rasterised view shows it.
+            if (shading.backdrop.w > 0.0 && bounce == 0u && crossings == 0u && !met_surface) {
+                radiance += throughput * backdrop_at(ndc.y);
+                break;
+            }
             var weight = 1.0;
             if (last_pdf >= 0.0 && pt.env.z != 0u) {
                 weight = pt_power(last_pdf, pt_env_share() * pt_env_pdf(dir));
