@@ -301,6 +301,20 @@ pub fn resolve(
     }
 }
 
+/// The places a sketch catches on what is modelled: the nearest corner,
+/// edge middle or face centre within reach, then a point along an edge.
+/// [`Mode::Element`] without the face, which would catch from anywhere over
+/// a part — a face's centre is caught only near it.
+pub fn resolve_points_and_edges(
+    world: &SnapWorld,
+    cursor: (f32, f32),
+    camera: &Camera,
+    viewport: (f32, f32),
+) -> Option<Hit> {
+    nearest_of_points(world, cursor, camera, viewport)
+        .or_else(|| nearest_on_edges(world, cursor, camera, viewport))
+}
+
 /// The nearest corner, edge middle or face centre to the cursor; on a tie a
 /// corner, then a middle, as the smaller aim.
 fn nearest_of_points(

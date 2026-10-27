@@ -4965,32 +4965,27 @@ impl App {
     }
 
     /// The parts in the scene near the pointer, laid onto this sketch's
-    /// plane: a corner first, then an edge's middle, then a place along an
-    /// edge. Whatever the snap toggle says, as the other sketches are — a
-    /// sketch is most often drawn against what is already modelled, and
-    /// Fusion catches a body's edges the same way. Not faces: over a part,
-    /// every point would be caught.
+    /// plane: the nearest corner, edge middle or face centre, then a place
+    /// along an edge. Whatever the snap toggle says, as the other sketches
+    /// are — a sketch is most often drawn against what is already modelled,
+    /// and Fusion catches a body's edges the same way. Not a face itself:
+    /// over a part, every point would be caught.
     fn sketch_object_snap(&mut self) -> Option<glam::DVec2> {
         use kreate::snap::Mode;
         let (id, world) = self.sketch_target()?;
         let (x, y) = self.cursor_viewport_px()?;
         let (w, h) = self.gfx.as_ref()?.viewport.render_size();
         let scene = self.sketch_snap_world(id, Mode::Element);
-        [Mode::Vertex, Mode::EdgeMidpoint, Mode::Edge]
-            .into_iter()
-            .find_map(|mode| {
-                kreate::snap::resolve(
-                    &scene,
-                    mode,
-                    (x as f32, y as f32),
-                    &self.camera,
-                    (w as f32, h as f32),
-                )
-            })
-            .map(|hit| {
-                let local = world.inverse().transform_point3(hit.point);
-                glam::DVec2::new(local.x, local.y)
-            })
+        kreate::snap::resolve_points_and_edges(
+            &scene,
+            (x as f32, y as f32),
+            &self.camera,
+            (w as f32, h as f32),
+        )
+        .map(|hit| {
+            let local = world.inverse().transform_point3(hit.point);
+            glam::DVec2::new(local.x, local.y)
+        })
     }
 
     /// Where drawing snaps to near `on_plane`, by the snap mode: the grid

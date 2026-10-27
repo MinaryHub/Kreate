@@ -420,3 +420,28 @@ fn a_face_centre_is_caught_from_anywhere_on_the_face() {
     );
     assert_eq!(hit.element, snap::Element::Centre);
 }
+
+/// What a sketch catches on a part: a face's centre near it, but not the
+/// face from anywhere across it — away from every corner, middle, centre and
+/// edge, nothing.
+#[test]
+fn a_sketch_catches_a_face_centre_near_it_and_not_the_face_elsewhere() {
+    let corners = [
+        DVec3::new(-2.0, 0.0, -2.0),
+        DVec3::new(2.0, 0.0, -2.0),
+        DVec3::new(2.0, 0.0, 2.0),
+        DVec3::new(-2.0, 0.0, 2.0),
+    ];
+    let world = SnapWorld {
+        verts: corners.to_vec(),
+        edges: (0..4).map(|i| [corners[i], corners[(i + 1) % 4]]).collect(),
+        centres: vec![DVec3::ZERO],
+        ..SnapWorld::default()
+    };
+    let near_centre = at_point(DVec3::new(0.05, 0.0, 0.05));
+    let hit = snap::resolve_points_and_edges(&world, near_centre, &camera(), VIEWPORT)
+        .expect("the centre is near");
+    assert!(hit.point.length() < 1e-9, "caught {:?}", hit.point);
+    let in_the_open = at_point(DVec3::new(1.0, 0.0, -1.0));
+    assert!(snap::resolve_points_and_edges(&world, in_the_open, &camera(), VIEWPORT).is_none());
+}

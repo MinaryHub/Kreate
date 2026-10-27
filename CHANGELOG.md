@@ -13,7 +13,7 @@ use; `scripts/release.sh` turns that section into the next release.
 ### Added
 
 - Drawing in a sketch catches the parts already modelled — their corners,
-  edges' middles and edges, laid onto the sketch's plane — whether snapping
+  edges' middles, faces' centres and edges, laid onto the sketch's plane — whether snapping
   is on or not, as it catches the other sketches.
 - The outliner gathers the sketches under a Sketches heading, a sketch on
   a part's face among them.
