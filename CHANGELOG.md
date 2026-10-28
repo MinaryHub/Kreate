@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-28
+
 ### Added
 
 - The Claude connector has an `environment` tool that reads or picks the
@@ -527,7 +529,8 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/MinaryHub/Kreate/releases/tag/v0.5.3
 [0.5.2]: https://github.com/MinaryHub/Kreate/releases/tag/v0.5.2
 [0.5.1]: https://github.com/MinaryHub/Kreate/releases/tag/v0.5.1
 [0.5.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.5.0
