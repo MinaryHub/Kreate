@@ -389,6 +389,23 @@ impl App {
                 self.capture_views(params)
             }
             "context" => Ok(self.context_json()),
+            // The studio the views and renders are lit and backed by.
+            "environment" => {
+                use kreate_render::studio::Preset;
+                if let Some(name) = text("name") {
+                    let room = Preset::from_name(&name).ok_or_else(|| {
+                        format!(
+                            "no environment {name:?}; one of {}",
+                            Preset::ALL.map(|p| p.name()).join(", ")
+                        )
+                    })?;
+                    kreate::shell::choose_environment(&mut self.ui, room);
+                }
+                Ok(json!({
+                    "environment": self.ui.studio_preset.name(),
+                    "choices": Preset::ALL.map(|p| p.name()),
+                }))
+            }
             // The model's outline against a picture's, and where they differ.
             "silhouette" => {
                 use kreate::silhouette::{compare, outline, picture_outline, Side};
@@ -990,6 +1007,7 @@ impl App {
                 "orthographic": self.camera.projection == kreate_render::Projection::Orthographic,
                 "through_camera": self.camera_view_object.and_then(name),
                 "shading": format!("{:?}", self.ui.view_status.shading),
+                "environment": self.ui.studio_preset.name(),
             },
             "frame": doc.playback.frame,
             "last_operation": self
@@ -1769,6 +1787,7 @@ impl App {
             // chose it or the scene camera's dials did.
             "view": {
                 "shading": format!("{:?}", self.ui.view_status.shading),
+                "environment": self.ui.studio_preset.name(),
                 "exposure_ev": self.ui.view_status.exposure,
                 "metered": self.ui.view_status.metered,
                 "through_camera": self.camera_view_object.and_then(|id| doc.object(id)).map(|o| o.name.clone()),

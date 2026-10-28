@@ -8218,16 +8218,7 @@ fn draw_render_tab(
                 }
             });
         if chosen != state.studio_preset {
-            state.studio_preset = chosen;
-            if let Some(path) = crate::prefs::viewport_path() {
-                let _ = crate::prefs::save_viewport(
-                    &path,
-                    state.resolution_scale,
-                    state.punchy,
-                    state.trace_when_still,
-                    chosen,
-                );
-            }
+            choose_environment(state, chosen);
         }
     });
     // The quality in one choice: samples, bounces and the denoiser together.
@@ -18023,5 +18014,21 @@ mod ribbon {
                 );
             }
         }
+    }
+}
+
+/// Picks the room the material preview, the rendered view and a render are
+/// lit and backed by, and remembers it for the next session — the Render
+/// tab's choice, and the connector's.
+pub fn choose_environment(state: &mut ShellState, room: kreate_render::studio::Preset) {
+    state.studio_preset = room;
+    if let Some(path) = crate::prefs::viewport_path() {
+        let _ = crate::prefs::save_viewport(
+            &path,
+            state.resolution_scale,
+            state.punchy,
+            state.trace_when_still,
+            room,
+        );
     }
 }

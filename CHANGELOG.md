@@ -10,6 +10,17 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- The Claude connector has an `environment` tool that reads or picks the
+  studio (Studio, Bright Studio, Grey Room, Outdoor), as the Render tab
+  does; the context reports it too.
+
+### Changed
+
+- The connector's file tools say they open DXF drawings and STEP parts,
+  and its render tool says what a render stands on.
+
 ## [0.5.2] - 2026-10-27
 
 ### Added

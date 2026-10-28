@@ -183,7 +183,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "render_image",
-            "description": "Renders the scene through a scene camera to a PNG file: rendered shading, path traced to the given number of samples, no grid, outlines or other overlays, at the size asked for. Returns a small preview to check it by. Takes as long as the samples do, up to time_limit seconds (at most 110); finished=false means it stopped at the limit with fewer samples. The user's view is put back afterwards.",
+            "description": "Renders the scene through a scene camera to a PNG file: rendered shading, path traced to the given number of samples, no grid, outlines or other overlays, at the size asked for, in the studio the environment tool picks when the scene has no lamp or sky picture of its own — a light backdrop behind the parts and an invisible floor under them that catches their shadows and a faint reflection (Outdoor has the sky instead). Returns a small preview to check it by. Takes as long as the samples do, up to time_limit seconds (at most 110); finished=false means it stopped at the limit with fewer samples. The user's view is put back afterwards.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -354,7 +354,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "open_file",
-            "description": "Opens a file in Kreate in place of the current document: a .kreate document, or a scene to import — glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF, OFF, USD (.usd/.usda/.usdc/.usdz), COLLADA (.dae), or a robot's URDF (its links as empties, each joint an empty whose local Z is the joint's axis). Unsaved changes in the current document are lost. To add a scene to the open document instead, use import_file.",
+            "description": "Opens a file in Kreate in place of the current document: a .kreate document, or a scene to import — glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF, OFF, USD (.usd/.usda/.usdc/.usdz), COLLADA (.dae), STEP (.step/.stp, as meshes), a DXF (.dxf) as a 2D drawing (read it with get_drawing), or a robot's URDF (its links as empties, each joint an empty whose local Z is the joint's axis). Unsaved changes in the current document are lost. To add a scene to the open document instead, use import_file.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "An absolute path." } },
@@ -364,7 +364,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "import_file",
-            "description": "Adds a scene file's contents to the open document, beside what is there, as one undo step: glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF, OFF, USD (.usd/.usda/.usdc/.usdz), COLLADA (.dae) or URDF. What it adds is selected.",
+            "description": "Adds a scene file's contents to the open document, beside what is there, as one undo step: glTF (.gltf/.glb), FBX, OBJ, STL, PLY, 3MF, OFF, USD (.usd/.usda/.usdc/.usdz), COLLADA (.dae), STEP (.step/.stp, as meshes), DXF (.dxf, as a 2D drawing to read with get_drawing) or URDF. What it adds is selected.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "An absolute path." } },
@@ -456,6 +456,16 @@ pub fn tools() -> Value {
                 }
             },
             "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "environment",
+            "description": "The studio the material preview, the rendered view and render_image are lit by and set in, as the Render tab's Environment choice: studio (softboxes, a light grey backdrop — the default, for a product shot), bright (higher key, near-white backdrop), grey_room (soft, low contrast, mid grey) or outdoor (a sun and the sky, no backdrop or floor). With no name, reads which one it is. It is the user's setting, kept between sessions, not part of the document, and nothing to undo. The rendered view and render_image use it only while the scene has no lamp of its own and no sky picture; a lamp or an HDRI is the scene lighting itself, and then there is no backdrop or floor either. get_context gives it too, under view.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "enum": ["studio", "bright", "grey_room", "outdoor"], "description": "The one to change to." }
+                }
+            }
         },
         {
             "name": "export_file",
@@ -578,6 +588,7 @@ fn method_of(tool: &str) -> Option<&'static str> {
         "get_drawing" => "drawing",
         "measure" => "measure",
         "get_history" => "history",
+        "environment" => "environment",
         // Offered for weeks and never reachable: the list stopped at
         // export_file, and each of these was "no tool called".
         "check_proportions" => "proportions",

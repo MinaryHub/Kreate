@@ -16680,6 +16680,36 @@ mod tests {
         assert!((length - 1.0).abs() < 1e-6, "a direction: {looking}");
     }
 
+    /// The connector reads and picks the studio, as the Render tab does, and
+    /// says which there are when asked for one that is not.
+    #[test]
+    fn the_connector_picks_the_environment() {
+        use kreate_render::studio::Preset;
+        let mut app = app();
+        let read = app
+            .bridge_call("environment", &serde_json::json!({}))
+            .expect("read");
+        assert_eq!(read["environment"], app.ui.studio_preset.name());
+        assert_eq!(
+            read["choices"].as_array().map(Vec::len),
+            Some(Preset::ALL.len())
+        );
+        let set = app
+            .bridge_call("environment", &serde_json::json!({ "name": "grey_room" }))
+            .expect("set");
+        assert_eq!(set["environment"], "grey_room");
+        assert_eq!(app.ui.studio_preset, Preset::GreyRoom);
+        let context = app
+            .bridge_call("context", &serde_json::json!({}))
+            .expect("context");
+        assert_eq!(context["view"]["environment"], "grey_room");
+        let wrong = app
+            .bridge_call("environment", &serde_json::json!({ "name": "attic" }))
+            .expect_err("no such room");
+        assert!(wrong.contains("outdoor"), "{wrong}");
+        assert_eq!(app.ui.studio_preset, Preset::GreyRoom);
+    }
+
     /// A box seen from the side against a picture of a taller one: they
     /// disagree, and where is put at the box's own depth.
     #[test]
