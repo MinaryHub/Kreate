@@ -7841,10 +7841,18 @@ impl App {
     fn save_to(&mut self, path: std::path::PathBuf) -> Result<String, String> {
         // The dialog may hand back a name with no extension, and a document
         // called `model` is one the shell will not associate with anything.
-        let path = if path.extension().is_none() {
-            path.with_extension("kreate")
-        } else {
+        // A name with some other dot in it (`chair.v2`) gets the extension
+        // added rather than replaced: a document saved under any other
+        // extension is one that opening takes for a scene to import.
+        let is_document = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("kreate"));
+        let path = if is_document {
             path
+        } else {
+            let mut name = path.into_os_string();
+            name.push(".kreate");
+            std::path::PathBuf::from(name)
         };
         self.file.set_view(&self.camera);
         match self.file.save(&path, &self.doc) {

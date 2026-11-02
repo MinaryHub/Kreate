@@ -82,10 +82,12 @@ pub fn keymap_path() -> Option<PathBuf> {
 
 /// Writes `contents` to `path` atomically.
 ///
-/// Returns what went wrong, for the caller to report. The temporary file is
-/// removed on failure so a broken save does not leave litter behind that the
-/// next one might mistake for a real file.
+/// Returns what went wrong, for the caller to report. The old file is never
+/// removed first: `std::fs::rename` replaces an existing file on every
+/// platform (on Windows it asks for `MOVEFILE_REPLACE_EXISTING`), so until
+/// the rename succeeds the old contents stay where the next load looks.
 pub fn write_atomic(path: &Path, contents: &str) -> Result<(), std::io::Error> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -93,17 +95,13 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), std::io::Error> {
     // atomic within one filesystem, and a temp directory can be on another
     // volume, where it quietly degrades to a copy.
     let temporary = path.with_extension("tmp");
-    let result = std::fs::write(&temporary, contents).and_then(|()| {
-        // Windows will not rename over an existing file, so the old one goes
-        // first. The window this opens is why the temporary file is kept until
-        // the rename succeeds: if the rename fails, the data is still on disk
-        // under a name the next load can be pointed at.
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-        std::fs::rename(&temporary, path)
+    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
     });
+    let result = written.and_then(|()| std::fs::rename(&temporary, path));
     if result.is_err() {
+        // The old file is untouched, so the temporary one is only litter.
         let _ = std::fs::remove_file(&temporary);
     }
     result
