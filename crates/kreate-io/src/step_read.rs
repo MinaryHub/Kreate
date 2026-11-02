@@ -868,6 +868,10 @@ fn expand_knots(mults: &[Value], knots: &[Value]) -> Vec<f64> {
     out
 }
 
+/// The highest spline degree read, as `Nurbs::new` allows: checked before a
+/// knot vector is sized from a degree the file chose.
+const MAX_STEP_DEGREE: usize = 15;
+
 /// A knot vector for a spline that does not write one.
 fn made_knots(kind: &str, n: usize, p: usize) -> Vec<f64> {
     match kind {
@@ -1624,7 +1628,7 @@ impl<'m> Reader<'m> {
                 let a = e.args();
                 let n = if surface { 8 } else { 6 };
                 let knots = (e.kind() == knots_part && a.len() > n).then(|| &a[n..]);
-                (&a[1..], knots, None)
+                (a.get(1..).unwrap_or(&[]), knots, None)
             } else {
                 let head = e.part(head)?;
                 (head, e.part(knots_part), e.part(rational))
@@ -1636,6 +1640,11 @@ impl<'m> Reader<'m> {
             let rows = arg(fields, 2).list();
             let nu = rows.len();
             let nv = rows.first().map(|r| r.list().len()).unwrap_or(0);
+            // Checked before anything is sized by them: the degrees come from
+            // the file, and a knot vector is allocated from them below.
+            if nu == 0 || nv == 0 || pu > MAX_STEP_DEGREE || pv > MAX_STEP_DEGREE {
+                return None;
+            }
             let mut ctrl = Vec::with_capacity(nu * nv);
             for r in rows {
                 if r.list().len() != nv {
@@ -1680,6 +1689,9 @@ impl<'m> Reader<'m> {
                 .map(|x| m.point(x))
                 .collect::<Option<_>>()?;
             let n = ctrl.len();
+            if n == 0 || p > MAX_STEP_DEGREE {
+                return None;
+            }
             let w = match weights {
                 Some(w) => arg(w, 0)
                     .list()

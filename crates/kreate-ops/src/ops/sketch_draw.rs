@@ -120,7 +120,7 @@ fn squared(points: &[DVec2], a: u32, b: u32) -> Option<Constraint> {
         return None;
     }
     let angle = d.y.atan2(d.x).rem_euclid(std::f64::consts::PI);
-    if angle < SQUARE || angle > std::f64::consts::PI - SQUARE {
+    if !(SQUARE..=std::f64::consts::PI - SQUARE).contains(&angle) {
         Some(Constraint::Horizontal { a, b })
     } else if (angle - std::f64::consts::FRAC_PI_2).abs() < SQUARE {
         Some(Constraint::Vertical { a, b })
@@ -1211,7 +1211,7 @@ impl Operator for Fillet {
         let (ua, ub) = ((pa - pp).normalize_or_zero(), (pb - pp).normalize_or_zero());
         let cos = ua.dot(ub).clamp(-1.0, 1.0);
         let theta = cos.acos();
-        if theta < 1e-6 || theta > std::f64::consts::PI - 1e-6 {
+        if !(1e-6..=std::f64::consts::PI - 1e-6).contains(&theta) {
             return Err(OpError::Failed(
                 "the lines are in a row: nothing to round".into(),
             ));

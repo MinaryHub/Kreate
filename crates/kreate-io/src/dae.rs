@@ -449,7 +449,10 @@ impl<'a> Reader<'a> {
             let mut at_v = 0usize;
             let points = self.scene.meshes[mesh].positions.len();
             for p in 0..points {
-                let n = counts.get(p).copied().unwrap_or(0);
+                // No more than the `<v>` list still holds: the count comes from
+                // the file, and a huge one would otherwise loop for ever.
+                let left = (v.len() / width.max(1)).saturating_sub(at_v);
+                let n = counts.get(p).copied().unwrap_or(0).min(left);
                 let mut pairs: Vec<(usize, f32)> = (0..n)
                     .filter_map(|k| {
                         let run = v.get((at_v + k) * width..(at_v + k + 1) * width)?;
@@ -816,10 +819,13 @@ impl<'a> Reader<'a> {
                     }
                 }
             }
-            let mut at = 0;
+            let mut at = 0usize;
             for &n in &sizes {
-                if n < 3 || (at + n) * width > indices.len() {
-                    at += n;
+                // Checked: `vcount` comes from the file, and a count that
+                // overflows would wrap past the bounds test into a panic.
+                let Some(end) = at.checked_add(n) else { break };
+                if n < 3 || end.checked_mul(width).is_none_or(|e| e > indices.len()) {
+                    at = end;
                     continue;
                 }
                 let mut face = Vec::with_capacity(n);
@@ -827,8 +833,10 @@ impl<'a> Reader<'a> {
                     let run = &indices[(at + c) * width..(at + c + 1) * width];
                     face.push(run[vertex_at] as u32);
                     let item = |(offset, (data, stride)): &(usize, (Vec<f64>, usize))| -> Vec<f64> {
-                        let i = run[*offset] * stride;
-                        data.get(i..i + stride)
+                        let Some(i) = run[*offset].checked_mul(*stride) else {
+                            return Vec::new();
+                        };
+                        data.get(i..i.saturating_add(*stride))
                             .map(<[f64]>::to_vec)
                             .unwrap_or_default()
                     };

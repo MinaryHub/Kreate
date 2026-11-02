@@ -201,8 +201,14 @@ fn serve(
             drop(rooms);
             return refuse("the session is full");
         }
-        room.next_site += 1;
-        let site = room.next_site;
+        // Checked: numbers are never reused, and one that wrapped to 0 would be
+        // a participant handing out ordinary, colliding object ids — or, in a
+        // debug build, a panic with the lock held that poisons every room.
+        let Some(site) = room.next_site.checked_add(1) else {
+            drop(rooms);
+            return refuse("the session has had too many participants; start a new one");
+        };
+        room.next_site = site;
         let name = name.chars().take(40).collect::<String>();
         let peer = Peer {
             site,

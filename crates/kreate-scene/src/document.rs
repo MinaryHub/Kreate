@@ -1131,6 +1131,17 @@ impl Document {
         }
         self.roots.retain(|r| *r != id);
         self.selection.remove(id);
+        // References by slot: a slot is reused by the next object added, and
+        // a release build does not check generations, so a stale one would
+        // silently name whatever camera came next.
+        if self.scene_camera == Some(id) {
+            self.scene_camera = None;
+        }
+        for marker in &mut self.markers {
+            if marker.camera == Some(id) {
+                marker.camera = None;
+            }
+        }
         for (_, c) in self.collections.iter_mut() {
             c.objects.retain(|o| *o != id);
         }

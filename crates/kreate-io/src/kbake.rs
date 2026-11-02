@@ -237,7 +237,9 @@ pub fn read(bytes: &[u8]) -> Option<PhysicsCache> {
         let object = Uid::from_raw(r.u64()?);
         let n = r.u32()? as usize;
         let verts = r.u32()? as usize;
-        if n.checked_mul(verts)?.checked_mul(12)? > bytes.len() - r.at {
+        // `verts.max(1)`: a track of empty frames costs nothing on disk, so
+        // without it any `n` passes and sizes the allocation below.
+        if n.checked_mul(verts.max(1))?.checked_mul(12)? > bytes.len() - r.at {
             return None;
         }
         let mut frames = Vec::with_capacity(n);
