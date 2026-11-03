@@ -32,9 +32,11 @@
 use kreate_math::Vec3;
 
 use crate::arena::{ArenaIndex, EdgeId, FaceId, LoopId, VertId};
+use crate::attribute::ElementValues;
 use crate::bmesh::{BMesh, BmError, SelectMode};
 use crate::Domain;
 
+use super::along;
 use super::walk::edge_ring;
 
 /// What a loop cut produced.
@@ -155,6 +157,28 @@ pub fn loop_cut(
     if corners.len() != strips.len() || strip_edges.len() != strips.len() {
         return Ok(out);
     }
+    // What each strip's face carries, and its four corners', in the order of
+    // `corners`: the faces the cut makes are new and would otherwise be born
+    // with no UVs, material 0 and flat shading.
+    let strip_values: Vec<(ElementValues, [ElementValues; 4])> = strips
+        .iter()
+        .map(|&(entry, exit)| {
+            let face = mesh
+                .loop_face(entry)
+                .map(|f| mesh.face_values(f))
+                .unwrap_or_default();
+            let at = |l: Option<LoopId>| l.map(|l| mesh.loop_values(l)).unwrap_or_default();
+            (
+                face,
+                [
+                    at(Some(entry)),
+                    at(mesh.loop_next(entry)),
+                    at(Some(exit)),
+                    at(mesh.loop_next(exit)),
+                ],
+            )
+        })
+        .collect();
 
     // The cut positions along an edge. Evenly spread, then shifted by
     // `position - 0.5` so that a single cut at 0.5 sits in the middle and the
@@ -224,8 +248,13 @@ pub fn loop_cut(
         verts
     };
 
-    let mut new_rings: Vec<(Vec<VertId>, Vec<VertId>, [VertId; 4])> =
-        Vec::with_capacity(strips.len());
+    type NewRing<'v> = (
+        Vec<VertId>,
+        Vec<VertId>,
+        [VertId; 4],
+        &'v (ElementValues, [ElementValues; 4]),
+    );
+    let mut new_rings: Vec<NewRing> = Vec::with_capacity(strips.len());
     for (i, [a, b, c, d]) in corners.iter().copied().enumerate() {
         let [e0, e1] = strip_edges[i];
         // `a → b` on the entry edge, and `d → c` on the exit edge: `d` is the
@@ -236,9 +265,9 @@ pub fn loop_cut(
         if near.len() != cuts || far.len() != cuts {
             continue;
         }
-        new_rings.push((near, far, [a, b, c, d]));
+        new_rings.push((near, far, [a, b, c, d], &strip_values[i]));
     }
-    for (near, far, _) in &new_rings {
+    for (near, far, ..) in &new_rings {
         // Both sides. Recording only the near one loses the last ring edge's
         // vertices — the strips overlap everywhere except at the two ends — and
         // the caller then selects an incomplete loop.
@@ -263,13 +292,16 @@ pub fn loop_cut(
         }
     }
     neighbours.sort_unstable_by_key(|f| f.index());
-    let neighbour_rings: Vec<Vec<(VertId, EdgeId)>> = neighbours
+    type NeighbourRing = (Vec<(VertId, EdgeId, ElementValues)>, ElementValues);
+    let neighbour_rings: Vec<NeighbourRing> = neighbours
         .iter()
         .map(|&f| {
-            mesh.face_loops(f)
+            let ring = mesh
+                .face_loops(f)
                 .into_iter()
-                .filter_map(|l| Some((mesh.loop_vert(l)?, mesh.loop_edge(l)?)))
-                .collect()
+                .filter_map(|l| Some((mesh.loop_vert(l)?, mesh.loop_edge(l)?, mesh.loop_values(l))))
+                .collect();
+            (ring, mesh.face_values(f))
         })
         .collect();
 
@@ -285,33 +317,74 @@ pub fn loop_cut(
         }
     }
 
-    for (near, far, [a, b, c, d]) in new_rings {
+    for (near, far, [a, b, c, d], (face, [ca, cb, cc, cd])) in new_rings {
+        // A cut vertex's UV is where it lies along its edge, of this face's
+        // own corners at the edge's ends.
+        let near_values: Vec<ElementValues> = near
+            .iter()
+            .map(|v| ElementValues::lerp(ca, cb, along(mesh, a, b, *v)))
+            .collect();
+        let far_values: Vec<ElementValues> = far
+            .iter()
+            .map(|v| ElementValues::lerp(cd, cc, along(mesh, d, c, *v)))
+            .collect();
         // Strips from the `a`/`d` side across to the `b`/`c` side.
-        let mut left = a;
-        let mut right = d;
+        let (mut left, mut left_values) = (a, ca);
+        let (mut right, mut right_values) = (d, cd);
         for k in 0..cuts {
-            out.faces
-                .push(mesh.add_face(&[left, near[k], far[k], right])?);
-            left = near[k];
-            right = far[k];
+            let f = mesh.add_face(&[left, near[k], far[k], right])?;
+            mesh.set_face_values(f, face);
+            mesh.set_face_corner_values(
+                f,
+                &[
+                    (left, left_values.clone()),
+                    (near[k], near_values[k].clone()),
+                    (far[k], far_values[k].clone()),
+                    (right, right_values.clone()),
+                ],
+            );
+            out.faces.push(f);
+            (left, left_values) = (near[k], &near_values[k]);
+            (right, right_values) = (far[k], &far_values[k]);
         }
-        out.faces.push(mesh.add_face(&[left, b, c, right])?);
+        let f = mesh.add_face(&[left, b, c, right])?;
+        mesh.set_face_values(f, face);
+        mesh.set_face_corner_values(
+            f,
+            &[
+                (left, left_values.clone()),
+                (b, cb.clone()),
+                (c, cc.clone()),
+                (right, right_values.clone()),
+            ],
+        );
+        out.faces.push(f);
     }
 
-    for ring in neighbour_rings {
-        let mut patched = Vec::with_capacity(ring.len() * 2);
-        for (v, e) in ring {
-            patched.push(v);
+    for (ring, face) in neighbour_rings {
+        let n = ring.len();
+        let mut patched = Vec::with_capacity(n * 2);
+        let mut corners = Vec::with_capacity(n * 2);
+        for (i, (v, e, here)) in ring.iter().enumerate() {
+            patched.push(*v);
+            corners.push((*v, here.clone()));
             if let Some(s) = &splits[e.index() as usize] {
                 let mut extra = s.verts.clone();
-                if s.from != v {
+                if s.from != *v {
                     extra.reverse();
+                }
+                let (next, _, there) = &ring[(i + 1) % n];
+                for x in &extra {
+                    let t = along(mesh, *v, *next, *x);
+                    corners.push((*x, ElementValues::lerp(here, there, t)));
                 }
                 patched.extend(extra);
             }
         }
         if patched.len() >= 3 {
-            mesh.add_face(&patched)?;
+            let f = mesh.add_face(&patched)?;
+            mesh.set_face_values(f, &face);
+            mesh.set_face_corner_values(f, &corners);
             out.patched_neighbours += 1;
         }
     }
@@ -472,6 +545,17 @@ mod tests {
                 (pa.y - y).abs() < 1e-4 && (pb.y - y).abs() < 1e-4 && (pa.x - pb.x).abs() > 1e-4
             })
             .expect("no edge along x at that row")
+    }
+
+    #[test]
+    fn the_cut_faces_keep_the_uvs_material_and_shading() {
+        let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+        crate::edit::carried::paint(&mut m);
+        let seed = m.edge_ids().next().unwrap();
+        let out = loop_cut(&mut m, seed, 2, 0.3).unwrap();
+        m.assert_valid();
+        crate::edit::carried::assert_kept(&m, &out.faces);
+        crate::edit::carried::assert_uv_follows_position(&m);
     }
 
     #[test]

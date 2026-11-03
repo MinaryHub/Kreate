@@ -23,6 +23,7 @@
 use kreate_math::Vec3;
 
 use crate::arena::{ArenaIndex, FaceId, VertId};
+use crate::attribute::ElementValues;
 use crate::bmesh::{BMesh, BmError};
 use crate::Domain;
 
@@ -125,21 +126,32 @@ pub fn merge_groups(
         }
     }
     affected.sort_unstable_by_key(|f| f.index());
-    let rings: Vec<Vec<VertId>> = affected.iter().map(|&f| mesh.face_verts(f)).collect();
+    // With what they carry, by corner: a face rebuilt is born with no UVs,
+    // material 0 and flat shading unless it is given them back.
+    let rings: Vec<_> = affected
+        .iter()
+        .map(|&f| (mesh.face_values(f), mesh.face_corner_values(f)))
+        .collect();
 
     // --- write --------------------------------------------------------------
     for &f in &affected {
         mesh.remove_face(f);
     }
 
-    for ring in rings {
+    for (values, ring) in rings {
         let mut rebuilt: Vec<VertId> = Vec::with_capacity(ring.len());
-        for v in ring {
+        // A merged vertex's corner keeps the values of the first corner that
+        // landed on it: the one the ring keeps.
+        let mut corners: Vec<(VertId, ElementValues)> = Vec::with_capacity(ring.len());
+        for (v, c) in ring {
             let m = mapped(v, &remap);
             // Consecutive duplicates are the ordinary case — two adjacent
             // corners merging — and they simply shorten the face.
             if rebuilt.last() != Some(&m) {
                 rebuilt.push(m);
+            }
+            if !corners.iter().any(|(w, _)| *w == m) {
+                corners.push((m, c));
             }
         }
         if rebuilt.len() > 1 && rebuilt.first() == rebuilt.last() {
@@ -157,7 +169,9 @@ pub fn merge_groups(
             out.faces_dropped += 1;
         }
         for l in loops {
-            mesh.add_face(&l)?;
+            let f = mesh.add_face(&l)?;
+            mesh.set_face_values(f, &values);
+            mesh.set_face_corner_values(f, &corners);
         }
     }
 
@@ -408,6 +422,18 @@ mod tests {
         // Nothing near: nothing merges.
         let ids: Vec<VertId> = m.vert_ids().collect();
         assert_eq!(weld_onto(&mut m, &[ids[0]], 1e-5).unwrap().removed, 0);
+    }
+
+    #[test]
+    fn the_faces_a_merge_rebuilds_keep_the_uvs_material_and_shading() {
+        let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+        crate::edit::carried::paint(&mut m);
+        let e = m.edge_ids().next().unwrap();
+        let [a, b] = m.edge_verts(e).unwrap();
+        merge_groups(&mut m, &[vec![a, b]], MergeTarget::Centre).unwrap();
+        m.assert_valid();
+        let faces: Vec<FaceId> = m.face_ids().collect();
+        crate::edit::carried::assert_kept(&m, &faces);
     }
 
     #[test]

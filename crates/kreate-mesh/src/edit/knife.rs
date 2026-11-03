@@ -26,6 +26,7 @@
 use kreate_math::Vec3;
 
 use crate::arena::{EdgeId, FaceId, VertId};
+use crate::attribute::ElementValues;
 use crate::bmesh::{BMesh, BmError, SelectMode};
 
 /// What a knife cut made.
@@ -376,25 +377,54 @@ fn split_edge(
     let mut sorted: Vec<Vec3> = points.to_vec();
     sorted.sort_by(|a, b| a.distance(pp).total_cmp(&b.distance(pp)));
     let faces = mesh.edge_faces(e);
-    let rings: Vec<Vec<VertId>> = faces.iter().map(|f| mesh.face_verts(*f)).collect();
+    // With each ring, what the face and its corners carry: the faces are
+    // rebuilt, and a rebuilt face is born with no UVs or material otherwise.
+    let rings: Vec<_> = faces
+        .iter()
+        .map(|f| {
+            (
+                mesh.face_verts(*f),
+                mesh.face_values(*f),
+                mesh.face_corner_values(*f),
+            )
+        })
+        .collect();
     for f in &faces {
         mesh.remove_face(*f);
     }
     mesh.remove_edge(e);
     let new: Vec<VertId> = sorted.iter().map(|at| mesh.add_vert(*at)).collect();
-    for ring in rings {
+    for (ring, values, mut corners) in rings {
         let n = ring.len();
         let mut patched = Vec::with_capacity(n + new.len());
         for i in 0..n {
             let (a, b) = (ring[i], ring[(i + 1) % n]);
             patched.push(a);
-            if a == p && b == q {
-                patched.extend(new.iter().copied());
-            } else if a == q && b == p {
-                patched.extend(new.iter().rev().copied());
+            if (a == p && b == q) || (a == q && b == p) {
+                let at = |v: VertId| {
+                    corners
+                        .iter()
+                        .find(|(w, _)| *w == v)
+                        .map(|(_, c)| c.clone())
+                };
+                if let (Some(ca), Some(cb)) = (at(a), at(b)) {
+                    // Each new corner blended to where it lies along the edge,
+                    // from this face's own corners — a seam keeps both sides.
+                    for x in &new {
+                        let t = super::along(mesh, a, b, *x);
+                        corners.push((*x, ElementValues::lerp(&ca, &cb, t)));
+                    }
+                }
+                if a == p {
+                    patched.extend(new.iter().copied());
+                } else {
+                    patched.extend(new.iter().rev().copied());
+                }
             }
         }
-        mesh.add_face(&patched)?;
+        let f = mesh.add_face(&patched)?;
+        mesh.set_face_values(f, &values);
+        mesh.set_face_corner_values(f, &corners);
     }
     if faces.is_empty() {
         // A wire edge: a chain of wire edges through the new vertices.
@@ -460,9 +490,27 @@ fn split_face(mesh: &mut BMesh, chain: &[VertId]) -> Result<Option<[FaceId; 2]>,
     if one.len() < 3 || two.len() < 3 {
         return Ok(None);
     }
+    // Both halves take the face's material and smoothing, and its corners'
+    // UVs; a chain vertex inside the face takes them blended to where it is.
+    let values = mesh.face_values(face);
+    let mut corners = mesh.face_corner_values(face);
+    let normal = mesh.face_normal(face).normalize_or_zero();
+    let placed: Vec<(Vec3, ElementValues)> = corners
+        .iter()
+        .filter_map(|(v, c)| Some((mesh.position(*v)?, c.clone())))
+        .collect();
+    for v in inner {
+        if let Some(p) = mesh.position(*v) {
+            corners.push((*v, super::values_inside(&placed, normal, p)));
+        }
+    }
     mesh.remove_face(face);
     let fa = mesh.add_face(&one)?;
     let fb = mesh.add_face(&two)?;
+    for f in [fa, fb] {
+        mesh.set_face_values(f, &values);
+        mesh.set_face_corner_values(f, &corners);
+    }
     Ok(Some([fa, fb]))
 }
 
@@ -474,6 +522,28 @@ mod tests {
     /// A 2-unit plane in XY, seen from above.
     fn plane() -> BMesh {
         BMesh::from_mesh_data(&primitives::plane(2.0))
+    }
+
+    #[test]
+    fn the_cut_faces_keep_the_uvs_material_and_shading() {
+        // Across a grid's middle row, with a bend inside one face: the edges
+        // it splits, the faces it halves and the vertex inside a face.
+        let mut m = BMesh::from_mesh_data(&primitives::grid(3.0, 3, 3));
+        crate::edit::carried::paint(&mut m);
+        knife(
+            &mut m,
+            &[
+                Vec3::new(-1.5, 0.1, 0.0),
+                Vec3::new(0.2, 0.3, 0.0),
+                Vec3::new(1.5, -0.2, 0.0),
+            ],
+            Vec3::NEG_Z,
+        )
+        .unwrap();
+        m.assert_valid();
+        let all: Vec<FaceId> = m.face_ids().collect();
+        crate::edit::carried::assert_kept(&m, &all);
+        crate::edit::carried::assert_uv_follows_position(&m);
     }
 
     #[test]

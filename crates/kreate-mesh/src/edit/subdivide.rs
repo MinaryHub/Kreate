@@ -24,6 +24,7 @@
 use kreate_math::Vec3;
 
 use crate::arena::{ArenaIndex, EdgeId, FaceId, VertId};
+use crate::attribute::ElementValues;
 use crate::bmesh::{BMesh, BmError};
 use crate::Domain;
 
@@ -42,6 +43,16 @@ pub struct Subdivision {
     pub patched_neighbours: usize,
 }
 
+/// One face as read before it is replaced: its ring, the edges leaving each
+/// corner, and what the face and each corner carry.
+#[derive(Default)]
+struct Ring {
+    verts: Vec<VertId>,
+    edges: Vec<EdgeId>,
+    corners: Vec<ElementValues>,
+    face: ElementValues,
+}
+
 /// Splits every edge of `faces` and replaces each face with one quad per corner.
 pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision, BmError> {
     let region = Region::new(mesh, faces);
@@ -53,21 +64,27 @@ pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision
     // Rings and their edges, per face, in winding order. Read in full first: the
     // loop cycles stop existing the moment the old faces are removed, and every
     // one of them is needed to place the new quads.
-    let mut rings: Vec<(Vec<VertId>, Vec<EdgeId>)> = Vec::with_capacity(region.faces.len());
+    // With each ring, the face's values and each corner's, in the same order:
+    // the quads that replace it are new faces and would otherwise be born
+    // with no UVs, material 0 and flat shading.
+    let mut rings: Vec<Ring> = Vec::with_capacity(region.faces.len());
     let mut to_split: Vec<EdgeId> = Vec::new();
     for &f in &region.faces {
         let loops = mesh.face_loops(f);
-        let mut verts = Vec::with_capacity(loops.len());
-        let mut edges = Vec::with_capacity(loops.len());
+        let mut ring = Ring {
+            face: mesh.face_values(f),
+            ..Ring::default()
+        };
         for l in loops {
             let (Some(v), Some(e)) = (mesh.loop_vert(l), mesh.loop_edge(l)) else {
                 continue;
             };
-            verts.push(v);
-            edges.push(e);
+            ring.verts.push(v);
+            ring.edges.push(e);
+            ring.corners.push(mesh.loop_values(l));
             to_split.push(e);
         }
-        rings.push((verts, edges));
+        rings.push(ring);
     }
     to_split.sort_unstable_by_key(|e| e.index());
     to_split.dedup();
@@ -83,13 +100,22 @@ pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision
         }
     }
     neighbours.sort_unstable_by_key(|f| f.index());
-    let neighbour_rings: Vec<Vec<(VertId, EdgeId)>> = neighbours
+    let neighbour_rings: Vec<Ring> = neighbours
         .iter()
         .map(|&f| {
-            mesh.face_loops(f)
-                .into_iter()
-                .filter_map(|l| Some((mesh.loop_vert(l)?, mesh.loop_edge(l)?)))
-                .collect()
+            let mut ring = Ring {
+                face: mesh.face_values(f),
+                ..Ring::default()
+            };
+            for l in mesh.face_loops(f) {
+                let (Some(v), Some(e)) = (mesh.loop_vert(l), mesh.loop_edge(l)) else {
+                    continue;
+                };
+                ring.verts.push(v);
+                ring.edges.push(e);
+                ring.corners.push(mesh.loop_values(l));
+            }
+            ring
         })
         .collect();
 
@@ -111,7 +137,8 @@ pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision
         table.get(e.index() as usize).copied().flatten()
     };
 
-    for (verts, edges) in &rings {
+    for ring in &rings {
+        let (verts, edges, corners) = (&ring.verts, &ring.edges, &ring.corners);
         let n = verts.len();
         if n < 3 {
             continue;
@@ -120,6 +147,11 @@ pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision
             verts.iter().filter_map(|v| mesh.position(*v)).sum::<Vec3>() / n as f32;
         let centre = mesh.add_vert(centre_pos);
         out.centres.push(centre);
+        // Where the centre and the midpoints sit, so are their UVs: the mean
+        // of the face's corners, and halfway along each edge — of this face's
+        // own corners, so a seam keeps its two sides.
+        let at_centre = ElementValues::blend(&corners.iter().map(|c| (c, 1.0)).collect::<Vec<_>>());
+        let halfway = |i: usize| ElementValues::lerp(&corners[i], &corners[(i + 1) % n], 0.5);
 
         for i in 0..n {
             let prev = (i + n - 1) % n;
@@ -131,8 +163,18 @@ pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision
             // `before → corner → after → centre` keeps the parent face's
             // winding: `edges[prev]` runs into the corner and `edges[i]` runs
             // out of it.
-            out.faces
-                .push(mesh.add_face(&[before, verts[i], after, centre])?);
+            let f = mesh.add_face(&[before, verts[i], after, centre])?;
+            mesh.set_face_values(f, &ring.face);
+            mesh.set_face_corner_values(
+                f,
+                &[
+                    (before, halfway(prev)),
+                    (verts[i], corners[i].clone()),
+                    (after, halfway(i)),
+                    (centre, at_centre.clone()),
+                ],
+            );
+            out.faces.push(f);
         }
     }
 
@@ -140,14 +182,22 @@ pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision
     // after the vertex the edge leaves.
     let mut rebuilt_neighbours = Vec::with_capacity(neighbours.len());
     for ring in &neighbour_rings {
-        let mut patched = Vec::with_capacity(ring.len() * 2);
-        for &(v, e) in ring {
+        let n = ring.verts.len();
+        let mut patched = Vec::with_capacity(n * 2);
+        let mut corners = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let (v, e) = (ring.verts[i], ring.edges[i]);
             patched.push(v);
+            corners.push((v, ring.corners[i].clone()));
             if let Some(m) = midpoint(e, &mid_of) {
                 patched.push(m);
+                corners.push((
+                    m,
+                    ElementValues::lerp(&ring.corners[i], &ring.corners[(i + 1) % n], 0.5),
+                ));
             }
         }
-        rebuilt_neighbours.push(patched);
+        rebuilt_neighbours.push((patched, ring.face.clone(), corners));
     }
 
     for &f in &region.faces {
@@ -164,9 +214,11 @@ pub fn subdivide_faces(mesh: &mut BMesh, faces: &[FaceId]) -> Result<Subdivision
             mesh.remove_edge(e);
         }
     }
-    for ring in rebuilt_neighbours {
+    for (ring, values, corners) in rebuilt_neighbours {
         if ring.len() >= 3 {
-            mesh.add_face(&ring)?;
+            let f = mesh.add_face(&ring)?;
+            mesh.set_face_values(f, &values);
+            mesh.set_face_corner_values(f, &corners);
             out.patched_neighbours += 1;
         }
     }
@@ -189,6 +241,18 @@ pub fn subdivide_selected(mesh: &mut BMesh) -> Result<Subdivision, BmError> {
 mod tests {
     use super::*;
     use crate::primitives;
+
+    #[test]
+    fn the_quads_and_the_patched_neighbours_keep_the_uvs_material_and_shading() {
+        let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+        crate::edit::carried::paint(&mut m);
+        let f = m.face_ids().next().unwrap();
+        let out = subdivide_faces(&mut m, &[f]).unwrap();
+        crate::edit::carried::assert_kept(&m, &out.faces);
+        let all: Vec<FaceId> = m.face_ids().collect();
+        crate::edit::carried::assert_kept(&m, &all);
+        crate::edit::carried::assert_uv_follows_position(&m);
+    }
 
     #[test]
     fn a_quad_becomes_four_quads() {

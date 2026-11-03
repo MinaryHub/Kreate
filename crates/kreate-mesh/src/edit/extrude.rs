@@ -22,7 +22,18 @@
 use kreate_math::Vec3;
 
 use crate::arena::{ArenaIndex, FaceId, VertId};
+use crate::attribute::ElementValues;
 use crate::bmesh::{BMesh, BmError, SelectMode};
+
+/// A boundary edge `a → b` of the region, in its face's winding, with what
+/// the wall standing on it inherits.
+struct Wall {
+    a: VertId,
+    b: VertId,
+    face: ElementValues,
+    at_a: ElementValues,
+    at_b: ElementValues,
+}
 
 /// What an extrusion produced.
 #[derive(Clone, Debug, Default)]
@@ -67,11 +78,17 @@ pub fn extrude_faces(
         in_region[f.index() as usize] = true;
     }
 
+    // With each ring, the face's own values and its corners': the shell and
+    // its walls are new faces, and a new face is born with no UVs, material 0
+    // and flat shading unless they are carried over.
     let mut rings: Vec<Vec<VertId>> = Vec::with_capacity(faces.len());
-    let mut boundary: Vec<(VertId, VertId)> = Vec::new();
+    let mut ring_values: Vec<(ElementValues, Vec<(VertId, ElementValues)>)> =
+        Vec::with_capacity(faces.len());
+    let mut boundary: Vec<Wall> = Vec::new();
     for &f in &faces {
         let loops = mesh.face_loops(f);
         let mut ring = Vec::with_capacity(loops.len());
+        let face_values = mesh.face_values(f);
         for &l in &loops {
             let Some(v) = mesh.loop_vert(l) else { continue };
             ring.push(v);
@@ -93,9 +110,16 @@ pub fn extrude_faces(
                 let Some(b) = mesh.loop_vert(next) else {
                     continue;
                 };
-                boundary.push((v, b));
+                boundary.push(Wall {
+                    a: v,
+                    b,
+                    face: face_values.clone(),
+                    at_a: mesh.loop_values(l),
+                    at_b: mesh.loop_values(next),
+                });
             }
         }
+        ring_values.push((face_values, mesh.face_corner_values(f)));
         rings.push(ring);
     }
 
@@ -120,22 +144,43 @@ pub fn extrude_faces(
         |v: VertId| -> Option<VertId> { copy_of.get(v.index() as usize).copied().flatten() };
 
     let mut new_faces = Vec::with_capacity(faces.len());
-    for ring in &rings {
+    for (ring, (face_values, corners)) in rings.iter().zip(&ring_values) {
         let lifted: Vec<VertId> = ring.iter().filter_map(|v| copied(*v)).collect();
         if lifted.len() == ring.len() {
-            new_faces.push(mesh.add_face(&lifted)?);
+            let f = mesh.add_face(&lifted)?;
+            mesh.set_face_values(f, face_values);
+            let corners: Vec<(VertId, ElementValues)> = corners
+                .iter()
+                .filter_map(|(v, values)| Some((copied(*v)?, values.clone())))
+                .collect();
+            mesh.set_face_corner_values(f, &corners);
+            new_faces.push(f);
         }
     }
 
     let mut side_faces = Vec::with_capacity(boundary.len());
-    for (a, b) in boundary {
+    for wall in boundary {
+        let Wall { a, b, .. } = wall;
         let (Some(a2), Some(b2)) = (copied(a), copied(b)) else {
             continue;
         };
         // `(a, b, b', a')`: with `a → b` the original winding, this quad's normal
         // points away from the solid. Reversing it produces a shell that is lit
         // from the inside and reads as a shading bug rather than a winding one.
-        side_faces.push(mesh.add_face(&[a, b, b2, a2])?);
+        let f = mesh.add_face(&[a, b, b2, a2])?;
+        // The wall takes the face it grew from: its material and smoothing,
+        // and the UV of the edge it stands on at both its feet and its top.
+        mesh.set_face_values(f, &wall.face);
+        mesh.set_face_corner_values(
+            f,
+            &[
+                (a, wall.at_a.clone()),
+                (a2, wall.at_a),
+                (b, wall.at_b.clone()),
+                (b2, wall.at_b),
+            ],
+        );
+        side_faces.push(f);
     }
 
     for f in &faces {
@@ -488,10 +533,23 @@ fn unspike(mesh: &mut BMesh, mut faces: Vec<FaceId>) -> Result<(), BmError> {
                 // one's slot and its very name — and a search after would
                 // find the new face where the old one was.
                 let beyond_at = faces.iter().position(|g| *g == beyond);
+                // Both faces are rebuilt on the vertices they had (and the face
+                // beyond on `near` too, a corner `f` had): what they carried
+                // goes across, or they come back with no UVs or material.
+                let (f_values, f_corners) = (mesh.face_values(f), mesh.face_corner_values(f));
+                let (beyond_values, mut beyond_corners) =
+                    (mesh.face_values(beyond), mesh.face_corner_values(beyond));
+                if let Some(at_near) = f_corners.iter().find(|(x, _)| *x == near) {
+                    beyond_corners.push(at_near.clone());
+                }
                 mesh.remove_face(f);
                 mesh.remove_face(beyond);
                 let f2 = mesh.add_face(&mine)?;
+                mesh.set_face_values(f2, &f_values);
+                mesh.set_face_corner_values(f2, &f_corners);
                 let beyond2 = mesh.add_face(&other)?;
+                mesh.set_face_values(beyond2, &beyond_values);
+                mesh.set_face_corner_values(beyond2, &beyond_corners);
                 faces[fi] = f2;
                 // The face beyond is rebuilt too, under a new name; it may
                 // have a spike of its own still.
@@ -613,18 +671,32 @@ pub fn extrude_edges_and_verts(mesh: &mut BMesh) -> Result<WireExtrusion, BmErro
     }
     // Read before writing: each edge's winding in the face it borders, so the
     // new quad runs against it and faces the same way.
-    let walls: Vec<(VertId, VertId)> = edges
+    // With each, what the face it borders carries, for the wall to take.
+    type Inherit = Option<(ElementValues, Vec<(VertId, ElementValues)>)>;
+    let walls: Vec<(VertId, VertId, Inherit)> = edges
         .iter()
         .filter_map(|e| {
             let [a, b] = mesh.edge_verts(*e)?;
-            let along = mesh
-                .edge_loops(*e)
-                .first()
-                .and_then(|l| mesh.loop_vert(*l))
+            let first = mesh.edge_loops(*e).first().copied();
+            let along = first
+                .and_then(|l| mesh.loop_vert(l))
                 .map(|first| first == a)
                 .unwrap_or(true);
+            let inherit = first.and_then(|l| mesh.loop_face(l)).map(|f| {
+                (
+                    mesh.face_values(f),
+                    mesh.face_corner_values(f)
+                        .into_iter()
+                        .filter(|(v, _)| *v == a || *v == b)
+                        .collect(),
+                )
+            });
             // A face walks the edge a→b; the wall walks it b→a.
-            Some(if along { (b, a) } else { (a, b) })
+            Some(if along {
+                (b, a, inherit)
+            } else {
+                (a, b, inherit)
+            })
         })
         .collect();
     let mut copy: Vec<(VertId, VertId)> = Vec::with_capacity(verts.len());
@@ -635,11 +707,22 @@ pub fn extrude_edges_and_verts(mesh: &mut BMesh) -> Result<WireExtrusion, BmErro
         out.new_verts.push(n);
     }
     let copy_of = |v: VertId| copy.iter().find(|(o, _)| *o == v).map(|(_, n)| *n);
-    for (a, b) in walls {
+    for (a, b, inherit) in walls {
         let (Some(na), Some(nb)) = (copy_of(a), copy_of(b)) else {
             continue;
         };
-        out.new_faces.push(mesh.add_face(&[a, b, nb, na])?);
+        let f = mesh.add_face(&[a, b, nb, na])?;
+        if let Some((face, corners)) = inherit {
+            mesh.set_face_values(f, &face);
+            let mut all = corners.clone();
+            all.extend(
+                corners
+                    .into_iter()
+                    .filter_map(|(v, values)| Some((copy_of(v)?, values))),
+            );
+            mesh.set_face_corner_values(f, &all);
+        }
+        out.new_faces.push(f);
     }
     // A vertex on no selected edge: an edge out of it.
     for (v, n) in &copy {
@@ -666,6 +749,16 @@ mod tests {
 
     fn cube() -> BMesh {
         BMesh::from_mesh_data(&primitives::cube(2.0))
+    }
+
+    #[test]
+    fn the_shell_and_its_walls_keep_the_uvs_material_and_shading() {
+        let mut m = cube();
+        crate::edit::carried::paint(&mut m);
+        let top = face_facing(&m, Vec3::Z);
+        let out = extrude_faces(&mut m, &[top], Vec3::Z).unwrap();
+        crate::edit::carried::assert_kept(&m, &out.new_faces);
+        crate::edit::carried::assert_kept(&m, &out.side_faces);
     }
 
     #[test]

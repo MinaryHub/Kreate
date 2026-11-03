@@ -33,7 +33,7 @@ pub mod tessellate;
 pub mod text;
 
 pub use arena::{Arena, ArenaIndex, EdgeId, FaceId, LoopId, VertId};
-pub use attribute::{AttrData, AttrType, AttributeStore, Domain, Layer};
+pub use attribute::{AttrData, AttrType, AttributeStore, Domain, ElementValues, Layer};
 pub use bmesh::{BMesh, BmError, BmViolation, Edge, ElementId, Face, Loop, SelectMode, Vert};
 pub use edit::{
     delete, dissolve_edges, dissolve_faces, dissolve_verts, extrude_faces, extrude_selected_faces,
