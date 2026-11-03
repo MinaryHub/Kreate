@@ -489,7 +489,11 @@ mod tests {
         };
         assert_eq!(names(&a), names(&b), "one scene, the same for both");
         let one_seed = names(&a) == ["AlsoA", "FromA"] || names(&a) == ["FromB"];
-        assert!(one_seed, "one participant's scene, not a mix: {:?}", names(&a));
+        assert!(
+            one_seed,
+            "one participant's scene, not a mix: {:?}",
+            names(&a)
+        );
     }
 
     #[test]
