@@ -1,17 +1,31 @@
-//! The path tracer, first version: §2.5's renderer on the rendered view's own
-//! lights, BRDF and environment. See `shaders/pathtrace.wgsl`.
+//! The path tracer: §2.5's renderer on the rendered view's own lights, BRDF
+//! and environment. See `shaders/pathtrace.wgsl`.
 //!
 //! The scene is handed over as triangles in world space and kept until it is
 //! handed over again — a camera moving through it changes nothing here. Each
 //! frame traces one sample per pixel into a running sum; the viewport divides
 //! it out onto the linear picture and the display transform does the rest.
 //!
-//! **What this version does not do**, and what it stands in for: materials are
-//! the flat standard surface — base colour, metallic, roughness — not a
-//! material's node graph, so a texture or a wired-up graph shows as its flat
-//! fields; area lights are the points the rasteriser makes them; there is no
-//! transmission, emission or depth of field. The next steps are those, and
-//! multiple importance sampling between the light and the BRDF.
+//! # What it does
+//!
+//! - Materials are the compiled node graphs, the viewport's own code, with
+//!   their images, normal maps and bumps.
+//! - At each surface one source is aimed at — a lamp (chosen by how much it
+//!   lights the point), a glowing triangle, or the environment's bright part
+//!   — and the path goes on by sampling the BRDF; a glow or a sky that both
+//!   could find is weighted between them by multiple importance sampling.
+//! - Glass (transmission, index of refraction, total internal reflection),
+//!   emission, cut-outs, a lens with an aperture, baked smoke and fire, a
+//!   product shot's floor.
+//! - Each pixel's samples are a scrambled Sobol sequence, not independent
+//!   draws; a pixel whose mean is quiet stops taking more; a view moved a
+//!   little carries the last picture's means over.
+//!
+//! # What it does not, yet
+//!
+//! One lobe pair (Lambert and GGX): no clearcoat, sheen, subsurface or
+//! anisotropy. Area lights are discs and spheres. The scene is one BVH with
+//! no instancing, rebuilt when the scene is handed over again.
 
 use glam::{DAffine3, Mat4, Vec3};
 

@@ -1,9 +1,9 @@
-// The path tracer: §2.5's renderer, first version.
+// The path tracer: §2.5's renderer. See `pathtrace.rs` for what it does.
 //
 // Appended to the shading library, so the lights, their units, the BRDF and
 // the environment are the rendered view's own — one model, two consumers, as
 // §3's fifth decision has it. A pixel's ray walks the scene's triangles
-// through a BVH; at each surface one light is sampled directly (with a shadow
+// through a BVH; at each surface one source is sampled directly (with a shadow
 // ray) and the path continues by sampling the BRDF, diffuse or specular; a
 // path that leaves the scene takes the environment's light. One sample per
 // pixel per frame, added to a running sum the viewport divides out.
@@ -199,11 +199,88 @@ fn pt_hash(x: u32) -> u32 {
     return v;
 }
 
-var<private> pt_state: u32;
+// Each pixel's samples are a scrambled Sobol sequence, not independent
+// random numbers: sample `i` of a pixel fills the gaps samples `0..i` left,
+// so the mean converges faster than white noise's `1/sqrt(n)` — the same
+// picture in fewer samples, and less for the denoiser to guess at.
+//
+// Burley's "Practical Hash-based Owen Scrambling" (JCGT 2020): four
+// dimensions of Sobol, Owen-scrambled per pixel by a hash, and every further
+// four the same four again with the sample order shuffled by another hash —
+// so dimensions in a group are stratified together and groups are
+// independent. A draw is uniform whatever it is used for, so a path that
+// branches and takes more or fewer numbers stays unbiased; dimensions are
+// laid out per bounce (`pt_dimensions`) so that the same use lands on the
+// same dimension from sample to sample, which is where the gain is.
+
+// The first four Sobol dimensions' direction numbers (Joe & Kuo), 32 each.
+const PT_SOBOL: array<u32, 128> = array<u32, 128>(
+    0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
+    0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u,
+    0x00008000u, 0x00004000u, 0x00002000u, 0x00001000u, 0x00000800u, 0x00000400u, 0x00000200u, 0x00000100u,
+    0x00000080u, 0x00000040u, 0x00000020u, 0x00000010u, 0x00000008u, 0x00000004u, 0x00000002u, 0x00000001u,
+    0x80000000u, 0xc0000000u, 0xa0000000u, 0xf0000000u, 0x88000000u, 0xcc000000u, 0xaa000000u, 0xff000000u,
+    0x80800000u, 0xc0c00000u, 0xa0a00000u, 0xf0f00000u, 0x88880000u, 0xcccc0000u, 0xaaaa0000u, 0xffff0000u,
+    0x80008000u, 0xc000c000u, 0xa000a000u, 0xf000f000u, 0x88008800u, 0xcc00cc00u, 0xaa00aa00u, 0xff00ff00u,
+    0x80808080u, 0xc0c0c0c0u, 0xa0a0a0a0u, 0xf0f0f0f0u, 0x88888888u, 0xccccccccu, 0xaaaaaaaau, 0xffffffffu,
+    0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0xe8000000u, 0x5c000000u, 0x8e000000u, 0xc5000000u,
+    0x68800000u, 0x9cc00000u, 0xee600000u, 0x55900000u, 0x80680000u, 0xc09c0000u, 0x60ee0000u, 0x90550000u,
+    0xe8808000u, 0x5cc0c000u, 0x8e606000u, 0xc5909000u, 0x6868e800u, 0x9c9c5c00u, 0xeeee8e00u, 0x5555c500u,
+    0x8000e880u, 0xc0005cc0u, 0x60008e60u, 0x9000c590u, 0xe8006868u, 0x5c009c9cu, 0x8e00eeeeu, 0xc5005555u,
+    0x80000000u, 0xc0000000u, 0x20000000u, 0x50000000u, 0xf8000000u, 0x74000000u, 0xa2000000u, 0x93000000u,
+    0xd8800000u, 0x25400000u, 0x59e00000u, 0xe6d00000u, 0x78080000u, 0xb40c0000u, 0x82020000u, 0xc3050000u,
+    0x208f8000u, 0x51474000u, 0xfbea2000u, 0x75d93000u, 0xa0858800u, 0x914e5400u, 0xdbe79e00u, 0x25db6d00u,
+    0x58800080u, 0xe54000c0u, 0x79e00020u, 0xb6d00050u, 0x800800f8u, 0xc00c0074u, 0x200200a2u, 0x50050093u
+);
+
+// Which sample of this pixel this is, the pixel's scramble, and the next
+// dimension to draw.
+var<private> pt_index: u32;
+var<private> pt_seed: u32;
+var<private> pt_dim: u32;
+
+// Laine and Karras's hash, which permutes a value's bits the way a nested
+// uniform scramble does when the bits are reversed around it.
+fn pt_lk_permute(x0: u32, seed: u32) -> u32 {
+    var x = x0 + seed;
+    x ^= x * 0x6c50b47cu;
+    x ^= x * 0xb82f1e52u;
+    x ^= x * 0xc7afe638u;
+    x ^= x * 0x8d22f6e6u;
+    return x;
+}
+
+fn pt_owen(x: u32, seed: u32) -> u32 {
+    return reverseBits(pt_lk_permute(reverseBits(x), seed));
+}
+
+fn pt_sobol(index: u32, dim: u32) -> u32 {
+    var x = 0u;
+    for (var bit = 0u; bit < 32u; bit = bit + 1u) {
+        if (((index >> bit) & 1u) != 0u) {
+            x ^= PT_SOBOL[dim * 32u + bit];
+        }
+    }
+    return x;
+}
+
+// Starts this bounce's dimensions: the same uses take the same dimensions
+// on every sample. `step` counts the loop's turns, bounces and glass alike.
+// Never back: a turn that drew more than its 32 (a march through smoke)
+// must not hand the next turn numbers it has already used.
+fn pt_dimensions(step: u32) {
+    pt_dim = max(pt_dim, 8u + step * 32u);
+}
 
 fn pt_random() -> f32 {
-    pt_state = pt_hash(pt_state);
-    return f32(pt_state >> 8u) / 16777216.0;
+    let group = pt_dim >> 2u;
+    let d = pt_dim & 3u;
+    pt_dim = pt_dim + 1u;
+    let group_seed = pt_hash(pt_seed ^ pt_hash(group + 0x9e3779b9u));
+    let index = pt_owen(pt_index, group_seed);
+    let x = pt_owen(pt_sobol(index, d), pt_hash(group_seed + d + 1u));
+    // 24 bits, so the result is below one in `f32`.
+    return f32(x >> 8u) / 16777216.0;
 }
 
 // --- intersection -------------------------------------------------------------
@@ -484,6 +561,66 @@ fn pt_emitter_pdf(le: vec3<f32>, dist2: f32, cos_l: f32) -> f32 {
     return pt_emitter_share() * pt_luminance(le) / pt.emitter_total * dist2 / cos_l;
 }
 
+// --- choosing a lamp ---------------------------------------------------------
+//
+// Chosen at random among the lamps, a lamp a hundred times brighter than
+// another, or a hundred times nearer, was still chosen as often — and the
+// samples spent on the dim one were the noise. So each is chosen in
+// proportion to the light it would give this point if nothing were in the
+// way: its illuminance here, on the side the surface faces. A tenth of the
+// chance is spread evenly, so a lamp the estimate says nothing of (a large
+// one just below the horizon, whose disc still reaches over it) is still
+// found, and the sum stays unbiased. Past a few dozen lamps the estimate
+// costs more than it saves, and the choice is even.
+
+const PT_LAMPS_WEIGHED: u32 = 64u;
+
+struct PtLampChoice {
+    k: u32,
+    // The chance it was chosen.
+    p: f32,
+};
+
+fn pt_lamp_weight(k: u32, at: vec3<f32>, geometric: vec3<f32>) -> f32 {
+    let light = lights[k];
+    if ((light.flags & FLAG_GEOMETRY) != 0u) {
+        // Aimed at as glowing geometry instead: never as a lamp.
+        return 0.0;
+    }
+    let facing = max(dot(direction_to(light, at), geometric), 0.0);
+    return pt_luminance(illuminance_at(light, at)) * facing;
+}
+
+fn pt_pick_lamp(at: vec3<f32>, geometric: vec3<f32>, u: f32) -> PtLampChoice {
+    let n = pt.light_count;
+    let even = 1.0 / f32(n);
+    var choice: PtLampChoice;
+    choice.k = min(u32(u * f32(n)), n - 1u);
+    choice.p = even;
+    if (n > PT_LAMPS_WEIGHED) {
+        return choice;
+    }
+    var total = 0.0;
+    for (var k = 0u; k < n; k = k + 1u) {
+        total += pt_lamp_weight(k, at, geometric);
+    }
+    if (!(total > 0.0)) {
+        return choice;
+    }
+    // Walk the mixture's cumulative sum to `u`.
+    var sum = 0.0;
+    for (var k = 0u; k < n; k = k + 1u) {
+        let p = 0.9 * pt_lamp_weight(k, at, geometric) / total + 0.1 * even;
+        sum += p;
+        if (u < sum || k == n - 1u) {
+            choice.k = k;
+            choice.p = p;
+            break;
+        }
+    }
+    return choice;
+}
+
 // The probability per solid angle that the bounce sampling below picks `l`:
 // the specular lobe's GGX half-vector density and the cosine lobe's, mixed as
 // the sampler mixes them.
@@ -760,7 +897,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let pixel = id.y * pt.size.x + id.x;
-    pt_state = pt_hash(pixel * 9781u + pt.sample * 6271u + 1u);
+    pt_seed = pt_hash(pixel * 9781u + 1u);
+    pt_index = pt.sample;
+    pt_dim = 0u;
 
     // What this pixel has so far, read before it is added to.
     var before = vec4<f32>(0.0);
@@ -842,10 +981,13 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // that finds nothing shows.
     var floor_tried = false;
     var floor_back = vec3<f32>(-1.0);
+    var step = 0u;
     loop {
         if (bounce > pt.max_bounces || crossings > 16u) {
             break;
         }
+        pt_dimensions(step);
+        step = step + 1u;
         let hit = pt_trace(origin, dir, 1e30, false, skip);
         skip = PT_NONE;
         // A product shot's floor, met by the camera's ray before anything
@@ -1289,15 +1431,16 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
 
-        // One lamp, chosen at random, its share scaled by how many there are.
+        // One lamp, chosen by how much it lights this point (see
+        // `pt_pick_lamp`), its share made up by dividing by that chance.
         if (!aim_at_glow && !aim_at_sky && pt.light_count > 0u) {
-            let k = min(u32(pt_random() * f32(pt.light_count)), pt.light_count - 1u);
-            let light = lights[k];
+            let at = p - pt.eye.xyz;
+            let chosen = pt_pick_lamp(at, geometric, pt_random());
+            let light = lights[chosen.k];
             // Drawn as glowing geometry instead, and aimed at as that.
             let as_geometry = (light.flags & FLAG_GEOMETRY) != 0u;
-            let at = p - pt.eye.xyz;
             let to_light = direction_to(light, at);
-            let e = illuminance_at(light, at) * f32(pt.light_count) / pt_lamp_share();
+            let e = illuminance_at(light, at) / (chosen.p * pt_lamp_share());
             if (!as_geometry && dot(to_light, geometric) > 0.0 && pt_luminance(e) > 0.0) {
                 // The shadow ray goes to a random point of the source — a
                 // sphere's disc facing the surface, or the sun's disc in the
