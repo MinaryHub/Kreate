@@ -243,7 +243,10 @@ pub fn parse_obj(text: &str, opts: ObjOptions) -> Result<ImportScene, ObjError> 
             }
             "usemtl" => {
                 let name = content["usemtl".len()..].trim().to_string();
+                // `(null)`: no material, as some exporters (and this one)
+                // write to end a run of one.
                 cur_material = match materials.iter().position(|m| *m == name) {
+                    _ if name.is_empty() || name == "(null)" => -1,
                     Some(i) => i as i32,
                     None => {
                         materials.push(name);
@@ -469,8 +472,14 @@ pub fn write_obj(meshes: &[(String, &MeshData)], opts: ObjOptions) -> String {
             }
             if let Some(materials) = materials {
                 let m = materials[f as usize];
-                if last_material != Some(m) && m >= 0 {
-                    let _ = writeln!(out, "usemtl material{m}");
+                if last_material != Some(m) {
+                    if m >= 0 {
+                        let _ = writeln!(out, "usemtl material{m}");
+                    } else if last_material.is_some() {
+                        // No material after one: said so, or the reader carries
+                        // the one before over this face too.
+                        let _ = writeln!(out, "usemtl (null)");
+                    }
                     last_material = Some(m);
                 }
             }
@@ -644,6 +653,22 @@ s off
 f 1 3 4
 ";
         assert_eq!(parse(text).meshes[0].smoothing_groups, Some(vec![1, 0]));
+    }
+
+    #[test]
+    fn a_face_with_no_material_after_one_with_a_material_stays_without() {
+        let mut m = MeshData::from_faces(
+            vec![Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y],
+            &[vec![0, 1, 2], vec![0, 2, 3]],
+        );
+        m.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            kreate_mesh::attribute::Domain::Face,
+            kreate_mesh::attribute::AttrData::I32(std::sync::Arc::new(vec![0, -1])),
+        );
+        let text = write_obj(&[("m".into(), &m)], identity_opts());
+        let scene = parse(&text);
+        assert_eq!(scene.meshes[0].face_materials, Some(vec![0, -1]));
     }
 
     #[test]

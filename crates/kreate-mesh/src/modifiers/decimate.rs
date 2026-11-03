@@ -71,6 +71,10 @@ struct Candidate {
     a: u32,
     b: u32,
     at: Vec3,
+    /// How many collapses each end had taken when this was costed: a
+    /// candidate costed before either end moved is of a place and a quadric
+    /// that are no longer there.
+    stamps: [u32; 2],
 }
 
 impl Eq for Candidate {}
@@ -147,25 +151,29 @@ pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
         v
     };
 
-    let candidate = |a: u32, b: u32, pos: &[Vec3], quadrics: &[Quadric]| -> Candidate {
-        let mut q = quadrics[a as usize];
-        q.add(&quadrics[b as usize]);
-        let (pa, pb) = (pos[a as usize], pos[b as usize]);
-        // The cheapest of the two ends and their middle: no matrix to
-        // invert, and never a vertex flung off the surface.
-        let mid = (pa + pb) * 0.5;
-        let best = [pa, pb, mid]
-            .into_iter()
-            .map(|p| (q.cost(p.as_dvec3()), p))
-            .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(Ordering::Equal))
-            .expect("three");
-        Candidate {
-            cost: best.0.max(0.0),
-            a,
-            b,
-            at: best.1,
-        }
-    };
+    // Bumped on each end of every collapse.
+    let mut stamp: Vec<u32> = vec![0; pos.len()];
+    let candidate =
+        |a: u32, b: u32, pos: &[Vec3], quadrics: &[Quadric], stamp: &[u32]| -> Candidate {
+            let mut q = quadrics[a as usize];
+            q.add(&quadrics[b as usize]);
+            let (pa, pb) = (pos[a as usize], pos[b as usize]);
+            // The cheapest of the two ends and their middle: no matrix to
+            // invert, and never a vertex flung off the surface.
+            let mid = (pa + pb) * 0.5;
+            let best = [pa, pb, mid]
+                .into_iter()
+                .map(|p| (q.cost(p.as_dvec3()), p))
+                .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(Ordering::Equal))
+                .expect("three");
+            Candidate {
+                cost: best.0.max(0.0),
+                a,
+                b,
+                at: best.1,
+                stamps: [stamp[a as usize], stamp[b as usize]],
+            }
+        };
     let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
     let mut seen: HashSet<(u32, u32)> = HashSet::new();
     for t in &tris {
@@ -173,13 +181,20 @@ pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
             let (a, b) = (t[k], t[(k + 1) % 3]);
             let key = (a.min(b), a.max(b));
             if seen.insert(key) {
-                heap.push(candidate(key.0, key.1, &pos, &quadrics));
+                heap.push(candidate(key.0, key.1, &pos, &quadrics, &stamp));
             }
         }
     }
 
     while live > target {
         let Some(c) = heap.pop() else { break };
+        // Stale: an end has moved since, so its place and cost are of a
+        // surface that is gone — collapsing to `c.at` would put the survivor
+        // back where an earlier one stood. Every edge round a survivor is
+        // costed afresh below, so a stale one is only dropped.
+        if c.stamps != [stamp[c.a as usize], stamp[c.b as usize]] {
+            continue;
+        }
         let (a, b) = (find(&merged, c.a), find(&merged, c.b));
         if a == b {
             continue;
@@ -241,6 +256,8 @@ pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
         }
         // Collapse b into a, at the chosen place.
         pos[a as usize] = c.at;
+        stamp[a as usize] += 1;
+        stamp[b as usize] += 1;
         let qb = quadrics[b as usize];
         quadrics[a as usize].add(&qb);
         merged[b as usize] = a;
@@ -275,7 +292,7 @@ pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
             }
         }
         for v in around {
-            heap.push(candidate(a.min(v), a.max(v), &pos, &quadrics));
+            heap.push(candidate(a.min(v), a.max(v), &pos, &quadrics, &stamp));
         }
     }
 

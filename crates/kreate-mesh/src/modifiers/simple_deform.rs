@@ -108,7 +108,10 @@ pub fn simple_deform(input: &MeshData, params: &SimpleDeformParams) -> MeshData 
                 q[v] = p[v] * k;
             }
             DeformMode::Stretch => {
-                let k = 1.0 + params.amount;
+                // Never zero or below: a stretch of -100% or more would
+                // collapse the length and blow the cross-section up a
+                // millionfold (or mirror it, turning every face inside out).
+                let k = (1.0 + params.amount).max(0.01);
                 q[axis] = lo + (p[axis] - lo) * k;
                 // Thinner in the middle as it is pulled, the bulk kept.
                 let pinch = 1.0 / k.sqrt().max(1e-6);

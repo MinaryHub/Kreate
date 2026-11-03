@@ -516,8 +516,10 @@ pub fn parse_usd_file(path: &Path) -> Result<ImportScene, UsdError> {
             .map_err(|e| UsdError(format!("the archive: {e}")))?;
         let mut files = HashMap::new();
         let mut first = None;
+        // What every entry inflates to, all together: a cap per entry alone
+        // still lets a thousand of them take the machine's memory.
+        let mut budget = crate::archive::Budget::default();
         for i in 0..archive.len() {
-            use std::io::Read;
             let mut item = archive.by_index(i).map_err(|e| UsdError(e.to_string()))?;
             let Some(inner) = item
                 .enclosed_name()
@@ -525,10 +527,8 @@ pub fn parse_usd_file(path: &Path) -> Result<ImportScene, UsdError> {
             else {
                 continue;
             };
-            let mut data = Vec::new();
-            item.by_ref()
-                .take(1 << 30)
-                .read_to_end(&mut data)
+            let data = budget
+                .read(&mut item)
                 .map_err(|e| UsdError(e.to_string()))?;
             let lower = inner.to_ascii_lowercase();
             if first.is_none()

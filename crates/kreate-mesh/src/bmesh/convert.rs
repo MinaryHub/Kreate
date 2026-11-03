@@ -17,6 +17,15 @@ use crate::mesh_data::MeshData;
 
 use super::{BMesh, DiskLink, Edge, Face, Loop, Vert};
 
+/// For each edge, corner and face slot filled, the `MeshData` index it came
+/// from, in slot order.
+#[derive(Default)]
+struct Sources {
+    edges: Vec<u32>,
+    corners: Vec<u32>,
+    faces: Vec<u32>,
+}
+
 impl BMesh {
     /// Builds an edit structure from storage form.
     ///
@@ -27,13 +36,27 @@ impl BMesh {
     /// permutation on an unedited mesh.
     pub fn from_mesh_data(mesh: &MeshData) -> Self {
         let mut bm = BMesh::new();
-        bm.build_elements(mesh);
+        let sources = bm.build_elements(mesh);
 
         // Position is inline in `Vert`, so it must not also exist as a layer —
         // two copies means whichever one an operator happens to read decides the
         // answer.
         let mut attributes = mesh.attributes().clone();
         attributes.remove(names::POSITION);
+        // Adopted wholesale only while every element landed in the slot of its
+        // own index. A face skipped as unusable (fewer than three corners, a
+        // repeated vertex) moves every later face and corner down a slot, and
+        // the store adopted as it is would then give each the material and UVs
+        // of the one before it.
+        for (domain, src, count) in [
+            (Domain::Edge, &sources.edges, mesh.num_edges()),
+            (Domain::Corner, &sources.corners, mesh.num_corners()),
+            (Domain::Face, &sources.faces, mesh.num_faces()),
+        ] {
+            if src.len() != count as usize {
+                attributes.gather_domain(domain, src);
+            }
+        }
         for domain in Domain::ALL {
             attributes.resize_domain(domain, bm.slot_count(domain));
         }
@@ -72,8 +95,9 @@ impl BMesh {
     /// consecutive slots in winding order. That is load-bearing — the
     /// attribute store is adopted wholesale rather than gathered — so it is
     /// asserted by the round-trip test rather than merely intended.
-    fn build_elements(&mut self, mesh: &MeshData) {
+    fn build_elements(&mut self, mesh: &MeshData) -> Sources {
         let num_verts = mesh.num_verts() as usize;
+        let mut sources = Sources::default();
 
         // --- vertices ---------------------------------------------------------
         for p in mesh.positions() {
@@ -86,7 +110,7 @@ impl BMesh {
         // them in between.
         let placeholder_edge = EdgeId::from_parts(0, 0);
         let mut edge_ids: Vec<EdgeId> = Vec::with_capacity(mesh.num_edges() as usize);
-        for [a, b] in mesh.edges() {
+        for (index, [a, b]) in mesh.edges().iter().enumerate() {
             let (a, b) = (*a as usize, *b as usize);
             if a == b || a >= num_verts || b >= num_verts {
                 // A degenerate or dangling edge, skipped as the incremental
@@ -115,6 +139,7 @@ impl BMesh {
                 first_loop: None,
             });
             edge_ids.push(id);
+            sources.edges.push(index as u32);
         }
 
         // --- the vertex-to-edge map, and the disk cycles from it --------------
@@ -171,8 +196,11 @@ impl BMesh {
         let mut loop_edge: Vec<EdgeId> = Vec::with_capacity(mesh.num_corners() as usize);
         let mut loop_ids: Vec<LoopId> = Vec::with_capacity(mesh.num_corners() as usize);
 
-        for face in mesh.faces() {
+        let mut corner_at = 0u32;
+        for (index, face) in mesh.faces().enumerate() {
             let n = face.len();
+            let first_corner = corner_at;
+            corner_at += n as u32;
             if n < 3 || face.iter().any(|v| *v as usize >= num_verts) {
                 // A corner referencing a vertex that does not exist, or a face
                 // too short to be one. Dropped rather than propagated, as
@@ -194,6 +222,7 @@ impl BMesh {
                 first_loop: placeholder_loop,
                 len: n as u32,
             });
+            sources.faces.push(index as u32);
 
             let first = self.loops.len();
             for i in 0..n {
@@ -222,6 +251,7 @@ impl BMesh {
                 });
                 loop_ids.push(id);
                 loop_edge.push(e);
+                sources.corners.push(first_corner + i as u32);
             }
 
             // The loop cycle, over the ids just pushed.
@@ -275,6 +305,7 @@ impl BMesh {
                 self.loops[l].radial_next = ring[(i + 1) % n];
             }
         }
+        sources
     }
 
     /// The edge between two vertices, through the CSR built above.
@@ -492,6 +523,47 @@ mod tests {
     use crate::attribute::{AttrData, AttrType};
     use kreate_math::Vec2;
     use std::sync::Arc;
+
+    #[test]
+    fn a_face_skipped_on_the_way_in_does_not_shift_the_others_attributes() {
+        // The middle face repeats a vertex and is dropped: the faces after it
+        // must keep their own material and UVs, not take the dropped one's.
+        let mut m = MeshData::from_faces(
+            vec![
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
+            &[vec![0, 1, 2], vec![1, 3, 1, 2], vec![1, 4, 3]],
+        );
+        m.attributes_mut().insert(
+            names::MATERIAL_INDEX,
+            Domain::Face,
+            AttrData::I32(Arc::new(vec![1, 2, 3])),
+        );
+        let uv: Vec<Vec2> = (0..m.num_corners())
+            .map(|i| Vec2::splat(i as f32))
+            .collect();
+        m.attributes_mut()
+            .insert(names::UV, Domain::Corner, AttrData::F32x2(Arc::new(uv)));
+
+        let bm = BMesh::from_mesh_data(&m);
+        assert_eq!(bm.num_faces(), 2);
+        let material = bm.attributes().get_i32(names::MATERIAL_INDEX).unwrap();
+        let uv = bm.attributes().get_f32x2(names::UV).unwrap();
+        let faces: Vec<_> = bm.face_ids().collect();
+        assert_eq!(material[faces[0].index() as usize], 1);
+        assert_eq!(material[faces[1].index() as usize], 3);
+        // The last face's corners were 7, 8 and 9 in the source.
+        let corners: Vec<f32> = bm
+            .face_loops(faces[1])
+            .iter()
+            .map(|l| uv[l.index() as usize].x)
+            .collect();
+        assert_eq!(corners, vec![7.0, 8.0, 9.0]);
+    }
 
     fn assert_same_shape(a: &MeshData, b: &MeshData) {
         assert_eq!(a.num_verts(), b.num_verts(), "vertex count");

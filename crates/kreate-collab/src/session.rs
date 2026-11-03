@@ -254,14 +254,25 @@ impl Session {
             }
             Msg::Applied { from, .. } => {
                 if let Some(replica) = &mut self.replica {
-                    if let Ok(Some(changes)) = replica.incoming(doc, from, &frame.body) {
-                        match events.last_mut() {
+                    match replica.incoming(doc, from, &frame.body) {
+                        Ok(Some(changes)) => match events.last_mut() {
                             Some(SessionEvent::Changed(all)) => {
                                 all.changed.extend(changes.changed);
                                 all.removed.extend(changes.removed);
                                 all.settings |= changes.settings;
                             }
                             _ => events.push(SessionEvent::Changed(changes)),
+                        },
+                        Ok(None) => {}
+                        // An edit everyone else has and this copy cannot
+                        // read: passed over, this copy would be out of step
+                        // with the session from here on, with nothing to say
+                        // so. Ended instead, to be joined again.
+                        Err(e) => {
+                            self.state = State::Closed;
+                            events.push(SessionEvent::Closed(format!(
+                                "an edit from the session could not be read ({e}); join again"
+                            )));
                         }
                     }
                 }

@@ -83,6 +83,13 @@ pub enum UndoPayload {
         /// What was there, in the same order.
         was: Vec<Option<Arc<crate::image::Tile>>>,
     },
+    /// Several records from one operator, restored last first.
+    ///
+    /// What an operator that wrote two meshes (a transform in edit mode over
+    /// several objects) or a mesh and an image leaves behind: no one of the
+    /// shapes above describes it, and dropping any part would leave an undo
+    /// that puts back only some of what the operator did.
+    Multi(Vec<UndoPayload>),
     /// The operator reported success but changed nothing worth recording.
     Nothing,
 }
@@ -119,6 +126,7 @@ impl UndoPayload {
                     .sum();
                 held + tiles.len() * std::mem::size_of::<(u32, u32)>()
             }
+            UndoPayload::Multi(parts) => parts.iter().map(UndoPayload::bytes).sum(),
             UndoPayload::Nothing => 0,
         }
     }
@@ -157,6 +165,13 @@ impl UndoPayload {
                         // when it is undone, not a blank one.
                         img.set_tile(*x, *y, tile.clone());
                     }
+                }
+            }
+            UndoPayload::Multi(parts) => {
+                // Last first: a later record was taken over what an earlier one
+                // wrote, so undoing in reverse ends at the state before both.
+                for part in parts.iter().rev() {
+                    part.restore(doc);
                 }
             }
             UndoPayload::Nothing => {}
@@ -251,9 +266,7 @@ impl<'a> DocMut<'a> {
     /// Named rather than implied, because edit mode holds several structures
     /// and baking the wrong one would write a mesh nobody edited over itself.
     pub fn bake_edit(&mut self, mesh: MeshId) -> bool {
-        if self.before.is_none() {
-            self.before = Some(Box::new(self.doc.clone()));
-        }
+        self.take_before();
         match self.sessions.as_mut().and_then(|s| s.get_mut(mesh)) {
             Some(session) => session.bake(self.doc),
             None => false,
@@ -264,15 +277,32 @@ impl<'a> DocMut<'a> {
         self.doc
     }
 
+    /// Takes the coarse snapshot, if it has not been taken yet.
+    ///
+    /// The declared writes made before it are undone on the copy: the snapshot
+    /// wins over them in [`DocMut::finish`], so it has to be the document as it
+    /// was before the operator ran, not as it was halfway through. A transform
+    /// with auto merge writes positions first and merges second; without this,
+    /// undoing it put the merge back and left the vertices where they were
+    /// dragged.
+    fn take_before(&mut self) {
+        if self.before.is_some() {
+            return;
+        }
+        let mut before = self.doc.clone();
+        for delta in self.deltas.iter().rev() {
+            delta.restore(&mut before);
+        }
+        self.before = Some(Box::new(before));
+    }
+
     /// Full mutable access, at the cost of a whole-document snapshot.
     ///
     /// Correct for anything that changes topology or the object graph. Using it
     /// for a transform would work but would record far more than necessary,
     /// which is what [`DocMut::edit_positions`] avoids.
     pub fn document_mut(&mut self) -> &mut Document {
-        if self.before.is_none() {
-            self.before = Some(Box::new(self.doc.clone()));
-        }
+        self.take_before();
         self.doc
     }
 
@@ -395,42 +425,45 @@ impl<'a> DocMut<'a> {
 ///
 /// An operator that writes the same vertex twice must undo to the value from
 /// before the operator ran, not to the value it had halfway through.
+///
+/// Only when every record is a position delta of one mesh; anything else —
+/// two meshes, or an image beside a mesh — is kept whole as
+/// [`UndoPayload::Multi`], which restores each part in reverse.
 fn merge_deltas(deltas: Vec<UndoPayload>) -> UndoPayload {
-    let mut mesh_id = None;
+    let first_mesh = match deltas.first() {
+        Some(UndoPayload::PositionDelta { mesh, .. }) => *mesh,
+        _ => return UndoPayload::Multi(deltas),
+    };
+    let one_mesh = deltas
+        .iter()
+        .all(|d| matches!(d, UndoPayload::PositionDelta { mesh, .. } if *mesh == first_mesh));
+    if !one_mesh {
+        return UndoPayload::Multi(deltas);
+    }
+
+    let mut seen = std::collections::HashSet::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut values: Vec<Vec3> = Vec::new();
-
     for d in deltas {
         let UndoPayload::PositionDelta {
-            mesh,
             indices: idx,
             values: vals,
+            ..
         } = d
         else {
-            continue;
+            unreachable!("checked above");
         };
-        // Deltas across two different meshes cannot be merged into this shape;
-        // the coarse path is the honest answer there.
-        match mesh_id {
-            None => mesh_id = Some(mesh),
-            Some(existing) if existing == mesh => {}
-            Some(_) => return UndoPayload::Nothing,
-        }
         for (i, v) in idx.into_iter().zip(vals) {
-            if !indices.contains(&i) {
+            if seen.insert(i) {
                 indices.push(i);
                 values.push(v);
             }
         }
     }
-
-    match mesh_id {
-        Some(mesh) => UndoPayload::PositionDelta {
-            mesh,
-            indices,
-            values,
-        },
-        None => UndoPayload::Nothing,
+    UndoPayload::PositionDelta {
+        mesh: first_mesh,
+        indices,
+        values,
     }
 }
 
@@ -577,6 +610,41 @@ mod tests {
         edit.document_mut()
             .add_object(Object::new("X", ObjectData::Empty));
         assert!(matches!(edit.finish(), UndoPayload::Snapshot(_)));
+    }
+
+    #[test]
+    fn a_snapshot_taken_after_a_declared_write_undoes_that_write_too() {
+        // A transform with auto merge: positions first, the merge second. The
+        // snapshot the merge takes must be from before the transform.
+        let (mut doc, mesh) = doc_with_grid();
+        let original = doc.mesh(mesh).unwrap().positions()[0];
+        let mut edit = DocMut::new(&mut doc);
+        edit.edit_positions(mesh, &[0], |_, p| p.z += 3.0).unwrap();
+        edit.document_mut()
+            .add_object(Object::new("X", ObjectData::Empty));
+        let payload = edit.finish();
+        payload.restore(&mut doc);
+        assert_eq!(doc.mesh(mesh).unwrap().positions()[0], original);
+    }
+
+    #[test]
+    fn writes_to_two_meshes_undo_both() {
+        // Edit mode over two objects: one transform, two meshes.
+        let (mut doc, a) = doc_with_grid();
+        let b = doc.add_mesh(kreate_mesh::primitives::grid(2.0, 2, 2));
+        let (pa, pb) = (
+            doc.mesh(a).unwrap().positions()[1],
+            doc.mesh(b).unwrap().positions()[1],
+        );
+        let mut edit = DocMut::new(&mut doc);
+        edit.edit_positions(a, &[1], |_, p| p.x += 1.0).unwrap();
+        edit.edit_positions(b, &[1], |_, p| p.y += 1.0).unwrap();
+        edit.edit_positions(a, &[1], |_, p| p.x += 1.0).unwrap();
+        let payload = edit.finish();
+        assert!(!payload.is_nothing());
+        payload.restore(&mut doc);
+        assert_eq!(doc.mesh(a).unwrap().positions()[1], pa);
+        assert_eq!(doc.mesh(b).unwrap().positions()[1], pb);
     }
 
     #[test]

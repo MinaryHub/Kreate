@@ -45,7 +45,7 @@ pub use validate::BmViolation;
 use kreate_math::Vec3;
 
 use crate::arena::{Arena, ArenaIndex, EdgeId, FaceId, LoopId, VertId};
-use crate::attribute::{AttributeStore, Domain};
+use crate::attribute::{AttributeStore, Domain, ElementValues};
 
 /// A vertex.
 #[derive(Clone, Copy, Debug)]
@@ -919,6 +919,108 @@ impl BMesh {
         if self.edges[e].first_loop == Some(l) {
             self.edges[e].first_loop = Some(node.radial_next);
         }
+    }
+
+    /// A face's own values (material, smoothing), read out so they outlive
+    /// the face. See [`AttributeStore::element_values`].
+    pub fn face_values(&self, f: FaceId) -> ElementValues {
+        if self.faces.get(f).is_none() {
+            return ElementValues::default();
+        }
+        self.attributes
+            .element_values(Domain::Face, f.index() as usize)
+    }
+
+    /// Writes values read by [`BMesh::face_values`] onto a face.
+    pub fn set_face_values(&mut self, f: FaceId, values: &ElementValues) {
+        if self.faces.get(f).is_some() {
+            self.attributes
+                .set_element_values(Domain::Face, f.index() as usize, values);
+        }
+    }
+
+    /// A corner's values (UV, colour, split normal), read out so they outlive
+    /// the corner.
+    pub fn loop_values(&self, l: LoopId) -> ElementValues {
+        if self.loops.get(l).is_none() {
+            return ElementValues::default();
+        }
+        self.attributes
+            .element_values(Domain::Corner, l.index() as usize)
+    }
+
+    /// Writes values read by [`BMesh::loop_values`] onto a corner.
+    pub fn set_loop_values(&mut self, l: LoopId, values: &ElementValues) {
+        if self.loops.get(l).is_some() {
+            self.attributes
+                .set_element_values(Domain::Corner, l.index() as usize, values);
+        }
+    }
+
+    /// Every corner of a face with its vertex and values, in winding order:
+    /// what an operator rebuilding the face reads before removing it.
+    pub fn face_corner_values(&self, f: FaceId) -> Vec<(VertId, ElementValues)> {
+        self.face_loops(f)
+            .into_iter()
+            .filter_map(|l| Some((self.loop_vert(l)?, self.loop_values(l))))
+            .collect()
+    }
+
+    /// Writes per-vertex corner values onto a face: each corner of `f` whose
+    /// vertex is in `corners` takes that entry's values. The other half of
+    /// [`BMesh::face_corner_values`], for a face rebuilt on the same vertices
+    /// (or on copies, with the table mapped).
+    pub fn set_face_corner_values(&mut self, f: FaceId, corners: &[(VertId, ElementValues)]) {
+        for l in self.face_loops(f) {
+            let Some(v) = self.loop_vert(l) else { continue };
+            if let Some((_, values)) = corners.iter().find(|(w, _)| *w == v) {
+                self.set_loop_values(l, values);
+            }
+        }
+    }
+
+    /// Gives a face that was made with nothing (a hole's cap) what the faces
+    /// around it carry: the material and smoothing of the first neighbour
+    /// across one of its edges, and at each corner the values of a
+    /// neighbouring face's corner at the same vertex.
+    ///
+    /// Faces in `fresh` are made with nothing too, and are not taken from. A
+    /// corner whose vertex no other face reaches — a fan's apex — takes the
+    /// blend of the face's other corners.
+    pub fn carry_from_neighbours(&mut self, f: FaceId, fresh: &[FaceId]) {
+        let loops = self.face_loops(f);
+        let neighbour = loops.iter().find_map(|l| {
+            let e = self.loop_edge(*l)?;
+            self.edge_faces(e)
+                .into_iter()
+                .find(|g| *g != f && !fresh.contains(g))
+        });
+        if let Some(g) = neighbour {
+            let values = self.face_values(g);
+            self.set_face_values(f, &values);
+        }
+        let mut found: Vec<Option<ElementValues>> = Vec::with_capacity(loops.len());
+        for l in &loops {
+            let from = self.loop_vert(*l).and_then(|v| {
+                self.vert_faces(v)
+                    .into_iter()
+                    .filter(|g| *g != f && !fresh.contains(g))
+                    .find_map(|g| self.face_loop_at(g, v))
+            });
+            found.push(from.map(|from| self.loop_values(from)));
+        }
+        let known: Vec<(&ElementValues, f32)> = found.iter().flatten().map(|v| (v, 1.0)).collect();
+        let fallback = ElementValues::blend(&known);
+        for (l, values) in loops.into_iter().zip(&found) {
+            self.set_loop_values(l, values.as_ref().unwrap_or(&fallback));
+        }
+    }
+
+    /// The corner of face `f` at vertex `v`.
+    pub fn face_loop_at(&self, f: FaceId, v: VertId) -> Option<LoopId> {
+        self.face_loops(f)
+            .into_iter()
+            .find(|l| self.loop_vert(*l) == Some(v))
     }
 
     /// Keeps the attribute arrays parallel to the arenas after an insert.

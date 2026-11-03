@@ -281,6 +281,31 @@ impl AttrData {
         }
     }
 
+    /// Writes entry `i` from entry `j` of `src`, a layer of the same type.
+    ///
+    /// Nothing is written for a type mismatch or an index out of range: the
+    /// caller is copying one element's values across, and a layer that has
+    /// changed type under it is one it has no business writing.
+    fn set_from(&mut self, i: usize, src: &AttrData, j: usize) {
+        macro_rules! put {
+            ($dst:expr, $src:expr) => {{
+                if let (true, Some(value)) = (i < $dst.len(), $src.get(j).copied()) {
+                    Arc::make_mut($dst)[i] = value;
+                }
+            }};
+        }
+        match (self, src) {
+            (AttrData::F32(d), AttrData::F32(s)) => put!(d, s),
+            (AttrData::F32x2(d), AttrData::F32x2(s)) => put!(d, s),
+            (AttrData::F32x3(d), AttrData::F32x3(s)) => put!(d, s),
+            (AttrData::F32x4(d), AttrData::F32x4(s)) => put!(d, s),
+            (AttrData::I32(d), AttrData::I32(s)) => put!(d, s),
+            (AttrData::Bool(d), AttrData::Bool(s)) => put!(d, s),
+            (AttrData::U8x4(d), AttrData::U8x4(s)) => put!(d, s),
+            _ => {}
+        }
+    }
+
     /// Builds a new array by picking entries in the given order.
     ///
     /// The operation every renumbering needs: compaction, and converting between
@@ -524,6 +549,128 @@ impl AttributeStore {
                 layer.data = layer.data.gather(indices);
             }
         }
+    }
+}
+
+impl AttributeStore {
+    /// One element's values in every user layer of its domain, read out.
+    ///
+    /// What an edit operator that rebuilds a face carries from the old face
+    /// to the new one: its material and smoothing, or a corner's UV and
+    /// colour. Read out rather than referred to by slot, because the operator
+    /// usually removes the old element before it is done, and the slot is
+    /// then reset or reused.
+    ///
+    /// Internal layers (selection, hiding) are left out: what is selected
+    /// afterwards is each operator's own decision, and copying it would undo
+    /// that decision behind its back.
+    pub fn element_values(&self, domain: Domain, index: usize) -> ElementValues {
+        ElementValues {
+            values: self
+                .iter_domain(domain)
+                .filter(|l| !names::is_internal(&l.name) && index < l.data.len())
+                .map(|l| (l.name.clone(), l.data.gather(&[index as u32])))
+                .collect(),
+        }
+    }
+
+    /// Writes values read by [`AttributeStore::element_values`] into an
+    /// element of the same domain. Layers that have gone, or changed type,
+    /// since are skipped.
+    pub fn set_element_values(&mut self, domain: Domain, index: usize, values: &ElementValues) {
+        for (name, value) in &values.values {
+            if let Some(i) = self.index_of(name) {
+                let layer = &mut self.layers[i];
+                if layer.domain == domain {
+                    layer.data.set_from(index, value, 0);
+                }
+            }
+        }
+    }
+}
+
+/// One element's values across a domain's layers: see
+/// [`AttributeStore::element_values`].
+#[derive(Clone, Debug, Default)]
+pub struct ElementValues {
+    /// Layer name, and a one-entry array of that layer's type.
+    values: Vec<(Box<str>, AttrData)>,
+}
+
+impl ElementValues {
+    /// A weighted blend of several elements' values, as
+    /// [`AttrData::interpolate`] blends: floats and colours by weight,
+    /// booleans only when every source has it, integers from the first
+    /// source. The corner a cut makes partway along an edge takes its UV
+    /// this way from the corners at the edge's ends.
+    ///
+    /// Layers missing from any source are left out.
+    pub fn blend(sources: &[(&ElementValues, f32)]) -> ElementValues {
+        let Some((first, _)) = sources.first() else {
+            return ElementValues::default();
+        };
+        let total: f32 = sources.iter().map(|(_, w)| *w).sum();
+        let norm = if total.abs() > f32::EPSILON {
+            1.0 / total
+        } else {
+            0.0
+        };
+        let mut values = Vec::with_capacity(first.values.len());
+        'layers: for (name, data) in &first.values {
+            let mut parts: Vec<(&AttrData, f32)> = Vec::with_capacity(sources.len());
+            for (source, w) in sources {
+                match source.values.iter().find(|(n, _)| n == name) {
+                    Some((_, d)) if d.ty() == data.ty() => parts.push((d, *w * norm)),
+                    _ => continue 'layers,
+                }
+            }
+            macro_rules! weighted {
+                ($variant:ident, $zero:expr) => {{
+                    let mut sum = $zero;
+                    for (d, w) in &parts {
+                        if let AttrData::$variant(v) = d {
+                            sum += v[0] * *w;
+                        }
+                    }
+                    AttrData::$variant(Arc::new(vec![sum]))
+                }};
+            }
+            let blended = match data {
+                AttrData::F32(_) => weighted!(F32, 0.0f32),
+                AttrData::F32x2(_) => weighted!(F32x2, Vec2::ZERO),
+                AttrData::F32x3(_) => weighted!(F32x3, Vec3::ZERO),
+                AttrData::F32x4(_) => weighted!(F32x4, Vec4::ZERO),
+                AttrData::I32(_) => data.clone(),
+                AttrData::Bool(_) => AttrData::Bool(Arc::new(vec![parts
+                    .iter()
+                    .all(|(d, _)| matches!(d, AttrData::Bool(v) if v[0]))])),
+                AttrData::U8x4(_) => {
+                    let mut sum = [0.0f32; 4];
+                    for (d, w) in &parts {
+                        if let AttrData::U8x4(v) = d {
+                            for (s, c) in sum.iter_mut().zip(v[0]) {
+                                *s += f32::from(c) * *w;
+                            }
+                        }
+                    }
+                    AttrData::U8x4(Arc::new(vec![
+                        sum.map(|s| s.round().clamp(0.0, 255.0) as u8)
+                    ]))
+                }
+            };
+            values.push((name.clone(), blended));
+        }
+        ElementValues { values }
+    }
+
+    /// The halfway blend of two, or `t` of the way from `a` to `b`.
+    pub fn lerp(a: &ElementValues, b: &ElementValues, t: f32) -> ElementValues {
+        ElementValues::blend(&[(a, 1.0 - t), (b, t)])
+    }
+
+    /// Whether nothing was read: no user layers in the domain.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
     }
 }
 

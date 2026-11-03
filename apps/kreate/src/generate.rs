@@ -242,7 +242,13 @@ fn slug(words: &str) -> String {
         .take(6)
         .collect::<Vec<_>>()
         .join("-");
-    out.truncate(48);
+    // On a character boundary: the words may be Korean, and a byte index in
+    // the middle of a syllable would panic the thread making the model.
+    let mut end = out.len().min(48);
+    while !out.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.truncate(end);
     if out.is_empty() {
         "model".into()
     } else {
@@ -449,6 +455,11 @@ mod tests {
         assert_eq!(slug("나무 의자"), "나무-의자");
         assert_eq!(slug("///"), "model");
         assert!(slug(&"long ".repeat(40)).len() <= 48);
+        // 49 bytes, the 48th inside the last syllable: cut short, not a panic.
+        assert_eq!(
+            slug("x가나다라마바사아자차카타파하가나"),
+            "x가나다라마바사아자차카타파하가"
+        );
     }
 
     /// Against the real Spaces: `cargo test -p kreate --lib generate -- --ignored`.

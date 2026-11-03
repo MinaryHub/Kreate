@@ -46,6 +46,7 @@
 use kreate_math::Vec3;
 
 use crate::arena::{ArenaIndex, EdgeId, FaceId, VertId};
+use crate::attribute::ElementValues;
 use crate::bmesh::{BMesh, BmError, SelectMode};
 use crate::Domain;
 
@@ -414,13 +415,15 @@ pub fn bevel_edges_segments(
         points
     };
 
-    let mut walls: Vec<[VertId; 4]> = Vec::new();
+    let mut walls: Vec<([VertId; 4], FaceId, FaceId)> = Vec::new();
     /// A wall bent into strips: the corner pairs at each end of its edge.
     struct Strip {
         a: (VertId, VertId),
         b: (VertId, VertId),
         vertex_a: VertId,
         vertex_b: VertId,
+        forward: FaceId,
+        backward: FaceId,
     }
     let mut strips: Vec<Strip> = Vec::new();
     for &e in &chosen {
@@ -451,7 +454,7 @@ pub fn bevel_edges_segments(
         // the backward face's — which is what it means for all three to agree
         // across the edges they share.
         if segments < 2 {
-            walls.push([near_b, near_a, far_a, far_b]);
+            walls.push(([near_b, near_a, far_a, far_b], forward, backward));
             continue;
         }
         // The arcs at each end, as positions for now: vertices are made once
@@ -459,7 +462,7 @@ pub fn bevel_edges_segments(
         let at_a = profile(mesh, near_a, far_a);
         let at_b = profile(mesh, near_b, far_b);
         if at_a.len() + 1 != segments as usize || at_b.len() + 1 != segments as usize {
-            walls.push([near_b, near_a, far_a, far_b]);
+            walls.push(([near_b, near_a, far_a, far_b], forward, backward));
             continue;
         }
         strips.push(Strip {
@@ -467,6 +470,8 @@ pub fn bevel_edges_segments(
             b: (near_b, far_b),
             vertex_a: a,
             vertex_b: b,
+            forward,
+            backward,
         });
     }
 
@@ -498,7 +503,9 @@ pub fn bevel_edges_segments(
         arc_verts.push((ends, made.clone(), vertex));
         made
     };
-    let mut strip_rings: Vec<Vec<VertId>> = Vec::new();
+    // With each strip ring, the faces either side and how far across the
+    // round each of its two rails lies, `0` at the forward face's side.
+    let mut strip_rings: Vec<(Vec<VertId>, FaceId, FaceId, [f32; 2])> = Vec::new();
     for strip in &strips {
         let mut at_a = vec![strip.a.0];
         at_a.extend(rail(mesh, &mut out, strip.a, strip.vertex_a));
@@ -507,7 +514,13 @@ pub fn bevel_edges_segments(
         at_b.extend(rail(mesh, &mut out, strip.b, strip.vertex_b));
         at_b.push(strip.b.1);
         for k in 0..segments as usize {
-            strip_rings.push(vec![at_b[k], at_a[k], at_a[k + 1], at_b[k + 1]]);
+            let across = [k as f32 / segments as f32, (k + 1) as f32 / segments as f32];
+            strip_rings.push((
+                vec![at_b[k], at_a[k], at_a[k + 1], at_b[k + 1]],
+                strip.forward,
+                strip.backward,
+                across,
+            ));
         }
     }
 
@@ -528,38 +541,100 @@ pub fn bevel_edges_segments(
         })
         .collect();
 
+    // What every affected face carries, read before it goes: the faces
+    // rebuilt from it take its material, smoothing and UVs, and a new point
+    // on it takes its UVs blended to where the point lies.
+    let carried: Vec<Carried> = plan
+        .iter()
+        .map(|(f, _)| Carried {
+            face: *f,
+            values: mesh.face_values(*f),
+            corners: mesh.face_corner_values(*f),
+            placed: mesh
+                .face_corner_values(*f)
+                .into_iter()
+                .filter_map(|(v, c)| Some((mesh.position(v)?, c)))
+                .collect(),
+            normal: mesh.face_normal(*f).normalize_or_zero(),
+        })
+        .collect();
+    let source = |f: FaceId| carried.iter().find(|c| c.face == f);
+    // A vertex's values on face `f`: its own corner's, if `f` had one there,
+    // or blended to where it lies in `f`.
+    let on = |mesh: &BMesh, c: &Carried, v: VertId| -> ElementValues {
+        if let Some((_, values)) = c.corners.iter().find(|(w, _)| *w == v) {
+            return values.clone();
+        }
+        match mesh.position(v) {
+            Some(p) => super::values_inside(&c.placed, c.normal, p),
+            None => ElementValues::default(),
+        }
+    };
+
+    // The rings with their values, worked out while the faces still stand.
+    // A ring, its face's values, its corners', and whether it is new.
+    type Out = (
+        Vec<VertId>,
+        ElementValues,
+        Vec<(VertId, ElementValues)>,
+        bool,
+    );
+    let mut rings_out: Vec<Out> = Vec::new();
+    for (ring, c) in rebuilt.into_iter().zip(&carried) {
+        let corners = ring.iter().map(|v| (*v, on(mesh, c, *v))).collect();
+        rings_out.push((ring, c.values.clone(), corners, false));
+    }
+    // A strip or a wall runs from the forward face's side across to the
+    // backward one's: its corners on each side take that face's values, and
+    // those between them blend across.
+    let across = |mesh: &BMesh, forward: FaceId, backward: FaceId, v: VertId, t: f32| match (
+        source(forward),
+        source(backward),
+    ) {
+        (Some(a), Some(b)) => ElementValues::lerp(&on(mesh, a, v), &on(mesh, b, v), t),
+        (Some(a), None) => on(mesh, a, v),
+        (None, Some(b)) => on(mesh, b, v),
+        (None, None) => ElementValues::default(),
+    };
+    let face_of = |f: FaceId| source(f).map(|c| c.values.clone()).unwrap_or_default();
+    for (ring, forward, backward, [t0, t1]) in strip_rings {
+        // `[b_k, a_k, a_k+1, b_k+1]`: the first two on rail `k`, the rest on `k + 1`.
+        let ts = [t0, t0, t1, t1];
+        let corners = ring
+            .iter()
+            .zip(ts)
+            .map(|(v, t)| (*v, across(mesh, forward, backward, *v, t)))
+            .collect();
+        rings_out.push((ring, face_of(forward), corners, true));
+    }
+    for (wall, forward, backward) in walls {
+        // `[near_b, near_a, far_a, far_b]`: the near pair on the forward face.
+        let ts = [0.0, 0.0, 1.0, 1.0];
+        let corners = wall
+            .iter()
+            .zip(ts)
+            .map(|(v, t)| (*v, across(mesh, forward, backward, *v, t)))
+            .collect();
+        rings_out.push((wall.to_vec(), face_of(forward), corners, true));
+    }
+
     // --- write --------------------------------------------------------------
     for &f in &affected {
         mesh.remove_face(f);
     }
-    for ring in rebuilt {
-        let mut cleaned = ring;
-        cleaned.dedup();
-        if cleaned.len() > 1 && cleaned.first() == cleaned.last() {
-            cleaned.pop();
-        }
-        if cleaned.len() >= 3 {
-            mesh.add_face(&cleaned)?;
-        }
-    }
-    for ring in strip_rings {
+    for (ring, values, corners, is_new) in rings_out {
         let mut ring = ring;
         ring.dedup();
         if ring.len() > 1 && ring.first() == ring.last() {
             ring.pop();
         }
         if ring.len() >= 3 {
-            out.faces.push(mesh.add_face(&ring)?);
-        }
-    }
-    for wall in walls {
-        let mut ring = wall.to_vec();
-        ring.dedup();
-        if ring.len() > 1 && ring.first() == ring.last() {
-            ring.pop();
-        }
-        if ring.len() >= 3 {
-            out.faces.push(mesh.add_face(&ring)?);
+            let f = mesh.add_face(&ring)?;
+            mesh.set_face_values(f, &values);
+            mesh.set_face_corner_values(f, &corners);
+            if is_new {
+                out.faces.push(f);
+            }
         }
     }
 
@@ -660,12 +735,29 @@ pub fn bevel_edges_segments(
         }
     }
 
+    // The caps are made by fill and the round, with nothing on them: they
+    // take what the faces around them carry.
+    let caps = out.caps.clone();
+    for f in &caps {
+        mesh.carry_from_neighbours(*f, &caps);
+    }
+
     mesh.select_none();
     for f in out.faces.iter().chain(&out.caps) {
         mesh.set_face_selected(*f, true);
     }
     mesh.flush_selection(SelectMode::Face);
     Ok(out)
+}
+
+/// An affected face as read before the bevel rebuilds it.
+struct Carried {
+    face: FaceId,
+    values: ElementValues,
+    corners: Vec<(VertId, ElementValues)>,
+    /// The corners again, by position, for a new point to be blended in.
+    placed: Vec<(Vec3, ElementValues)>,
+    normal: Vec3,
 }
 
 /// The two edges of `face` that meet at `vertex`, as `(incoming, outgoing)`.
@@ -876,6 +968,23 @@ mod tests {
 
     fn euler(mesh: &BMesh) -> i64 {
         mesh.num_verts() as i64 - mesh.num_edges() as i64 + mesh.num_faces() as i64
+    }
+
+    #[test]
+    fn every_face_after_a_bevel_keeps_the_uvs_material_and_shading() {
+        // One edge, and every edge (with caps at the corners), flat and round.
+        for (all, segments) in [(false, 1), (false, 3), (true, 1), (true, 2), (true, 3)] {
+            let mut m = cube();
+            crate::edit::carried::paint(&mut m);
+            let edges: Vec<EdgeId> = if all {
+                m.edge_ids().collect()
+            } else {
+                m.edge_ids().take(1).collect()
+            };
+            bevel_edges_segments(&mut m, &edges, 0.2, segments).unwrap();
+            let faces: Vec<FaceId> = m.face_ids().collect();
+            crate::edit::carried::assert_kept(&m, &faces);
+        }
     }
 
     #[test]

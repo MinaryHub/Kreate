@@ -49,7 +49,7 @@ export function parseInquiry(body: unknown): Inquiry | string {
     const t = v.trim();
     return t.length > LIMITS[key] ? null : t;
   };
-  const kind = typeof b.kind === "string" && b.kind in KINDS ? (b.kind as Inquiry["kind"]) : "other";
+  const kind = typeof b.kind === "string" && Object.hasOwn(KINDS, b.kind) ? (b.kind as Inquiry["kind"]) : "other";
   const message = text("message");
   if (message === null) return `the message is longer than ${LIMITS.message} characters`;
   if (!message) return "the message is empty";
@@ -70,7 +70,7 @@ export function parseInquiry(body: unknown): Inquiry | string {
 
 /** The Brevo request for an inquiry. */
 export function brevoPayload(inquiry: Inquiry, to: string, from: string, fromName: string) {
-  const firstLine = inquiry.message.split("\n")[0].slice(0, 60);
+  const firstLine = Array.from(inquiry.message.split(/\r?\n/)[0]).slice(0, 60).join("");
   const lines = [
     inquiry.message,
     "",
@@ -97,6 +97,11 @@ const PER_WINDOW = 5;
 const recent = new Map<string, number[]>();
 
 export function allow(key: string, now = Date.now()): boolean {
+  // Forget senders whose window has passed, so a long-lived instance does not
+  // keep one entry for every address it has ever seen.
+  if (recent.size > 1000) {
+    for (const [k, ts] of recent) if (ts.every((t) => now - t >= WINDOW_MS)) recent.delete(k);
+  }
   const times = (recent.get(key) ?? []).filter((t) => now - t < WINDOW_MS);
   if (times.length >= PER_WINDOW) {
     recent.set(key, times);

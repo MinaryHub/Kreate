@@ -255,20 +255,7 @@ impl History {
         // here rather than let end the application: what it wrote is turned
         // back below with any other failure's, and a script or the connector
         // that ran it hears why. The panic hook has written its report.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            registry.execute(op_id, &full, &mut edit, ctx)
-        }))
-        .unwrap_or_else(|panic| {
-            let why = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "a panic".into());
-            tracing::error!("operator {op_id} panicked: {why}");
-            Err(OpError::Failed(format!(
-                "{op_id} hit an internal error and was undone ({why}); nothing was changed"
-            )))
-        });
+        let result = execute_guarded(registry, op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
         // Every operator into the log, with how long it took and how it
         // went; a slow one said as such — what a frozen window is traced by.
@@ -509,9 +496,22 @@ impl History {
         let (op_id, params) = (entry.op_id.clone(), entry.params.clone());
 
         let mut edit = DocMut::new(doc);
-        let result = registry.execute(&op_id, &params, &mut edit, ctx);
+        let result = execute_guarded(registry, &op_id, &params, &mut edit, ctx);
         let payload = edit.finish();
-        result?;
+        // A re-run that failed or declined is turned back, as `dispatch` does:
+        // what it wrote before stopping must not stay in the document with no
+        // entry to undo it by.
+        match result {
+            Ok(OpResult::Finished) => {}
+            Ok(_) => {
+                payload.restore(doc);
+                return Ok(false);
+            }
+            Err(e) => {
+                payload.restore(doc);
+                return Err(e);
+            }
+        }
 
         // The re-run may record a different payload than the first run did — for
         // instance if the mesh has since been compacted — so the stored one is
@@ -547,21 +547,23 @@ impl History {
         full.overlay(params);
 
         let mut edit = DocMut::new(doc);
-        let result = registry.execute(&op_id, &full, &mut edit, ctx);
+        let result = execute_guarded(registry, &op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
 
         match result {
-            Ok(_) => {
+            Ok(OpResult::Finished) => {
                 self.entries[index].params = full;
                 self.entries[index].payload = payload;
                 Ok(true)
             }
-            Err(e) => {
-                // The document is back at the pre-operation state and the entry
-                // no longer describes anything applied, so the cursor must move
-                // with it rather than claiming an applied entry that is not.
+            other => {
+                // What the failed or declined run wrote is turned back, so the
+                // document is at the pre-operation state; the entry no longer
+                // describes anything applied, so the cursor moves with it
+                // rather than claiming an applied entry that is not.
+                payload.restore(doc);
                 self.cursor = index;
-                Err(e)
+                other.map(|_| false)
             }
         }
     }
@@ -594,6 +596,34 @@ impl History {
             self.evicted += 1;
         }
     }
+}
+
+/// Runs an operator with a panic turned into an error.
+///
+/// An operator that panics is a bug, and it is turned into an error here
+/// rather than let end the application: the caller turns back what it wrote
+/// with any other failure's. The panic hook has written its report.
+fn execute_guarded(
+    registry: &OperatorRegistry,
+    op_id: &str,
+    params: &PropertyMap,
+    edit: &mut DocMut,
+    ctx: &Context,
+) -> Result<OpResult, OpError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.execute(op_id, params, edit, ctx)
+    }))
+    .unwrap_or_else(|panic| {
+        let why = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".into());
+        tracing::error!("operator {op_id} panicked: {why}");
+        Err(OpError::Failed(format!(
+            "{op_id} hit an internal error and was undone ({why}); nothing was changed"
+        )))
+    })
 }
 
 /// Validates every mesh in the document, in debug builds only.

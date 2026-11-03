@@ -26,6 +26,7 @@
 use kreate_math::Vec3;
 
 use crate::arena::{ArenaIndex, FaceId, VertId};
+use crate::attribute::ElementValues;
 use crate::bmesh::{BMesh, BmError, SelectMode};
 
 use super::region::Region;
@@ -196,6 +197,36 @@ fn inset_one_ring(
 
     // Rings of the interior faces, read before anything is removed.
     let interior: Vec<Vec<VertId>> = faces.iter().map(|&f| mesh.face_verts(f)).collect();
+    // And what they carry: rebuilt, they would otherwise come back with no
+    // UVs, material 0 and flat shading. With each directed edge, the face
+    // that walks it, for the band face standing on it to take after.
+    let carried: Vec<_> = faces
+        .iter()
+        .map(|&f| (mesh.face_values(f), mesh.face_corner_values(f)))
+        .collect();
+    let mut walked: Vec<(
+        (VertId, VertId),
+        ElementValues,
+        ElementValues,
+        ElementValues,
+    )> = Vec::new();
+    for &f in faces {
+        let values = mesh.face_values(f);
+        for l in mesh.face_loops(f) {
+            let (Some(next), Some(a)) = (mesh.loop_next(l), mesh.loop_vert(l)) else {
+                continue;
+            };
+            let Some(b) = mesh.loop_vert(next) else {
+                continue;
+            };
+            walked.push((
+                (a, b),
+                values.clone(),
+                mesh.loop_values(l),
+                mesh.loop_values(next),
+            ));
+        }
+    }
 
     let mut inner = Vec::with_capacity(ring.len());
     for (i, &v) in ring.iter().enumerate() {
@@ -216,17 +247,18 @@ fn inset_one_ring(
     for &f in faces {
         mesh.remove_face(f);
     }
-    for original in interior {
-        let rebuilt: Vec<VertId> = original
-            .iter()
-            .map(
-                |v| match moved.binary_search_by_key(&v.index(), |(a, _)| a.index()) {
-                    Ok(i) => moved[i].1,
-                    Err(_) => *v,
-                },
-            )
-            .collect();
-        out.inner_faces.push(mesh.add_face(&rebuilt)?);
+    let moved_to = |v: VertId| match moved.binary_search_by_key(&v.index(), |(a, _)| a.index()) {
+        Ok(i) => moved[i].1,
+        Err(_) => v,
+    };
+    for (original, (values, corners)) in interior.into_iter().zip(carried) {
+        let rebuilt: Vec<VertId> = original.iter().map(|v| moved_to(*v)).collect();
+        let f = mesh.add_face(&rebuilt)?;
+        mesh.set_face_values(f, &values);
+        let corners: Vec<(VertId, ElementValues)> =
+            corners.into_iter().map(|(v, c)| (moved_to(v), c)).collect();
+        mesh.set_face_corner_values(f, &corners);
+        out.inner_faces.push(f);
     }
 
     let n = ring.len();
@@ -235,8 +267,24 @@ fn inset_one_ring(
         // `(a, b, b', a')`, the same winding rule the extrude walls use: the
         // band must be wound consistently with the face it came from or it lights
         // from the inside.
-        out.band_faces
-            .push(mesh.add_face(&[ring[i], ring[j], inner[j], inner[i]])?);
+        let f = mesh.add_face(&[ring[i], ring[j], inner[j], inner[i]])?;
+        // The band takes the face whose edge it stands on: its material and
+        // smoothing, and that edge's UVs at its outer and inner ends.
+        if let Some((_, values, at_a, at_b)) =
+            walked.iter().find(|(e, ..)| *e == (ring[i], ring[j]))
+        {
+            mesh.set_face_values(f, values);
+            mesh.set_face_corner_values(
+                f,
+                &[
+                    (ring[i], at_a.clone()),
+                    (inner[i], at_a.clone()),
+                    (ring[j], at_b.clone()),
+                    (inner[j], at_b.clone()),
+                ],
+            );
+        }
+        out.band_faces.push(f);
     }
     Ok(())
 }
@@ -276,6 +324,22 @@ mod tests {
             sum += ring[i].cross(ring[(i + 1) % ring.len()]);
         }
         sum.dot(normal) * 0.5
+    }
+
+    #[test]
+    fn the_inner_faces_and_the_band_keep_the_uvs_material_and_shading() {
+        for region in [false, true] {
+            let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+            crate::edit::carried::paint(&mut m);
+            let f = m.face_ids().next().unwrap();
+            let out = if region {
+                inset_region(&mut m, &[f], 0.25, 0.1).unwrap()
+            } else {
+                inset_individual(&mut m, &[f], 0.25, 0.1).unwrap()
+            };
+            crate::edit::carried::assert_kept(&m, &out.inner_faces);
+            crate::edit::carried::assert_kept(&m, &out.band_faces);
+        }
     }
 
     #[test]

@@ -149,10 +149,25 @@ pub fn dissolve_faces(
             continue;
         }
 
+        // The merged face takes the first face's material and smoothing, and
+        // at each corner the UV of a face of the group that had it: a new face
+        // is born with none of them otherwise.
+        let values = mesh.face_values(group[0]);
+        let mut corners: Vec<(VertId, crate::ElementValues)> = Vec::with_capacity(ring.len());
+        for f in &group {
+            for (v, c) in mesh.face_corner_values(*f) {
+                if ring.contains(&v) && !corners.iter().any(|(w, _)| *w == v) {
+                    corners.push((v, c));
+                }
+            }
+        }
         for f in &group {
             mesh.remove_face(*f);
         }
-        out.faces.push(mesh.add_face(&ring)?);
+        let merged = mesh.add_face(&ring)?;
+        mesh.set_face_values(merged, &values);
+        mesh.set_face_corner_values(merged, &corners);
+        out.faces.push(merged);
 
         // Everything the group alone was holding. Edges first: a vertex is only
         // loose once the wires hanging off it are gone.
@@ -323,6 +338,15 @@ mod tests {
     }
 
     // --- dissolve -----------------------------------------------------------
+
+    #[test]
+    fn the_merged_face_keeps_the_uvs_material_and_shading() {
+        let mut m = cube();
+        crate::edit::carried::paint(&mut m);
+        let e = m.edge_ids().next().unwrap();
+        let out = dissolve_edges(&mut m, &[e]).unwrap();
+        crate::edit::carried::assert_kept(&m, &out.faces);
+    }
 
     #[test]
     fn dissolving_an_edge_of_a_cube_merges_two_faces_and_keeps_it_closed() {

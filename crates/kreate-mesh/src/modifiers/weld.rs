@@ -88,11 +88,12 @@ pub fn weld(input: &MeshData, params: &WeldParams) -> MeshData {
                 corners.push(range.start as u32 + k as u32);
             }
         }
-        while ring.len() > 1 && ring.first() == ring.last() {
-            ring.pop();
-            corners.pop();
-        }
-        if ring.len() >= 3 {
+        // A face whose vertices weld together without being neighbours (a
+        // dart's tip onto its notch) comes out pinched, meeting one vertex
+        // twice: cut into the faces it is, never kept as one invalid ring.
+        let pairs: Vec<(u32, u32)> = ring.into_iter().zip(corners).collect();
+        for piece in pinched_apart(pairs) {
+            let (ring, corners): (Vec<u32>, Vec<u32>) = piece.into_iter().unzip();
             faces.push(ring);
             face_source.push(f);
             corner_source.extend(corners);
@@ -114,6 +115,43 @@ pub fn weld(input: &MeshData, params: &WeldParams) -> MeshData {
     let edges = out.num_edges() as usize;
     *out.attributes_mut() = attributes;
     out.attributes_mut().resize_domain(Domain::Edge, edges);
+    // Seams, creases and sharp edges carried over to the edges that still
+    // join the same two kept vertices; `kept` is output-to-source already.
+    super::gather_edges_by_pair(&mut out, input, &kept);
+    out
+}
+
+/// A ring of (vertex, source corner) cut at every vertex it meets twice into
+/// the rings it is, those of three corners or more.
+fn pinched_apart(ring: Vec<(u32, u32)>) -> Vec<Vec<(u32, u32)>> {
+    let mut out = Vec::new();
+    let mut work = vec![ring];
+    while let Some(mut ring) = work.pop() {
+        ring.dedup_by_key(|c| c.0);
+        while ring.len() > 1 && ring.first().map(|c| c.0) == ring.last().map(|c| c.0) {
+            ring.pop();
+        }
+        if ring.len() < 3 {
+            continue;
+        }
+        let repeat = (0..ring.len()).find_map(|i| {
+            ring[i + 1..]
+                .iter()
+                .position(|c| c.0 == ring[i].0)
+                .map(|d| (i, i + 1 + d))
+        });
+        match repeat {
+            None => out.push(ring),
+            Some((i, j)) => {
+                let mut outer = ring[j..].to_vec();
+                outer.extend_from_slice(&ring[..i]);
+                work.push(ring[i..j].to_vec());
+                work.push(outer);
+            }
+        }
+    }
+    // In ring order, so the output does not depend on the work stack's.
+    out.reverse();
     out
 }
 
@@ -146,6 +184,22 @@ mod tests {
         // Nothing near enough: as it was.
         let same = weld(&cube, &WeldParams { distance: 1e-4 });
         assert_eq!(same.num_verts(), 8);
+    }
+
+    #[test]
+    fn a_face_pinched_by_the_weld_is_never_left_repeating_a_vertex() {
+        // A dart whose tip welds onto its notch: [a, b, a, d] is not a face.
+        let m = MeshData::from_faces(
+            vec![
+                Vec3::ZERO,
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0005, 0.0),
+                Vec3::new(-1.0, 1.0, 0.0),
+            ],
+            &[vec![0, 1, 2, 3]],
+        );
+        let out = weld(&m, &WeldParams { distance: 0.001 });
+        assert!(out.validate().is_empty(), "{:?}", out.validate());
     }
 
     #[test]

@@ -153,7 +153,15 @@ fn pack(out: &mut Vec<u8>, bytes: &[u8]) {
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// What `unpack` may still produce, all told. Three bytes of a run
+    /// unpack to 65 535 zeros, so a bake of a megabyte could otherwise ask
+    /// for twenty gigabytes of grid.
+    unpack_left: usize,
 }
+
+/// The most a bake's grids may unpack to, together: a 256³ grid's two
+/// channels over a few hundred frames.
+const MAX_UNPACKED: usize = 4 << 30;
 
 impl Reader<'_> {
     fn take(&mut self, n: usize) -> Option<&[u8]> {
@@ -179,6 +187,7 @@ impl Reader<'_> {
     }
     /// `count` bytes packed by [`pack`].
     fn unpack(&mut self, count: usize) -> Option<Vec<u8>> {
+        self.unpack_left = self.unpack_left.checked_sub(count)?;
         let mut out = Vec::with_capacity(count);
         while out.len() < count {
             let b = self.take(1)?[0];
@@ -204,7 +213,11 @@ impl Reader<'_> {
 
 /// The bake in `bytes`, or `None` when it is not one this build can read.
 pub fn read(bytes: &[u8]) -> Option<PhysicsCache> {
-    let mut r = Reader { bytes, at: 0 };
+    let mut r = Reader {
+        bytes,
+        at: 0,
+        unpack_left: MAX_UNPACKED,
+    };
     if r.take(6)? != MAGIC {
         return None;
     }
@@ -237,7 +250,9 @@ pub fn read(bytes: &[u8]) -> Option<PhysicsCache> {
         let object = Uid::from_raw(r.u64()?);
         let n = r.u32()? as usize;
         let verts = r.u32()? as usize;
-        if n.checked_mul(verts)?.checked_mul(12)? > bytes.len() - r.at {
+        // `verts.max(1)`: a track of empty frames costs nothing on disk, so
+        // without it any `n` passes and sizes the allocation below.
+        if n.checked_mul(verts.max(1))?.checked_mul(12)? > bytes.len() - r.at {
             return None;
         }
         let mut frames = Vec::with_capacity(n);
