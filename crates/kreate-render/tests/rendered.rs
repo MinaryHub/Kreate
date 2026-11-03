@@ -2445,7 +2445,74 @@ fn traced_scene(
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
         out = read_frame(gpu, &mut viewport, &draws);
     }
+    if let Some(replace) = REPLACE_MEAN.with(|r| r.take()) {
+        let gathered = viewport
+            .read_traced(&gpu.device, &gpu.queue)
+            .expect("reads back");
+        let mean = replace(&gathered);
+        viewport.show_traced_mean(&gpu.queue, &gathered, &mean);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        out = read_frame(gpu, &mut viewport, &draws);
+    }
     out
+}
+
+/// What a finished render's denoiser does with what the tracer gathered.
+type Replace = Box<dyn FnOnce(&kreate_render::pathtrace::Gathered) -> Vec<[f32; 3]>>;
+
+thread_local! {
+    /// After `traced_scene`'s frames: read what was gathered, show this in
+    /// its place, and draw one frame more.
+    static REPLACE_MEAN: std::cell::RefCell<Option<Replace>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A finished render's denoiser reads what the samples gathered — the light,
+/// the first surface's colour and normal — and puts its own picture in the
+/// mean's place; the next frame shows that picture and traces nothing.
+#[test]
+fn a_replaced_mean_is_what_the_next_frame_shows() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    let seen = std::rc::Rc::new(std::cell::Cell::new((0usize, 0usize, 0.0f32)));
+    let record = seen.clone();
+    REPLACE_MEAN.with(|r| {
+        *r.borrow_mut() = Some(Box::new(move |g: &kreate_render::pathtrace::Gathered| {
+            let n = (g.width * g.height) as usize;
+            assert_eq!(g.color.len(), n);
+            let lit = g
+                .color
+                .iter()
+                .filter(|c| c.iter().all(|v| v.is_finite() && *v >= 0.0))
+                .count();
+            let unit = g
+                .normal
+                .iter()
+                .filter(|v| {
+                    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    (l - 1.0).abs() < 0.01
+                })
+                .count();
+            let grey = g.albedo.iter().map(|a| a[0]).sum::<f32>() / n as f32;
+            record.set((lit, unit, grey));
+            // One flat colour: what the next frame must then show everywhere.
+            vec![[0.2, 0.2, 0.2]; n]
+        }))
+    });
+    NOISE_THRESHOLD.with(|t| t.set(0.0));
+    let shown = traced_shot_with(&gpu, true, 8, None, false);
+    NOISE_THRESHOLD.with(|t| t.set(0.01));
+    let (lit, unit, grey) = seen.get();
+    let n = shown.len();
+    assert_eq!(lit, n, "every pixel's light is a number");
+    // The floor and the cube fill most of the picture, and each of their
+    // pixels has the surface's normal.
+    assert!(unit > n / 2, "{unit} of {n} pixels have a normal");
+    // Grey surfaces (0.8) and, where the view meets nothing, white.
+    assert!(grey > 0.7 && grey <= 1.0, "first-surface colour {grey}");
+    let first = shown[0];
+    let flat = shown
+        .iter()
+        .all(|p| (0..3).all(|i| (p[i] - first[i]).abs() < 0.02));
+    assert!(flat, "the replaced mean is not what is shown");
 }
 
 /// The path tracer: the same scene, the same lights, the same units — so its

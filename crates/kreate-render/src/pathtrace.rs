@@ -1431,6 +1431,108 @@ impl PathTracer {
         );
     }
 
+    /// What the samples have gathered, read back for a finished render's
+    /// denoiser: each pixel's mean light, its first surface's colour and
+    /// normal — and the sums as they are, for [`PathTracer::replace_mean`].
+    pub fn read_gathered(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Gathered, String> {
+        let (w, h) = self.size;
+        let pixels = w as usize * h as usize;
+        if pixels == 0 || self.scene_bind.is_none() {
+            return Err("nothing has been traced".into());
+        }
+        let sums: Vec<[f32; 4]> =
+            bytemuck::cast_slice(&read_buffer(device, queue, &self.sum, pixels as u64 * 32)?)
+                .to_vec();
+        let aux: Vec<[f32; 4]> =
+            bytemuck::cast_slice(&read_buffer(device, queue, &self.aux, pixels as u64 * 48)?)
+                .to_vec();
+        let mut color = Vec::with_capacity(pixels);
+        let mut albedo = Vec::with_capacity(pixels);
+        let mut normal = Vec::with_capacity(pixels);
+        for p in 0..pixels {
+            let (s, stats) = (sums[p * 2], sums[p * 2 + 1]);
+            // The resolve pass's own arithmetic: the carried mean counts for
+            // the frames it stands for, less this pixel's own.
+            let c = aux[p * 3 + 2];
+            let k = (c[3] - s[3]).max(0.0);
+            let d = (s[3] + k).max(1.0);
+            color.push([0, 1, 2].map(|i| (s[i] + c[i] * k) / d));
+            let n = s[3].max(1.0);
+            albedo.push(if s[3] > 0.0 {
+                [0, 1, 2].map(|i| stats[i] / n)
+            } else {
+                [1.0; 3]
+            });
+            let at = aux[p * 3 + 1];
+            normal.push([at[0], at[1], at[2]]);
+        }
+        Ok(Gathered {
+            width: w,
+            height: h,
+            color,
+            albedo,
+            normal,
+            sums,
+            aux,
+        })
+    }
+
+    /// Puts `mean` in place of what was gathered, so that the next resolve
+    /// ([`PathTracer::resolve`]) shows it: the sums are rewritten so that
+    /// divided out, carried mean and all, they come to `mean`. The counts
+    /// are kept, so nothing downstream sees a picture with no samples.
+    pub fn replace_mean(&self, queue: &wgpu::Queue, gathered: &Gathered, mean: &[[f32; 3]]) {
+        if gathered.width != self.size.0
+            || gathered.height != self.size.1
+            || mean.len() != gathered.color.len()
+        {
+            return;
+        }
+        let mut sums = gathered.sums.clone();
+        for (p, m) in mean.iter().enumerate() {
+            let s = sums[p * 2];
+            let c = gathered.aux[p * 3 + 2];
+            let k = (c[3] - s[3]).max(0.0);
+            let d = (s[3] + k).max(1.0);
+            for i in 0..3 {
+                sums[p * 2][i] = m[i] * d - c[i] * k;
+            }
+        }
+        queue.write_buffer(&self.sum, 0, bytemuck::cast_slice(&sums));
+    }
+
+    /// The mean onto `picture` again, with no sample traced: after
+    /// [`PathTracer::replace_mean`].
+    pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder, picture: &wgpu::TextureView) {
+        let Some(resolve_bind) = &self.resolve_bind else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("path trace resolve again"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: picture,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_viewport(0.0, 0.0, self.size.0 as f32, self.size.1 as f32, 0.0, 1.0);
+        pass.set_pipeline(&self.resolve);
+        pass.set_bind_group(0, resolve_bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     /// One sample per pixel into the sum, then the mean onto `picture`.
     pub fn render(
         &self,
@@ -1479,6 +1581,48 @@ impl PathTracer {
         pass.set_bind_group(0, resolve_bind, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// What the path tracer has gathered, read back: see
+/// [`PathTracer::read_gathered`].
+pub struct Gathered {
+    pub width: u32,
+    pub height: u32,
+    /// Each pixel's mean light, scene-linear and before the exposure.
+    pub color: Vec<[f32; 3]>,
+    /// Each pixel's first surface's colour; white where nothing was met.
+    pub albedo: Vec<[f32; 3]>,
+    /// Each pixel's first surface's normal, in the world; zero where nothing.
+    pub normal: Vec<[f32; 3]>,
+    sums: Vec<[f32; 4]>,
+    aux: Vec<[f32; 4]>,
+}
+
+/// The first `bytes` of a storage buffer, on the CPU.
+fn read_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source: &wgpu::Buffer,
+    bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("path trace readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("path trace readback"),
+    });
+    encoder.copy_buffer_to_buffer(source, 0, &staging, 0, bytes);
+    queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("the GPU did not finish: {e:?}"))?;
+    let out = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+    Ok(out)
 }
 
 #[cfg(test)]

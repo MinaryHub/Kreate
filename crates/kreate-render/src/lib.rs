@@ -28,6 +28,7 @@ pub mod lod;
 pub mod material;
 pub mod mesh_gpu;
 pub mod motion;
+pub mod oidn;
 pub mod outline;
 pub mod palette;
 pub mod pathtrace;

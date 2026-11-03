@@ -77,10 +77,68 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev libudev-dev libdbus-1-dev
+            libxrandr-dev libxi-dev libgl1-mesa-dev libudev-dev libdbus-1-dev patchelf
 
       - name: Build
         run: cargo build --release -p kreate -p kreate-mcp --target ${{ matrix.target }}
+
+      # Open Image Denoise beside the program, which loads it at run time to
+      # denoise finished renders (`kreate_render::oidn`); without it a render
+      # is filtered by the view's own denoiser. The CPU device only — the
+      # GPU ones are most of the download and need their vendors' runtimes —
+      # and Threading Building Blocks, which it runs on. Both Apache-2.0;
+      # their licences go in with them. A missing file is a warning, not a
+      # failed release: the program runs without it.
+      - name: Open Image Denoise
+        shell: bash
+        env:
+          OIDN: 2.3.3
+        run: |
+          mkdir -p dist oidn
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)
+              archive="oidn-$OIDN.x86_64.linux.tar.gz"; dir="oidn-$OIDN.x86_64.linux/lib"
+              files="libOpenImageDenoise.so.2 libOpenImageDenoise_core.so.$OIDN libOpenImageDenoise_device_cpu.so.$OIDN libtbb.so.12" ;;
+            aarch64-apple-darwin)
+              archive="oidn-$OIDN.arm64.macos.tar.gz"; dir="oidn-$OIDN.arm64.macos/lib"
+              files="libOpenImageDenoise.2.dylib libOpenImageDenoise_core.$OIDN.dylib libOpenImageDenoise_device_cpu.$OIDN.dylib libtbb.12.dylib" ;;
+            x86_64-apple-darwin)
+              archive="oidn-$OIDN.x86_64.macos.tar.gz"; dir="oidn-$OIDN.x86_64.macos/lib"
+              files="libOpenImageDenoise.2.dylib libOpenImageDenoise_core.$OIDN.dylib libOpenImageDenoise_device_cpu.$OIDN.dylib libtbb.12.dylib" ;;
+            x86_64-pc-windows-msvc)
+              archive="oidn-$OIDN.x64.windows.zip"; dir="oidn-$OIDN.x64.windows/bin"
+              files="OpenImageDenoise.dll OpenImageDenoise_core.dll OpenImageDenoise_device_cpu.dll tbb12.dll" ;;
+          esac
+          url="https://github.com/RenderKit/oidn/releases/download/v$OIDN/$archive"
+          if ! curl -fsSL -o "oidn/$archive" "$url"; then
+            echo "::warning::could not download $url; released without Open Image Denoise"
+            exit 0
+          fi
+          cd oidn
+          case "$archive" in
+            *.zip) unzip -q "$archive" ;;
+            *) tar xzf "$archive" ;;
+          esac
+          for f in $files; do
+            # Dereferenced: the zip the updater fetches keeps no symlinks.
+            if [ -e "$dir/$f" ]; then cp -L "$dir/$f" ../dist/; else echo "::warning::no $f in $archive"; fi
+          done
+          # Its libraries look for each other in `../lib`, their archive's
+          # layout; here they sit beside the program, so they are pointed at
+          # their own folder. (The loader also loads them ahead by full path.)
+          for f in $files; do
+            [ -e "../dist/$f" ] || continue
+            case "$RUNNER_OS" in
+              Linux) patchelf --set-rpath '$ORIGIN' "../dist/$f" || echo "::warning::patchelf $f" ;;
+              macOS)
+                install_name_tool -add_rpath @loader_path "../dist/$f" 2>/dev/null || true
+                codesign --force --sign - "../dist/$f" || echo "::warning::codesign $f" ;;
+            esac
+          done
+          top="${dir%/*}"
+          [ -f "$top/LICENSE.txt" ] && cp "$top/LICENSE.txt" ../dist/OpenImageDenoise-LICENSE.txt
+          [ -f "$top/third-party-programs.txt" ] && cp "$top/third-party-programs.txt" ../dist/OpenImageDenoise-third-party.txt
+          true
 
       - name: Package
         shell: bash

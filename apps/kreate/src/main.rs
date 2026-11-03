@@ -15411,6 +15411,9 @@ struct RenderJob {
     written: Vec<std::path::PathBuf>,
     /// An animation being written as one MP4, opened at its first frame.
     video: Option<kreate::video::Video>,
+    /// Whether this picture has been through Open Image Denoise: once its
+    /// samples are in, and before it is written. See `advance_render_job`.
+    denoised: bool,
 }
 
 /// Motion blur in progress: which moment of the shutter is being drawn, and

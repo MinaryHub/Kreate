@@ -94,6 +94,17 @@ try {
         if (Test-Path $from) { Copy-Item $from $layout }
         else { Write-Warning "$dll not in the SDK: the package compiles shaders with FXC" }
     }
+    # Open Image Denoise, when `KREATE_OIDN` names its `bin` folder: the
+    # program loads it to denoise finished renders and does without it.
+    if ($env:KREATE_OIDN -and (Test-Path $env:KREATE_OIDN)) {
+        foreach ($dll in 'OpenImageDenoise.dll', 'OpenImageDenoise_core.dll', 'OpenImageDenoise_device_cpu.dll', 'tbb12.dll') {
+            $from = Join-Path $env:KREATE_OIDN $dll
+            if (Test-Path $from) { Copy-Item $from $layout }
+            else { Write-Warning "$dll not in $env:KREATE_OIDN" }
+        }
+    } else {
+        Write-Warning 'KREATE_OIDN not set: the package denoises renders with its own filter'
+    }
     Copy-Item (Join-Path $here 'Assets\*') (Join-Path $layout 'Assets')
     (Get-Content (Join-Path $here 'AppxManifest.xml') -Raw).Replace('$VERSION$', $version) |
         Set-Content (Join-Path $layout 'AppxManifest.xml') -Encoding utf8

@@ -1700,6 +1700,9 @@ pub struct Viewport {
     /// This frame's place in the mean, one-based; `None` when the mean is
     /// full and the frame only presents it.
     frame_sample: Option<u32>,
+    /// The path tracer's mean was replaced (a finished render's denoising):
+    /// the next frame resolves it onto the picture again, tracing nothing.
+    resolve_again: std::cell::Cell<bool>,
     /// What the lights, the world and the display transform were last set
     /// to, for the mean's signature: a lamp moved is a different picture.
     lighting_signature: u64,
@@ -2868,6 +2871,7 @@ impl Viewport {
             accum_signature: 0,
             accum_applies: false,
             frame_sample: None,
+            resolve_again: std::cell::Cell::new(false),
             temporal_aa: false,
             temporal_previous: None,
             temporal_key: None,
@@ -5652,7 +5656,16 @@ impl Viewport {
             // The path tracer's mean onto the picture — over the rasterised
             // scene, which is still drawn for the depth the overlays test
             // against. A full mean is left on the picture and shown again.
-            if self.frame_sample.is_some() || !self.accum_applies {
+            let again = self.resolve_again.replace(false);
+            if again {
+                // A replaced mean: shown as it is, through the same glow and
+                // display transform, with nothing traced or filtered.
+                self.encode_lit_scene(encoder, draws);
+                self.pathtracer.resolve(encoder, self.hdr.view());
+                if self.blooming() {
+                    self.bloom.apply(encoder, self.hdr.view());
+                }
+            } else if self.frame_sample.is_some() || !self.accum_applies {
                 self.encode_lit_scene(encoder, draws);
                 // The tracer travels through the smoke itself — its shadows,
                 // the light it scatters and the flame's glow on what is near.
@@ -6225,6 +6238,33 @@ fn read_texture(
 }
 
 impl Viewport {
+    /// What the path tracer has gathered for the picture on screen: see
+    /// [`crate::pathtrace::PathTracer::read_gathered`].
+    pub fn read_traced(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<crate::pathtrace::Gathered, String> {
+        if !self.path_tracing() {
+            return Err("the view is not path traced".into());
+        }
+        self.pathtracer.read_gathered(device, queue)
+    }
+
+    /// Shows `mean` in place of the path tracer's own: a finished render's
+    /// picture, denoised on the CPU. The next frame resolves it through the
+    /// glow and the display transform as the tracer's would be, and traces
+    /// nothing; the view's own filter is the caller's to turn off.
+    pub fn show_traced_mean(
+        &mut self,
+        queue: &wgpu::Queue,
+        gathered: &crate::pathtrace::Gathered,
+        mean: &[[f32; 3]],
+    ) {
+        self.pathtracer.replace_mean(queue, gathered, mean);
+        self.resolve_again.set(true);
+    }
+
     /// The last drawn frame's passes, for a render's EXR. `exposure` is the
     /// display's, in stops; `forward` the camera's view direction.
     pub fn read_passes(
