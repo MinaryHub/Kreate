@@ -572,12 +572,14 @@ pub fn bevel_edges_segments(
     };
 
     // The rings with their values, worked out while the faces still stand.
-    let mut rings_out: Vec<(
+    // A ring, its face's values, its corners', and whether it is new.
+    type Out = (
         Vec<VertId>,
         ElementValues,
         Vec<(VertId, ElementValues)>,
         bool,
-    )> = Vec::new();
+    );
+    let mut rings_out: Vec<Out> = Vec::new();
     for (ring, c) in rebuilt.into_iter().zip(&carried) {
         let corners = ring.iter().map(|v| (*v, on(mesh, c, *v))).collect();
         rings_out.push((ring, c.values.clone(), corners, false));
