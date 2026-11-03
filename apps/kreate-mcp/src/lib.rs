@@ -788,35 +788,114 @@ impl Socket {
         Ok(())
     }
 
-    fn exchange(&mut self, method: &str, params: &Value) -> Result<Value, String> {
+    /// One request and its answer. The error says whether the request was
+    /// written: once it was, Kreate may have carried it out.
+    fn exchange(&mut self, method: &str, params: &Value) -> Result<Value, (Sent, String)> {
         use std::io::{BufRead, Write};
-        let (reader, writer, token) = self.stream.as_mut().ok_or("not connected")?;
+        let (reader, writer, token) = self
+            .stream
+            .as_mut()
+            .ok_or((Sent::No, "not connected".to_string()))?;
         let request = json!({ "token": token, "method": method, "params": params });
-        writeln!(writer, "{request}").map_err(|e| e.to_string())?;
-        writer.flush().map_err(|e| e.to_string())?;
+        writeln!(writer, "{request}").map_err(|e| (Sent::No, e.to_string()))?;
+        writer.flush().map_err(|e| (Sent::No, e.to_string()))?;
         let mut line = String::new();
-        if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-            return Err("Kreate closed the connection".into());
+        match reader.read_line(&mut line) {
+            Ok(0) => return Err((Sent::Yes, "Kreate closed the connection".into())),
+            Ok(_) => {}
+            Err(e) => return Err((Sent::Yes, e.to_string())),
         }
-        serde_json::from_str(&line)
-            .map_err(|e| format!("Kreate answered something unreadable: {e}"))
+        serde_json::from_str(&line).map_err(|e| {
+            (
+                Sent::Yes,
+                format!("Kreate answered something unreadable: {e}"),
+            )
+        })
     }
+
+    /// Whether the far end has closed the connection: a Kreate that quit or
+    /// restarted since the last call. Asked before writing, so a request is
+    /// not sent into a connection nobody is reading.
+    fn is_closed(&self) -> bool {
+        let Some((_, stream, _)) = &self.stream else {
+            return true;
+        };
+        if stream.set_nonblocking(true).is_err() {
+            return true;
+        }
+        let mut probe = [0u8; 1];
+        let closed = match stream.peek(&mut probe) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+        };
+        let _ = stream.set_nonblocking(false);
+        closed
+    }
+}
+
+/// Whether a request was written before it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sent {
+    No,
+    Yes,
+}
+
+/// The requests that change nothing, which are safe to send again.
+fn reads_only(method: &str) -> bool {
+    matches!(
+        method,
+        "scene"
+            | "operators"
+            | "context"
+            | "overlaps"
+            | "mesh"
+            | "assets"
+            | "sketch"
+            | "drawing"
+            | "measure"
+            | "history"
+            | "proportions"
+            | "silhouette"
+            | "analyze_mesh"
+            | "rig_check"
+    )
 }
 
 impl App for Socket {
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         // Connected on first use and again whenever the connection broke:
         // Kreate may have been restarted, on a new port, since the last call.
+        //
+        // Tried again only where that cannot do a thing twice: when the
+        // request never left, or when it only reads. A change that was sent
+        // and not answered may have been made, and sending it again would
+        // make it twice — two cubes, two undos.
         let mut answer = Err(String::new());
         for _ in 0..2 {
+            if self.stream.is_some() && self.is_closed() {
+                self.stream = None;
+            }
             if self.stream.is_none() {
                 self.connect()?;
             }
-            answer = self.exchange(method, &params);
-            if answer.is_ok() {
-                break;
+            match self.exchange(method, &params) {
+                Ok(value) => {
+                    answer = Ok(value);
+                    break;
+                }
+                Err((sent, why)) => {
+                    self.stream = None;
+                    if sent == Sent::Yes && !reads_only(method) {
+                        answer = Err(format!(
+                            "{why}. The request had been sent and may have been carried out; \
+                             look (get_scene, get_history) before trying it again"
+                        ));
+                        break;
+                    }
+                    answer = Err(why);
+                }
             }
-            self.stream = None;
         }
         let answer = answer?;
         match (answer.get("ok"), answer.get("error")) {

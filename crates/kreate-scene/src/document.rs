@@ -1140,19 +1140,39 @@ impl Document {
     }
 
     pub fn remove_object(&mut self, id: ObjectId) -> Option<Object> {
-        let removed = self.objects.remove(id)?;
-        if self.object_index.get(&removed.uid) == Some(&id) {
-            self.object_index.remove(&removed.uid);
-        }
-        let children: Vec<ObjectId> = self
+        self.objects.get(id)?;
+        // What each child hangs from now — the parent's world frame, its
+        // bone's, and the inverse kept from parenting — read while the parent
+        // is still there. Handed to the grandparent as it is, the child's own
+        // transform would be read against a different frame and the child
+        // would jump.
+        let children: Vec<(ObjectId, DAffine3)> = self
             .objects
             .iter()
             .filter(|(_, o)| o.parent == Some(id))
             .map(|(cid, _)| cid)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|cid| (cid, self.above(cid)))
             .collect();
-        for child in children {
+        let removed = self.objects.remove(id)?;
+        if self.object_index.get(&removed.uid) == Some(&id) {
+            self.object_index.remove(&removed.uid);
+        }
+        let grandparent_inverse = removed.parent.map(|g| self.world_transform(g).inverse());
+        for (child, above) in children {
             if let Some(c) = self.objects.get_mut(child).map(Arc::make_mut) {
                 c.parent = removed.parent;
+                c.parent_bone = None;
+                match grandparent_inverse {
+                    // The same frame, kept as the inverse against the new one.
+                    Some(inverse) => c.parent_inverse = inverse * above,
+                    // A root's transform is its world: the frame goes into it.
+                    None => {
+                        c.parent_inverse = DAffine3::IDENTITY;
+                        c.transform = DTransform::from_affine(above * c.transform.to_affine());
+                    }
+                }
             }
             if removed.parent.is_none() {
                 self.roots.push(child);
@@ -2936,6 +2956,40 @@ mod tests {
         assert_eq!(d.object(c).unwrap().parent, Some(a));
         assert!(d.object(b).is_none());
         assert_eq!(d.hierarchy().len(), 2);
+    }
+
+    #[test]
+    fn removing_a_parent_leaves_its_children_where_they_stand() {
+        // B moved and turned, C under it: with B gone, C hangs from A (or
+        // from nothing) but must not move in the world.
+        for under_a in [true, false] {
+            let mut d = Document::new();
+            let a = d.add_object(Object::new("A", ObjectData::Empty));
+            let b = d.add_object(Object::new("B", ObjectData::Empty));
+            let c = d.add_object(Object::new("C", ObjectData::Empty));
+            d.object_mut(a).unwrap().transform.translation = DVec3::new(0.0, 0.0, 1.0);
+            if under_a {
+                d.set_parent(b, Some(a)).unwrap();
+            }
+            {
+                let t = &mut d.object_mut(b).unwrap().transform;
+                t.translation = DVec3::new(3.0, 0.0, 0.0);
+                t.rotation = kreate_math::DQuat::from_rotation_z(0.7);
+            }
+            d.object_mut(c).unwrap().transform.translation = DVec3::new(0.0, 2.0, 0.0);
+            d.set_parent(c, Some(b)).unwrap();
+            {
+                let t = &mut d.object_mut(b).unwrap().transform;
+                t.rotation = kreate_math::DQuat::from_rotation_z(1.2);
+            }
+            let before = d.world_transform(c);
+            d.remove_object(b).unwrap();
+            let after = d.world_transform(c);
+            assert!(
+                before.abs_diff_eq(after, 1e-9),
+                "C moved: {before:?} -> {after:?}"
+            );
+        }
     }
 
     #[test]

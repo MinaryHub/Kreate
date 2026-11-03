@@ -913,6 +913,14 @@ fn read_u32_accessor(
     let data = &buffers.get(view.buffer().index())?.0;
     let stride = view.stride().unwrap_or(4);
     let start = view.offset() + accessor.offset();
+    // The count is whatever the JSON says, and nothing checks it against the
+    // buffer: sized from it, a count of a hundred billion would abort on the
+    // allocation, which no unwind guard catches. What the buffer can hold is
+    // the most there can be.
+    let fits = data.len().saturating_sub(start) / stride.max(1) + 1;
+    if accessor.count() > fits {
+        return None;
+    }
     let mut out = Vec::with_capacity(accessor.count());
     for i in 0..accessor.count() {
         let at = start.checked_add(i.checked_mul(stride)?)?;

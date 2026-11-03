@@ -443,14 +443,14 @@ fn read_part(
 pub fn parse_3mf(bytes: &[u8]) -> Result<crate::ir::ImportScene, ThreeMfError> {
     use crate::ir::{ImportNode, ImportNodeData, ImportScene, ImportTransform, SourceMetadata};
     use std::collections::HashMap;
-    use std::io::Read;
     let mut zip =
         zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| ThreeMfError::Zip(e.to_string()))?;
+    // Bounded as a `.kreate` is: a package is a zip, and its parts are read
+    // whole.
+    let mut budget = crate::archive::Budget::default();
     let mut text_of = |name: &str| -> Option<String> {
         let mut entry = zip.by_name(name.trim_start_matches('/')).ok()?;
-        let mut text = String::new();
-        entry.read_to_string(&mut text).ok()?;
-        Some(text)
+        budget.read_string(&mut entry).ok()
     };
     // The model part is wherever the package's relationships say; the
     // conventional place when they do not.

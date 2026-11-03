@@ -2547,13 +2547,15 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
 /// date: what a test of an old file reads it with.
 pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
     let mut zip = zip::ZipArchive::new(reader)?;
+    // Every entry is read whole, so what they inflate to is bounded: a small
+    // file of deflated zeros would otherwise take the machine's memory.
+    let mut budget = crate::archive::Budget::default();
 
     let manifest: Manifest = {
         let mut file = zip
             .by_name(MANIFEST)
             .map_err(|_| ContainerError::NotAKreateDocument("no manifest.json".into()))?;
-        let mut text = String::new();
-        file.read_to_string(&mut text)?;
+        let text = budget.read_string(&mut file)?;
         serde_json::from_str(&text).map_err(|source| ContainerError::Json {
             entry: MANIFEST.to_string(),
             source,
@@ -2575,8 +2577,7 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
         let mut file = zip
             .by_name(SCENE)
             .map_err(|_| ContainerError::NotAKreateDocument("no scene.json".into()))?;
-        let mut text = String::new();
-        file.read_to_string(&mut text)?;
+        let text = budget.read_string(&mut file)?;
         serde_json::from_str(&text).map_err(|source| ContainerError::Json {
             entry: SCENE.to_string(),
             source,
@@ -2597,8 +2598,7 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
             continue;
         }
         let mut file = zip.by_name(&name)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        let bytes = budget.read(&mut file)?;
         if let Some(key) = name
             .strip_prefix(MESH_DIR)
             .and_then(|k| k.strip_suffix(".kmesh"))

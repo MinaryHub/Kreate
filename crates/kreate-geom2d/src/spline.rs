@@ -17,6 +17,10 @@ pub struct Spline {
     pub fit: Vec<DVec2>,
 }
 
+/// The most fit points [`Spline::through`] solves for exactly: a few
+/// megabytes and a fraction of a second.
+pub const MAX_SOLVED_FIT: usize = 512;
+
 impl Spline {
     /// A clamped, uniform B-spline over `ctrl`: it starts at the first
     /// point and ends at the last, its parameter running over `[0, 1]`.
@@ -48,6 +52,14 @@ impl Spline {
             let mut s = Spline::clamped(1, fit.to_vec());
             s.fit = fit.to_vec();
             return s;
+        }
+        // The solve below is dense: memory in the square of the points and
+        // time in the cube. A file can list tens of thousands of them (a
+        // DXF's fit points), which would be gigabytes and hours; past this
+        // many the Catmull–Rom curve through the same points is taken, which
+        // passes through every one of them too and costs nothing.
+        if n > MAX_SOLVED_FIT {
+            return Spline::catmull_rom(fit, false);
         }
         // Chord-length parameters for the fit points.
         let mut u = vec![0.0; n];
@@ -337,6 +349,21 @@ mod tests {
     }
 
     /// A curve drawn through points passes through every one of them.
+    #[test]
+    fn many_fit_points_are_taken_without_the_dense_solve_and_still_passed_through() {
+        // Forty thousand points would be a 12 GB matrix: this must return at
+        // once, through the points' ends at least.
+        let fit: Vec<DVec2> = (0..40_000)
+            .map(|i| DVec2::new(i as f64 * 0.01, (i as f64 * 0.1).sin()))
+            .collect();
+        let started = std::time::Instant::now();
+        let s = Spline::through(&fit);
+        assert!(started.elapsed().as_secs_f64() < 2.0);
+        let (lo, hi) = s.domain();
+        assert!(s.point(lo).distance(fit[0]) < 1e-9);
+        assert!(s.point(hi).distance(fit[fit.len() - 1]) < 1e-9);
+    }
+
     #[test]
     fn a_spline_through_points_passes_through_them() {
         let fit = [

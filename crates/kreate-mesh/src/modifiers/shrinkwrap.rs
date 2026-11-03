@@ -173,12 +173,23 @@ impl Surface {
                 }
             }
             // Past the ring the best is nearer than, nothing nearer waits.
-            if let Some((d, _, _)) = best {
+            if let Some((d, q, n)) = best {
                 if d.sqrt() <= ring as f32 * self.cell {
-                    break;
+                    return (q, n);
                 }
             }
             let _ = seen_any;
+        }
+        // The rings ran out before the answer was sure: a point far outside
+        // the grid, whose rings never reached a cell, or reached one only at
+        // the last. Every triangle, then — slow, and only ever for points
+        // that are far away, which a shrinkwrap has few of.
+        for (t, [a, b, c]) in self.tris.iter().enumerate() {
+            let q = closest_on_triangle(p, *a, *b, *c);
+            let d = q.distance_squared(p);
+            if best.is_none_or(|(bd, _, _)| d < bd) {
+                best = Some((d, q, self.normals[t]));
+            }
         }
         best.map(|(_, q, n)| (q, n)).unwrap_or((p, Vec3::Z))
     }
@@ -275,6 +286,15 @@ pub fn shrinkwrap(input: &MeshData, target: &MeshData, params: &ShrinkwrapParams
 mod tests {
     use super::*;
     use crate::primitives;
+
+    #[test]
+    fn a_point_far_outside_the_target_still_finds_its_nearest() {
+        // Ten radii out, past every ring of the grid round the sphere.
+        let sphere = primitives::uv_sphere(1.0, 48, 24);
+        let surface = Surface::new(&sphere).unwrap();
+        let (q, _) = surface.nearest(Vec3::new(10.0, 0.0, 0.0));
+        assert!(q.distance(Vec3::X) < 0.01, "{q:?}");
+    }
 
     #[test]
     fn a_cube_wrapped_onto_a_sphere_lies_on_it() {

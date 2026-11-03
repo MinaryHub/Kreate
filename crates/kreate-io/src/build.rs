@@ -646,12 +646,15 @@ fn build_armatures(scene: &ImportScene, doc: &mut Document) -> Vec<Rig> {
     let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (s, skin) in scene.skins.iter().enumerate() {
         // A joint in two skins is a bone in the first.
-        let joints: Vec<usize> = skin
-            .joints
-            .iter()
-            .copied()
-            .filter(|j| *j < scene.nodes.len())
-            .collect();
+        //
+        // Every joint or none: a joint's position in the list is what the
+        // inverse binds and every vertex's joint indices count by, so one
+        // dropped from the middle would give each joint after it its
+        // neighbour's bind and its neighbour's vertices.
+        if skin.joints.iter().any(|j| *j >= scene.nodes.len()) {
+            continue;
+        }
+        let joints: Vec<usize> = skin.joints.clone();
         if joints.is_empty() || joints.iter().any(|j| claimed.contains(j)) {
             continue;
         }
