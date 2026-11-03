@@ -25,6 +25,9 @@ pub const DEFAULT_PORT: u16 = 7878;
 /// textures, and not a length an attacker picked to exhaust memory.
 pub const MAX_FRAME: usize = 1 << 30;
 
+/// The largest header, which is a message's JSON.
+pub const MAX_HEADER: usize = 1 << 20;
+
 /// Where a participant is looking and what they hold.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Presence {
@@ -140,6 +143,15 @@ impl Frame {
 
     pub fn write_to(&self, out: &mut impl Write) -> io::Result<()> {
         let header = serde_json::to_vec(&self.msg).expect("a message always serialises");
+        // Refused rather than cast: a length past `u32` would be written as
+        // its low bits, and the other end would read the rest of this frame
+        // as the next one's header.
+        if header.len() > MAX_HEADER || self.body.len() > MAX_FRAME {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a frame larger than the protocol allows",
+            ));
+        }
         let mut head = [0u8; 8];
         head[..4].copy_from_slice(&(header.len() as u32).to_be_bytes());
         head[4..].copy_from_slice(&(self.body.len() as u32).to_be_bytes());
@@ -150,11 +162,21 @@ impl Frame {
     }
 
     pub fn read_from(input: &mut impl Read) -> io::Result<Self> {
+        Self::read_limited(input, MAX_HEADER, MAX_FRAME)
+    }
+
+    /// The same, refusing a header or body past the given sizes before any of
+    /// it is allocated.
+    pub fn read_limited(
+        input: &mut impl Read,
+        max_header: usize,
+        max_body: usize,
+    ) -> io::Result<Self> {
         let mut head = [0u8; 8];
         input.read_exact(&mut head)?;
         let header_len = u32::from_be_bytes(head[..4].try_into().unwrap()) as usize;
         let body_len = u32::from_be_bytes(head[4..].try_into().unwrap()) as usize;
-        if header_len > 1 << 20 || body_len > MAX_FRAME {
+        if header_len > max_header || body_len > max_body {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "a frame larger than the protocol allows",

@@ -777,6 +777,19 @@ impl UidCounters {
             DatablockKind::Armature => &mut self.armature,
         }
     }
+
+    /// Each counter the higher of the two.
+    fn max_with(&mut self, other: &UidCounters) {
+        self.object = self.object.max(other.object);
+        self.mesh = self.mesh.max(other.mesh);
+        self.camera = self.camera.max(other.camera);
+        self.image = self.image.max(other.image);
+        self.light = self.light.max(other.light);
+        self.world = self.world.max(other.world);
+        self.material = self.material.max(other.material);
+        self.action = self.action.max(other.action);
+        self.armature = self.armature.max(other.armature);
+    }
 }
 
 impl Document {
@@ -805,8 +818,24 @@ impl Document {
     /// [`Document::version`].
     pub fn adopt(&mut self, other: Document) {
         let next = self.version.max(other.version) + 1;
+        // Which participant this copy is belongs to the session, not to the
+        // content: an undo to a step from before the session started must not
+        // end it here, nor one from during it put a copy that has left back in.
+        let site = self.site;
+        // And in a session the counters never go back. The identities handed
+        // out since the snapshot have been sent to the others; handing one out
+        // again names a different object with an identity a peer already
+        // holds, and last writer wins would merge the two.
+        let counters = (site != 0).then(|| (self.uids.clone(), self.site_uids.clone()));
         *self = other;
         self.version = next;
+        if self.site != site {
+            self.set_uid_site(site);
+        }
+        if let Some((uids, site_uids)) = counters {
+            self.uids.max_with(&uids);
+            self.site_uids.max_with(&site_uids);
+        }
     }
 
     #[inline]
@@ -2638,6 +2667,34 @@ mod tests {
         assert_eq!(d.object_count(), 1);
         assert_eq!(d.roots(), &[id]);
         assert_eq!(d.object(id).unwrap().name, "Cube");
+    }
+
+    #[test]
+    fn in_a_shared_session_an_undo_neither_leaves_it_nor_reuses_an_identity() {
+        // A step from before the session: undoing to it must keep this copy
+        // participant 2, and the next object must not take an identity that
+        // was already handed out (and sent) since.
+        let (mut d, _) = doc_with_cube();
+        let before_session = d.clone();
+        d.set_uid_site(2);
+        let sent = d.add_mesh_object("Sent", kreate_mesh::primitives::cube(1.0));
+        let sent_uid = d.object_uid(sent).unwrap();
+        d.adopt(before_session);
+        assert_eq!(d.uid_site(), 2);
+        let next = d.add_mesh_object("Next", kreate_mesh::primitives::cube(1.0));
+        let next_uid = d.object_uid(next).unwrap();
+        assert_ne!(next_uid, sent_uid);
+        assert_eq!(next_uid.raw() >> SITE_SHIFT, 2, "still in its own range");
+
+        // And outside a session, undo stays identity-preserving: redoing a
+        // creation hands out the same identity it did the first time.
+        let (mut d, _) = doc_with_cube();
+        let snapshot = d.clone();
+        let a = d.add_mesh_object("A", kreate_mesh::primitives::cube(1.0));
+        let first = d.object_uid(a).unwrap();
+        d.adopt(snapshot);
+        let again = d.add_mesh_object("A", kreate_mesh::primitives::cube(1.0));
+        assert_eq!(d.object_uid(again).unwrap(), first);
     }
 
     #[test]
