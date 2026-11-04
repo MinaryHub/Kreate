@@ -12,6 +12,13 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Outdoor's sky is a physical daylight model (Preetham's), its sun the
+  colour the air leaves it; and a Sunset room, the sun low and orange.
+- A point light or a spot can take a luminaire's measured shape from its
+  IES file (Light tab, Load IES…), in the viewport and the path tracer.
+
+### Added
+
 - Materials can scatter light below their surface — skin, marble, wax,
   milk — with a colour and a radius: the path tracer walks it through the
   solid, so a face out of the light glows with what came through; the

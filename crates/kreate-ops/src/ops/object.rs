@@ -817,6 +817,90 @@ impl Default for SetLightParams {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct SetLightProfileParams {
+    /// Where the shape came from — an IES file's name — to show in the panel.
+    pub name: String,
+    /// The shape: relative intensities from the direction the light points
+    /// (0°) to straight back (180°), evenly spaced, as numbers separated by
+    /// commas. Empty takes the shape off.
+    pub samples: String,
+    /// The luminaire's peak intensity in candela, which the shape is
+    /// relative to: the light's brightness becomes it. Zero leaves the
+    /// brightness as it is.
+    #[param(min = 0.0)]
+    pub candela: f64,
+}
+
+/// Gives the active object's light a measured luminaire's shape, or takes it
+/// off. The application reads the IES file; this sets what it said, so the
+/// edit replays and undoes like any other.
+pub struct SetLightProfile;
+
+impl Operator for SetLightProfile {
+    type Params = SetLightProfileParams;
+
+    fn id() -> &'static str {
+        "light.set_profile"
+    }
+    fn label() -> &'static str {
+        "Set Light Profile"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_light(doc).is_some()
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(id) = active_light(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let samples: Vec<f32> = params
+            .samples
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                t.parse::<f32>()
+                    .map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 })
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|_| OpError::Failed("the profile's numbers do not read".into()))?;
+        if samples.len() == 1 || samples.len() > 4096 {
+            return Err(OpError::Failed(
+                "a profile needs two to 4096 samples".into(),
+            ));
+        }
+        let Some(light) = doc.document_mut().light_mut(id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        // A shape about the direction it points: a point or a spot. A sun
+        // and an area light have their own spread.
+        if !samples.is_empty()
+            && !matches!(
+                light.kind,
+                kreate_scene::LightKind::Point { .. } | kreate_scene::LightKind::Spot { .. }
+            )
+        {
+            return Err(OpError::Failed(
+                "a measured shape is for a point light or a spot".into(),
+            ));
+        }
+        light.profile = (!samples.is_empty()).then(|| kreate_scene::LightProfile {
+            name: params.name.clone(),
+            samples,
+        });
+        if light.profile.is_some() && params.candela > 0.0 {
+            light.intensity = params.candela;
+            light.exposure = 0.0;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
 /// Sets the active object's light exactly.
 ///
 /// Absolute, for the reason `SetTransform` is: these are numbers a person
@@ -4402,6 +4486,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<LinkMaterial>();
     registry.register::<ApplyPhysicalMaterial>();
     registry.register::<SetMaterialImage>();
+    registry.register::<SetLightProfile>();
     registry.register::<SetMaterial>();
     registry.register::<SetCamera>();
     registry.register::<Delete>();

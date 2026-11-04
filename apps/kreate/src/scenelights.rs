@@ -50,6 +50,8 @@ pub fn exposure_of(room: Room) -> f32 {
         Room::Bright => -0.9,
         Room::GreyRoom => -0.3,
         Room::Outdoor => -1.6,
+        // A low sun gives a fifth of the light a high one does.
+        Room::Sunset => -0.4,
     }
 }
 
@@ -66,8 +68,13 @@ fn studio(yaw: f32, room: Room) -> Preview {
         lights: vec![PlacedLight {
             falloff: Falloff::Parallel,
             direction: -from.normalize(),
-            amount: [room.key_lux(); 3],
-            angular_radius: if room == Room::Outdoor { 0.01 } else { 0.1 },
+            // The sun's own colour for a sky; white for a room's lamp.
+            amount: room.key_color().map(|c| c * room.key_lux()),
+            angular_radius: if matches!(room, Room::Outdoor | Room::Sunset) {
+                0.01
+            } else {
+                0.1
+            },
             cast_shadow: true,
             ..Default::default()
         }],
@@ -366,6 +373,19 @@ fn place(light: &kreate_scene::Light, world: &kreate_math::DAffine3) -> PlacedLi
         range: None,
         // The path tracer draws a panel for it instead. See `area_panels`.
         traced_as_geometry: matches!(light.kind, LightKind::Area { .. }),
+        // Resampled to the renderer's count, whatever the file had.
+        profile: light.profile.as_ref().and_then(|p| {
+            (p.samples.len() >= 2).then(|| {
+                let n = p.samples.len() - 1;
+                std::array::from_fn(|i| {
+                    let x =
+                        i as f32 / (kreate_render::lights::PROFILE_SAMPLES - 1) as f32 * n as f32;
+                    let k = (x.floor() as usize).min(n - 1);
+                    let t = x - k as f32;
+                    p.samples[k] * (1.0 - t) + p.samples[k + 1] * t
+                })
+            })
+        }),
     }
 }
 

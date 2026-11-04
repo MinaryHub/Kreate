@@ -134,6 +134,25 @@ pub struct PlacedLight {
     /// area light's panel — and its lamp sampling passes it over, or it would
     /// be counted twice. The rasterised view reads it as a lamp regardless.
     pub traced_as_geometry: bool,
+    /// A measured luminaire's shape (an IES file's): the intensity by angle
+    /// from the direction the light points, relative to `amount`, at
+    /// [`PROFILE_SAMPLES`] even steps from 0° to 180°. `None` is the same in
+    /// every direction.
+    pub profile: Option<[f32; PROFILE_SAMPLES]>,
+}
+
+/// How many samples a light's profile has: see [`PlacedLight::profile`].
+pub const PROFILE_SAMPLES: usize = 32;
+
+/// The light has a profile: see [`PlacedLight::profile`].
+pub const FLAG_PROFILE: u32 = 16;
+
+/// A profile's value at `cosine` from its axis: linear between its samples.
+pub fn profile_at(profile: &[f32; PROFILE_SAMPLES], cosine: f32) -> f32 {
+    let x = cosine.clamp(-1.0, 1.0).acos() / std::f32::consts::PI * (PROFILE_SAMPLES - 1) as f32;
+    let i = (x.floor() as usize).min(PROFILE_SAMPLES - 2);
+    let t = x - i as f32;
+    profile[i] * (1.0 - t) + profile[i + 1] * t
 }
 
 /// How far a light of `candela` reaches before it stops being visible.
@@ -195,6 +214,7 @@ impl Default for PlacedLight {
             // such a thing goes on measuring the light it was measuring.
             range: None,
             traced_as_geometry: false,
+            profile: None,
         }
     }
 }
@@ -236,6 +256,9 @@ pub struct GpuLight {
     pub falloff: u32,
     /// See `FLAG_SHADOW` and friends.
     pub flags: u32,
+    /// The profile, four samples to a vector: see [`PlacedLight::profile`].
+    /// Read only with `FLAG_PROFILE`.
+    pub profile: [[f32; 4]; PROFILE_SAMPLES / 4],
 }
 
 impl GpuLight {
@@ -282,6 +305,13 @@ impl GpuLight {
         if light.traced_as_geometry {
             flags |= FLAG_GEOMETRY;
         }
+        let mut profile = [[0.0f32; 4]; PROFILE_SAMPLES / 4];
+        if let Some(p) = &light.profile {
+            flags |= FLAG_PROFILE;
+            for (i, v) in p.iter().enumerate() {
+                profile[i / 4][i % 4] = v.max(0.0);
+            }
+        }
 
         Self {
             position: [relative.x, relative.y, relative.z, light.radius.max(0.0)],
@@ -309,6 +339,7 @@ impl GpuLight {
             cone: [outer, inner],
             falloff: light.falloff.id(),
             flags,
+            profile,
         }
     }
 
@@ -371,7 +402,14 @@ impl GpuLight {
             (cosine - outer) / (inner - outer)
         };
 
-        let scale = attenuation * cone;
+        // A measured luminaire's shape, by the angle from where it points.
+        let shape = if self.flags & FLAG_PROFILE != 0 {
+            let flat: [f32; PROFILE_SAMPLES] = std::array::from_fn(|i| self.profile[i / 4][i % 4]);
+            profile_at(&flat, cosine)
+        } else {
+            1.0
+        };
+        let scale = attenuation * cone * shape;
         [
             self.amount[0] * scale,
             self.amount[1] * scale,
@@ -692,10 +730,11 @@ mod tests {
         // reads its fields out of its neighbour, and the picture is merely
         // wrong rather than broken. Sixty-four bytes, sixteen-byte aligned, is
         // what makes it a valid storage-array element under every layout rule.
-        assert_eq!(std::mem::size_of::<GpuLight>(), 64);
+        // Then the profile's eight vectors.
+        assert_eq!(std::mem::size_of::<GpuLight>(), 192);
         assert_eq!(std::mem::align_of::<GpuLight>(), 4);
         // And the shader's own declaration adds up to the same.
-        assert_eq!(16 + 16 + 16 + 8 + 4 + 4, 64);
+        assert_eq!(16 + 16 + 16 + 8 + 4 + 4 + 8 * 16, 192);
     }
 
     #[test]

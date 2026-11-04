@@ -30,6 +30,7 @@ const FLAG_SHADOW: u32 = 1u;
 const FLAG_DIFFUSE: u32 = 2u;
 const FLAG_SPECULAR: u32 = 4u;
 const FLAG_GEOMETRY: u32 = 8u;
+const FLAG_PROFILE: u32 = 16u;
 
 struct Light {
     /// xyz: eye-relative position in metres. w: source radius in metres.
@@ -43,6 +44,19 @@ struct Light {
     cone: vec2<f32>,
     falloff: u32,
     flags: u32,
+    /// A measured luminaire's shape: 32 samples, four to a vector, from 0°
+    /// to 180° off the axis, relative to `amount`. Read with FLAG_PROFILE.
+    profile: array<vec4<f32>, 8>,
+}
+
+/// A profile's value at `cosine` from its axis: see `lights::profile_at`.
+fn profile_at(light: Light, cosine: f32) -> f32 {
+    let x = acos(clamp(cosine, -1.0, 1.0)) / 3.14159265 * 31.0;
+    let i = min(u32(floor(x)), 30u);
+    let t = x - f32(i);
+    let a = light.profile[i / 4u][i % 4u];
+    let b = light.profile[(i + 1u) / 4u][(i + 1u) % 4u];
+    return a * (1.0 - t) + b * t;
 }
 
 /// Whether this light sees in every direction.
@@ -99,7 +113,12 @@ fn illuminance_at(light: Light, at: vec3<f32>) -> vec3<f32> {
         cone = (cosine - light.cone.x) / (light.cone.y - light.cone.x);
     }
 
-    return light.amount.rgb * (attenuation * cone);
+    // A measured luminaire's shape, by the angle from where it points.
+    var shape = 1.0;
+    if (light.flags & FLAG_PROFILE) != 0u {
+        shape = profile_at(light, cosine);
+    }
+    return light.amount.rgb * (attenuation * cone * shape);
 }
 
 /// Whether this light lights the diffuse response.

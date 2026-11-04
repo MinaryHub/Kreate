@@ -13797,6 +13797,33 @@ fn draw_light_data(
         if let Some((field, action)) = out.action {
             field_action(state, info, params, field, action, FieldOwner::Light);
         }
+        // A measured luminaire's shape: a point's or a spot's, from its IES
+        // file. The file's name says it is there; a cross takes it off.
+        if matches!(
+            light.kind,
+            kreate_scene::LightKind::Point { .. } | kreate_scene::LightKind::Spot { .. }
+        ) {
+            ui.separator();
+            ui.label(state.catalog.get("light-profile"));
+            ui.horizontal(|ui| match &light.profile {
+                Some(profile) => {
+                    // i18n-exempt: a file's name is the user's own text
+                    ui.monospace(&profile.name);
+                    if ui
+                        .button(CLEAR_GLYPH)
+                        .on_hover_text(state.catalog.get("light-profile-clear"))
+                        .clicked()
+                    {
+                        state.queue.push(Command::ClearLightProfile);
+                    }
+                }
+                None => {
+                    if ui.button(state.catalog.get("light-profile-pick")).clicked() {
+                        state.queue.push(Command::PickLightProfile);
+                    }
+                }
+            });
+        }
     });
 }
 

@@ -183,7 +183,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "render_image",
-            "description": "Renders the scene through a scene camera to a PNG file: rendered shading, path traced to the given number of samples, no grid, outlines or other overlays, at the size asked for, in the studio the environment tool picks when the scene has no lamp or sky picture of its own — a light backdrop behind the parts and an invisible floor under them that catches their shadows and a faint reflection (Outdoor has the sky instead). Returns a small preview to check it by. Takes as long as the samples do, up to time_limit seconds (at most 110); finished=false means it stopped at the limit with fewer samples. The user's view is put back afterwards.",
+            "description": "Renders the scene through a scene camera to a PNG file: rendered shading, path traced to the given number of samples, no grid, outlines or other overlays, at the size asked for, in the studio the environment tool picks when the scene has no lamp or sky picture of its own — a light backdrop behind the parts and an invisible floor under them that catches their shadows and a faint reflection (Outdoor and Sunset have the sky instead). Returns a small preview to check it by. Takes as long as the samples do, up to time_limit seconds (at most 110); finished=false means it stopped at the limit with fewer samples. The user's view is put back afterwards.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -463,7 +463,7 @@ pub fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "enum": ["studio", "bright", "grey_room", "outdoor"], "description": "The one to change to." }
+                    "name": { "type": "string", "enum": ["studio", "bright", "grey_room", "outdoor", "sunset"], "description": "The one to change to." }
                 }
             }
         },

@@ -137,6 +137,12 @@ pub enum Command {
     ClearMaterialImage {
         map: u32,
     },
+    /// Ask for an IES file and give the active light its measured shape.
+    /// A command for the reason `PickMaterialImage` is: `light.set_profile`
+    /// sets what the file said; the file read cannot be an operator.
+    PickLightProfile,
+    /// Take the active light's measured shape off.
+    ClearLightProfile,
     /// Ask for an image file and put it in an Image Texture node of the
     /// material in `slot`. A command for the reason `PickMaterialImage` is:
     /// `node.set_image` makes the link, the file read cannot be an operator.

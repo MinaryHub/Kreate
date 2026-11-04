@@ -7599,6 +7599,15 @@ impl App {
                 Command::PickWorldImage => self.pick_world_image(),
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
+                Command::PickLightProfile => self.pick_light_profile(),
+                Command::ClearLightProfile => {
+                    let mut params = PropertyMap::new();
+                    params.set(
+                        "samples",
+                        kreate_reflect::PropertyValue::Text(String::new()),
+                    );
+                    self.run_op("light.set_profile", params);
+                }
                 Command::PickNodeImage { slot, node } => self.pick_node_image(slot, node),
                 Command::NewMaterial => {
                     let params = self.material_slot_param();
@@ -8304,6 +8313,49 @@ impl App {
     /// The same division as `pick_world_image`, and the same consequence for
     /// undo: the datablock is added outside the history, so undoing the link
     /// leaves the image in the document with nothing pointing at it.
+    /// Reads an IES file and gives the active light its shape and peak.
+    fn pick_light_profile(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("IES", &["ies", "IES"])
+            .set_title("Light Profile")
+            .pick_file()
+        else {
+            return;
+        };
+        let text = match std::fs::read(&path) {
+            // IES files predate UTF-8 and some say so: read as Latin-1.
+            Ok(bytes) => bytes.iter().map(|b| *b as char).collect::<String>(),
+            Err(e) => return self.status(&format!("cannot read {}: {e}", path.display())),
+        };
+        let photometry = match kreate_io::ies::read(&text) {
+            Ok(p) => p,
+            Err(e) => return self.status(&format!("{}: {e}", path.display())),
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut params = PropertyMap::new();
+        params.set("name", kreate_reflect::PropertyValue::Text(name.clone()));
+        params.set(
+            "samples",
+            kreate_reflect::PropertyValue::Text(
+                photometry
+                    .profile
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        );
+        params.set(
+            "candela",
+            kreate_reflect::PropertyValue::Float(photometry.peak_candela),
+        );
+        self.run_op("light.set_profile", params);
+        self.status(&format!("light profile: {name}"));
+    }
+
     fn pick_material_image(&mut self, map: u32) {
         let Some(slot) = kreate_scene::MaterialMap::ALL.get(map as usize).copied() else {
             return;
