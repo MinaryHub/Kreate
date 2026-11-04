@@ -1619,6 +1619,7 @@ dependencies = [
  "kreate-scene",
  "kreate-shader",
  "kreate-testkit",
+ "libloading",
  "meshopt",
  "naga",
  "pollster",

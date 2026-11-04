@@ -281,7 +281,17 @@ fn remove_old(dir: &Path) -> bool {
     let mut removed = false;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("kreate") && name.contains(".old") {
+        // Ours: the programs, and the denoiser's libraries beside them.
+        let ours = [
+            "kreate",
+            "libOpenImageDenoise",
+            "OpenImageDenoise",
+            "libtbb",
+            "tbb12",
+        ]
+        .iter()
+        .any(|p| name.starts_with(p));
+        if ours && name.contains(".old") {
             removed |= std::fs::remove_file(entry.path()).is_ok();
         }
     }

@@ -336,6 +336,66 @@ fn glow_glass_and_ior_travel_as_their_extensions() {
     assert_eq!(glass.emission_strength, 0.0, "no glow where none was");
 }
 
+/// A varnish, a sheen, a brushed highlight and a specular weight leave as
+/// their KHR extensions and come back as they went.
+#[test]
+fn the_layers_travel_as_their_extensions() {
+    let mut doc = Document::new();
+    let layers = kreate_scene::shader::SurfaceLayers {
+        specular: 0.5,
+        coat: 0.8,
+        coat_roughness: 0.15,
+        sheen_color: kreate_math::SceneRgb::new(0.6, 0.3, 0.9),
+        sheen_roughness: 0.45,
+        anisotropy: 0.7,
+        anisotropy_rotation: 0.125,
+    };
+    let paint = doc.add_material(Material {
+        name: "Paint".into(),
+        layers,
+        ..Default::default()
+    });
+    let plain = doc.add_material(Material {
+        name: "Plain".into(),
+        ..Default::default()
+    });
+    cube_with(&mut doc, "A", paint);
+    cube_with(&mut doc, "B", plain);
+    let bytes = write(&doc, true);
+    let json = glb_json(&bytes);
+    let used: Vec<&str> = json["extensionsUsed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for name in [
+        "KHR_materials_specular",
+        "KHR_materials_clearcoat",
+        "KHR_materials_sheen",
+        "KHR_materials_anisotropy",
+    ] {
+        assert!(used.contains(&name), "{name} not in {used:?}");
+    }
+    let (back, _) = read(&bytes);
+    let by_name = |n: &str| {
+        back.materials()
+            .find(|(_, m)| m.name == n)
+            .unwrap()
+            .1
+            .clone()
+    };
+    let got = by_name("Paint").layers;
+    let (a, b) = (got.to_array(), layers.to_array());
+    for i in 0..9 {
+        assert!((a[i] - b[i]).abs() < 1e-5, "{got:?} against {layers:?}");
+    }
+    assert!(
+        by_name("Plain").layers.is_plain(),
+        "a plain material gained layers"
+    );
+}
+
 /// A cut-out goes out as glTF's MASK with its cutoff and comes back the same;
 /// a BLEND material from another program arrives as glass.
 #[test]

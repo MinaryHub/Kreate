@@ -394,6 +394,9 @@ pub struct Material {
     /// the base colour image's alpha — is below this. glTF's `MASK` and its
     /// `alphaCutoff`: a leaf drawn on a card. `None` is solid throughout.
     pub alpha_clip: Option<f32>,
+    /// The layers over the plain surface: a varnish, a sheen, a brushed
+    /// highlight, a specular weight. See [`crate::shader::SurfaceLayers`].
+    pub layers: crate::shader::SurfaceLayers,
     /// The material's own shading graph, once somebody has asked for one.
     ///
     /// `None` is the fast path v1 §5.6 describes: the flat fields above *are*
@@ -441,6 +444,7 @@ impl Default for Material {
             ior: 1.5,
             thin: false,
             alpha_clip: None,
+            layers: crate::shader::SurfaceLayers::default(),
             graph: None,
             action: None,
             density: None,
@@ -509,6 +513,37 @@ impl MaterialMap {
 }
 
 impl Material {
+    /// The layers the material is shaded with: its graph's surface's, when it
+    /// has a graph, or its own.
+    pub fn surface_layers(&self) -> crate::shader::SurfaceLayers {
+        use crate::shader::{NodeKind, SurfaceLayers};
+        let from_graph = self.graph.as_ref().and_then(|g| {
+            let kind = &g.nodes.get(g.output()?)?.kind;
+            match kind {
+                NodeKind::Surface {
+                    specular,
+                    coat,
+                    coat_roughness,
+                    sheen_color,
+                    sheen_roughness,
+                    anisotropy,
+                    anisotropy_rotation,
+                    ..
+                } => Some(SurfaceLayers {
+                    specular: *specular,
+                    coat: *coat,
+                    coat_roughness: *coat_roughness,
+                    sheen_color: *sheen_color,
+                    sheen_roughness: *sheen_roughness,
+                    anisotropy: *anisotropy,
+                    anisotropy_rotation: *anisotropy_rotation,
+                }),
+                _ => None,
+            }
+        });
+        from_graph.unwrap_or(self.layers)
+    }
+
     /// What the surface emits on its own: the colour times the strength, in
     /// nits. The number the renderer adds to what it reflects.
     pub fn emitted(&self) -> kreate_math::SceneRgb {

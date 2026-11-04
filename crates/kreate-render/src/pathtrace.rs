@@ -1,17 +1,31 @@
-//! The path tracer, first version: §2.5's renderer on the rendered view's own
-//! lights, BRDF and environment. See `shaders/pathtrace.wgsl`.
+//! The path tracer: §2.5's renderer on the rendered view's own lights, BRDF
+//! and environment. See `shaders/pathtrace.wgsl`.
 //!
 //! The scene is handed over as triangles in world space and kept until it is
 //! handed over again — a camera moving through it changes nothing here. Each
 //! frame traces one sample per pixel into a running sum; the viewport divides
 //! it out onto the linear picture and the display transform does the rest.
 //!
-//! **What this version does not do**, and what it stands in for: materials are
-//! the flat standard surface — base colour, metallic, roughness — not a
-//! material's node graph, so a texture or a wired-up graph shows as its flat
-//! fields; area lights are the points the rasteriser makes them; there is no
-//! transmission, emission or depth of field. The next steps are those, and
-//! multiple importance sampling between the light and the BRDF.
+//! # What it does
+//!
+//! - Materials are the compiled node graphs, the viewport's own code, with
+//!   their images, normal maps and bumps.
+//! - At each surface one source is aimed at — a lamp (chosen by how much it
+//!   lights the point), a glowing triangle, or the environment's bright part
+//!   — and the path goes on by sampling the BRDF; a glow or a sky that both
+//!   could find is weighted between them by multiple importance sampling.
+//! - Glass (transmission, index of refraction, total internal reflection),
+//!   emission, cut-outs, a lens with an aperture, baked smoke and fire, a
+//!   product shot's floor.
+//! - Each pixel's samples are a scrambled Sobol sequence, not independent
+//!   draws; a pixel whose mean is quiet stops taking more; a view moved a
+//!   little carries the last picture's means over.
+//!
+//! # What it does not, yet
+//!
+//! One lobe pair (Lambert and GGX): no clearcoat, sheen, subsurface or
+//! anisotropy. Area lights are discs and spheres. The scene is one BVH with
+//! no instancing, rebuilt when the scene is handed over again.
 
 use glam::{DAffine3, Mat4, Vec3};
 
@@ -34,9 +48,7 @@ fn dispatch(count: u32) -> String {
     let mut out = String::from(
         "fn pt_material(id: u32, uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, p: vec3<f32>, n: vec3<f32>, pdx: vec3<f32>, pdy: vec3<f32>, facing: f32) -> PtMaterialOut {
     var out: PtMaterialOut;
-    out.surface.base_color = vec3<f32>(0.8);
-    out.surface.metallic = 0.0;
-    out.surface.roughness = 0.5;
+    out.surface = surface_default();
     out.normal = vec3<f32>(0.0, 0.0, 1.0);
     out.gradient = vec3<f32>(0.0);
     out.alpha = 1.0;
@@ -1417,6 +1429,108 @@ impl PathTracer {
         );
     }
 
+    /// What the samples have gathered, read back for a finished render's
+    /// denoiser: each pixel's mean light, its first surface's colour and
+    /// normal — and the sums as they are, for [`PathTracer::replace_mean`].
+    pub fn read_gathered(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Gathered, String> {
+        let (w, h) = self.size;
+        let pixels = w as usize * h as usize;
+        if pixels == 0 || self.scene_bind.is_none() {
+            return Err("nothing has been traced".into());
+        }
+        let sums: Vec<[f32; 4]> =
+            bytemuck::cast_slice(&read_buffer(device, queue, &self.sum, pixels as u64 * 32)?)
+                .to_vec();
+        let aux: Vec<[f32; 4]> =
+            bytemuck::cast_slice(&read_buffer(device, queue, &self.aux, pixels as u64 * 48)?)
+                .to_vec();
+        let mut color = Vec::with_capacity(pixels);
+        let mut albedo = Vec::with_capacity(pixels);
+        let mut normal = Vec::with_capacity(pixels);
+        for p in 0..pixels {
+            let (s, stats) = (sums[p * 2], sums[p * 2 + 1]);
+            // The resolve pass's own arithmetic: the carried mean counts for
+            // the frames it stands for, less this pixel's own.
+            let c = aux[p * 3 + 2];
+            let k = (c[3] - s[3]).max(0.0);
+            let d = (s[3] + k).max(1.0);
+            color.push([0, 1, 2].map(|i| (s[i] + c[i] * k) / d));
+            let n = s[3].max(1.0);
+            albedo.push(if s[3] > 0.0 {
+                [0, 1, 2].map(|i| stats[i] / n)
+            } else {
+                [1.0; 3]
+            });
+            let at = aux[p * 3 + 1];
+            normal.push([at[0], at[1], at[2]]);
+        }
+        Ok(Gathered {
+            width: w,
+            height: h,
+            color,
+            albedo,
+            normal,
+            sums,
+            aux,
+        })
+    }
+
+    /// Puts `mean` in place of what was gathered, so that the next resolve
+    /// ([`PathTracer::resolve`]) shows it: the sums are rewritten so that
+    /// divided out, carried mean and all, they come to `mean`. The counts
+    /// are kept, so nothing downstream sees a picture with no samples.
+    pub fn replace_mean(&self, queue: &wgpu::Queue, gathered: &Gathered, mean: &[[f32; 3]]) {
+        if gathered.width != self.size.0
+            || gathered.height != self.size.1
+            || mean.len() != gathered.color.len()
+        {
+            return;
+        }
+        let mut sums = gathered.sums.clone();
+        for (p, m) in mean.iter().enumerate() {
+            let s = sums[p * 2];
+            let c = gathered.aux[p * 3 + 2];
+            let k = (c[3] - s[3]).max(0.0);
+            let d = (s[3] + k).max(1.0);
+            for i in 0..3 {
+                sums[p * 2][i] = m[i] * d - c[i] * k;
+            }
+        }
+        queue.write_buffer(&self.sum, 0, bytemuck::cast_slice(&sums));
+    }
+
+    /// The mean onto `picture` again, with no sample traced: after
+    /// [`PathTracer::replace_mean`].
+    pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder, picture: &wgpu::TextureView) {
+        let Some(resolve_bind) = &self.resolve_bind else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("path trace resolve again"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: picture,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_viewport(0.0, 0.0, self.size.0 as f32, self.size.1 as f32, 0.0, 1.0);
+        pass.set_pipeline(&self.resolve);
+        pass.set_bind_group(0, resolve_bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     /// One sample per pixel into the sum, then the mean onto `picture`.
     pub fn render(
         &self,
@@ -1465,6 +1579,48 @@ impl PathTracer {
         pass.set_bind_group(0, resolve_bind, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// What the path tracer has gathered, read back: see
+/// [`PathTracer::read_gathered`].
+pub struct Gathered {
+    pub width: u32,
+    pub height: u32,
+    /// Each pixel's mean light, scene-linear and before the exposure.
+    pub color: Vec<[f32; 3]>,
+    /// Each pixel's first surface's colour; white where nothing was met.
+    pub albedo: Vec<[f32; 3]>,
+    /// Each pixel's first surface's normal, in the world; zero where nothing.
+    pub normal: Vec<[f32; 3]>,
+    sums: Vec<[f32; 4]>,
+    aux: Vec<[f32; 4]>,
+}
+
+/// The first `bytes` of a storage buffer, on the CPU.
+fn read_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source: &wgpu::Buffer,
+    bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("path trace readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("path trace readback"),
+    });
+    encoder.copy_buffer_to_buffer(source, 0, &staging, 0, bytes);
+    queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("the GPU did not finish: {e:?}"))?;
+    let out = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+    Ok(out)
 }
 
 #[cfg(test)]

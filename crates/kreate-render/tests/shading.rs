@@ -579,6 +579,7 @@ fn some_points() -> Vec<Point> {
             base_color: kreate_math::SceneRgb::new(0.85, 0.6, 0.35),
             metallic,
             roughness,
+            ..Default::default()
         };
         for i in 0..9 {
             let a = (i as f32 / 9.0) * std::f32::consts::TAU;
@@ -712,6 +713,7 @@ fn the_per_light_lobe_switches_reach_the_device() {
             base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.3,
+            ..Default::default()
         },
     );
 
@@ -803,6 +805,7 @@ fn spread() -> Vec<Point> {
                         base_color: kreate_math::SceneRgb::new(0.8, 0.6, 0.4),
                         metallic,
                         roughness,
+                        ..Default::default()
                     },
                 });
             }
@@ -882,6 +885,7 @@ fn a_white_surface_under_an_imaged_furnace_returns_what_it_received() {
                 base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
                 metallic: 1.0,
                 roughness: *roughness,
+                ..Default::default()
             },
         })
         .collect();
@@ -966,6 +970,7 @@ fn turning_the_world_turns_what_a_surface_reflects() {
             base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
             metallic: 0.0,
             roughness: 0.8,
+            ..Default::default()
         },
     };
     let facing = on_gpu_under(
@@ -1131,6 +1136,7 @@ fn under_sky(
             base_color: kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
             metallic,
             roughness,
+            ..Default::default()
         },
     };
     on_gpu_under(
@@ -1307,6 +1313,7 @@ fn a_surface_facing_away_from_a_sun_is_never_darker_than_black() {
             base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.6,
+            ..Default::default()
         },
     })
     .collect();

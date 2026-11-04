@@ -2094,6 +2094,13 @@ op-object-add_roof-param-rise-name = 높이
 op-object-add_roof-param-thickness-name = 두께
 op-object-add_roof-param-overhang-name = 처마 길이
 op-material-set_properties-param-thin-name = 얇은 유리
+op-material-set_properties-param-specular-name = 반사 세기
+op-material-set_properties-param-coat-name = 코팅
+op-material-set_properties-param-coat_roughness-name = 코팅 거칠기
+op-material-set_properties-param-sheen-name = 광택(직물)
+op-material-set_properties-param-sheen_roughness-name = 광택 퍼짐
+op-material-set_properties-param-anisotropy-name = 이방성
+op-material-set_properties-param-anisotropy_rotation-name = 이방성 방향
 render-preparing = 렌더러 준비 중…
 render-time-left = 약 { $seconds }초 남음
 

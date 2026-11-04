@@ -10,6 +10,27 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- Materials have a clear coat (car paint, varnish), a fabric sheen, a
+  brushed (anisotropic) highlight and a specular weight, in the Material
+  tab, the path tracer and the viewport alike; glTF files carry them as
+  `KHR_materials_clearcoat`, `_sheen`, `_anisotropy` and `_specular`.
+- A non-metal's reflection follows its index of refraction: water reflects
+  less than glass, a gem far more.
+- A finished render (F12, Ctrl+F12) is denoised by Intel Open Image
+  Denoise when it is installed beside Kreate — the release builds carry
+  it — keeping fine texture and soft shading that the view's own filter
+  blurs. Without it a render is filtered as before.
+
+### Changed
+
+- The path tracer's samples are a scrambled Sobol sequence rather than
+  independent random numbers: the same picture in about half the samples.
+- Among several lamps, the path tracer aims at each by how much it lights
+  the point, so a scene with many dim lamps and one bright one is far less
+  grainy.
+
 ## [0.5.3] - 2026-10-28
 
 ### Added

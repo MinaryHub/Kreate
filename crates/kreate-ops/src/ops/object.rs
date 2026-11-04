@@ -1277,6 +1277,30 @@ pub struct SetMaterialParams {
     /// image's — is below this: a leaf on a card. Zero is never.
     #[param(min = 0.0, max = 1.0)]
     pub alpha_clip: f64,
+    /// How strongly a non-metal reflects, as a multiple of what its index of
+    /// refraction says: one is physical, zero takes the reflection away.
+    #[param(min = 0.0, soft_max = 2.0)]
+    pub specular: f64,
+    /// A clear varnish over the surface: a car's paint, a lacquered table.
+    /// Zero is none.
+    #[param(min = 0.0, max = 1.0)]
+    pub coat: f64,
+    /// How rough the varnish is: zero is a mirror.
+    #[param(min = 0.0, max = 1.0)]
+    pub coat_roughness: f64,
+    /// The colour of a fabric's sheen, the soft glow at its rim. Black is none.
+    #[param(color)]
+    pub sheen: [f64; 3],
+    /// How far the sheen spreads from the rim.
+    #[param(min = 0.0, max = 1.0)]
+    pub sheen_roughness: f64,
+    /// How much the highlight stretches along the surface: brushed metal.
+    /// Zero is round. Runs along the texture's U.
+    #[param(min = 0.0, max = 1.0)]
+    pub anisotropy: f64,
+    /// Which way the stretch runs, in turns from the texture's U.
+    #[param(min = 0.0, max = 1.0)]
+    pub anisotropy_rotation: f64,
 }
 
 impl Default for SetMaterialParams {
@@ -1294,6 +1318,13 @@ impl Default for SetMaterialParams {
             ior: 1.5,
             thin: false,
             alpha_clip: 0.0,
+            specular: 1.0,
+            coat: 0.0,
+            coat_roughness: 0.03,
+            sheen: [0.0, 0.0, 0.0],
+            sheen_roughness: 0.3,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
         }
     }
 }
@@ -1364,6 +1395,25 @@ impl Operator for SetMaterial {
         material.ior = params.ior.max(1.0) as f32;
         material.thin = params.thin;
         material.alpha_clip = (params.alpha_clip > 0.0).then(|| params.alpha_clip.min(1.0) as f32);
+        // The sheen's colour as the base colour's is: a swatch to a reflectance.
+        let sheen = kreate_math::Srgb::new(
+            params.sheen[0] as f32,
+            params.sheen[1] as f32,
+            params.sheen[2] as f32,
+        )
+        .as_reflectance();
+        material.layers = kreate_scene::shader::SurfaceLayers::from_array([
+            params.specular as f32,
+            params.coat as f32,
+            params.coat_roughness as f32,
+            sheen.r,
+            sheen.g,
+            sheen.b,
+            params.sheen_roughness as f32,
+            params.anisotropy as f32,
+            params.anisotropy_rotation as f32,
+        ]);
+        let layers = material.layers;
         let (glass, bend) = (material.transmission, material.ior);
         let (opacity, cut) = (material.alpha, material.alpha_clip.unwrap_or(0.0));
         // The glow has no socket, so a material with its own graph takes it
@@ -1377,6 +1427,13 @@ impl Operator for SetMaterial {
                     ior,
                     alpha,
                     clip,
+                    specular,
+                    coat,
+                    coat_roughness,
+                    sheen_color,
+                    sheen_roughness,
+                    anisotropy,
+                    anisotropy_rotation,
                     ..
                 } = &mut graph.nodes[o].kind
                 {
@@ -1385,6 +1442,13 @@ impl Operator for SetMaterial {
                     *ior = bend;
                     *alpha = opacity;
                     *clip = cut;
+                    *specular = layers.specular;
+                    *coat = layers.coat;
+                    *coat_roughness = layers.coat_roughness;
+                    *sheen_color = layers.sheen_color;
+                    *sheen_roughness = layers.sheen_roughness;
+                    *anisotropy = layers.anisotropy;
+                    *anisotropy_rotation = layers.anisotropy_rotation;
                 }
             }
         }
@@ -2066,6 +2130,7 @@ pub fn material_image_params(
 /// The parameters that would leave the material in `slot` exactly as it is.
 pub fn material_params(material: &kreate_scene::Material, slot: u32) -> SetMaterialParams {
     let c = material.base_color.as_swatch();
+    let layers = material.surface_layers();
     SetMaterialParams {
         slot,
         color: [c.r as f64, c.g as f64, c.b as f64],
@@ -2082,6 +2147,16 @@ pub fn material_params(material: &kreate_scene::Material, slot: u32) -> SetMater
         ior: material.ior as f64,
         thin: material.thin,
         alpha_clip: material.alpha_clip.unwrap_or(0.0) as f64,
+        specular: layers.specular as f64,
+        coat: layers.coat as f64,
+        coat_roughness: layers.coat_roughness as f64,
+        sheen: {
+            let c = layers.sheen_color.as_swatch();
+            [c.r as f64, c.g as f64, c.b as f64]
+        },
+        sheen_roughness: layers.sheen_roughness as f64,
+        anisotropy: layers.anisotropy as f64,
+        anisotropy_rotation: layers.anisotropy_rotation as f64,
     }
 }
 

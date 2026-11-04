@@ -52,7 +52,9 @@ fn gpu() -> Option<Gpu> {
     })
 }
 
-/// A device for a test that path traces: a software device is skipped.
+/// A device for a test that path traces: a software device is skipped,
+/// unless `KREATE_TRACE_ON_CPU` is set — the tests that do not crash it
+/// run, slowly, on lavapipe that way.
 ///
 /// Mesa's lavapipe, the Linux runner's device, dies of a segmentation
 /// fault in the path tracer's compute — inside the driver, on the first
@@ -62,7 +64,7 @@ fn gpu() -> Option<Gpu> {
 macro_rules! traced_gpu_or_skip {
     ($e:expr) => {
         match $e {
-            Some(v) if v.software => {
+            Some(v) if v.software && std::env::var_os("KREATE_TRACE_ON_CPU").is_none() => {
                 eprintln!("a software device; the path tracer is not run on it");
                 return;
             }
@@ -277,6 +279,7 @@ fn grey() -> Surface {
         base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
         metallic: 0.0,
         roughness: 0.5,
+        ..Default::default()
     }
 }
 
@@ -1783,6 +1786,7 @@ fn the_material_reaches_the_shader() {
             base_color: kreate_math::SceneRgb::new(0.05, 0.05, 0.05),
             metallic: 0.0,
             roughness: 0.5,
+            ..Default::default()
         },
         &light,
         FRAMED,
@@ -1795,6 +1799,7 @@ fn the_material_reaches_the_shader() {
             base_color: kreate_math::SceneRgb::new(0.9, 0.9, 0.9),
             metallic: 0.0,
             roughness: 0.5,
+            ..Default::default()
         },
         &light,
         FRAMED,
@@ -2178,6 +2183,68 @@ fn a_moved_view_carries_the_last_frames_samples_over() {
     assert!(apart(&still) < 0.02, "settled to {}", apart(&still));
 }
 
+/// The samples a pixel takes are a scrambled low-discrepancy sequence, not
+/// independent draws, so a short mean is nearer the settled picture than
+/// independent draws would leave it. Measured through a lens, so the
+/// pixel's area, the lens and the sun's disc are all being integrated.
+///
+/// When this was written, against the same scene's mean of 2048: sixteen
+/// samples were 0.0236 off (RMS) and sixty-four 0.0114; with the
+/// independent draws before them, 0.0353 and 0.0154 — the same error in
+/// about half the samples.
+#[test]
+fn a_short_mean_is_nearer_the_settled_picture_than_independent_samples_leave_it() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    let lens = Some(kreate_render::pathtrace::Lens {
+        radius: 0.25,
+        focus: 40.0,
+    });
+    NOISE_THRESHOLD.with(|t| t.set(0.0));
+    let shot = |frames: u32| traced_shot_with(&gpu, true, frames, lens, false);
+    let reference = shot(2048);
+    let error = |p: &[[f32; 4]]| {
+        (reference
+            .iter()
+            .zip(p)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>())
+            .sum::<f32>()
+            / reference.len() as f32)
+            .sqrt()
+    };
+    let (e16, e64) = (error(&shot(16)), error(&shot(64)));
+    NOISE_THRESHOLD.with(|t| t.set(0.01));
+    eprintln!("rms error: 16 samples {e16}, 64 samples {e64}");
+    assert!(e16 < 0.03, "sixteen samples are {e16} off");
+    assert!(e64 < e16 * 0.6, "16 samples {e16}, 64 samples {e64}");
+}
+
+/// Among faint lamps far off and one bright sun, the sun is the one chosen
+/// to aim at, nearly every time: chosen evenly it was one sample in eight,
+/// and the other seven were noise.
+///
+/// When this was written, sixteen samples were 0.023 off (RMS) from the
+/// mean of 1024; chosen evenly, 0.111.
+#[test]
+fn the_bright_lamp_is_aimed_at_more_than_the_faint_ones() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    DECOYS.with(|d| d.set(7));
+    NOISE_THRESHOLD.with(|t| t.set(0.0));
+    let shot = |frames: u32| traced_shot_with(&gpu, true, frames, None, false);
+    let reference = shot(1024);
+    let short = shot(16);
+    DECOYS.with(|d| d.set(0));
+    NOISE_THRESHOLD.with(|t| t.set(0.01));
+    let error = (reference
+        .iter()
+        .zip(&short)
+        .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>())
+        .sum::<f32>()
+        / reference.len() as f32)
+        .sqrt();
+    eprintln!("rms error with decoys: {error}");
+    assert!(error < 0.05, "sixteen samples are {error} off");
+}
+
 /// Adaptive sampling stops quiet pixels early and changes nothing else: a
 /// long mean taken with it is, near enough, the mean taken without.
 ///
@@ -2381,7 +2448,74 @@ fn traced_scene(
         viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
         out = read_frame(gpu, &mut viewport, &draws);
     }
+    if let Some(replace) = REPLACE_MEAN.with(|r| r.take()) {
+        let gathered = viewport
+            .read_traced(&gpu.device, &gpu.queue)
+            .expect("reads back");
+        let mean = replace(&gathered);
+        viewport.show_traced_mean(&gpu.queue, &gathered, &mean);
+        viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+        out = read_frame(gpu, &mut viewport, &draws);
+    }
     out
+}
+
+/// What a finished render's denoiser does with what the tracer gathered.
+type Replace = Box<dyn FnOnce(&kreate_render::pathtrace::Gathered) -> Vec<[f32; 3]>>;
+
+thread_local! {
+    /// After `traced_scene`'s frames: read what was gathered, show this in
+    /// its place, and draw one frame more.
+    static REPLACE_MEAN: std::cell::RefCell<Option<Replace>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A finished render's denoiser reads what the samples gathered — the light,
+/// the first surface's colour and normal — and puts its own picture in the
+/// mean's place; the next frame shows that picture and traces nothing.
+#[test]
+fn a_replaced_mean_is_what_the_next_frame_shows() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    let seen = std::rc::Rc::new(std::cell::Cell::new((0usize, 0usize, 0.0f32)));
+    let record = seen.clone();
+    REPLACE_MEAN.with(|r| {
+        *r.borrow_mut() = Some(Box::new(move |g: &kreate_render::pathtrace::Gathered| {
+            let n = (g.width * g.height) as usize;
+            assert_eq!(g.color.len(), n);
+            let lit = g
+                .color
+                .iter()
+                .filter(|c| c.iter().all(|v| v.is_finite() && *v >= 0.0))
+                .count();
+            let unit = g
+                .normal
+                .iter()
+                .filter(|v| {
+                    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    (l - 1.0).abs() < 0.01
+                })
+                .count();
+            let grey = g.albedo.iter().map(|a| a[0]).sum::<f32>() / n as f32;
+            record.set((lit, unit, grey));
+            // One flat colour: what the next frame must then show everywhere.
+            vec![[0.2, 0.2, 0.2]; n]
+        }))
+    });
+    NOISE_THRESHOLD.with(|t| t.set(0.0));
+    let shown = traced_shot_with(&gpu, true, 8, None, false);
+    NOISE_THRESHOLD.with(|t| t.set(0.01));
+    let (lit, unit, grey) = seen.get();
+    let n = shown.len();
+    assert_eq!(lit, n, "every pixel's light is a number");
+    // The floor and the cube fill most of the picture, and each of their
+    // pixels has the surface's normal.
+    assert!(unit > n / 2, "{unit} of {n} pixels have a normal");
+    // Grey surfaces (0.8) and, where the view meets nothing, white.
+    assert!(grey > 0.7 && grey <= 1.0, "first-surface colour {grey}");
+    let first = shown[0];
+    let flat = shown
+        .iter()
+        .all(|p| (0..3).all(|i| (p[i] - first[i]).abs() < 0.02));
+    assert!(flat, "the replaced mean is not what is shown");
 }
 
 /// The path tracer: the same scene, the same lights, the same units — so its
@@ -3473,13 +3607,23 @@ fn an_image_sky_lights_the_floor_as_much_as_it_should_and_quietly() {
         "under the cap the floor is {cap}, its size says {expected}"
     );
     // A sun: two rows, far brighter — near the most a half float holds.
-    // Smooth at sixteen samples.
+    // Smooth at sixteen samples: the middle eight tenths of the pixels
+    // within a quarter of the median of each other.
+    //
+    // Measured between the tenths, not as a standard deviation: at sixteen
+    // samples a bounce that happens to find the sun leaves the odd pixel
+    // several times brighter, and one such pixel in a patch this size is the
+    // whole of a standard deviation. That measure once passed only because
+    // the random numbers of neighbouring pixels moved together — every pixel
+    // twelve per cent dark alike, which read as smooth.
     let sun = sky_patch(&gpu, 16, &cap_sky(w, h, 2, 60_000.0), (w, h));
-    let m = mean(&sun);
-    let spread = (sun.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / sun.len() as f32).sqrt();
+    let mut sorted = sun.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let at = |f: f32| sorted[((sorted.len() - 1) as f32 * f).round() as usize];
+    let (low, median, high) = (at(0.1), at(0.5), at(0.9));
     assert!(
-        m > 0.0 && spread < m * 0.25,
-        "under a small sun sixteen samples are speckle: {spread} about {m}"
+        median > 0.0 && high - low < median * 0.25,
+        "under a small sun sixteen samples are speckle: {low} to {high} about {median}"
     );
 }
 

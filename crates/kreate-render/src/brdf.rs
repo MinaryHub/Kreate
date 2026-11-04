@@ -67,6 +67,36 @@ pub struct Surface {
     /// would crowd every interesting appearance into the bottom fifth of the
     /// range.
     pub roughness: f32,
+    /// How strongly a dielectric reflects, as a multiple of what its index
+    /// of refraction says: one is physical, zero takes the reflection away.
+    /// glTF's `KHR_materials_specular` factor and OpenPBR's specular weight.
+    pub specular: f32,
+    /// The index of refraction, which says how much a dielectric reflects
+    /// face on: `((n − 1)/(n + 1))²`, four per cent at 1.5. What passes
+    /// through bends by it too.
+    pub ior: f32,
+    /// A clear varnish over the surface, zero to one: the lacquer on a car's
+    /// paint or a table's top. A second, colourless specular lobe of its
+    /// own roughness, the light it reflects taken from what reaches the
+    /// surface below.
+    pub coat: f32,
+    /// The varnish's perceptual roughness.
+    pub coat_roughness: f32,
+    /// The colour of a fabric's sheen — the soft brightening at its rim, from
+    /// fibres catching grazing light. Black is none.
+    pub sheen_color: SceneRgb,
+    /// How far the sheen spreads from the rim, zero to one.
+    pub sheen_roughness: f32,
+    /// How much the highlight stretches along the surface, zero to one:
+    /// brushed metal, spun aluminium.
+    pub anisotropy: f32,
+    /// Which way it stretches, in turns from the surface's tangent.
+    pub anisotropy_rotation: f32,
+    /// The surface's tangent — the direction its texture coordinates' U runs
+    /// — which the stretch is measured from. Geometry, not material: the
+    /// pass that shades fills it in. Zero where there is none, and then the
+    /// highlight does not stretch.
+    pub tangent: [f32; 3],
 }
 
 impl Default for Surface {
@@ -77,16 +107,35 @@ impl Default for Surface {
             base_color: SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.5,
+            specular: 1.0,
+            ior: DIELECTRIC_IOR,
+            coat: 0.0,
+            coat_roughness: 0.03,
+            sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+            sheen_roughness: 0.3,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
+            tangent: [0.0; 3],
         }
     }
 }
 
-/// The reflectance of a dielectric at normal incidence.
-///
-/// Four percent, which is glass, most plastics, and near enough everything
-/// that is not a metal. A material parameter for it exists in the full
-/// standard surface and is not here yet, because the number is right for
-/// almost everything and wrong in ways nobody has asked about.
+/// The index of refraction a dielectric has when nothing says otherwise:
+/// glass, most plastics, and the four per cent [`DIELECTRIC_F0`] is.
+pub const DIELECTRIC_IOR: f32 = 1.5;
+
+/// A dielectric's reflectance face on, from its index of refraction and a
+/// weight on it: `((n − 1)/(n + 1))² · specular`, at most one.
+pub fn dielectric_f0(ior: f32, specular: f32) -> f32 {
+    let n = ior.max(1.0);
+    let r = (n - 1.0) / (n + 1.0);
+    (r * r * specular.max(0.0)).min(1.0)
+}
+
+/// The reflectance of a dielectric at normal incidence, at the default index
+/// of refraction: four percent, which is glass, most plastics, and near
+/// enough everything that is not a metal. A surface's own is
+/// [`dielectric_f0`] of its `ior` and `specular`.
 pub const DIELECTRIC_F0: f32 = 0.04;
 
 impl Surface {
@@ -98,10 +147,11 @@ impl Surface {
     pub fn f0(&self) -> [f32; 3] {
         let m = self.metallic.clamp(0.0, 1.0);
         let base = self.base_color.to_array();
+        let d = dielectric_f0(self.ior, self.specular);
         [
-            DIELECTRIC_F0 * (1.0 - m) + base[0] * m,
-            DIELECTRIC_F0 * (1.0 - m) + base[1] * m,
-            DIELECTRIC_F0 * (1.0 - m) + base[2] * m,
+            d * (1.0 - m) + base[0] * m,
+            d * (1.0 - m) + base[1] * m,
+            d * (1.0 - m) + base[2] * m,
         ]
     }
 
@@ -126,6 +176,24 @@ impl Surface {
     pub fn alpha(&self) -> f32 {
         let r = self.roughness.clamp(MIN_ROUGHNESS, 1.0);
         r * r
+    }
+
+    /// The roughness the energy terms — the compensation, the shares the
+    /// lobes leave each other — are read at. The surface's own, unless its
+    /// highlight is stretched; then one between its two widths, since the
+    /// wider is where a stretched lobe loses most of its light to bouncing
+    /// more than once.
+    pub fn lobe_roughness(&self) -> f32 {
+        let strength = self.anisotropy.clamp(0.0, 1.0);
+        let has_tangent = self.tangent.iter().any(|c| *c != 0.0);
+        if strength <= 0.0 || !has_tangent {
+            return self.roughness.clamp(0.0, 1.0);
+        }
+        let alpha = self.alpha();
+        // The mean of the two widths: the wider alone over-compensates a
+        // lightly brushed lobe, the round one under-compensates a long one.
+        let along = alpha + (1.0 - alpha) * strength * strength;
+        ((along + alpha) * 0.5).sqrt()
     }
 }
 
@@ -168,6 +236,55 @@ impl Response {
 ///
 /// Chosen over Beckmann for its tail, which is what makes a rough metal look
 /// like metal rather than like chalk.
+/// The stretched lobe's frame and widths: the direction it stretches along
+/// and across, in the surface's plane, and the width along each. `None` for
+/// a lobe that does not stretch.
+///
+/// glTF's `KHR_materials_anisotropy`: along the direction, the width grows
+/// toward one as the strength's square, `mix(α, 1, s²)`; across it, it is
+/// the surface's own.
+pub fn stretch(
+    surface: &Surface,
+    n: glam::Vec3,
+    alpha: f32,
+) -> Option<(glam::Vec3, glam::Vec3, f32, f32)> {
+    let strength = surface.anisotropy.clamp(0.0, 1.0);
+    if strength <= 0.0 {
+        return None;
+    }
+    let t = glam::Vec3::from_array(surface.tangent);
+    let t = t - n * n.dot(t);
+    if t.length_squared() < 1e-12 {
+        return None;
+    }
+    let t = t.normalize();
+    let b = n.cross(t);
+    let (sin, cos) = (surface.anisotropy_rotation * std::f32::consts::TAU).sin_cos();
+    let along = t * cos + b * sin;
+    let across = n.cross(along);
+    let at = alpha + (1.0 - alpha) * strength * strength;
+    Some((along, across, at, alpha))
+}
+
+/// The stretched Trowbridge-Reitz distribution.
+pub fn distribution_stretched(toh: f32, boh: f32, noh: f32, at: f32, ab: f32) -> f32 {
+    let x = (toh / at).powi(2) + (boh / ab).powi(2) + noh * noh;
+    1.0 / (std::f32::consts::PI * at * ab * x * x).max(1.175_494_4e-38)
+}
+
+/// Smith's height-correlated visibility for the stretched lobe, with
+/// `1/(4·NoL·NoV)` folded in, as [`visibility`] is.
+pub fn visibility_stretched(
+    (tov, bov, nov): (f32, f32, f32),
+    (tol, bol, nol): (f32, f32, f32),
+    at: f32,
+    ab: f32,
+) -> f32 {
+    let v = nol * ((at * tov).powi(2) + (ab * bov).powi(2) + nov * nov).sqrt();
+    let l = nov * ((at * tol).powi(2) + (ab * bol).powi(2) + nol * nol).sqrt();
+    0.5 / (v + l).max(1.175_494_4e-38)
+}
+
 fn distribution(noh: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
     let d = noh * noh * (a2 - 1.0) + 1.0;
@@ -506,11 +623,19 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
     let alpha = surface.alpha();
     let f0 = surface.f0();
     let f = fresnel(f0, voh);
-    let d = distribution(noh, alpha);
-    let vis = visibility(nov, nol, alpha);
-    let compensation = energy_compensation(f0, nov, surface.roughness.clamp(0.0, 1.0));
+    // Stretched along the tangent where the surface says so; the energy
+    // terms below stay the round lobe's, which is close for the widths a
+    // brushed metal has and keeps one table.
+    let (d, vis) = match stretch(surface, n, alpha) {
+        Some((t, b, at, ab)) => (
+            distribution_stretched(t.dot(h), b.dot(h), noh, at, ab),
+            visibility_stretched((t.dot(v), b.dot(v), nov), (t.dot(l), b.dot(l), nol), at, ab),
+        ),
+        None => (distribution(noh, alpha), visibility(nov, nol, alpha)),
+    };
+    let compensation = energy_compensation(f0, nov, surface.lobe_roughness());
 
-    let specular = [
+    let specular: [f32; 3] = [
         d * vis * f[0] * compensation[0],
         d * vis * f[1] * compensation[1],
         d * vis * f[2] * compensation[2],
@@ -527,7 +652,7 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
     //   is exactly `albedo·(1 - E(NoV))` — the energy the specular lobe left.
     //   Scaling by `1 - F(VoH)` is reciprocal, since the half-vector is
     //   symmetric, and gains a third of the arriving light at a grazing view.
-    let roughness = surface.roughness.clamp(0.0, 1.0);
+    let roughness = surface.lobe_roughness();
     let share_v = specular_share(f0, nov, roughness);
     let share_l = specular_share(f0, nol, roughness);
     let (avg_a, avg_b) = albedo_table().average(roughness);
@@ -542,6 +667,52 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
         // within a thousandth.
         let avg = (f0[c] * avg_a + avg_b).clamp(0.0, 0.99);
         diffuse[c] = albedo[c] * inv_pi * (1.0 - share_v[c]) * (1.0 - share_l[c]) / (1.0 - avg);
+    }
+
+    let mut specular = specular;
+    let sheen = surface.sheen_color.to_array();
+    let sheen_weight = sheen[0].max(sheen[1]).max(sheen[2]).clamp(0.0, 1.0);
+    if sheen_weight > 0.0 {
+        // The sheen over the surface, under any varnish: the surface lit by
+        // what the fibres leave it, coupled as the coat is below.
+        let table = sheen_table();
+        let r = surface.sheen_roughness;
+        let below = (1.0 - sheen_weight * table.lookup(nov, r))
+            * (1.0 - sheen_weight * table.lookup(nol, r))
+            / (1.0 - sheen_weight * table.average(r)).max(1e-3);
+        let lobe = sheen_distribution(noh, sheen_alpha(r)) * sheen_visibility(nov, nol);
+        for c in 0..3 {
+            diffuse[c] *= below;
+            specular[c] = specular[c] * below + sheen[c].clamp(0.0, 1.0) * lobe;
+        }
+    }
+    let coat = surface.coat.clamp(0.0, 1.0);
+    if coat > 0.0 {
+        // The varnish: a colourless GGX lobe of its own roughness, at a
+        // dielectric's four per cent — a clear coat is about 1.5 — and the
+        // surface below lit by what it lets through.
+        //
+        // Below it, both lobes are scaled the way the diffuse is coupled to
+        // the specular above: `(1 − c·E(NoV))(1 − c·E(NoL)) / (1 − c·Ē)`.
+        // Symmetric, so the BRDF stays reciprocal; and for a Lambertian base
+        // its integral is exactly `1 − c·E(NoV)`, the light the coat did not
+        // take, so a white matte under a full coat still returns all of it.
+        let coat_roughness = surface.coat_roughness.clamp(MIN_ROUGHNESS, 1.0);
+        let coat_alpha = coat_roughness * coat_roughness;
+        let cf0 = [DIELECTRIC_F0; 3];
+        let cf = fresnel(cf0, voh);
+        let cd = distribution(noh, coat_alpha);
+        let cv = visibility(nov, nol, coat_alpha);
+        let cc = energy_compensation(cf0, nov, coat_roughness);
+        let e_v = specular_share(cf0, nov, coat_roughness)[0];
+        let e_l = specular_share(cf0, nol, coat_roughness)[0];
+        let (ca, cb) = albedo_table().average(coat_roughness);
+        let e_avg = (DIELECTRIC_F0 * ca + cb).clamp(0.0, 0.99);
+        let below = (1.0 - coat * e_v) * (1.0 - coat * e_l) / (1.0 - coat * e_avg);
+        for c in 0..3 {
+            diffuse[c] *= below;
+            specular[c] = specular[c] * below + coat * cd * cv * cf[c] * cc[c];
+        }
     }
 
     Response { diffuse, specular }
@@ -621,7 +792,9 @@ pub fn library_source() -> &'static str {
 /// The table, then its per-roughness averages. One buffer rather than two,
 /// because the forward pass will already be carrying lights, materials and a
 /// camera, and a binding saved there is a binding not spent.
-pub const DFG_ENTRIES: usize = ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT;
+/// Then the sheen's table and its averages, each entry `(E, 0)`: see
+/// [`SheenTable`].
+pub const DFG_ENTRIES: usize = 2 * (ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT);
 
 /// The buffer the shader reads: the table, then the averages.
 ///
@@ -632,8 +805,144 @@ pub const DFG_ENTRIES: usize = ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT;
 pub fn dfg_buffer(table: &AlbedoTable) -> Vec<f32> {
     let mut out = table.as_flat();
     out.extend(table.averages_flat());
+    let sheen = sheen_table();
+    for row in &sheen.entries {
+        for e in row {
+            out.extend([*e, 0.0]);
+        }
+    }
+    for a in &sheen.average {
+        out.extend([*a, 0.0]);
+    }
     debug_assert_eq!(out.len(), DFG_ENTRIES * 2);
     out
+}
+
+// --- sheen -------------------------------------------------------------------
+//
+// The soft brightening at a fabric's rim: fibres standing off the surface
+// catch light at grazing angles. Estevez and Kulla's "Charlie" distribution —
+// `sin θh` to a power, so it peaks where the half vector lies along the
+// surface — with Neubelt and Pettineo's visibility term, which is what glTF's
+// `KHR_materials_sheen` and Filament use.
+//
+// The lobe is not energy-conserving by itself, so the surface below is lit by
+// what it leaves, the same symmetric way the diffuse is coupled to the
+// specular and the coat to what is under it: from the lobe's directional
+// albedo, tabulated here.
+
+/// The sheen's roughness is held above this: the distribution's power is
+/// its inverse, and a power in the hundreds is a spike no table resolves.
+pub const MIN_SHEEN_ROUGHNESS: f32 = 0.07;
+
+/// The Charlie distribution.
+pub fn sheen_distribution(noh: f32, alpha: f32) -> f32 {
+    let inv = 1.0 / alpha;
+    let sin2 = (1.0 - noh * noh).max(0.0078125);
+    (2.0 + inv) * sin2.powf(inv * 0.5) / std::f32::consts::TAU
+}
+
+/// Neubelt and Pettineo's visibility, `1/(4·(NoL + NoV − NoL·NoV))`.
+pub fn sheen_visibility(nov: f32, nol: f32) -> f32 {
+    1.0 / (4.0 * (nol + nov - nol * nov)).max(1e-4)
+}
+
+fn sheen_alpha(roughness: f32) -> f32 {
+    let r = roughness.clamp(MIN_SHEEN_ROUGHNESS, 1.0);
+    r * r
+}
+
+/// The sheen lobe's directional albedo, per view angle and roughness, and
+/// its cosine-weighted average per roughness — what a white sheen reflects,
+/// and therefore what it takes from the surface below.
+pub struct SheenTable {
+    entries: [[f32; ALBEDO_LUT]; ALBEDO_LUT],
+    average: [f32; ALBEDO_LUT],
+}
+
+impl SheenTable {
+    /// By quadrature over the hemisphere: the lobe is broad, so a fixed grid
+    /// resolves it at every roughness the floor allows.
+    pub fn compute() -> Self {
+        const THETA: usize = 48;
+        const PHI: usize = 64;
+        let mut entries = [[0.0f32; ALBEDO_LUT]; ALBEDO_LUT];
+        for (ri, row) in entries.iter_mut().enumerate() {
+            let roughness = (ri as f32 + 0.5) / ALBEDO_LUT as f32;
+            let alpha = sheen_alpha(roughness);
+            for (vi, cell) in row.iter_mut().enumerate() {
+                let nov = ((vi as f32 + 0.5) / ALBEDO_LUT as f32).clamp(1e-3, 1.0);
+                let v = glam::Vec3::new((1.0 - nov * nov).max(0.0).sqrt(), 0.0, nov);
+                let mut sum = 0.0f32;
+                for i in 0..THETA {
+                    // Even in cos θ, so each ring is the same solid angle.
+                    let cos_t = (i as f32 + 0.5) / THETA as f32;
+                    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+                    for j in 0..PHI {
+                        let phi = (j as f32 + 0.5) / PHI as f32 * std::f32::consts::TAU;
+                        let l = glam::Vec3::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+                        let h = (v + l).normalize();
+                        let f = sheen_distribution(h.z.clamp(0.0, 1.0), alpha)
+                            * sheen_visibility(nov, cos_t);
+                        sum += f * cos_t;
+                    }
+                }
+                let d_omega = std::f32::consts::TAU / (THETA * PHI) as f32;
+                *cell = (sum * d_omega).clamp(0.0, 1.0);
+            }
+        }
+        let mut average = [0.0f32; ALBEDO_LUT];
+        for (ri, row) in entries.iter().enumerate() {
+            average[ri] = row
+                .iter()
+                .enumerate()
+                .map(|(vi, e)| {
+                    e * 2.0 * ((vi as f32 + 0.5) / ALBEDO_LUT as f32) / ALBEDO_LUT as f32
+                })
+                .sum();
+        }
+        Self { entries, average }
+    }
+
+    /// The albedo at `(NoV, roughness)`, interpolated as the DFG table is.
+    pub fn lookup(&self, nov: f32, roughness: f32) -> f32 {
+        let last = (ALBEDO_LUT - 1) as f32;
+        let to_index = |t: f32| (t.clamp(0.0, 1.0) * ALBEDO_LUT as f32 - 0.5).clamp(0.0, last);
+        let (x, y) = (to_index(nov), to_index(roughness));
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(ALBEDO_LUT - 1), (y0 + 1).min(ALBEDO_LUT - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let near = self.entries[y0][x0] * (1.0 - fx) + self.entries[y0][x1] * fx;
+        let far = self.entries[y1][x0] * (1.0 - fx) + self.entries[y1][x1] * fx;
+        near * (1.0 - fy) + far * fy
+    }
+
+    /// The cosine-weighted average at `roughness`.
+    pub fn average(&self, roughness: f32) -> f32 {
+        let last = (ALBEDO_LUT - 1) as f32;
+        let y = (roughness.clamp(0.0, 1.0) * ALBEDO_LUT as f32 - 0.5).clamp(0.0, last);
+        let y0 = y.floor() as usize;
+        let y1 = (y0 + 1).min(ALBEDO_LUT - 1);
+        let fy = y - y0 as f32;
+        self.average[y0] * (1.0 - fy) + self.average[y1] * fy
+    }
+}
+
+/// The one sheen table.
+pub fn sheen_table() -> &'static SheenTable {
+    static TABLE: std::sync::OnceLock<SheenTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(SheenTable::compute)
+}
+
+/// How much of a surface's light its sheen takes from the view `nov`: the
+/// sheen colour's brightest channel times the lobe's albedo.
+pub fn sheen_share(surface: &Surface, nov: f32) -> f32 {
+    let s = surface.sheen_color.to_array();
+    let w = s[0].max(s[1]).max(s[2]).clamp(0.0, 1.0);
+    if w <= 0.0 {
+        return 0.0;
+    }
+    w * sheen_table().lookup(nov, surface.sheen_roughness)
 }
 
 #[cfg(test)]
@@ -690,6 +999,7 @@ mod tests {
             base_color: SceneRgb::WHITE,
             metallic: 1.0,
             roughness,
+            ..Default::default()
         }
     }
 
@@ -710,6 +1020,207 @@ mod tests {
                 "roughness {roughness} reflected {albedo}"
             );
         }
+    }
+
+    #[test]
+    fn a_varnish_over_a_white_matte_keeps_its_energy_and_brightens_the_rim() {
+        // A white matte returns all the light it gets; under a varnish it
+        // must still — the varnish's reflection taken from what reaches the
+        // matte, not added to it — at every angle and every roughness of the
+        // varnish. And a varnish is there: at a grazing view it reflects
+        // more than the matte's own sheen does.
+        let matte = Surface {
+            base_color: SceneRgb::WHITE,
+            metallic: 0.0,
+            roughness: 0.8,
+            ..Default::default()
+        };
+        // Not a near-mirror varnish: a grid cannot integrate a delta lobe.
+        for coat_roughness in [0.2, 0.5, 1.0] {
+            let coated = Surface {
+                coat: 1.0,
+                coat_roughness,
+                ..matte
+            };
+            for nov in [0.95, 0.6, 0.3] {
+                let total = directional_albedo(&coated, nov, Lobe::Both);
+                assert!(
+                    (0.93..=1.03).contains(&total),
+                    "coat roughness {coat_roughness}, NoV {nov}: {total}"
+                );
+            }
+        }
+        let bare = directional_albedo(&matte, 0.2, Lobe::Specular);
+        let varnished = directional_albedo(
+            &Surface {
+                coat: 1.0,
+                coat_roughness: 0.3,
+                ..matte
+            },
+            0.2,
+            Lobe::Specular,
+        );
+        assert!(varnished > bare * 1.5, "{bare} bare, {varnished} varnished");
+    }
+
+    #[test]
+    fn a_white_sheen_over_a_white_matte_keeps_its_energy() {
+        // The fibres' light is taken from what reaches the surface below, so
+        // a white cloth with a white sheen returns what it gets — face on and
+        // at a glance, soft sheen and tight, with a varnish over it too.
+        for sheen_roughness in [0.2, 0.5, 1.0] {
+            for coat in [0.0, 1.0] {
+                let cloth = Surface {
+                    base_color: SceneRgb::WHITE,
+                    roughness: 0.9,
+                    sheen_color: SceneRgb::WHITE,
+                    sheen_roughness,
+                    coat,
+                    coat_roughness: 0.4,
+                    ..Default::default()
+                };
+                for nov in [0.95, 0.5, 0.2] {
+                    let total = directional_albedo(&cloth, nov, Lobe::Both);
+                    assert!(
+                        (0.92..=1.04).contains(&total),
+                        "sheen {sheen_roughness}, coat {coat}, NoV {nov}: {total}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_sheen_brightens_the_rim_and_not_the_face() {
+        // What a sheen is for: velvet's glow at its silhouette. A dark cloth
+        // seen at a glance, lit at a glance from beside the viewer — the
+        // half vector lying along the surface, where the fibres stand —
+        // gives back far more with a sheen than without; seen and lit face
+        // on, about the same.
+        let dark = Surface {
+            base_color: SceneRgb::new(0.05, 0.05, 0.05),
+            roughness: 0.9,
+            ..Default::default()
+        };
+        let velvet = Surface {
+            sheen_color: SceneRgb::new(0.8, 0.8, 0.8),
+            sheen_roughness: 0.4,
+            ..dark
+        };
+        let n = glam::Vec3::Z;
+        let grazing = glam::Vec3::new(0.97, 0.0, 0.243).normalize();
+        let beside = glam::Vec3::new(0.95, 0.25, 0.19).normalize();
+        let rim = |s: &Surface| evaluate(s, n, grazing, beside).total()[0];
+        assert!(
+            rim(&velvet) > rim(&dark) * 3.0,
+            "{} against {}",
+            rim(&velvet),
+            rim(&dark)
+        );
+        let face = |s: &Surface| evaluate(s, n, n, n).total()[0];
+        assert!(
+            face(&velvet) < face(&dark) * 1.5,
+            "{} against {}",
+            face(&velvet),
+            face(&dark)
+        );
+    }
+
+    #[test]
+    fn a_brushed_metal_stretches_its_highlight_along_the_brushing() {
+        // Brushed along X: a light tipped off the mirror direction along X
+        // still catches the highlight; tipped as far along Y, it does not.
+        let brushed = Surface {
+            base_color: SceneRgb::WHITE,
+            metallic: 1.0,
+            roughness: 0.2,
+            anisotropy: 0.8,
+            tangent: [1.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        let n = glam::Vec3::Z;
+        let v = n;
+        let along = glam::Vec3::new(0.35, 0.0, 1.0).normalize();
+        let across = glam::Vec3::new(0.0, 0.35, 1.0).normalize();
+        let f = |l| evaluate(&brushed, n, v, l).specular[0];
+        assert!(
+            f(along) > f(across) * 5.0,
+            "{} along, {} across",
+            f(along),
+            f(across)
+        );
+        // Turned a quarter, the other way about.
+        let turned = Surface {
+            anisotropy_rotation: 0.25,
+            ..brushed
+        };
+        let g = |l| evaluate(&turned, n, v, l).specular[0];
+        assert!(
+            g(across) > g(along) * 5.0,
+            "{} across, {} along",
+            g(across),
+            g(along)
+        );
+        // And with no tangent there is nothing to stretch along: round.
+        let lost = Surface {
+            tangent: [0.0; 3],
+            ..brushed
+        };
+        let h = |l| evaluate(&lost, n, v, l).specular[0];
+        assert!((h(along) - h(across)).abs() < 1e-4 * h(along).max(1.0));
+    }
+
+    #[test]
+    fn a_brushed_white_metal_keeps_its_energy_and_stays_reciprocal() {
+        for anisotropy in [0.4, 0.9] {
+            let brushed = Surface {
+                base_color: SceneRgb::WHITE,
+                metallic: 1.0,
+                roughness: 0.5,
+                anisotropy,
+                tangent: [1.0, 0.0, 0.0],
+                ..Default::default()
+            };
+            for nov in [0.9, 0.5] {
+                let albedo = directional_albedo(&brushed, nov, Lobe::Specular);
+                assert!(
+                    (0.85..=1.05).contains(&albedo),
+                    "anisotropy {anisotropy}, NoV {nov}: {albedo}"
+                );
+            }
+            // Reciprocal as the stretched lobe goes: on a dielectric, where
+            // the multiple-scattering compensation — which reads the view
+            // and so is not symmetric, stretched or not — is one to within
+            // a thousandth.
+            let plastic = Surface {
+                metallic: 0.0,
+                ..brushed
+            };
+            let n = glam::Vec3::Z;
+            let a = glam::Vec3::new(0.3, 0.5, 0.8).normalize();
+            let b = glam::Vec3::new(-0.6, 0.1, 0.7).normalize();
+            let ab = evaluate(&plastic, n, a, b).specular[0];
+            let ba = evaluate(&plastic, n, b, a).specular[0];
+            assert!((ab - ba).abs() < 2e-3 * ab.max(ba), "{ab} against {ba}");
+        }
+    }
+
+    #[test]
+    fn the_index_of_refraction_sets_a_dielectrics_reflection() {
+        // Water reflects less than glass face on, a diamond far more; and a
+        // specular weight of zero reflects nothing at all.
+        let at = |ior: f32, specular: f32| {
+            Surface {
+                ior,
+                specular,
+                ..Default::default()
+            }
+            .f0()[0]
+        };
+        assert!((at(1.33, 1.0) - 0.02).abs() < 0.001, "{}", at(1.33, 1.0));
+        assert!((at(1.5, 1.0) - 0.04).abs() < 1e-6);
+        assert!((at(2.42, 1.0) - 0.172).abs() < 0.001, "{}", at(2.42, 1.0));
+        assert_eq!(at(1.5, 0.0), 0.0);
     }
 
     #[test]
@@ -753,6 +1264,7 @@ mod tests {
                         base_color: SceneRgb::WHITE,
                         metallic,
                         roughness,
+                        ..Default::default()
                     };
                     let albedo = directional_albedo(&surface, nov, Lobe::Both);
                     assert!(
@@ -854,6 +1366,7 @@ mod tests {
             base_color: SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.4,
+            ..Default::default()
         };
         let n = glam::Vec3::Z;
         let a = glam::Vec3::new(0.9, 0.0, 0.436).normalize();
@@ -950,7 +1463,9 @@ mod tests {
         for declaration in [
             format!("const ALBEDO_LUT: u32 = {ALBEDO_LUT}u;"),
             format!("const DIELECTRIC_F0: f32 = {DIELECTRIC_F0};"),
+            format!("const DIELECTRIC_IOR: f32 = {DIELECTRIC_IOR};"),
             format!("const MIN_ROUGHNESS: f32 = {MIN_ROUGHNESS};"),
+            format!("const MIN_SHEEN_ROUGHNESS: f32 = {MIN_SHEEN_ROUGHNESS};"),
         ] {
             assert!(
                 source.contains(&declaration),
@@ -1060,6 +1575,7 @@ mod tests {
             base_color: SceneRgb::new(1.0, 0.77, 0.34),
             metallic: 1.0,
             roughness: 0.2,
+            ..Default::default()
         };
         assert_eq!(gold.f0(), [1.0, 0.77, 0.34]);
         assert_eq!(gold.diffuse_albedo(), [0.0; 3]);
@@ -1068,8 +1584,13 @@ mod tests {
             base_color: SceneRgb::new(1.0, 0.77, 0.34),
             metallic: 0.0,
             roughness: 0.2,
+            ..Default::default()
         };
-        assert_eq!(plastic.f0(), [DIELECTRIC_F0; 3]);
+        // From the index of refraction: 1.5's four per cent, to the last bit
+        // or two of a float.
+        for c in plastic.f0() {
+            assert!((c - DIELECTRIC_F0).abs() < 1e-7, "{c}");
+        }
         assert_eq!(plastic.diffuse_albedo(), [1.0, 0.77, 0.34]);
     }
 
@@ -1083,6 +1604,7 @@ mod tests {
             base_color: SceneRgb::new(0.9, 0.6, 0.3),
             metallic: 0.3,
             roughness: 0.35,
+            ..Default::default()
         };
         let n = glam::Vec3::Z;
         for (a, b) in [
@@ -1173,21 +1695,25 @@ mod tests {
                 base_color: SceneRgb::WHITE,
                 metallic: 1.0,
                 roughness: 0.0,
+                ..Default::default()
             },
             Surface {
                 base_color: SceneRgb::BLACK,
                 metallic: 0.0,
                 roughness: 1.0,
+                ..Default::default()
             },
             Surface {
                 base_color: SceneRgb::new(2.0, -1.0, 0.5),
                 metallic: 5.0,
                 roughness: -3.0,
+                ..Default::default()
             },
             Surface {
                 base_color: SceneRgb::new(f32::NAN, 0.5, 0.5),
                 metallic: 0.5,
                 roughness: 0.5,
+                ..Default::default()
             },
         ];
         let directions = [
@@ -1231,6 +1757,7 @@ mod tests {
             base_color: SceneRgb::WHITE,
             metallic: 1.0,
             roughness: 0.0,
+            ..Default::default()
         };
         assert_eq!(mirror.alpha(), MIN_ROUGHNESS * MIN_ROUGHNESS);
         let peak = evaluate(&mirror, glam::Vec3::Z, glam::Vec3::Z, glam::Vec3::Z).specular[0];
@@ -1251,6 +1778,7 @@ mod tests {
             base_color: SceneRgb::WHITE,
             metallic: 0.0,
             roughness: 0.5,
+            ..Default::default()
         };
         let diffuse = directional_albedo(&surface, 0.9, Lobe::Diffuse);
         // Less than one, because the specular lobe took its share first.
@@ -1289,6 +1817,7 @@ mod tests {
             base_color: SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.3,
+            ..Default::default()
         };
         let n = glam::Vec3::Z;
         let v = glam::Vec3::Z;

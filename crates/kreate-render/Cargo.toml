@@ -20,6 +20,9 @@ thiserror.workspace = true
 # An environment is `Rgba16Float`, and the projection reads those bytes on the
 # CPU — see `environment::irradiance_sh9` for why it is not a GPU pass.
 half = "2"
+# Open Image Denoise, loaded at run time when it is installed: see `oidn`.
+# Already in the tree through wgpu's Vulkan loader.
+libloading = "0.8"
 
 [dev-dependencies]
 # The compiler, for the contract test only. A *dev* dependency deliberately:

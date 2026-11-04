@@ -35,6 +35,7 @@
 
 const ALBEDO_LUT: u32 = 32u;
 const DIELECTRIC_F0: f32 = 0.04;
+const DIELECTRIC_IOR: f32 = 1.5;
 const MIN_ROUGHNESS: f32 = 0.045;
 const PI: f32 = 3.14159265359;
 const INV_PI: f32 = 0.31830988618;
@@ -57,6 +58,50 @@ struct Surface {
     metallic: f32,
     /// Perceptual roughness. The distribution uses its square.
     roughness: f32,
+    /// A weight on the dielectric's reflection; one is physical.
+    specular: f32,
+    /// The index of refraction: what a dielectric reflects face on.
+    ior: f32,
+    /// A clear varnish, zero to one, and its perceptual roughness.
+    coat: f32,
+    coat_roughness: f32,
+    /// A fabric's sheen: its colour (black is none) and spread.
+    sheen_color: vec3<f32>,
+    sheen_roughness: f32,
+    /// How far the highlight stretches along the surface, and which way in
+    /// turns from the tangent.
+    anisotropy: f32,
+    anisotropy_rotation: f32,
+    /// The surface's tangent, filled in by the pass; zero where there is
+    /// none, and the highlight does not stretch.
+    tangent: vec3<f32>,
+}
+
+/// A surface with every field at the value that leaves it what the three
+/// first ones say: what a constructor starts from, because a `var` of a
+/// struct is zeros, and an index of refraction of zero is no surface.
+fn surface_default() -> Surface {
+    var s: Surface;
+    s.base_color = vec3<f32>(0.8);
+    s.metallic = 0.0;
+    s.roughness = 0.5;
+    s.specular = 1.0;
+    s.ior = DIELECTRIC_IOR;
+    s.coat = 0.0;
+    s.coat_roughness = 0.03;
+    s.sheen_color = vec3<f32>(0.0);
+    s.sheen_roughness = 0.3;
+    s.anisotropy = 0.0;
+    s.anisotropy_rotation = 0.0;
+    s.tangent = vec3<f32>(0.0);
+    return s;
+}
+
+/// `((n − 1)/(n + 1))² · specular`, at most one: see `brdf::dielectric_f0`.
+fn dielectric_f0(ior: f32, specular: f32) -> f32 {
+    let n = max(ior, 1.0);
+    let r = (n - 1.0) / (n + 1.0);
+    return min(r * r * max(specular, 0.0), 1.0);
 }
 
 struct Response {
@@ -66,13 +111,24 @@ struct Response {
 
 fn surface_f0(s: Surface) -> vec3<f32> {
     let m = clamp(s.metallic, 0.0, 1.0);
-    return mix(vec3<f32>(DIELECTRIC_F0), s.base_color, m);
+    return mix(vec3<f32>(dielectric_f0(s.ior, s.specular)), s.base_color, m);
 }
 
 fn surface_diffuse_albedo(s: Surface) -> vec3<f32> {
     // Zero for a metal, and not as an approximation: a conductor absorbs what
     // enters it, so nothing scatters back out.
     return s.base_color * (1.0 - clamp(s.metallic, 0.0, 1.0));
+}
+
+/// The roughness the energy terms are read at: see `Surface::lobe_roughness`.
+fn surface_lobe_roughness(s: Surface) -> f32 {
+    let strength = clamp(s.anisotropy, 0.0, 1.0);
+    if strength <= 0.0 || all(s.tangent == vec3<f32>(0.0)) {
+        return clamp(s.roughness, 0.0, 1.0);
+    }
+    let alpha = surface_alpha(s);
+    let along = alpha + (1.0 - alpha) * strength * strength;
+    return sqrt((along + alpha) * 0.5);
 }
 
 fn surface_alpha(s: Surface) -> f32 {
@@ -109,6 +165,103 @@ fn dfg_average(roughness: f32) -> vec2<f32> {
     let y0 = u32(floor(y));
     let y1 = min(y0 + 1u, ALBEDO_LUT - 1u);
     return mix(dfg[base + y0], dfg[base + y1], y - floor(y));
+}
+
+// --- sheen: see `brdf.rs`'s section of the same name ---------------------
+
+const MIN_SHEEN_ROUGHNESS: f32 = 0.07;
+
+/// Where the sheen's table starts in the buffer: after the DFG table and its
+/// averages. Its own averages follow it.
+fn sheen_base() -> u32 {
+    return ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT;
+}
+
+fn sheen_lookup(nov: f32, roughness: f32) -> f32 {
+    let x = lut_index(nov);
+    let y = lut_index(roughness);
+    let x0 = u32(floor(x));
+    let y0 = u32(floor(y));
+    let x1 = min(x0 + 1u, ALBEDO_LUT - 1u);
+    let y1 = min(y0 + 1u, ALBEDO_LUT - 1u);
+    let fx = x - floor(x);
+    let fy = y - floor(y);
+    let b = sheen_base();
+    let near = mix(dfg[b + y0 * ALBEDO_LUT + x0].x, dfg[b + y0 * ALBEDO_LUT + x1].x, fx);
+    let far = mix(dfg[b + y1 * ALBEDO_LUT + x0].x, dfg[b + y1 * ALBEDO_LUT + x1].x, fx);
+    return mix(near, far, fy);
+}
+
+fn sheen_average(roughness: f32) -> f32 {
+    let b = sheen_base() + ALBEDO_LUT * ALBEDO_LUT;
+    let y = lut_index(roughness);
+    let y0 = u32(floor(y));
+    let y1 = min(y0 + 1u, ALBEDO_LUT - 1u);
+    return mix(dfg[b + y0].x, dfg[b + y1].x, y - floor(y));
+}
+
+fn sheen_distribution(noh: f32, alpha: f32) -> f32 {
+    let inv = 1.0 / alpha;
+    let sin2 = max(1.0 - noh * noh, 0.0078125);
+    return (2.0 + inv) * pow(sin2, inv * 0.5) / (2.0 * PI);
+}
+
+fn sheen_visibility(nov: f32, nol: f32) -> f32 {
+    return 1.0 / max(4.0 * (nol + nov - nol * nov), 1e-4);
+}
+
+fn sheen_alpha(roughness: f32) -> f32 {
+    let r = clamp(roughness, MIN_SHEEN_ROUGHNESS, 1.0);
+    return r * r;
+}
+
+/// The sheen colour's brightest channel: how much of the lobe's albedo the
+/// sheen takes from the surface below.
+fn sheen_weight(s: Surface) -> f32 {
+    return clamp(max(max(s.sheen_color.r, s.sheen_color.g), s.sheen_color.b), 0.0, 1.0);
+}
+
+/// The stretched lobe's frame and widths: see `brdf::stretch`. `w` is zero
+/// for a lobe that does not stretch.
+struct Stretch {
+    along: vec3<f32>,
+    across: vec3<f32>,
+    at: f32,
+    ab: f32,
+    on: bool,
+}
+
+fn stretch(s: Surface, n: vec3<f32>, alpha: f32) -> Stretch {
+    var out: Stretch;
+    out.on = false;
+    let strength = clamp(s.anisotropy, 0.0, 1.0);
+    if strength <= 0.0 {
+        return out;
+    }
+    var t = s.tangent - n * dot(n, s.tangent);
+    if dot(t, t) < 1e-12 {
+        return out;
+    }
+    t = normalize(t);
+    let b = cross(n, t);
+    let a = s.anisotropy_rotation * 2.0 * PI;
+    out.along = t * cos(a) + b * sin(a);
+    out.across = cross(n, out.along);
+    out.at = alpha + (1.0 - alpha) * strength * strength;
+    out.ab = alpha;
+    out.on = true;
+    return out;
+}
+
+fn distribution_stretched(toh: f32, boh: f32, noh: f32, at: f32, ab: f32) -> f32 {
+    let x = (toh / at) * (toh / at) + (boh / ab) * (boh / ab) + noh * noh;
+    return 1.0 / max(PI * at * ab * x * x, 1.17549435e-38);
+}
+
+fn visibility_stretched(tov: f32, bov: f32, nov: f32, tol: f32, bol: f32, nol: f32, at: f32, ab: f32) -> f32 {
+    let v = nol * sqrt((at * tov) * (at * tov) + (ab * bov) * (ab * bov) + nov * nov);
+    let l = nov * sqrt((at * tol) * (at * tol) + (ab * bol) * (ab * bol) + nol * nol);
+    return 0.5 / max(v + l, 1.17549435e-38);
 }
 
 /// Trowbridge-Reitz.
@@ -184,11 +337,20 @@ fn brdf_evaluate(s: Surface, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> Respon
     let voh = clamp(dot(v, h), 0.0, 1.0);
 
     let alpha = surface_alpha(s);
-    let roughness = clamp(s.roughness, 0.0, 1.0);
+    let roughness = surface_lobe_roughness(s);
     let f0 = surface_f0(s);
     let f = fresnel(f0, voh);
-    let d = distribution(noh, alpha);
-    let vis = visibility(nov, nol, alpha);
+    var d = distribution(noh, alpha);
+    var vis = visibility(nov, nol, alpha);
+    let st = stretch(s, n, alpha);
+    if st.on {
+        d = distribution_stretched(dot(st.along, h), dot(st.across, h), noh, st.at, st.ab);
+        vis = visibility_stretched(
+            dot(st.along, v), dot(st.across, v), nov,
+            dot(st.along, l), dot(st.across, l), nol,
+            st.at, st.ab,
+        );
+    }
 
     out.specular = d * vis * f * energy_compensation(f0, nov, roughness);
 
@@ -202,6 +364,36 @@ fn brdf_evaluate(s: Surface, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> Respon
     out.diffuse = surface_diffuse_albedo(s) * INV_PI
         * (vec3<f32>(1.0) - share_v) * (vec3<f32>(1.0) - share_l)
         / (vec3<f32>(1.0) - avg);
+
+    // The sheen over the surface, under any varnish: see `brdf::evaluate`.
+    let sw = sheen_weight(s);
+    if sw > 0.0 {
+        let r = s.sheen_roughness;
+        let below = (1.0 - sw * sheen_lookup(nov, r)) * (1.0 - sw * sheen_lookup(nol, r))
+            / max(1.0 - sw * sheen_average(r), 1e-3);
+        let lobe = sheen_distribution(noh, sheen_alpha(r)) * sheen_visibility(nov, nol);
+        out.diffuse *= below;
+        out.specular = out.specular * below + clamp(s.sheen_color, vec3<f32>(0.0), vec3<f32>(1.0)) * lobe;
+    }
+
+    // The varnish, and what it leaves the surface below: see `brdf::evaluate`.
+    let coat = clamp(s.coat, 0.0, 1.0);
+    if coat > 0.0 {
+        let coat_roughness = clamp(s.coat_roughness, MIN_ROUGHNESS, 1.0);
+        let coat_alpha = coat_roughness * coat_roughness;
+        let cf0 = vec3<f32>(DIELECTRIC_F0);
+        let cf = fresnel(cf0, voh);
+        let cd = distribution(noh, coat_alpha);
+        let cv = visibility(nov, nol, coat_alpha);
+        let cc = energy_compensation(cf0, nov, coat_roughness);
+        let e_v = specular_share(cf0, nov, coat_roughness).x;
+        let e_l = specular_share(cf0, nol, coat_roughness).x;
+        let cab = dfg_average(coat_roughness);
+        let e_avg = clamp(DIELECTRIC_F0 * cab.x + cab.y, 0.0, 0.99);
+        let below = (1.0 - coat * e_v) * (1.0 - coat * e_l) / (1.0 - coat * e_avg);
+        out.diffuse *= below;
+        out.specular = out.specular * below + coat * cd * cv * cf * cc;
+    }
 
     return out;
 }
@@ -248,8 +440,14 @@ fn brdf_shade(
 struct Sample {
     /// rgb: base colour. w: metallic.
     material: vec4<f32>,
-    /// x: roughness. yzw: unused.
+    /// x: roughness. y: specular. z: index of refraction. w: the coat.
     params: vec4<f32>,
+    /// x: the coat's roughness. y: the sheen's. z: anisotropy. w: its turn.
+    more: vec4<f32>,
+    /// rgb: the sheen's colour.
+    sheen: vec4<f32>,
+    /// xyz: the tangent.
+    tangent: vec4<f32>,
     normal: vec4<f32>,
     view: vec4<f32>,
     light: vec4<f32>,
@@ -278,10 +476,19 @@ fn probe_brdf(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let sample = samples[i];
-    var s: Surface;
+    var s = surface_default();
     s.base_color = sample.material.rgb;
     s.metallic = sample.material.w;
     s.roughness = sample.params.x;
+    s.specular = sample.params.y;
+    s.ior = sample.params.z;
+    s.coat = sample.params.w;
+    s.coat_roughness = sample.more.x;
+    s.sheen_roughness = sample.more.y;
+    s.anisotropy = sample.more.z;
+    s.anisotropy_rotation = sample.more.w;
+    s.sheen_color = sample.sheen.rgb;
+    s.tangent = sample.tangent.xyz;
 
     let r = brdf_evaluate(
         s,

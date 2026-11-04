@@ -68,6 +68,7 @@ impl App {
             blur: None,
             written: Vec::new(),
             video: None,
+            denoised: false,
         });
         // Motion blur: the shutter, as a fraction of a frame, from the
         // camera; a closed one has nothing to smear.
@@ -243,6 +244,14 @@ impl App {
             ));
             return;
         }
+        // The samples are in. With Open Image Denoise installed, the picture
+        // is filtered by it rather than by the view's own blur: read back,
+        // denoised on the CPU, put in place of the mean, and shown for a
+        // frame before it is written. A motion-blurred picture is the mean
+        // of several and is left to the view's filter.
+        if self.denoise_with_oidn() {
+            return;
+        }
         // Motion blur: this was one moment of the shutter. Added to the
         // mean, and the next moment drawn, until the shutter has closed.
         if self.render_job.as_ref().is_some_and(|j| j.blur.is_some()) {
@@ -369,6 +378,58 @@ impl App {
     }
 
     /// Moves an animation's render on from frame `f`, of `end`.
+    /// Runs Open Image Denoise over the finished picture, once, when the
+    /// render asks for denoising and the library is installed. `true` when
+    /// it has just done so, and the picture wants a frame to be shown before
+    /// it is written.
+    fn denoise_with_oidn(&mut self) -> bool {
+        let Some(job) = self.render_job.as_mut() else {
+            return false;
+        };
+        if job.denoised || !job.settings.denoise || job.blur.is_some() {
+            return false;
+        }
+        job.denoised = true;
+        if !kreate_render::oidn::available() {
+            return false;
+        }
+        let Some(gfx) = self.gfx.as_mut() else {
+            return false;
+        };
+        let started = Instant::now();
+        let result = gfx
+            .viewport
+            .read_traced(&gfx.gpu.device, &gfx.gpu.queue)
+            .and_then(|gathered| {
+                let clean = kreate_render::oidn::denoise(&kreate_render::oidn::Noisy {
+                    width: gathered.width as usize,
+                    height: gathered.height as usize,
+                    color: &gathered.color,
+                    albedo: &gathered.albedo,
+                    normal: &gathered.normal,
+                })?;
+                Ok((gathered, clean))
+            });
+        match result {
+            Ok((gathered, clean)) => {
+                gfx.viewport.path_trace_denoise = false;
+                gfx.viewport
+                    .show_traced_mean(&gfx.gpu.queue, &gathered, &clean);
+                tracing::info!(
+                    "denoised with Open Image Denoise in {:.2} s",
+                    started.elapsed().as_secs_f32()
+                );
+                self.redraw.set(RedrawReason::ACCUMULATE);
+                true
+            }
+            Err(e) => {
+                // The view's own filter has the picture as it was.
+                tracing::warn!("Open Image Denoise: {e}; the view's own filter is kept");
+                false
+            }
+        }
+    }
+
     fn next_render_frame(&mut self, f: i32, end: i32) {
         self.set_frame((f + 1) as f64);
         // A marker cuts to another camera on this frame: the render cuts
@@ -390,6 +451,13 @@ impl App {
             job.frames = Some((f + 1, end));
             job.drawn = 0;
             job.ids = None;
+            job.denoised = false;
+            // The next frame is filtered as the settings say until its own
+            // samples are in: the last one's denoising turned the view's off.
+            let denoise = job.settings.denoise;
+            if let Some(gfx) = self.gfx.as_mut() {
+                gfx.viewport.path_trace_denoise = denoise;
+            }
             if let Some(blur) = job.blur.as_mut() {
                 blur.step = 0;
                 blur.base = (f + 1) as f64;

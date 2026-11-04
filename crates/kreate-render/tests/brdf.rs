@@ -75,6 +75,9 @@ const ABSOLUTE: f32 = 1e-5;
 struct Sample {
     material: [f32; 4],
     params: [f32; 4],
+    more: [f32; 4],
+    sheen: [f32; 4],
+    tangent: [f32; 4],
     normal: [f32; 4],
     view: [f32; 4],
     light: [f32; 4],
@@ -84,7 +87,28 @@ fn sample_of(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) -> 
     let base = surface.base_color.to_array();
     Sample {
         material: [base[0], base[1], base[2], surface.metallic],
-        params: [surface.roughness, 0.0, 0.0, 0.0],
+        params: [
+            surface.roughness,
+            surface.specular,
+            surface.ior,
+            surface.coat,
+        ],
+        more: [
+            surface.coat_roughness,
+            surface.sheen_roughness,
+            surface.anisotropy,
+            surface.anisotropy_rotation,
+        ],
+        sheen: {
+            let c = surface.sheen_color.to_array();
+            [c[0], c[1], c[2], 0.0]
+        },
+        tangent: [
+            surface.tangent[0],
+            surface.tangent[1],
+            surface.tangent[2],
+            0.0,
+        ],
         normal: [n.x, n.y, n.z, 0.0],
         view: [v.x, v.y, v.z, 0.0],
         light: [l.x, l.y, l.z, 0.0],
@@ -284,6 +308,7 @@ fn surfaces() -> Vec<Surface> {
                 base_color: kreate_math::SceneRgb::new(0.9, 0.55, 0.2),
                 metallic,
                 roughness,
+                ..Default::default()
             });
         }
     }
@@ -291,12 +316,58 @@ fn surfaces() -> Vec<Surface> {
         base_color: kreate_math::SceneRgb::WHITE,
         metallic: 1.0,
         roughness: 0.3,
+        ..Default::default()
     });
     out.push(Surface {
         base_color: kreate_math::SceneRgb::BLACK,
         metallic: 0.0,
         roughness: 0.6,
+        ..Default::default()
     });
+    // The layered surface: water's and a diamond's reflection, a weight on
+    // it, and varnishes sharp and soft over a matte and over a metal.
+    for (ior, specular) in [(1.33f32, 1.0f32), (2.42, 1.0), (1.5, 0.5)] {
+        out.push(Surface {
+            base_color: kreate_math::SceneRgb::new(0.3, 0.5, 0.7),
+            roughness: 0.4,
+            ior,
+            specular,
+            ..Default::default()
+        });
+    }
+    for (metallic, coat_roughness) in [(0.0f32, 0.05f32), (0.0, 0.6), (1.0, 0.2)] {
+        out.push(Surface {
+            base_color: kreate_math::SceneRgb::new(0.8, 0.1, 0.1),
+            metallic,
+            roughness: 0.5,
+            coat: 0.8,
+            coat_roughness,
+            ..Default::default()
+        });
+    }
+    // Brushed: stretched along X and turned a little, then a quarter turn.
+    for (anisotropy, anisotropy_rotation) in [(0.5f32, 0.1f32), (0.9, 0.25)] {
+        out.push(Surface {
+            base_color: kreate_math::SceneRgb::new(0.9, 0.9, 0.9),
+            metallic: 1.0,
+            roughness: 0.3,
+            anisotropy,
+            anisotropy_rotation,
+            tangent: [1.0, 0.0, 0.0],
+            ..Default::default()
+        });
+    }
+    // Sheens, tight and soft, coloured, and under a varnish.
+    for (sheen_roughness, coat) in [(0.1f32, 0.0f32), (0.5, 0.0), (0.9, 0.6)] {
+        out.push(Surface {
+            base_color: kreate_math::SceneRgb::new(0.2, 0.1, 0.4),
+            roughness: 0.8,
+            sheen_color: kreate_math::SceneRgb::new(0.9, 0.6, 0.3),
+            sheen_roughness,
+            coat,
+            ..Default::default()
+        });
+    }
     out
 }
 
@@ -417,6 +488,7 @@ fn the_table_crosses_to_the_device_intact() {
         base_color: kreate_math::SceneRgb::WHITE,
         metallic: 1.0,
         roughness: 0.85,
+        ..Default::default()
     };
     let n = glam::Vec3::Z;
 
@@ -482,6 +554,7 @@ fn a_mirror_is_finite_on_the_device() {
         base_color: kreate_math::SceneRgb::WHITE,
         metallic: 1.0,
         roughness: 0.0,
+        ..Default::default()
     };
     let n = glam::Vec3::Z;
     let samples = vec![sample_of(&mirror, n, glam::Vec3::Z, glam::Vec3::Z)];

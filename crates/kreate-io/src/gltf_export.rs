@@ -1448,24 +1448,30 @@ fn emit_material(
             let glows = m.emissive != Vec3::ZERO && m.emissive_strength != 1.0;
             let clear = m.transmission > 0.0;
             let bends = m.ior != 1.5;
-            (glows || clear || bends).then(|| json::extensions::material::Material {
-                emissive_strength: glows.then_some(json::extensions::material::EmissiveStrength {
-                    emissive_strength: json::extensions::material::EmissiveStrengthFactor(
-                        m.emissive_strength,
+            let layered = layer_extensions(&m.layers);
+            (glows || clear || bends || !layered.is_empty()).then(|| {
+                json::extensions::material::Material {
+                    others: layered,
+                    emissive_strength: glows.then_some(
+                        json::extensions::material::EmissiveStrength {
+                            emissive_strength: json::extensions::material::EmissiveStrengthFactor(
+                                m.emissive_strength,
+                            ),
+                        },
                     ),
-                }),
-                transmission: clear.then(|| json::extensions::material::Transmission {
-                    transmission_factor: json::extensions::material::TransmissionFactor(
-                        m.transmission,
-                    ),
-                    transmission_texture: None,
-                    extras: Default::default(),
-                }),
-                ior: bends.then_some(json::extensions::material::Ior {
-                    ior: json::extensions::material::IndexOfRefraction(m.ior),
-                    extras: Default::default(),
-                }),
-                ..Default::default()
+                    transmission: clear.then(|| json::extensions::material::Transmission {
+                        transmission_factor: json::extensions::material::TransmissionFactor(
+                            m.transmission,
+                        ),
+                        transmission_texture: None,
+                        extras: Default::default(),
+                    }),
+                    ior: bends.then_some(json::extensions::material::Ior {
+                        ior: json::extensions::material::IndexOfRefraction(m.ior),
+                        extras: Default::default(),
+                    }),
+                    ..Default::default()
+                }
             })
         }),
         ..Default::default()
@@ -1479,6 +1485,10 @@ fn emit_material(
             ),
             (ext.transmission.is_some(), "KHR_materials_transmission"),
             (ext.ior.is_some(), "KHR_materials_ior"),
+            (ext.others.contains_key(SPECULAR), SPECULAR),
+            (ext.others.contains_key(CLEARCOAT), CLEARCOAT),
+            (ext.others.contains_key(SHEEN), SHEEN),
+            (ext.others.contains_key(ANISOTROPY), ANISOTROPY),
         ];
         for (on, name) in used {
             if on && !root.extensions_used.iter().any(|e| e == name) {
@@ -1488,6 +1498,46 @@ fn emit_material(
     }
     map.insert(source, index);
     index
+}
+
+const SPECULAR: &str = "KHR_materials_specular";
+const CLEARCOAT: &str = "KHR_materials_clearcoat";
+const SHEEN: &str = "KHR_materials_sheen";
+const ANISOTROPY: &str = "KHR_materials_anisotropy";
+
+/// The layer extensions a material needs, as raw JSON: only those whose
+/// factor is not the plain surface's.
+fn layer_extensions(
+    l: &kreate_scene::shader::SurfaceLayers,
+) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::json;
+    let mut out = serde_json::Map::new();
+    if l.specular != 1.0 {
+        out.insert(SPECULAR.into(), json!({ "specularFactor": l.specular }));
+    }
+    if l.coat > 0.0 {
+        out.insert(
+            CLEARCOAT.into(),
+            json!({ "clearcoatFactor": l.coat, "clearcoatRoughnessFactor": l.coat_roughness }),
+        );
+    }
+    let s = l.sheen_color;
+    if s.r > 0.0 || s.g > 0.0 || s.b > 0.0 {
+        out.insert(
+            SHEEN.into(),
+            json!({ "sheenColorFactor": [s.r, s.g, s.b], "sheenRoughnessFactor": l.sheen_roughness }),
+        );
+    }
+    if l.anisotropy > 0.0 {
+        out.insert(
+            ANISOTROPY.into(),
+            json!({
+                "anisotropyStrength": l.anisotropy,
+                "anisotropyRotation": l.anisotropy_rotation * std::f32::consts::TAU,
+            }),
+        );
+    }
+    out
 }
 
 /// The extension carrying the lights. Part of the specification's own set,

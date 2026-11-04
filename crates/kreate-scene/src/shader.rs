@@ -282,7 +282,93 @@ pub enum NodeKind {
         alpha: f32,
         /// Cut away below this opacity; zero is never.
         clip: f32,
+        /// How strongly a dielectric reflects, as a multiple of what its
+        /// index of refraction says. One is physical.
+        specular: f32,
+        /// A clear varnish over it, zero to one, and the varnish's roughness.
+        coat: f32,
+        coat_roughness: f32,
+        /// A fabric's sheen at the rim: its colour (black is none) and how
+        /// far it spreads.
+        sheen_color: SceneRgb,
+        sheen_roughness: f32,
+        /// How far the highlight stretches along the surface, zero to one,
+        /// and which way, in turns from the tangent.
+        anisotropy: f32,
+        anisotropy_rotation: f32,
     },
+}
+
+/// The layers a standard surface can carry over its plain self: a specular
+/// weight, a varnish, a fabric's sheen, a brushed highlight. What a
+/// [`Material`](crate::document::Material) keeps for them, and what
+/// [`ShaderGraph::for_material`] puts on its surface. The default is none of
+/// them — the plain surface every file before them describes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceLayers {
+    pub specular: f32,
+    pub coat: f32,
+    pub coat_roughness: f32,
+    pub sheen_color: SceneRgb,
+    pub sheen_roughness: f32,
+    pub anisotropy: f32,
+    pub anisotropy_rotation: f32,
+}
+
+impl Default for SurfaceLayers {
+    fn default() -> Self {
+        Self {
+            specular: 1.0,
+            coat: 0.0,
+            coat_roughness: 0.03,
+            sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+            sheen_roughness: 0.3,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
+        }
+    }
+}
+
+impl SurfaceLayers {
+    /// Whether it is the plain surface: nothing to write, nothing to say.
+    pub fn is_plain(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// As nine numbers, in the order a file keeps them.
+    pub fn to_array(&self) -> [f32; 9] {
+        [
+            self.specular,
+            self.coat,
+            self.coat_roughness,
+            self.sheen_color.r,
+            self.sheen_color.g,
+            self.sheen_color.b,
+            self.sheen_roughness,
+            self.anisotropy,
+            self.anisotropy_rotation,
+        ]
+    }
+
+    /// From nine numbers, each one held to what it can mean.
+    pub fn from_array(v: [f32; 9]) -> Self {
+        let unit = |x: f32| {
+            if x.is_finite() {
+                x.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            specular: if v[0].is_finite() { v[0].max(0.0) } else { 1.0 },
+            coat: unit(v[1]),
+            coat_roughness: unit(v[2]),
+            sheen_color: SceneRgb::new(unit(v[3]), unit(v[4]), unit(v[5])),
+            sheen_roughness: unit(v[6]),
+            anisotropy: unit(v[7]),
+            anisotropy_rotation: if v[8].is_finite() { v[8] } else { 0.0 },
+        }
+    }
 }
 
 /// What a Math node does to its two numbers.
@@ -711,6 +797,13 @@ impl NodeKind {
                 ior,
                 alpha,
                 clip,
+                specular,
+                coat,
+                coat_roughness,
+                sheen_color,
+                sheen_roughness,
+                anisotropy,
+                anisotropy_rotation,
             } => {
                 vec![
                     base_color.r,
@@ -725,6 +818,15 @@ impl NodeKind {
                     *ior,
                     *alpha,
                     *clip,
+                    *specular,
+                    *coat,
+                    *coat_roughness,
+                    sheen_color.r,
+                    sheen_color.g,
+                    sheen_color.b,
+                    *sheen_roughness,
+                    *anisotropy,
+                    *anisotropy_rotation,
                 ]
             }
             NodeKind::Fresnel { ior } => vec![*ior],
@@ -857,6 +959,15 @@ impl NodeKind {
                 // Absent in every file written before cut-outs: solid.
                 alpha: at(10, 1.0),
                 clip: at(11, 0.0),
+                // Absent in every file written before the layered surface:
+                // the plain one it always was.
+                specular: at(12, 1.0),
+                coat: at(13, 0.0),
+                coat_roughness: at(14, 0.03),
+                sheen_color: SceneRgb::new(at(15, 0.0), at(16, 0.0), at(17, 0.0)),
+                sheen_roughness: at(18, 0.3),
+                anisotropy: at(19, 0.0),
+                anisotropy_rotation: at(20, 0.0),
             },
             _ => return None,
         })
@@ -1072,6 +1183,13 @@ impl ShaderGraph {
                     ior: 1.5,
                     alpha: 1.0,
                     clip: 0.0,
+                    specular: 1.0,
+                    coat: 0.0,
+                    coat_roughness: 0.03,
+                    sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+                    sheen_roughness: 0.3,
+                    anisotropy: 0.0,
+                    anisotropy_rotation: 0.0,
                 },
             )],
             links: Vec::new(),
@@ -1110,6 +1228,13 @@ impl ShaderGraph {
             ior,
             alpha,
             clip,
+            specular,
+            coat,
+            coat_roughness,
+            sheen_color,
+            sheen_roughness,
+            anisotropy,
+            anisotropy_rotation,
             ..
         } = &mut graph.nodes[0].kind
         {
@@ -1118,6 +1243,14 @@ impl ShaderGraph {
             *ior = material.ior;
             *alpha = material.alpha;
             *clip = material.alpha_clip.unwrap_or(0.0);
+            let l = material.layers;
+            *specular = l.specular;
+            *coat = l.coat;
+            *coat_roughness = l.coat_roughness;
+            *sheen_color = l.sheen_color;
+            *sheen_roughness = l.sheen_roughness;
+            *anisotropy = l.anisotropy;
+            *anisotropy_rotation = l.anisotropy_rotation;
         }
         // `standard` puts the surface at zero and adds nothing else, so every
         // link below reaches nodes that are certainly there, of the types the
@@ -1998,6 +2131,13 @@ mod tests {
                     ior: 1.5,
                     alpha: 1.0,
                     clip: 0.0,
+                    specular: 1.0,
+                    coat: 0.0,
+                    coat_roughness: 0.03,
+                    sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+                    sheen_roughness: 0.3,
+                    anisotropy: 0.0,
+                    anisotropy_rotation: 0.0,
                 },
             )),
             None
@@ -2272,6 +2412,13 @@ mod tests {
                 ior: 1.33,
                 alpha: 0.8,
                 clip: 0.5,
+                specular: 0.7,
+                coat: 0.4,
+                coat_roughness: 0.1,
+                sheen_color: SceneRgb::new(0.2, 0.3, 0.4),
+                sheen_roughness: 0.6,
+                anisotropy: 0.5,
+                anisotropy_rotation: 0.25,
             },
         ];
         for kind in kinds {
