@@ -212,7 +212,11 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     let roughness = clamp(surface.roughness, 0.0, 1.0);
     out.surface = vec4<f32>(normal, roughness);
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
-    out.share = vec4<f32>(specular_share(surface_f0(surface), nov, roughness), 1.0);
+    // Under the varnish, the surface's own reflection is what it lets through.
+    out.share = vec4<f32>(
+        specular_share(surface_f0(surface), nov, roughness) * (1.0 - surface.coat * coat_reflects(surface, nov)),
+        1.0,
+    );
     out.environment = vec4<f32>(environment_specular(surface, normal, view) * sample.occlusion, 1.0);
     // A cut-out: nothing here. Last, after every derivative this stage
     // takes — a derivative after a discard reads a neighbour that is gone.

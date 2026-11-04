@@ -629,13 +629,51 @@ fn pt_bsdf_pdf(s: Surface, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
     if (nol <= 0.0) {
         return 0.0;
     }
-    let p_spec = clamp(mix(0.15, 1.0, s.metallic) * (1.0 - 0.5 * s.roughness), 0.1, 0.95);
+    let lobes = pt_lobes(s, n, v);
     let h = normalize(v + l);
     let noh = max(dot(n, h), 1e-4);
     let voh = max(dot(v, h), 1e-4);
-    let alpha = s.roughness * s.roughness;
+    // The BRDF's own width, floor and all, so the samples are spread as the
+    // lobe they stand for is.
+    let alpha = surface_alpha(s);
     let spec = distribution(noh, alpha) * noh / (4.0 * voh);
-    return p_spec * spec + (1.0 - p_spec) * nol / PI;
+    var pdf = lobes.y * spec + lobes.z * nol / PI;
+    if (lobes.x > 0.0) {
+        let ca = pt_coat_alpha(s);
+        pdf += lobes.x * distribution(noh, ca) * noh / (4.0 * voh);
+    }
+    return pdf;
+}
+
+// How a bounce is shared between the lobes: x the varnish, y the surface's
+// specular, z its diffuse — summing to one. By how much each reflects from
+// this view, roughly: a varnish takes its Fresnel share (at least a little,
+// so a sharp one is found), and below it the split there always was.
+fn pt_lobes(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    var p_coat = 0.0;
+    if (s.coat > 0.0) {
+        let nov = clamp(dot(n, v), 1e-4, 1.0);
+        let m = 1.0 - nov;
+        let f = DIELECTRIC_F0 + (1.0 - DIELECTRIC_F0) * m * m * m * m * m;
+        p_coat = clamp(clamp(s.coat, 0.0, 1.0) * (0.25 + f), 0.05, 0.6);
+    }
+    let p_spec = clamp(mix(0.15, 1.0, s.metallic) * (1.0 - 0.5 * s.roughness), 0.1, 0.95);
+    return vec3<f32>(p_coat, (1.0 - p_coat) * p_spec, (1.0 - p_coat) * (1.0 - p_spec));
+}
+
+fn pt_coat_alpha(s: Surface) -> f32 {
+    let r = clamp(s.coat_roughness, MIN_ROUGHNESS, 1.0);
+    return r * r;
+}
+
+// A GGX half vector about `frame`'s Z, for `alpha`.
+fn pt_ggx_half(frame: mat3x3<f32>, alpha: f32) -> vec3<f32> {
+    let r1 = pt_random();
+    let r2 = pt_random();
+    let cos_h = sqrt((1.0 - r1) / (1.0 + (alpha * alpha - 1.0) * r1));
+    let sin_h = sqrt(max(1.0 - cos_h * cos_h, 0.0));
+    let phi = 6.2831853 * r2;
+    return frame * vec3<f32>(sin_h * cos(phi), sin_h * sin(phi), cos_h);
 }
 
 fn pt_power(a: f32, b: f32) -> f32 {
@@ -1269,7 +1307,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             radiance += throughput * glow * weight;
         }
         let extra = pt_surfaces[m + 1u];
-        var s: Surface;
+        var s = surface_default();
         s.base_color = pt_surfaces[m].rgb;
         s.metallic = pt_surfaces[m].a;
         s.roughness = extra.x;
@@ -1477,48 +1515,43 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
 
-        // The next direction: the specular lobe or the diffuse one, by how
-        // much of each this surface has.
-        let f0 = surface_f0(s);
-        let p_spec = clamp(mix(0.15, 1.0, s.metallic) * (1.0 - 0.5 * s.roughness), 0.1, 0.95);
+        // The next direction: from one of the lobes — the varnish, the
+        // specular, the diffuse — chosen by how much each reflects; and
+        // weighted by the whole BRDF over the whole mixture's chance of
+        // going there. The same BRDF the lamps are shaded with, so the light
+        // that comes by bounces is coupled, compensated and layered exactly
+        // as the light that comes straight is.
+        let lobes = pt_lobes(s, n, v);
         let frame = pt_orthonormal(n);
         var next = vec3<f32>(0.0);
-        if (pt_random() < p_spec) {
-            // GGX: a half vector from the distribution, the mirror of the
-            // view about it.
-            let alpha = s.roughness * s.roughness;
-            let r1 = pt_random();
-            let r2 = pt_random();
-            let cos_h = sqrt((1.0 - r1) / (1.0 + (alpha * alpha - 1.0) * r1));
-            let sin_h = sqrt(max(1.0 - cos_h * cos_h, 0.0));
-            let phi = 6.2831853 * r2;
-            let h = frame * vec3<f32>(sin_h * cos(phi), sin_h * sin(phi), cos_h);
-            next = reflect(-v, h);
-            let nol = dot(n, next);
-            let nov = max(dot(n, v), 1e-4);
-            let voh = max(dot(v, h), 1e-4);
-            let noh = max(dot(n, h), 1e-4);
-            if (nol <= 0.0 || dot(next, geometric) <= 0.0) {
-                break;
+        let lobe = pt_random();
+        if (lobe < lobes.x + lobes.y) {
+            // GGX: a half vector from the distribution — the varnish's or
+            // the surface's — and the mirror of the view about it.
+            var alpha = surface_alpha(s);
+            if (lobe < lobes.x) {
+                alpha = pt_coat_alpha(s);
             }
-            // Schlick's Fresnel and Smith's masking over the sampling pdf.
-            let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - voh, 5.0);
-            let k = alpha * 0.5;
-            let g = (nol / (nol * (1.0 - k) + k)) * (nov / (nov * (1.0 - k) + k));
-            throughput *= fresnel * g * voh / (nov * noh) / p_spec;
+            next = reflect(-v, pt_ggx_half(frame, alpha));
         } else {
-            // Cosine-weighted, which leaves the albedo as the whole weight.
             let r1 = pt_random();
             let r2 = pt_random();
             let r = sqrt(r1);
             let phi = 6.2831853 * r2;
             next = frame * vec3<f32>(r * cos(phi), r * sin(phi), sqrt(max(1.0 - r1, 0.0)));
-            if (dot(next, geometric) <= 0.0) {
-                break;
-            }
-            throughput *= surface_diffuse_albedo(s) / (1.0 - p_spec);
         }
-        last_pdf = pt_bsdf_pdf(s, n, v, normalize(next));
+        next = normalize(next);
+        let nol = dot(n, next);
+        if (nol <= 0.0 || dot(next, geometric) <= 0.0) {
+            break;
+        }
+        let pdf = pt_bsdf_pdf(s, n, v, next);
+        if (!(pdf > 0.0)) {
+            break;
+        }
+        let f = brdf_evaluate(s, n, v, next);
+        throughput *= (f.diffuse + f.specular) * nol / pdf;
+        last_pdf = pdf;
         // Paths that carry little are ended, the survivors made heavier so the
         // sum stays right.
         if (bounce >= 3u) {

@@ -48,9 +48,7 @@ fn dispatch(count: u32) -> String {
     let mut out = String::from(
         "fn pt_material(id: u32, uv: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, p: vec3<f32>, n: vec3<f32>, pdx: vec3<f32>, pdy: vec3<f32>, facing: f32) -> PtMaterialOut {
     var out: PtMaterialOut;
-    out.surface.base_color = vec3<f32>(0.8);
-    out.surface.metallic = 0.0;
-    out.surface.roughness = 0.5;
+    out.surface = surface_default();
     out.normal = vec3<f32>(0.0, 0.0, 1.0);
     out.gradient = vec3<f32>(0.0);
     out.alpha = 1.0;

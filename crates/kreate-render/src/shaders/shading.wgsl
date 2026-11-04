@@ -490,6 +490,7 @@ fn ambient_from(
     nov: f32,
     irradiance: vec3<f32>,
     prefiltered: vec3<f32>,
+    coat_prefiltered: vec3<f32>,
 ) -> vec3<f32> {
     let roughness = clamp(s.roughness, 0.0, 1.0);
     let share = specular_share(surface_f0(s), nov, roughness);
@@ -497,7 +498,21 @@ fn ambient_from(
     // Irradiance over `π` is the radiance a Lambertian surface reflects, which
     // is the one place the factor belongs: the coefficients carry it in for the
     // lookup and it comes back out here.
-    return prefiltered * share + diffuse * irradiance / PI_SHADING;
+    let base = prefiltered * share + diffuse * irradiance / PI_SHADING;
+    // The varnish first, and the surface below with what it leaves: see
+    // `shading::ambient_from`.
+    let coat_share = coat_reflects(s, nov);
+    return base * (1.0 - s.coat * coat_share) + coat_prefiltered * (clamp(s.coat, 0.0, 1.0) * coat_share);
+}
+
+/// How much of the arriving light the varnish takes, at its roughness; zero
+/// with no varnish.
+fn coat_reflects(s: Surface, nov: f32) -> f32 {
+    if s.coat <= 0.0 {
+        return 0.0;
+    }
+    let r = clamp(s.coat_roughness, MIN_ROUGHNESS, 1.0);
+    return specular_share(vec3<f32>(DIELECTRIC_F0), nov, r).x;
 }
 
 const PI_SHADING: f32 = 3.14159265359;
@@ -505,7 +520,7 @@ const PI_SHADING: f32 = 3.14159265359;
 /// The flat case, spelled as what it is.
 fn ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
-    return ambient_from(s, nov, radiance, radiance);
+    return ambient_from(s, nov, radiance, radiance, radiance);
 }
 
 /// The world's rotation, applied to a direction on its way to the cube.
@@ -546,7 +561,7 @@ fn environment_irradiance(normal: vec3<f32>) -> vec3<f32> {
 fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     if shading.world.w <= 0.0 {
-        return ambient_from(s, nov, shading.world.rgb * PI_SHADING, shading.world.rgb);
+        return ambient_from(s, nov, shading.world.rgb * PI_SHADING, shading.world.rgb, shading.world.rgb);
     }
     let roughness = clamp(s.roughness, 0.0, 1.0);
     // The mirror direction, which is what a reflection is about. The prefilter
@@ -564,7 +579,18 @@ fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f
         unrotate(reflection),
         level,
     ).rgb * strength;
-    return ambient_from(s, nov, environment_irradiance(normal) * strength, prefiltered);
+    // The varnish's own reflection, at its own roughness: one more lookup,
+    // and only when there is a varnish.
+    var coat_prefiltered = prefiltered;
+    if s.coat > 0.0 {
+        coat_prefiltered = textureSampleLevel(
+            environment_cube,
+            environment_sampler,
+            unrotate(reflection),
+            clamp(s.coat_roughness, 0.0, 1.0) * shading.environment.z,
+        ).rgb * strength;
+    }
+    return ambient_from(s, nov, environment_irradiance(normal) * strength, prefiltered, coat_prefiltered);
 }
 
 /// The part of [`environment_ambient`] that is the environment's mirror
@@ -572,7 +598,10 @@ fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f
 fn environment_specular(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     let roughness = clamp(s.roughness, 0.0, 1.0);
-    let share = specular_share(surface_f0(s), nov, roughness);
+    // The surface's own reflection, under what the varnish takes; the
+    // varnish's is the environment's alone, which the screen does not
+    // replace.
+    let share = specular_share(surface_f0(s), nov, roughness) * (1.0 - s.coat * coat_reflects(s, nov));
     if shading.world.w <= 0.0 {
         return shading.world.rgb * share;
     }
@@ -682,7 +711,7 @@ fn probe_shading(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let sample = samples[i];
-    var s: Surface;
+    var s = surface_default();
     s.base_color = sample.material.rgb;
     s.metallic = sample.material.w;
     s.roughness = sample.params.x;

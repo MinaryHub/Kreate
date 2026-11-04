@@ -282,6 +282,20 @@ pub enum NodeKind {
         alpha: f32,
         /// Cut away below this opacity; zero is never.
         clip: f32,
+        /// How strongly a dielectric reflects, as a multiple of what its
+        /// index of refraction says. One is physical.
+        specular: f32,
+        /// A clear varnish over it, zero to one, and the varnish's roughness.
+        coat: f32,
+        coat_roughness: f32,
+        /// A fabric's sheen at the rim: its colour (black is none) and how
+        /// far it spreads.
+        sheen_color: SceneRgb,
+        sheen_roughness: f32,
+        /// How far the highlight stretches along the surface, zero to one,
+        /// and which way, in turns from the tangent.
+        anisotropy: f32,
+        anisotropy_rotation: f32,
     },
 }
 
@@ -711,6 +725,13 @@ impl NodeKind {
                 ior,
                 alpha,
                 clip,
+                specular,
+                coat,
+                coat_roughness,
+                sheen_color,
+                sheen_roughness,
+                anisotropy,
+                anisotropy_rotation,
             } => {
                 vec![
                     base_color.r,
@@ -725,6 +746,15 @@ impl NodeKind {
                     *ior,
                     *alpha,
                     *clip,
+                    *specular,
+                    *coat,
+                    *coat_roughness,
+                    sheen_color.r,
+                    sheen_color.g,
+                    sheen_color.b,
+                    *sheen_roughness,
+                    *anisotropy,
+                    *anisotropy_rotation,
                 ]
             }
             NodeKind::Fresnel { ior } => vec![*ior],
@@ -857,6 +887,15 @@ impl NodeKind {
                 // Absent in every file written before cut-outs: solid.
                 alpha: at(10, 1.0),
                 clip: at(11, 0.0),
+                // Absent in every file written before the layered surface:
+                // the plain one it always was.
+                specular: at(12, 1.0),
+                coat: at(13, 0.0),
+                coat_roughness: at(14, 0.03),
+                sheen_color: SceneRgb::new(at(15, 0.0), at(16, 0.0), at(17, 0.0)),
+                sheen_roughness: at(18, 0.3),
+                anisotropy: at(19, 0.0),
+                anisotropy_rotation: at(20, 0.0),
             },
             _ => return None,
         })
@@ -1072,6 +1111,13 @@ impl ShaderGraph {
                     ior: 1.5,
                     alpha: 1.0,
                     clip: 0.0,
+                    specular: 1.0,
+                    coat: 0.0,
+                    coat_roughness: 0.03,
+                    sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+                    sheen_roughness: 0.3,
+                    anisotropy: 0.0,
+                    anisotropy_rotation: 0.0,
                 },
             )],
             links: Vec::new(),
@@ -1998,6 +2044,13 @@ mod tests {
                     ior: 1.5,
                     alpha: 1.0,
                     clip: 0.0,
+                    specular: 1.0,
+                    coat: 0.0,
+                    coat_roughness: 0.03,
+                    sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+                    sheen_roughness: 0.3,
+                    anisotropy: 0.0,
+                    anisotropy_rotation: 0.0,
                 },
             )),
             None
@@ -2272,6 +2325,13 @@ mod tests {
                 ior: 1.33,
                 alpha: 0.8,
                 clip: 0.5,
+                specular: 0.7,
+                coat: 0.4,
+                coat_roughness: 0.1,
+                sheen_color: SceneRgb::new(0.2, 0.3, 0.4),
+                sheen_roughness: 0.6,
+                anisotropy: 0.5,
+                anisotropy_rotation: 0.25,
             },
         ];
         for kind in kinds {

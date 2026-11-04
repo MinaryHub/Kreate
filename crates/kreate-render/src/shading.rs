@@ -90,7 +90,7 @@ pub fn ambient(
         radiance[1] * std::f32::consts::PI,
         radiance[2] * std::f32::consts::PI,
     ];
-    ambient_from(surface, nov, irradiance, radiance)
+    ambient_from(surface, nov, irradiance, radiance, radiance)
 }
 
 /// The environment's contribution, given what it sends and what it reflects.
@@ -100,20 +100,34 @@ pub fn ambient(
 /// cube lookup. Written this way so that "the image path and the flat path
 /// agree" is a property of the *arguments* rather than a claim about two
 /// bodies of arithmetic staying in step.
+///
+/// `coat_prefiltered` is the same reflection at the varnish's roughness. The
+/// varnish takes its share of the light first and the surface below has the
+/// rest, so a white matte under a full coat still returns all of `L`.
 pub fn ambient_from(
     surface: &Surface,
     nov: f32,
     irradiance: [f32; 3],
     prefiltered: [f32; 3],
+    coat_prefiltered: [f32; 3],
 ) -> [f32; 3] {
     let roughness = surface.roughness.clamp(0.0, 1.0);
     let share = brdf::specular_share(surface.f0(), nov, roughness);
     let albedo = surface.diffuse_albedo();
+    let coat = surface.coat.clamp(0.0, 1.0);
+    let coat_share = if coat > 0.0 {
+        let r = surface.coat_roughness.clamp(brdf::MIN_ROUGHNESS, 1.0);
+        brdf::specular_share([brdf::DIELECTRIC_F0; 3], nov, r)[0]
+    } else {
+        0.0
+    };
+    let below = 1.0 - coat * coat_share;
     let mut out = [0.0f32; 3];
     for c in 0..3 {
         // Irradiance over `π` is the radiance a Lambertian surface reflects.
-        out[c] = prefiltered[c] * share[c]
+        let base = prefiltered[c] * share[c]
             + albedo[c] * (1.0 - share[c]) * irradiance[c] / std::f32::consts::PI;
+        out[c] = base * below + coat_prefiltered[c] * coat * coat_share;
     }
     out
 }
@@ -291,6 +305,7 @@ mod tests {
                 base_color: SceneRgb::new(0.8, 0.8, 0.8),
                 metallic: 0.0,
                 roughness: 0.5,
+                ..Default::default()
             },
         )
     }
@@ -314,6 +329,7 @@ mod tests {
                     base_color: SceneRgb::WHITE,
                     metallic,
                     roughness,
+                    ..Default::default()
                 };
                 for angle in [0.0f32, 0.7, 1.4] {
                     let normal = glam::Vec3::Z;
@@ -353,6 +369,7 @@ mod tests {
                 base_color: SceneRgb::WHITE,
                 metallic,
                 roughness: 0.3,
+                ..Default::default()
             };
             let out = ambient(&surface, glam::Vec3::Z, glam::Vec3::Z, environment)[0];
             assert!(out <= 1.02, "metallic {metallic} returned {out}");
@@ -366,6 +383,7 @@ mod tests {
                     base_color: SceneRgb::WHITE,
                     metallic,
                     roughness: 0.3,
+                    ..Default::default()
                 },
                 glam::Vec3::Z,
                 glam::Vec3::Z,
@@ -388,6 +406,7 @@ mod tests {
                 base_color: SceneRgb::new(albedo, albedo, albedo),
                 metallic: 0.0,
                 roughness: 0.4,
+                ..Default::default()
             };
             let out = ambient(&surface, glam::Vec3::Z, glam::Vec3::Z, environment)[0];
             assert!(out <= environment[0] * 1.02, "{albedo} returned {out}");
@@ -400,6 +419,7 @@ mod tests {
                 base_color: SceneRgb::new(0.1, 0.1, 0.1),
                 metallic: 0.0,
                 roughness: 0.4,
+                ..Default::default()
             },
             glam::Vec3::Z,
             glam::Vec3::Z,
@@ -410,6 +430,7 @@ mod tests {
                 base_color: SceneRgb::new(0.9, 0.9, 0.9),
                 metallic: 0.0,
                 roughness: 0.4,
+                ..Default::default()
             },
             glam::Vec3::Z,
             glam::Vec3::Z,

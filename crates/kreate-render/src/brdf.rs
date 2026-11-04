@@ -67,6 +67,31 @@ pub struct Surface {
     /// would crowd every interesting appearance into the bottom fifth of the
     /// range.
     pub roughness: f32,
+    /// How strongly a dielectric reflects, as a multiple of what its index
+    /// of refraction says: one is physical, zero takes the reflection away.
+    /// glTF's `KHR_materials_specular` factor and OpenPBR's specular weight.
+    pub specular: f32,
+    /// The index of refraction, which says how much a dielectric reflects
+    /// face on: `((n − 1)/(n + 1))²`, four per cent at 1.5. What passes
+    /// through bends by it too.
+    pub ior: f32,
+    /// A clear varnish over the surface, zero to one: the lacquer on a car's
+    /// paint or a table's top. A second, colourless specular lobe of its
+    /// own roughness, the light it reflects taken from what reaches the
+    /// surface below.
+    pub coat: f32,
+    /// The varnish's perceptual roughness.
+    pub coat_roughness: f32,
+    /// The colour of a fabric's sheen — the soft brightening at its rim, from
+    /// fibres catching grazing light. Black is none.
+    pub sheen_color: SceneRgb,
+    /// How far the sheen spreads from the rim, zero to one.
+    pub sheen_roughness: f32,
+    /// How much the highlight stretches along the surface, zero to one:
+    /// brushed metal, spun aluminium.
+    pub anisotropy: f32,
+    /// Which way it stretches, in turns from the surface's tangent.
+    pub anisotropy_rotation: f32,
 }
 
 impl Default for Surface {
@@ -77,16 +102,34 @@ impl Default for Surface {
             base_color: SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.5,
+            specular: 1.0,
+            ior: DIELECTRIC_IOR,
+            coat: 0.0,
+            coat_roughness: 0.03,
+            sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+            sheen_roughness: 0.3,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
         }
     }
 }
 
-/// The reflectance of a dielectric at normal incidence.
-///
-/// Four percent, which is glass, most plastics, and near enough everything
-/// that is not a metal. A material parameter for it exists in the full
-/// standard surface and is not here yet, because the number is right for
-/// almost everything and wrong in ways nobody has asked about.
+/// The index of refraction a dielectric has when nothing says otherwise:
+/// glass, most plastics, and the four per cent [`DIELECTRIC_F0`] is.
+pub const DIELECTRIC_IOR: f32 = 1.5;
+
+/// A dielectric's reflectance face on, from its index of refraction and a
+/// weight on it: `((n − 1)/(n + 1))² · specular`, at most one.
+pub fn dielectric_f0(ior: f32, specular: f32) -> f32 {
+    let n = ior.max(1.0);
+    let r = (n - 1.0) / (n + 1.0);
+    (r * r * specular.max(0.0)).min(1.0)
+}
+
+/// The reflectance of a dielectric at normal incidence, at the default index
+/// of refraction: four percent, which is glass, most plastics, and near
+/// enough everything that is not a metal. A surface's own is
+/// [`dielectric_f0`] of its `ior` and `specular`.
 pub const DIELECTRIC_F0: f32 = 0.04;
 
 impl Surface {
@@ -98,10 +141,11 @@ impl Surface {
     pub fn f0(&self) -> [f32; 3] {
         let m = self.metallic.clamp(0.0, 1.0);
         let base = self.base_color.to_array();
+        let d = dielectric_f0(self.ior, self.specular);
         [
-            DIELECTRIC_F0 * (1.0 - m) + base[0] * m,
-            DIELECTRIC_F0 * (1.0 - m) + base[1] * m,
-            DIELECTRIC_F0 * (1.0 - m) + base[2] * m,
+            d * (1.0 - m) + base[0] * m,
+            d * (1.0 - m) + base[1] * m,
+            d * (1.0 - m) + base[2] * m,
         ]
     }
 
@@ -510,7 +554,7 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
     let vis = visibility(nov, nol, alpha);
     let compensation = energy_compensation(f0, nov, surface.roughness.clamp(0.0, 1.0));
 
-    let specular = [
+    let specular: [f32; 3] = [
         d * vis * f[0] * compensation[0],
         d * vis * f[1] * compensation[1],
         d * vis * f[2] * compensation[2],
@@ -542,6 +586,36 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
         // within a thousandth.
         let avg = (f0[c] * avg_a + avg_b).clamp(0.0, 0.99);
         diffuse[c] = albedo[c] * inv_pi * (1.0 - share_v[c]) * (1.0 - share_l[c]) / (1.0 - avg);
+    }
+
+    let mut specular = specular;
+    let coat = surface.coat.clamp(0.0, 1.0);
+    if coat > 0.0 {
+        // The varnish: a colourless GGX lobe of its own roughness, at a
+        // dielectric's four per cent — a clear coat is about 1.5 — and the
+        // surface below lit by what it lets through.
+        //
+        // Below it, both lobes are scaled the way the diffuse is coupled to
+        // the specular above: `(1 − c·E(NoV))(1 − c·E(NoL)) / (1 − c·Ē)`.
+        // Symmetric, so the BRDF stays reciprocal; and for a Lambertian base
+        // its integral is exactly `1 − c·E(NoV)`, the light the coat did not
+        // take, so a white matte under a full coat still returns all of it.
+        let coat_roughness = surface.coat_roughness.clamp(MIN_ROUGHNESS, 1.0);
+        let coat_alpha = coat_roughness * coat_roughness;
+        let cf0 = [DIELECTRIC_F0; 3];
+        let cf = fresnel(cf0, voh);
+        let cd = distribution(noh, coat_alpha);
+        let cv = visibility(nov, nol, coat_alpha);
+        let cc = energy_compensation(cf0, nov, coat_roughness);
+        let e_v = specular_share(cf0, nov, coat_roughness)[0];
+        let e_l = specular_share(cf0, nol, coat_roughness)[0];
+        let (ca, cb) = albedo_table().average(coat_roughness);
+        let e_avg = (DIELECTRIC_F0 * ca + cb).clamp(0.0, 0.99);
+        let below = (1.0 - coat * e_v) * (1.0 - coat * e_l) / (1.0 - coat * e_avg);
+        for c in 0..3 {
+            diffuse[c] *= below;
+            specular[c] = specular[c] * below + coat * cd * cv * cf[c] * cc[c];
+        }
     }
 
     Response { diffuse, specular }
@@ -690,6 +764,7 @@ mod tests {
             base_color: SceneRgb::WHITE,
             metallic: 1.0,
             roughness,
+            ..Default::default()
         }
     }
 
@@ -710,6 +785,65 @@ mod tests {
                 "roughness {roughness} reflected {albedo}"
             );
         }
+    }
+
+    #[test]
+    fn a_varnish_over_a_white_matte_keeps_its_energy_and_brightens_the_rim() {
+        // A white matte returns all the light it gets; under a varnish it
+        // must still — the varnish's reflection taken from what reaches the
+        // matte, not added to it — at every angle and every roughness of the
+        // varnish. And a varnish is there: at a grazing view it reflects
+        // more than the matte's own sheen does.
+        let matte = Surface {
+            base_color: SceneRgb::WHITE,
+            metallic: 0.0,
+            roughness: 0.8,
+            ..Default::default()
+        };
+        // Not a near-mirror varnish: a grid cannot integrate a delta lobe.
+        for coat_roughness in [0.2, 0.5, 1.0] {
+            let coated = Surface {
+                coat: 1.0,
+                coat_roughness,
+                ..matte
+            };
+            for nov in [0.95, 0.6, 0.3] {
+                let total = directional_albedo(&coated, nov, Lobe::Both);
+                assert!(
+                    (0.93..=1.03).contains(&total),
+                    "coat roughness {coat_roughness}, NoV {nov}: {total}"
+                );
+            }
+        }
+        let bare = directional_albedo(&matte, 0.2, Lobe::Specular);
+        let varnished = directional_albedo(
+            &Surface {
+                coat: 1.0,
+                coat_roughness: 0.3,
+                ..matte
+            },
+            0.2,
+            Lobe::Specular,
+        );
+        assert!(varnished > bare * 1.5, "{bare} bare, {varnished} varnished");
+    }
+
+    #[test]
+    fn the_index_of_refraction_sets_a_dielectrics_reflection() {
+        // Water reflects less than glass face on, a diamond far more; and a
+        // specular weight of zero reflects nothing at all.
+        let at = |ior: f32, specular: f32| {
+            Surface {
+                ior,
+                specular,
+                ..Default::default()
+            }
+            .f0()[0]
+        };
+        assert!((at(1.33, 1.0) - 0.02).abs() < 0.001, "{}", at(1.33, 1.0));
+        assert!((at(1.5, 1.0) - 0.04).abs() < 1e-6);
+        assert!((at(2.42, 1.0) - 0.172).abs() < 0.001, "{}", at(2.42, 1.0));
+        assert_eq!(at(1.5, 0.0), 0.0);
     }
 
     #[test]
@@ -753,6 +887,7 @@ mod tests {
                         base_color: SceneRgb::WHITE,
                         metallic,
                         roughness,
+                        ..Default::default()
                     };
                     let albedo = directional_albedo(&surface, nov, Lobe::Both);
                     assert!(
@@ -854,6 +989,7 @@ mod tests {
             base_color: SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.4,
+            ..Default::default()
         };
         let n = glam::Vec3::Z;
         let a = glam::Vec3::new(0.9, 0.0, 0.436).normalize();
@@ -950,6 +1086,7 @@ mod tests {
         for declaration in [
             format!("const ALBEDO_LUT: u32 = {ALBEDO_LUT}u;"),
             format!("const DIELECTRIC_F0: f32 = {DIELECTRIC_F0};"),
+            format!("const DIELECTRIC_IOR: f32 = {DIELECTRIC_IOR};"),
             format!("const MIN_ROUGHNESS: f32 = {MIN_ROUGHNESS};"),
         ] {
             assert!(
@@ -1060,6 +1197,7 @@ mod tests {
             base_color: SceneRgb::new(1.0, 0.77, 0.34),
             metallic: 1.0,
             roughness: 0.2,
+            ..Default::default()
         };
         assert_eq!(gold.f0(), [1.0, 0.77, 0.34]);
         assert_eq!(gold.diffuse_albedo(), [0.0; 3]);
@@ -1068,8 +1206,13 @@ mod tests {
             base_color: SceneRgb::new(1.0, 0.77, 0.34),
             metallic: 0.0,
             roughness: 0.2,
+            ..Default::default()
         };
-        assert_eq!(plastic.f0(), [DIELECTRIC_F0; 3]);
+        // From the index of refraction: 1.5's four per cent, to the last bit
+        // or two of a float.
+        for c in plastic.f0() {
+            assert!((c - DIELECTRIC_F0).abs() < 1e-7, "{c}");
+        }
         assert_eq!(plastic.diffuse_albedo(), [1.0, 0.77, 0.34]);
     }
 
@@ -1083,6 +1226,7 @@ mod tests {
             base_color: SceneRgb::new(0.9, 0.6, 0.3),
             metallic: 0.3,
             roughness: 0.35,
+            ..Default::default()
         };
         let n = glam::Vec3::Z;
         for (a, b) in [
@@ -1173,21 +1317,25 @@ mod tests {
                 base_color: SceneRgb::WHITE,
                 metallic: 1.0,
                 roughness: 0.0,
+                ..Default::default()
             },
             Surface {
                 base_color: SceneRgb::BLACK,
                 metallic: 0.0,
                 roughness: 1.0,
+                ..Default::default()
             },
             Surface {
                 base_color: SceneRgb::new(2.0, -1.0, 0.5),
                 metallic: 5.0,
                 roughness: -3.0,
+                ..Default::default()
             },
             Surface {
                 base_color: SceneRgb::new(f32::NAN, 0.5, 0.5),
                 metallic: 0.5,
                 roughness: 0.5,
+                ..Default::default()
             },
         ];
         let directions = [
@@ -1231,6 +1379,7 @@ mod tests {
             base_color: SceneRgb::WHITE,
             metallic: 1.0,
             roughness: 0.0,
+            ..Default::default()
         };
         assert_eq!(mirror.alpha(), MIN_ROUGHNESS * MIN_ROUGHNESS);
         let peak = evaluate(&mirror, glam::Vec3::Z, glam::Vec3::Z, glam::Vec3::Z).specular[0];
@@ -1251,6 +1400,7 @@ mod tests {
             base_color: SceneRgb::WHITE,
             metallic: 0.0,
             roughness: 0.5,
+            ..Default::default()
         };
         let diffuse = directional_albedo(&surface, 0.9, Lobe::Diffuse);
         // Less than one, because the specular lobe took its share first.
@@ -1289,6 +1439,7 @@ mod tests {
             base_color: SceneRgb::new(0.8, 0.8, 0.8),
             metallic: 0.0,
             roughness: 0.3,
+            ..Default::default()
         };
         let n = glam::Vec3::Z;
         let v = glam::Vec3::Z;

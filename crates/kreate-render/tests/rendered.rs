@@ -279,6 +279,7 @@ fn grey() -> Surface {
         base_color: kreate_math::SceneRgb::new(0.8, 0.8, 0.8),
         metallic: 0.0,
         roughness: 0.5,
+        ..Default::default()
     }
 }
 
@@ -1785,6 +1786,7 @@ fn the_material_reaches_the_shader() {
             base_color: kreate_math::SceneRgb::new(0.05, 0.05, 0.05),
             metallic: 0.0,
             roughness: 0.5,
+            ..Default::default()
         },
         &light,
         FRAMED,
@@ -1797,6 +1799,7 @@ fn the_material_reaches_the_shader() {
             base_color: kreate_math::SceneRgb::new(0.9, 0.9, 0.9),
             metallic: 0.0,
             roughness: 0.5,
+            ..Default::default()
         },
         &light,
         FRAMED,
