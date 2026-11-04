@@ -229,6 +229,21 @@ impl DisplayRgb {
 }
 
 impl SceneRgb {
+    /// A colour given as CIE xyY — a chromaticity and a luminance, the form a
+    /// daylight model or a measured light gives — in the working space,
+    /// linear Rec. 709 primaries with a D65 white. Negative channels (a
+    /// colour outside the gamut) are clipped to zero.
+    pub fn from_xyy(x: f32, y: f32, luminance: f32) -> Self {
+        let y = y.max(1e-4);
+        let (cx, cz) = (x / y * luminance, (1.0 - x - y) / y * luminance);
+        let l = luminance;
+        Self::new(
+            (3.2406 * cx - 1.5372 * l - 0.4986 * cz).max(0.0),
+            (-0.9689 * cx + 1.8758 * l + 0.0415 * cz).max(0.0),
+            (0.0557 * cx - 0.2040 * l + 1.0570 * cz).max(0.0),
+        )
+    }
+
     pub const BLACK: Self = Self {
         r: 0.0,
         g: 0.0,

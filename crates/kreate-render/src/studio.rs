@@ -281,16 +281,9 @@ fn zenith(theta_s: f32, t: f32) -> (f32, f32, f32) {
     (y, cx, cy)
 }
 
-/// CIE xyY to linear Rec. 709 — the renderer's working space.
+/// CIE xyY to the renderer's working space: see `SceneRgb::from_xyy`.
 fn xyy_to_rgb(x: f32, y: f32, lum: f32) -> Vec3 {
-    let y = y.max(1e-4);
-    let (cx, cz) = (x / y * lum, (1.0 - x - y) / y * lum);
-    Vec3::new(
-        3.2406 * cx - 1.5372 * lum - 0.4986 * cz,
-        -0.9689 * cx + 1.8758 * lum + 0.0415 * cz,
-        0.0557 * cx - 0.2040 * lum + 1.0570 * cz,
-    )
-    .max(Vec3::ZERO)
+    Vec3::from(kreate_math::SceneRgb::from_xyy(x, y, lum).to_array())
 }
 
 /// How the sky's kilocandela per square metre become the renderer's units:

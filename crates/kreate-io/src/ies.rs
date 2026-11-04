@@ -101,7 +101,7 @@ pub fn read(text: &str) -> Result<Photometry, IesError> {
         *m = (*m * scale).max(0.0);
     }
     let peak = mean.iter().copied().fold(0.0f64, f64::max);
-    if !(peak > 0.0) {
+    if peak.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Err(IesError::Dark);
     }
     // Onto even steps from 0° to 180°, linearly between the file's angles;
