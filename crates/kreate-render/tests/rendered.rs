@@ -2140,6 +2140,102 @@ fn traced_shot_with(
 }
 
 thread_local! {
+    /// Cubes the traced scene has besides its first, and whether they share
+    /// its slices — linked copies, which the tracer places — or have their
+    /// own.
+    static COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SHARED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Where the traced scene's `i`th extra cube stands: beside the first,
+/// turned, squashed and lifted onto the floor.
+fn copy_at(i: usize) -> glam::DAffine3 {
+    let side = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
+    glam::DAffine3::from_scale_rotation_translation(
+        glam::DVec3::new(0.6, 0.9, 1.3),
+        glam::DQuat::from_rotation_z(0.4 + i as f64),
+        glam::DVec3::new(side * 1.7, 0.4 * i as f64, 0.65),
+    )
+}
+
+/// Linked copies are stored once and the rays carried into each, where
+/// copies of their own are moved into the world: the picture is the same.
+/// Both are traced the same samples, so they differ only by rounding.
+#[test]
+fn linked_copies_are_traced_as_their_own_copies_are() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    NOISE_THRESHOLD.with(|t| t.set(0.0));
+    COPIES.with(|c| c.set(2));
+    let shot = |shared: bool| {
+        SHARED.with(|s| s.set(shared));
+        traced_shot_with(&gpu, true, 32, None, false)
+    };
+    let own = shot(false);
+    let linked = shot(true);
+    let single = {
+        COPIES.with(|c| c.set(0));
+        shot(false)
+    };
+    SHARED.with(|s| s.set(false));
+    NOISE_THRESHOLD.with(|t| t.set(0.01));
+    let apart = |a: &[[f32; 4]], b: &[[f32; 4]]| {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>())
+            .sum::<f32>()
+            / a.len() as f32
+    };
+    let (same, different) = (apart(&own, &linked), apart(&own, &single));
+    eprintln!("linked against own {same}, against none {different}");
+    assert!(
+        different > 0.01,
+        "the copies are not in the picture: {different}"
+    );
+    assert!(
+        same < different * 0.05,
+        "linked {same} apart, none {different}"
+    );
+}
+
+/// The device's ray tracing and the shader's own walk find the same
+/// surfaces: the same scene, the same samples, the same picture but for
+/// rounding — with copies, glass and a glow in it.
+#[test]
+fn ray_queries_and_the_shaders_walk_trace_the_same_picture() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    if !gpu
+        .device
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+    {
+        eprintln!("no ray queries on this device");
+        return;
+    }
+    NOISE_THRESHOLD.with(|t| t.set(0.0));
+    COPIES.with(|c| c.set(2));
+    SHARED.with(|s| s.set(true));
+    let hardware = traced_shot_with(&gpu, true, 32, None, false);
+    // Read when the tracer is made, which the viewport does as it is.
+    std::env::set_var("KREATE_RAY_QUERY", "0");
+    let walked = traced_shot_with(&gpu, true, 32, None, false);
+    std::env::remove_var("KREATE_RAY_QUERY");
+    COPIES.with(|c| c.set(0));
+    SHARED.with(|s| s.set(false));
+    NOISE_THRESHOLD.with(|t| t.set(0.01));
+    let n = hardware.len() as f32;
+    let apart = hardware
+        .iter()
+        .zip(&walked)
+        .map(|(a, b)| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<f32>())
+        .sum::<f32>()
+        / n;
+    let mean = hardware.iter().map(|c| c[0] + c[1] + c[2]).sum::<f32>() / n;
+    eprintln!("apart {apart} of {mean}");
+    assert!(mean > 0.05, "nothing traced: {mean}");
+    assert!(apart < mean * 0.01, "the two differ by {apart} of {mean}");
+}
+
+thread_local! {
     /// The adaptive sampling's threshold the traced scenes use.
     static NOISE_THRESHOLD: std::cell::Cell<f32> = const { std::cell::Cell::new(0.01) };
     /// From which frame the traced scene's camera is turned a little.
@@ -2398,6 +2494,16 @@ fn traced_scene(
             )
         })
         .collect();
+    let copied: Vec<_> = (0..COPIES.with(|c| c.get()))
+        .map(|_| {
+            (
+                data[0].0.clone(),
+                data[0].1.clone(),
+                uvs[0].clone(),
+                cube_cpu.indices.clone(),
+            )
+        })
+        .collect();
     let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = parts
         .iter()
         .zip(&data)
@@ -2416,6 +2522,25 @@ fn traced_scene(
     let mut meshes = meshes;
     if cube_kind == CubeKind::Glass {
         meshes[0].surface = 1;
+    }
+    // More cubes about the first, turned and squashed: the same slices
+    // when a test asks for them shared, copies of them otherwise.
+    for (i, own) in copied.iter().enumerate() {
+        let (positions, normals, uvs, indices) = if SHARED.with(|s| s.get()) {
+            (&data[0].0, &data[0].1, &uvs[0], &cube_cpu.indices)
+        } else {
+            (&own.0, &own.1, &own.2, &own.3)
+        };
+        meshes.push(kreate_render::pathtrace::PtMesh {
+            positions,
+            uvs,
+            normals,
+            colors: &[],
+            indices,
+            transform: copy_at(i),
+            surface: meshes[0].surface,
+            runs: &[],
+        });
     }
     let glass = kreate_render::pathtrace::PtSurface {
         base_color: [1.0, 1.0, 1.0],

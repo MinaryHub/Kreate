@@ -12724,68 +12724,78 @@ impl App {
                     let key = h.finish();
                     if self.path_trace_key != Some(key) || fresh {
                         self.path_trace_key = Some(key);
-                        let mut extracted: Vec<_> = traced()
-                            .map(|(id, mesh)| {
+                        // Each mesh read once, however many objects show it:
+                        // linked copies hand the tracer the same slices,
+                        // which it stores once and places at each.
+                        type Shape = (
+                            Vec<[f32; 3]>,
+                            Vec<[f32; 2]>,
+                            Vec<kreate_math::Vec3>,
+                            Vec<u32>,
+                            Vec<u32>,
+                            Vec<kreate_render::mesh_gpu::Submesh>,
+                        );
+                        let mut shapes: std::collections::HashMap<usize, Shape> =
+                            std::collections::HashMap::new();
+                        for (_, mesh) in traced() {
+                            shapes.entry(Arc::as_ptr(mesh) as usize).or_insert_with(|| {
                                 let cpu = kreate_render::RenderMeshCpu::extract(mesh);
-                                let positions: Vec<[f32; 3]> =
-                                    cpu.positions.iter().map(|p| p.0).collect();
-                                let uvs = cpu.uvs.clone();
-                                let normals: Vec<kreate_math::Vec3> = cpu
-                                    .normals
-                                    .iter()
-                                    .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
-                                    .collect();
-                                let runs = materials.runs_of(&self.doc, *id, &cpu.submeshes);
                                 (
-                                    positions,
-                                    uvs,
-                                    normals,
+                                    cpu.positions.iter().map(|p| p.0).collect(),
+                                    cpu.uvs.clone(),
+                                    cpu.normals
+                                        .iter()
+                                        .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+                                        .collect(),
                                     cpu.indices,
+                                    cpu.colors,
+                                    cpu.submeshes,
+                                )
+                            });
+                        }
+                        let placed: Vec<_> = traced()
+                            .map(|(id, mesh)| {
+                                let shape = &shapes[&(Arc::as_ptr(mesh) as usize)];
+                                (
+                                    Arc::as_ptr(mesh) as usize,
                                     self.doc.world_transform(*id),
                                     materials.index_of(&self.doc, *id),
-                                    runs,
-                                    cpu.colors,
+                                    materials.runs_of(&self.doc, *id, &shape.5),
                                 )
                             })
                             .collect();
-                        extracted.extend(panels.iter().enumerate().map(|(i, p)| {
-                            (
-                                p.positions.clone(),
-                                vec![[0.0f32; 2]; p.positions.len()],
-                                p.normals.clone(),
-                                p.indices.clone(),
-                                p.transform,
-                                first_panel + i as u32,
-                                Vec::new(),
-                                Vec::new(),
-                            )
-                        }));
-                        let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = extracted
+                        let mut meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = placed
                             .iter()
-                            .map(
-                                |(
+                            .map(|(key, transform, surface, runs)| {
+                                let (positions, uvs, normals, indices, colors, _) = &shapes[key];
+                                kreate_render::pathtrace::PtMesh {
                                     positions,
                                     uvs,
                                     normals,
-                                    indices,
-                                    transform,
-                                    surface,
-                                    runs,
                                     colors,
-                                )| {
-                                    kreate_render::pathtrace::PtMesh {
-                                        positions,
-                                        uvs,
-                                        normals,
-                                        colors,
-                                        indices,
-                                        transform: *transform,
-                                        surface: *surface,
-                                        runs,
-                                    }
-                                },
-                            )
+                                    indices,
+                                    transform: *transform,
+                                    surface: *surface,
+                                    runs,
+                                }
+                            })
                             .collect();
+                        let panel_uvs: Vec<Vec<[f32; 2]>> = panels
+                            .iter()
+                            .map(|p| vec![[0.0f32; 2]; p.positions.len()])
+                            .collect();
+                        meshes.extend(panels.iter().zip(&panel_uvs).enumerate().map(
+                            |(i, (p, uvs))| kreate_render::pathtrace::PtMesh {
+                                positions: &p.positions,
+                                uvs,
+                                normals: &p.normals,
+                                colors: &[],
+                                indices: &p.indices,
+                                transform: p.transform,
+                                surface: first_panel + i as u32,
+                                runs: &[],
+                            },
+                        ));
                         let pt_images: Vec<kreate_render::pathtrace::PtImage<'_>> = images
                             .iter()
                             .map(|i| kreate_render::pathtrace::PtImage {

@@ -17,6 +17,15 @@ use; `scripts/release.sh` turns that section into the next release.
 - A point light or a spot can take a luminaire's measured shape from its
   IES file (Light tab, Load IES…), in the viewport and the path tracer.
 
+### Changed
+
+- The path tracer uses the GPU's own ray tracing where it has it (Vulkan
+  ray queries); `KREATE_RAY_QUERY=0` turns that off. Elsewhere it walks its
+  own trees as before.
+- Linked copies of a mesh are stored once in the path tracer and placed
+  where each one stands, so a scene of many copies costs the memory and the
+  build time of one.
+
 ### Added
 
 - Materials can scatter light below their surface — skin, marble, wax,
