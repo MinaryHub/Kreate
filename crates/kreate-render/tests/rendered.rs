@@ -2319,6 +2319,9 @@ fn traced_scene(
     let floor =
         kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &floor_cpu, glam::Vec4::ONE);
     let cube_kind = CUBE.with(|c| c.get());
+    // A test's own cube surface, as the tracer runs it: its compiled code
+    // and constants.
+    let mut tracer_cube: Option<kreate_shader::Compiled> = None;
     if cube_kind == CubeKind::Glass {
         let floor_graph =
             kreate_scene::shader::ShaderGraph::standard("floor", grey().base_color, 0.0, 0.5);
@@ -2333,6 +2336,20 @@ fn traced_scene(
             *base_color = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
             *transmission = GLASS.with(|g| g.get());
             *roughness = 0.05;
+        }
+        // A test's own cube surface over the glass one: its colour, its
+        // roughness and its layers.
+        if let Some((colour, rough, layers)) = CUBE_SURFACE.with(|c| c.get()) {
+            let mut material = kreate_scene::Material {
+                base_color: colour,
+                roughness: rough,
+                transmission: GLASS.with(|g| g.get()),
+                layers,
+                ..Default::default()
+            };
+            material.name = "cube".into();
+            glass_graph = kreate_scene::shader::ShaderGraph::for_material(&material);
+            tracer_cube = Some(kreate_shader::compile(&glass_graph).expect("compiles"));
         }
         let compiled = [
             kreate_shader::compile(&floor_graph).expect("compiles"),
@@ -2405,7 +2422,25 @@ fn traced_scene(
         roughness: 0.05,
         transmission: GLASS.with(|g| g.get()),
         ior: 1.5,
+        // A test's own cube surface is the compiled one, as the
+        // application's materials are.
+        material: tracer_cube.as_ref().map(|_| 0),
         ..Default::default()
+    };
+    let tracer_code = tracer_cube.as_ref().map(|c| {
+        format!(
+            "{}{}",
+            kreate_shader::tracer_declarations(),
+            kreate_shader::for_tracer(c, 0, 0, 0, 0)
+        )
+    });
+    let tracer_materials = match (&tracer_cube, &tracer_code) {
+        (Some(c), Some(code)) => kreate_render::pathtrace::PtMaterials {
+            code,
+            count: 1,
+            values: &c.constants,
+        },
+        _ => Default::default(),
     };
     viewport.set_path_trace_scene(
         &gpu.device,
@@ -2413,7 +2448,7 @@ fn traced_scene(
         &meshes,
         &[surface, glass],
         images,
-        &Default::default(),
+        &tracer_materials,
     );
     let mut draws = vec![
         Draw::new(&cube, lift),
@@ -2434,7 +2469,11 @@ fn traced_scene(
                 ..PlacedLight::default()
             })
             .collect();
-        lights.push(key_light(20_000.0));
+        let mut sun = key_light(20_000.0);
+        if let Some(d) = SUN.with(|s| s.get()) {
+            sun.direction = d.normalize();
+        }
+        lights.push(sun);
         let nudged = Camera {
             rotation: glam::DQuat::from_rotation_z(0.04) * camera.rotation,
             ..camera
@@ -2840,6 +2879,100 @@ thread_local! {
     static GLASS: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
     /// What `traced_scene` stands on its floor.
     static CUBE: std::cell::Cell<CubeKind> = const { std::cell::Cell::new(CubeKind::Solid) };
+    /// Where `traced_scene`'s sun shines from, when a test turns it.
+    static SUN: std::cell::Cell<Option<glam::Vec3>> = const { std::cell::Cell::new(None) };
+    /// With `CubeKind::Glass`, the cube's own colour, roughness and layers
+    /// in place of clear glass's: compiled, so the tracer reads them.
+    static CUBE_SURFACE: std::cell::Cell<Option<(kreate_math::SceneRgb, f32, kreate_scene::shader::SurfaceLayers)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The cube made of a surface of the test's own, path traced.
+fn layered_cube(
+    gpu: &Gpu,
+    colour: kreate_math::SceneRgb,
+    transmission: f32,
+    layers: kreate_scene::shader::SurfaceLayers,
+    frames: u32,
+) -> Vec<[f32; 4]> {
+    CUBE_SURFACE.with(|c| c.set(Some((colour, 0.5, layers))));
+    GLASS.with(|g| g.set(transmission));
+    NOISE_THRESHOLD.with(|t| t.set(0.0));
+    let shot = cube_shot(gpu, CubeKind::Glass, true, frames);
+    NOISE_THRESHOLD.with(|t| t.set(0.01));
+    GLASS.with(|g| g.set(1.0));
+    CUBE_SURFACE.with(|c| c.set(None));
+    shot
+}
+
+/// Light that scatters inside comes back about as much as a matte of the
+/// same colour returns — the walk's albedo is found from the colour — and
+/// comes out where no light falls: lit from behind and above, a cube's face
+/// toward the camera is in its own shadow, and light walked through from the
+/// lit faces brightens it.
+#[test]
+fn light_walked_below_the_surface_comes_back_its_colour_and_comes_through() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    let white = kreate_math::SceneRgb::new(0.8, 0.8, 0.8);
+    let walked_layers = kreate_scene::shader::SurfaceLayers {
+        subsurface: 1.0,
+        subsurface_color: white,
+        subsurface_radius: 0.6,
+        ..Default::default()
+    };
+    let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+    // As much light back, lit as the other tests are.
+    let matte = layered_cube(&gpu, white, 0.0, Default::default(), 64);
+    let walked = layered_cube(&gpu, white, 0.0, walked_layers, 64);
+    assert!(walked.iter().all(|p| p.iter().all(|v| v.is_finite())));
+    let none = cube_shot(&gpu, CubeKind::None, true, 16);
+    let cube: Vec<usize> = (0..none.len())
+        .filter(|&i| (lum(&matte[i]) - lum(&none[i])).abs() > 0.05)
+        .collect();
+    assert!(cube.len() > 50, "the cube is {} pixels", cube.len());
+    let mean = |p: &[[f32; 4]], at: &[usize]| {
+        at.iter().map(|&i| lum(&p[i])).sum::<f32>() / at.len() as f32
+    };
+    let (m, w) = (mean(&matte, &cube), mean(&walked, &cube));
+    eprintln!("cube: matte {m}, walked {w}");
+    assert!(w > m * 0.75 && w < m * 1.25, "matte {m}, walked {w}");
+    // From behind: the darkest fifth of the cube is its shaded face.
+    SUN.with(|s| s.set(Some(glam::Vec3::new(0.0, -0.6, -0.8))));
+    let matte = layered_cube(&gpu, white, 0.0, Default::default(), 64);
+    let walked = layered_cube(&gpu, white, 0.0, walked_layers, 64);
+    SUN.with(|s| s.set(None));
+    let mut by_light = cube.clone();
+    by_light.sort_by(|a, b| lum(&matte[*a]).total_cmp(&lum(&matte[*b])));
+    let shaded = &by_light[..by_light.len() / 5];
+    let (ms, ws) = (mean(&matte, shaded), mean(&walked, shaded));
+    eprintln!("shaded face: matte {ms}, walked {ws}");
+    assert!(ws > ms * 1.3, "matte {ms}, walked {ws}");
+}
+
+/// Glass that takes light as it passes: the floor seen through a red-tinted
+/// glass cube is redder than through a clear one, and darker.
+#[test]
+fn a_tinted_glass_takes_its_colour_out_of_what_passes() {
+    let gpu = traced_gpu_or_skip!(gpu());
+    let white = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
+    let clear = layered_cube(&gpu, white, 1.0, Default::default(), 48);
+    let red = layered_cube(
+        &gpu,
+        white,
+        1.0,
+        kreate_scene::shader::SurfaceLayers {
+            attenuation_color: kreate_math::SceneRgb::new(0.9, 0.2, 0.2),
+            attenuation_distance: 0.3,
+            ..Default::default()
+        },
+        48,
+    );
+    let sum = |p: &[[f32; 4]], c: usize| p.iter().map(|x| x[c]).sum::<f32>();
+    let (r0, g0) = (sum(&clear, 0), sum(&clear, 1));
+    let (r1, g1) = (sum(&red, 0), sum(&red, 1));
+    eprintln!("clear r {r0} g {g0}; tinted r {r1} g {g1}");
+    assert!(g1 < g0 * 0.97, "green {g0} to {g1}");
+    assert!(r1 / g1 > r0 / g0 * 1.02, "the picture did not redden");
 }
 
 /// The cube as `kind`, rasterised or traced.

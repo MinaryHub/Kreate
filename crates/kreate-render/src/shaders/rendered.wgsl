@@ -269,7 +269,14 @@ fn through_glass(
     // for the dielectric the clear surface is.
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     let f = DIELECTRIC_F0 + (1.0 - DIELECTRIC_F0) * pow(1.0 - nov, 5.0);
-    return reflected + (1.0 - f) * surface.base_color * seen + shown_glow(sample.emission);
+    // A tinted glass's colour, as through a thickness of its own distance:
+    // the rasteriser does not know how thick the solid is where it is seen
+    // through, and the distance is the depth the colour was given for.
+    var through = surface.base_color;
+    if surface.attenuation_distance > 0.0 {
+        through *= surface.attenuation_color;
+    }
+    return reflected + (1.0 - f) * through * seen + shown_glow(sample.emission);
 }
 
 // The direction U runs on the surface at `p`, from the screen derivatives of

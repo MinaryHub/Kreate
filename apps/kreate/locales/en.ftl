@@ -2095,6 +2095,11 @@ op-material-set_properties-param-sheen-name = Sheen
 op-material-set_properties-param-sheen_roughness-name = Sheen Roughness
 op-material-set_properties-param-anisotropy-name = Anisotropy
 op-material-set_properties-param-anisotropy_rotation-name = Anisotropy Rotation
+op-material-set_properties-param-subsurface-name = Subsurface
+op-material-set_properties-param-subsurface_color-name = Subsurface Colour
+op-material-set_properties-param-subsurface_radius-name = Subsurface Radius
+op-material-set_properties-param-attenuation_color-name = Absorption Colour
+op-material-set_properties-param-attenuation_distance-name = Absorption Distance
 render-preparing = Preparing the renderer…
 render-time-left = about { $seconds } s left
 

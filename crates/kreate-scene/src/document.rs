@@ -528,6 +528,11 @@ impl Material {
                     sheen_roughness,
                     anisotropy,
                     anisotropy_rotation,
+                    subsurface,
+                    subsurface_color,
+                    subsurface_radius,
+                    attenuation_color,
+                    attenuation_distance,
                     ..
                 } => Some(SurfaceLayers {
                     specular: *specular,
@@ -537,6 +542,11 @@ impl Material {
                     sheen_roughness: *sheen_roughness,
                     anisotropy: *anisotropy,
                     anisotropy_rotation: *anisotropy_rotation,
+                    subsurface: *subsurface,
+                    subsurface_color: *subsurface_color,
+                    subsurface_radius: *subsurface_radius,
+                    attenuation_color: *attenuation_color,
+                    attenuation_distance: *attenuation_distance,
                 }),
                 _ => None,
             }

@@ -1301,6 +1301,24 @@ pub struct SetMaterialParams {
     /// Which way the stretch runs, in turns from the texture's U.
     #[param(min = 0.0, max = 1.0)]
     pub anisotropy_rotation: f64,
+    /// How much of the light scatters inside before it leaves: skin, marble,
+    /// wax, milk. Zero is none.
+    #[param(min = 0.0, max = 1.0)]
+    pub subsurface: f64,
+    /// The colour light comes back with after scattering inside.
+    #[param(color)]
+    pub subsurface_color: [f64; 3],
+    /// How far light travels inside before it scatters, in metres: a few
+    /// millimetres for skin, centimetres for wax.
+    #[param(min = 0.0, soft_max = 0.1)]
+    pub subsurface_radius: f64,
+    /// The colour light passing through keeps after the distance below:
+    /// tinted glass, wine, sea water.
+    #[param(color)]
+    pub attenuation_color: [f64; 3],
+    /// The distance it has that colour after, in metres. Zero is clear.
+    #[param(min = 0.0, soft_max = 1.0)]
+    pub attenuation_distance: f64,
 }
 
 impl Default for SetMaterialParams {
@@ -1325,6 +1343,11 @@ impl Default for SetMaterialParams {
             sheen_roughness: 0.3,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
+            subsurface: 0.0,
+            subsurface_color: [0.8, 0.8, 0.8],
+            subsurface_radius: 0.01,
+            attenuation_color: [1.0, 1.0, 1.0],
+            attenuation_distance: 0.0,
         }
     }
 }
@@ -1395,14 +1418,16 @@ impl Operator for SetMaterial {
         material.ior = params.ior.max(1.0) as f32;
         material.thin = params.thin;
         material.alpha_clip = (params.alpha_clip > 0.0).then(|| params.alpha_clip.min(1.0) as f32);
-        // The sheen's colour as the base colour's is: a swatch to a reflectance.
-        let sheen = kreate_math::Srgb::new(
-            params.sheen[0] as f32,
-            params.sheen[1] as f32,
-            params.sheen[2] as f32,
-        )
-        .as_reflectance();
-        material.layers = kreate_scene::shader::SurfaceLayers::from_array([
+        // Colours as the base colour's are: a swatch to a reflectance.
+        let reflectance = |c: [f64; 3]| {
+            kreate_math::Srgb::new(c[0] as f32, c[1] as f32, c[2] as f32).as_reflectance()
+        };
+        let (sheen, sub, through) = (
+            reflectance(params.sheen),
+            reflectance(params.subsurface_color),
+            reflectance(params.attenuation_color),
+        );
+        material.layers = kreate_scene::shader::SurfaceLayers::from_slice(&[
             params.specular as f32,
             params.coat as f32,
             params.coat_roughness as f32,
@@ -1412,6 +1437,15 @@ impl Operator for SetMaterial {
             params.sheen_roughness as f32,
             params.anisotropy as f32,
             params.anisotropy_rotation as f32,
+            params.subsurface as f32,
+            sub.r,
+            sub.g,
+            sub.b,
+            params.subsurface_radius as f32,
+            through.r,
+            through.g,
+            through.b,
+            params.attenuation_distance as f32,
         ]);
         let layers = material.layers;
         let (glass, bend) = (material.transmission, material.ior);
@@ -1434,6 +1468,11 @@ impl Operator for SetMaterial {
                     sheen_roughness,
                     anisotropy,
                     anisotropy_rotation,
+                    subsurface,
+                    subsurface_color,
+                    subsurface_radius,
+                    attenuation_color,
+                    attenuation_distance,
                     ..
                 } = &mut graph.nodes[o].kind
                 {
@@ -1449,6 +1488,11 @@ impl Operator for SetMaterial {
                     *sheen_roughness = layers.sheen_roughness;
                     *anisotropy = layers.anisotropy;
                     *anisotropy_rotation = layers.anisotropy_rotation;
+                    *subsurface = layers.subsurface;
+                    *subsurface_color = layers.subsurface_color;
+                    *subsurface_radius = layers.subsurface_radius;
+                    *attenuation_color = layers.attenuation_color;
+                    *attenuation_distance = layers.attenuation_distance;
                 }
             }
         }
@@ -2157,6 +2201,17 @@ pub fn material_params(material: &kreate_scene::Material, slot: u32) -> SetMater
         sheen_roughness: layers.sheen_roughness as f64,
         anisotropy: layers.anisotropy as f64,
         anisotropy_rotation: layers.anisotropy_rotation as f64,
+        subsurface: layers.subsurface as f64,
+        subsurface_color: {
+            let c = layers.subsurface_color.as_swatch();
+            [c.r as f64, c.g as f64, c.b as f64]
+        },
+        subsurface_radius: layers.subsurface_radius as f64,
+        attenuation_color: {
+            let c = layers.attenuation_color.as_swatch();
+            [c.r as f64, c.g as f64, c.b as f64]
+        },
+        attenuation_distance: layers.attenuation_distance as f64,
     }
 }
 

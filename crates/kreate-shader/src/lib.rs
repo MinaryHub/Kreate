@@ -277,11 +277,13 @@ pub fn compile_with(
     // The layers, from their slots: see where the constants are pushed.
     let _ = writeln!(
         wgsl,
-        "    s.ior = max(material.values[{0}].y, 1.0);\n    s.specular = max(material.values[{1}].x, 0.0);\n    s.coat = clamp(material.values[{1}].y, 0.0, 1.0);\n    s.coat_roughness = clamp(material.values[{1}].z, 0.02, 1.0);\n    s.sheen_roughness = clamp(material.values[{1}].w, 0.02, 1.0);\n    s.sheen_color = max(material.values[{2}].rgb, vec3<f32>(0.0));\n    s.anisotropy = clamp(material.values[{2}].w, 0.0, 1.0);\n    s.anisotropy_rotation = material.values[{3}].x;",
+        "    s.ior = max(material.values[{0}].y, 1.0);\n    s.specular = max(material.values[{1}].x, 0.0);\n    s.coat = clamp(material.values[{1}].y, 0.0, 1.0);\n    s.coat_roughness = clamp(material.values[{1}].z, 0.02, 1.0);\n    s.sheen_roughness = clamp(material.values[{1}].w, 0.02, 1.0);\n    s.sheen_color = max(material.values[{2}].rgb, vec3<f32>(0.0));\n    s.anisotropy = clamp(material.values[{2}].w, 0.0, 1.0);\n    s.anisotropy_rotation = material.values[{3}].x;\n    s.subsurface = clamp(material.values[{3}].y, 0.0, 1.0);\n    s.subsurface_radius = max(material.values[{3}].z, 0.0);\n    s.attenuation_distance = max(material.values[{3}].w, 0.0);\n    s.subsurface_color = clamp(material.values[{4}].rgb, vec3<f32>(0.0), vec3<f32>(1.0));\n    s.attenuation_color = clamp(material.values[{5}].rgb, vec3<f32>(0.0), vec3<f32>(1.0));",
         surface_slot + 2,
         surface_slot + 3,
         surface_slot + 4,
         surface_slot + 5,
+        surface_slot + 6,
+        surface_slot + 7,
     );
     // Straight up when nothing is wired: the geometric normal, unchanged.
     let normal = out.input_expr(output, 3, "vec3<f32>(0.0, 0.0, 1.0)")?;
@@ -845,6 +847,11 @@ impl Emitter<'_> {
                 sheen_roughness,
                 anisotropy,
                 anisotropy_rotation,
+                subsurface,
+                subsurface_color,
+                subsurface_radius,
+                attenuation_color,
+                attenuation_distance,
             } => {
                 // Two slots: the colour and the metallic share one, the
                 // roughness has the next. Always both, so that the layout is
@@ -861,7 +868,25 @@ impl Emitter<'_> {
                     .push([specular, coat, coat_roughness, sheen_roughness]);
                 self.constants
                     .push([sheen_color.r, sheen_color.g, sheen_color.b, anisotropy]);
-                self.constants.push([anisotropy_rotation, 0.0, 0.0, 0.0]);
+                self.constants.push([
+                    anisotropy_rotation,
+                    subsurface,
+                    subsurface_radius,
+                    attenuation_distance,
+                ]);
+                // Two more: the colours light comes back and goes through with.
+                self.constants.push([
+                    subsurface_color.r,
+                    subsurface_color.g,
+                    subsurface_color.b,
+                    0.0,
+                ]);
+                self.constants.push([
+                    attenuation_color.r,
+                    attenuation_color.g,
+                    attenuation_color.b,
+                    0.0,
+                ]);
             }
         }
         self.emitted[node] = Some(slot);
@@ -1447,7 +1472,7 @@ mod tests {
     /// this one only says the generated text is WGSL at all.
     fn parses(compiled: &Compiled) {
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32>, subsurface: f32, subsurface_color: vec3<f32>, subsurface_radius: f32, attenuation_color: vec3<f32>, attenuation_distance: f32, diffuse_weight: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; s.diffuse_weight = 1.0; return s; }}\n{}",
             compiled.wgsl
         );
         naga::front::wgsl::parse_str(&source)
@@ -1457,7 +1482,7 @@ mod tests {
     /// Parses and validates, against the stand-in `Surface`.
     fn validates(compiled: &Compiled) {
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32>, subsurface: f32, subsurface_color: vec3<f32>, subsurface_radius: f32, attenuation_color: vec3<f32>, attenuation_distance: f32, diffuse_weight: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; s.diffuse_weight = 1.0; return s; }}\n{}",
             compiled.wgsl
         );
         let module = naga::front::wgsl::parse_str(&source)
@@ -1708,7 +1733,7 @@ mod tests {
         // layers seven and eight.
         assert!(b.contains(", 7, ") && b.contains(", 8, "), "{b}");
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32>, subsurface: f32, subsurface_color: vec3<f32>, subsurface_radius: f32, attenuation_color: vec3<f32>, attenuation_distance: f32, diffuse_weight: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; s.diffuse_weight = 1.0; return s; }}
 @group(0) @binding(0) var<storage, read> pt_material_values: array<vec4<f32>>;
 @group(0) @binding(1) var pt_colour_images: texture_2d_array<f32>;
 @group(0) @binding(2) var pt_data_images: texture_2d_array<f32>;
@@ -1862,7 +1887,7 @@ mod tests {
             }
             let compiled = compile(&g).expect("compiles");
             let source = format!(
-                "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}
+                "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32>, subsurface: f32, subsurface_color: vec3<f32>, subsurface_radius: f32, attenuation_color: vec3<f32>, attenuation_distance: f32, diffuse_weight: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; s.diffuse_weight = 1.0; return s; }}
 {}",
                 compiled.wgsl
             );
@@ -1912,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_material_compiles_to_its_six_constants() {
+    fn a_flat_material_compiles_to_its_eight_constants() {
         let compiled = compile(&flat()).expect("compiles");
         parses(&compiled);
         assert_eq!(
@@ -1927,8 +1952,13 @@ mod tests {
                 [1.0, 0.0, 0.03, 0.3],
                 // ...nor colour, no stretch...
                 [0.0, 0.0, 0.0, 0.0],
-                // ...nor its turn.
-                [0.0, 0.0, 0.0, 0.0]
+                // ...nor its turn, no scattering inside (its radius if
+                // there were), nothing taken from what passes through...
+                [0.0, 0.0, 0.01, 0.0],
+                // ...the colour it would come back...
+                [0.8, 0.8, 0.8, 0.0],
+                // ...and clear.
+                [1.0, 1.0, 1.0, 0.0]
             ]
         );
         assert!(compiled.images.is_empty());
@@ -2300,7 +2330,7 @@ mod map_tests {
 
     fn parses(compiled: &Compiled) {
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32>, subsurface: f32, subsurface_color: vec3<f32>, subsurface_radius: f32, attenuation_color: vec3<f32>, attenuation_distance: f32, diffuse_weight: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; s.diffuse_weight = 1.0; return s; }}\n{}",
             compiled.wgsl
         );
         naga::front::wgsl::parse_str(&source)

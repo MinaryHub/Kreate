@@ -12,6 +12,16 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Materials can scatter light below their surface — skin, marble, wax,
+  milk — with a colour and a radius: the path tracer walks it through the
+  solid, so a face out of the light glows with what came through; the
+  viewport shows its colour.
+- Glass can take colour out of what passes through it, by an absorption
+  colour and distance: a wine bottle, sea water. glTF's
+  `KHR_materials_volume` carries it.
+
+### Added
+
 - Materials have a clear coat (car paint, varnish), a fabric sheen, a
   brushed (anisotropic) highlight and a specular weight, in the Material
   tab, the path tracer and the viewport alike; glTF files carry them as

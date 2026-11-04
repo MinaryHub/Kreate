@@ -2101,6 +2101,11 @@ op-material-set_properties-param-sheen-name = 광택(직물)
 op-material-set_properties-param-sheen_roughness-name = 광택 퍼짐
 op-material-set_properties-param-anisotropy-name = 이방성
 op-material-set_properties-param-anisotropy_rotation-name = 이방성 방향
+op-material-set_properties-param-subsurface-name = 표면하 산란
+op-material-set_properties-param-subsurface_color-name = 표면하 산란 색
+op-material-set_properties-param-subsurface_radius-name = 표면하 산란 반경
+op-material-set_properties-param-attenuation_color-name = 흡수 색
+op-material-set_properties-param-attenuation_distance-name = 흡수 거리
 render-preparing = 렌더러 준비 중…
 render-time-left = 약 { $seconds }초 남음
 

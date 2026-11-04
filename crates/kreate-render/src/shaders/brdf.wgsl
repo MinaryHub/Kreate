@@ -75,6 +75,16 @@ struct Surface {
     /// The surface's tangent, filled in by the pass; zero where there is
     /// none, and the highlight does not stretch.
     tangent: vec3<f32>,
+    /// Light that scatters inside: how much, its colour, and how far it goes
+    /// in metres. See `brdf::Surface`.
+    subsurface: f32,
+    subsurface_color: vec3<f32>,
+    subsurface_radius: f32,
+    /// What light passing through keeps after the distance: tinted glass.
+    attenuation_color: vec3<f32>,
+    attenuation_distance: f32,
+    /// A weight on the diffuse lobe; one but in the path tracer's walk.
+    diffuse_weight: f32,
 }
 
 /// A surface with every field at the value that leaves it what the three
@@ -94,6 +104,12 @@ fn surface_default() -> Surface {
     s.anisotropy = 0.0;
     s.anisotropy_rotation = 0.0;
     s.tangent = vec3<f32>(0.0);
+    s.subsurface = 0.0;
+    s.subsurface_color = vec3<f32>(0.8);
+    s.subsurface_radius = 0.01;
+    s.attenuation_color = vec3<f32>(1.0);
+    s.attenuation_distance = 0.0;
+    s.diffuse_weight = 1.0;
     return s;
 }
 
@@ -117,7 +133,10 @@ fn surface_f0(s: Surface) -> vec3<f32> {
 fn surface_diffuse_albedo(s: Surface) -> vec3<f32> {
     // Zero for a metal, and not as an approximation: a conductor absorbs what
     // enters it, so nothing scatters back out.
-    return s.base_color * (1.0 - clamp(s.metallic, 0.0, 1.0));
+    // The light that scatters inside comes back its own colour: see
+    // `Surface::diffuse_albedo`.
+    let albedo = mix(s.base_color, s.subsurface_color, clamp(s.subsurface, 0.0, 1.0));
+    return albedo * (1.0 - clamp(s.metallic, 0.0, 1.0)) * clamp(s.diffuse_weight, 0.0, 1.0);
 }
 
 /// The roughness the energy terms are read at: see `Surface::lobe_roughness`.
@@ -448,6 +467,8 @@ struct Sample {
     sheen: vec4<f32>,
     /// xyz: the tangent.
     tangent: vec4<f32>,
+    /// rgb: the subsurface colour. w: how much.
+    subsurface: vec4<f32>,
     normal: vec4<f32>,
     view: vec4<f32>,
     light: vec4<f32>,
@@ -489,6 +510,8 @@ fn probe_brdf(@builtin(global_invocation_id) id: vec3<u32>) {
     s.anisotropy_rotation = sample.more.w;
     s.sheen_color = sample.sheen.rgb;
     s.tangent = sample.tangent.xyz;
+    s.subsurface_color = sample.subsurface.rgb;
+    s.subsurface = sample.subsurface.w;
 
     let r = brdf_evaluate(
         s,
