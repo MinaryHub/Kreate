@@ -1190,9 +1190,11 @@ pub struct MaterialRecord {
     pub alpha_clip: Option<f32>,
     /// The layers over the plain surface, written only when there are any:
     /// specular weight, coat and its roughness, sheen colour and roughness,
-    /// anisotropy and its turn. See `SurfaceLayers::to_array`.
+    /// anisotropy and its turn, then what scatters inside and what passing
+    /// through keeps. See `SurfaceLayers::to_vec`; a shorter list (a file
+    /// from before the later ones) leaves those at their defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layers: Option<[f32; 9]>,
+    pub layers: Option<Vec<f32>>,
     /// The material's own node graph, when it uses one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphRecord>,
@@ -2233,7 +2235,7 @@ pub fn write(
                         .then_some([m.transmission, m.ior]),
                     thin: m.thin,
                     alpha_clip: m.alpha_clip,
-                    layers: (!m.layers.is_plain()).then(|| m.layers.to_array()),
+                    layers: (!m.layers.is_plain()).then(|| m.layers.to_vec()),
                     graph: m.graph.as_ref().map(|g| graph_record(g, document)),
                     action: m.action.and_then(|a| action_index.get(&a).copied()),
                     density: m.density,
@@ -2818,7 +2820,8 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
             alpha_clip: record.alpha_clip.map(|c| c.clamp(0.0, 1.0)),
             layers: record
                 .layers
-                .map(kreate_scene::shader::SurfaceLayers::from_array)
+                .as_deref()
+                .map(kreate_scene::shader::SurfaceLayers::from_slice)
                 .unwrap_or_default(),
             graph: record
                 .graph

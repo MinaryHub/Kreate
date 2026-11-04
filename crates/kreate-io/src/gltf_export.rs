@@ -1489,6 +1489,7 @@ fn emit_material(
             (ext.others.contains_key(CLEARCOAT), CLEARCOAT),
             (ext.others.contains_key(SHEEN), SHEEN),
             (ext.others.contains_key(ANISOTROPY), ANISOTROPY),
+            (ext.others.contains_key(VOLUME), VOLUME),
         ];
         for (on, name) in used {
             if on && !root.extensions_used.iter().any(|e| e == name) {
@@ -1504,6 +1505,7 @@ const SPECULAR: &str = "KHR_materials_specular";
 const CLEARCOAT: &str = "KHR_materials_clearcoat";
 const SHEEN: &str = "KHR_materials_sheen";
 const ANISOTROPY: &str = "KHR_materials_anisotropy";
+const VOLUME: &str = "KHR_materials_volume";
 
 /// The layer extensions a material needs, as raw JSON: only those whose
 /// factor is not the plain surface's.
@@ -1534,6 +1536,19 @@ fn layer_extensions(
             json!({
                 "anisotropyStrength": l.anisotropy,
                 "anisotropyRotation": l.anisotropy_rotation * std::f32::consts::TAU,
+            }),
+        );
+    }
+    if l.attenuation_distance > 0.0 {
+        let c = l.attenuation_color;
+        out.insert(
+            VOLUME.into(),
+            json!({
+                "attenuationColor": [c.r, c.g, c.b],
+                "attenuationDistance": l.attenuation_distance,
+                // A volume with no thickness is a thin wall, which would
+                // take nothing; the attenuation is meant through the solid.
+                "thicknessFactor": l.attenuation_distance,
             }),
         );
     }

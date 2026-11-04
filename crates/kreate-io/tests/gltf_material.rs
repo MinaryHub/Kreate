@@ -349,6 +349,9 @@ fn the_layers_travel_as_their_extensions() {
         sheen_roughness: 0.45,
         anisotropy: 0.7,
         anisotropy_rotation: 0.125,
+        attenuation_color: kreate_math::SceneRgb::new(0.7, 0.2, 0.3),
+        attenuation_distance: 0.05,
+        ..Default::default()
     };
     let paint = doc.add_material(Material {
         name: "Paint".into(),
@@ -374,6 +377,7 @@ fn the_layers_travel_as_their_extensions() {
         "KHR_materials_clearcoat",
         "KHR_materials_sheen",
         "KHR_materials_anisotropy",
+        "KHR_materials_volume",
     ] {
         assert!(used.contains(&name), "{name} not in {used:?}");
     }
@@ -386,8 +390,8 @@ fn the_layers_travel_as_their_extensions() {
             .clone()
     };
     let got = by_name("Paint").layers;
-    let (a, b) = (got.to_array(), layers.to_array());
-    for i in 0..9 {
+    let (a, b) = (got.to_vec(), layers.to_vec());
+    for i in 0..a.len() {
         assert!((a[i] - b[i]).abs() < 1e-5, "{got:?} against {layers:?}");
     }
     assert!(

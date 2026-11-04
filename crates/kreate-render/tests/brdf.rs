@@ -78,6 +78,7 @@ struct Sample {
     more: [f32; 4],
     sheen: [f32; 4],
     tangent: [f32; 4],
+    subsurface: [f32; 4],
     normal: [f32; 4],
     view: [f32; 4],
     light: [f32; 4],
@@ -109,6 +110,10 @@ fn sample_of(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) -> 
             surface.tangent[2],
             0.0,
         ],
+        subsurface: {
+            let c = surface.subsurface_color.to_array();
+            [c[0], c[1], c[2], surface.subsurface]
+        },
         normal: [n.x, n.y, n.z, 0.0],
         view: [v.x, v.y, v.z, 0.0],
         light: [l.x, l.y, l.z, 0.0],
@@ -357,6 +362,15 @@ fn surfaces() -> Vec<Surface> {
             ..Default::default()
         });
     }
+    // Light that scatters inside, as a raster pass shows it: its colour in
+    // the diffuse lobe's place.
+    out.push(Surface {
+        base_color: kreate_math::SceneRgb::new(0.9, 0.7, 0.6),
+        roughness: 0.5,
+        subsurface: 0.7,
+        subsurface_color: kreate_math::SceneRgb::new(0.9, 0.3, 0.2),
+        ..Default::default()
+    });
     // Sheens, tight and soft, coloured, and under a varnish.
     for (sheen_roughness, coat) in [(0.1f32, 0.0f32), (0.5, 0.0), (0.9, 0.6)] {
         out.push(Surface {

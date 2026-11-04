@@ -561,6 +561,99 @@ fn pt_emitter_pdf(le: vec3<f32>, dist2: f32, cos_l: f32) -> f32 {
     return pt_emitter_share() * pt_luminance(le) / pt.emitter_total * dist2 / cos_l;
 }
 
+// --- below the surface ---------------------------------------------------------
+//
+// Light that enters a skin, a marble, a candle and scatters before it leaves,
+// as a random walk through a uniform medium: steps drawn from its mean free
+// path, each scattering evenly in every direction and keeping the medium's
+// single-scattering albedo, until the walk meets a face of the solid. The
+// albedo is found from the colour the light should come back with — the
+// whole walk's — by Kulla and Conty's fit of van de Hulst's relation, so the
+// colour given is the colour seen.
+
+// What a surface's tinted glass takes per metre: `-ln(c) / d`, zero for a
+// clear one.
+fn pt_absorption(s: Surface) -> vec3<f32> {
+    if (s.attenuation_distance <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let c = clamp(s.attenuation_color, vec3<f32>(1e-4), vec3<f32>(1.0));
+    return -log(c) / s.attenuation_distance;
+}
+
+// The share of the light that walks below: the subsurface weight of the
+// diffuse lobe, which a metal has none of.
+fn pt_below_weight(s: Surface) -> f32 {
+    return clamp(s.subsurface, 0.0, 1.0) * (1.0 - clamp(s.metallic, 0.0, 1.0));
+}
+
+// How often the walk is chosen: its share, held below one so the surface's
+// own reflection is still sampled.
+fn pt_below_chance(s: Surface) -> f32 {
+    return min(pt_below_weight(s), 0.9);
+}
+
+// The single-scattering albedo that gives a walk's colour `a`.
+fn pt_walk_albedo(a: vec3<f32>) -> vec3<f32> {
+    let c = clamp(a, vec3<f32>(0.0), vec3<f32>(0.999));
+    let k = vec3<f32>(4.09712) + vec3<f32>(4.20863) * c
+        - sqrt(vec3<f32>(9.59217) + vec3<f32>(41.6808) * c + vec3<f32>(17.7126) * c * c);
+    return vec3<f32>(1.0) - k * k;
+}
+
+struct PtWalk {
+    // One when the walk came out; zero when it was lost inside.
+    out: u32,
+    // Where to trace from, and which way, to meet the face it leaves by.
+    at: vec3<f32>,
+    dir: vec3<f32>,
+    // What the scattering kept.
+    carried: vec3<f32>,
+};
+
+fn pt_walk(entry: vec3<f32>, inward: vec3<f32>, s: Surface) -> PtWalk {
+    var out: PtWalk;
+    out.out = 0u;
+    out.carried = vec3<f32>(1.0);
+    let albedo = pt_walk_albedo(s.subsurface_color);
+    let sigma = 1.0 / max(s.subsurface_radius, 1e-5);
+    // In by a cosine-weighted direction about the inward normal: the light
+    // that crosses a rough boundary.
+    let frame = pt_orthonormal(inward);
+    let r1 = pt_random();
+    let r2 = pt_random();
+    let r = sqrt(r1);
+    let phi = 6.2831853 * r2;
+    var d = frame * vec3<f32>(r * cos(phi), r * sin(phi), sqrt(max(1.0 - r1, 0.0)));
+    var at = entry;
+    for (var k = 0u; k < 256u; k = k + 1u) {
+        let length = -log(max(1.0 - pt_random(), 1e-7)) / sigma;
+        let met = pt_trace(at, d, length, false, PT_NONE);
+        if (met.t >= 0.0) {
+            out.out = 1u;
+            out.at = at;
+            out.dir = d;
+            return out;
+        }
+        at = at + d * length;
+        out.carried *= albedo;
+        // Long walks in a pale medium carry little each: ended at random,
+        // the survivors made heavier, as the path itself is.
+        if (k >= 8u) {
+            let keep = clamp(max(max(out.carried.r, out.carried.g), out.carried.b), 0.05, 0.99);
+            if (pt_random() > keep) {
+                return out;
+            }
+            out.carried /= keep;
+        }
+        let z = 1.0 - 2.0 * pt_random();
+        let sr = sqrt(max(1.0 - z * z, 0.0));
+        let a = 6.2831853 * pt_random();
+        d = vec3<f32>(sr * cos(a), sr * sin(a), z);
+    }
+    return out;
+}
+
 // --- choosing a lamp ---------------------------------------------------------
 //
 // Chosen at random among the lamps, a lamp a hundred times brighter than
@@ -1040,6 +1133,14 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // that finds nothing shows.
     var floor_tried = false;
     var floor_back = vec3<f32>(-1.0);
+    // What the medium the path is travelling through takes per metre: the
+    // inside of a tinted glass, from the face it entered by until the face it
+    // leaves by. Zero in air.
+    var medium = vec3<f32>(0.0);
+    // The path has walked below a surface and is leaving by the face it meets
+    // next: that face is lit as the point the light comes out of, not
+    // shaded as the material.
+    var leaving_below = false;
     var step = 0u;
     loop {
         if (bounce > pt.max_bounces || crossings > 16u) {
@@ -1217,6 +1318,8 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             radiance += throughput * pt_environment(dir) * weight;
             break;
         }
+        // Through a tinted medium, what it took over the way here.
+        throughput *= exp(-medium * hit.t);
         let tri = pt_triangles[hit.triangle];
         let w = 1.0 - hit.u - hit.v;
         let p = origin + dir * hit.t;
@@ -1324,7 +1427,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // otherwise. See `pt_emitter_pdf`.
         // A one-sided glow — an area light's panel — lights only the side its
         // normals face, so a path arriving from behind finds nothing.
-        let lit_side = entering || pt_surfaces[m + 3u].x == 0.0;
+        let lit_side = (entering || pt_surfaces[m + 3u].x == 0.0) && !leaving_below;
         let glow = select(vec3<f32>(0.0), pt_surfaces[m + 2u].rgb, lit_side);
         if (pt_luminance(glow) > 0.0) {
             var weight = 1.0;
@@ -1375,9 +1478,23 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 first_normal = geometric;
             }
         }
-        let v = -dir;
+        var v = -dir;
+        // Out from below: the face met from inside is where the light comes
+        // out, a diffuse emergence — so it is shaded as a white matte facing
+        // out, the colour having been taken on the walk.
+        let emerging = leaving_below;
+        if (emerging) {
+            leaving_below = false;
+            geometric = -geometric;
+            n = select(-n, n, dot(n, geometric) > 0.0);
+            s = surface_default();
+            s.base_color = vec3<f32>(1.0);
+            s.roughness = 1.0;
+            s.specular = 0.0;
+            v = n;
+        }
         let start = p + geometric * 1e-3 * max(1.0, length(p - pt.eye.xyz) * 0.01);
-        let transmission = extra.w;
+        let transmission = select(extra.w, 0.0, emerging);
 
         // Glass, chosen as often as the surface is glass: the path reflects
         // or goes through by Fresnel, bent by the index of refraction, and
@@ -1410,6 +1527,10 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             if (through) {
                 if (entering) {
                     throughput *= s.base_color;
+                    // Inside now: what the glass takes per metre, until out.
+                    medium = pt_absorption(s);
+                } else {
+                    medium = vec3<f32>(0.0);
                 }
                 // From the surface itself, leaving this triangle behind: an
                 // offset through would step past whatever lies flush against
@@ -1431,6 +1552,33 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             direct = radiance;
         }
         bounce += 1u;
+
+        // Below the surface: as often as its diffuse light scatters inside,
+        // the path goes in and walks — scattering by the medium's albedo,
+        // lengths drawn from its mean free path — until it meets a face of
+        // the solid, which it leaves by next turn. The rest of the time the
+        // surface is shaded without that share of its diffuse lobe, which
+        // the walk stands for.
+        let p_below = pt_below_chance(s);
+        if (p_below > 0.0) {
+            if (pt_random() < p_below) {
+                let share = specular_share(surface_f0(s), clamp(dot(n, v), 1e-4, 1.0), surface_lobe_roughness(s));
+                throughput *= (vec3<f32>(1.0) - share) * (pt_below_weight(s) / p_below);
+                let walked = pt_walk(p - geometric * 1e-4 * max(1.0, length(p - pt.eye.xyz) * 0.01), -geometric, s);
+                if (walked.out == 0u) {
+                    break;
+                }
+                throughput *= walked.carried;
+                origin = walked.at;
+                dir = walked.dir;
+                skip = PT_NONE;
+                leaving_below = true;
+                last_pdf = -1.0;
+                continue;
+            }
+            throughput /= 1.0 - p_below;
+            s.diffuse_weight = 1.0 - clamp(s.subsurface, 0.0, 1.0);
+        }
 
         // Aim at a glowing triangle, or at a lamp: one of the two, its share
         // made up by dividing by how often it is chosen.

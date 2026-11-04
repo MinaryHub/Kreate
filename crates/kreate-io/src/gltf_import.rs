@@ -895,7 +895,8 @@ fn ngon_faces(
 
 /// The layers a glTF material's extensions describe over its plain surface:
 /// `KHR_materials_specular`'s weight, `KHR_materials_clearcoat`,
-/// `KHR_materials_sheen` and `KHR_materials_anisotropy` — their factors, each
+/// `KHR_materials_sheen`, `KHR_materials_anisotropy` and
+/// `KHR_materials_volume`'s attenuation — their factors, each
 /// at the specification's default where the file says nothing. Read from the
 /// raw JSON: the reader has no types for most of them.
 fn layers_of(material: &gltf::Material<'_>) -> kreate_scene::shader::SurfaceLayers {
@@ -938,7 +939,16 @@ fn layers_of(material: &gltf::Material<'_>) -> kreate_scene::shader::SurfaceLaye
             .unwrap_or(0.0)
             / std::f32::consts::TAU;
     }
-    SurfaceLayers::from_array(out.to_array())
+    if let Some(volume) = material.extension_value("KHR_materials_volume") {
+        if let Some(c) = volume.get("attenuationColor").and_then(|v| v.as_array()) {
+            let c = [0, 1, 2].map(|i| c.get(i).and_then(|x| x.as_f64()).unwrap_or(1.0) as f32);
+            out.attenuation_color = kreate_math::SceneRgb::new(c[0], c[1], c[2]);
+        }
+        // Absent is infinite, which is clear: zero here.
+        out.attenuation_distance =
+            number("KHR_materials_volume", "attenuationDistance").unwrap_or(0.0);
+    }
+    SurfaceLayers::from_slice(&out.to_vec())
 }
 
 /// Reads a scalar `u32` accessor as a plain vector.

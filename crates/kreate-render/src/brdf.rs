@@ -97,6 +97,23 @@ pub struct Surface {
     /// pass that shades fills it in. Zero where there is none, and then the
     /// highlight does not stretch.
     pub tangent: [f32; 3],
+    /// How much of the diffuse light scatters inside before it leaves, zero
+    /// to one: skin, marble, wax, milk. The path tracer walks it; a raster
+    /// pass shows its colour in the diffuse lobe's place.
+    pub subsurface: f32,
+    /// The colour the light comes back with after scattering inside.
+    pub subsurface_color: SceneRgb,
+    /// How far light travels inside before scattering, on average, in metres.
+    pub subsurface_radius: f32,
+    /// What light passing through the material keeps after
+    /// `attenuation_distance`: a tinted glass's colour, a wine's. White and a
+    /// distance of zero are clear. glTF's `KHR_materials_volume`.
+    pub attenuation_color: SceneRgb,
+    pub attenuation_distance: f32,
+    /// A weight on the diffuse lobe, one but where a pass has taken part of
+    /// it elsewhere — the path tracer, for the share that walks below the
+    /// surface. Not a material's.
+    pub diffuse_weight: f32,
 }
 
 impl Default for Surface {
@@ -116,6 +133,12 @@ impl Default for Surface {
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
             tangent: [0.0; 3],
+            subsurface: 0.0,
+            subsurface_color: SceneRgb::new(0.8, 0.8, 0.8),
+            subsurface_radius: 0.01,
+            attenuation_color: SceneRgb::new(1.0, 1.0, 1.0),
+            attenuation_distance: 0.0,
+            diffuse_weight: 1.0,
         }
     }
 }
@@ -162,9 +185,17 @@ impl Surface {
     /// come back out. A metal with a diffuse term is the commonest way for a
     /// renderer to make metal look like painted plastic.
     pub fn diffuse_albedo(&self) -> [f32; 3] {
-        let m = 1.0 - self.metallic.clamp(0.0, 1.0);
+        let m = (1.0 - self.metallic.clamp(0.0, 1.0)) * self.diffuse_weight.clamp(0.0, 1.0);
         let base = self.base_color.to_array();
-        [base[0] * m, base[1] * m, base[2] * m]
+        // The light that scatters inside comes back its own colour: shown in
+        // the diffuse lobe's place where nothing walks it.
+        let k = self.subsurface.clamp(0.0, 1.0);
+        let sub = self.subsurface_color.to_array();
+        [
+            (base[0] * (1.0 - k) + sub[0] * k) * m,
+            (base[1] * (1.0 - k) + sub[1] * k) * m,
+            (base[2] * (1.0 - k) + sub[2] * k) * m,
+        ]
     }
 
     /// The microfacet distribution's width.

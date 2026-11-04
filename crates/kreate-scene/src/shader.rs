@@ -296,11 +296,21 @@ pub enum NodeKind {
         /// and which way, in turns from the tangent.
         anisotropy: f32,
         anisotropy_rotation: f32,
+        /// Light that scatters inside: how much, the colour it comes back,
+        /// how far it goes in metres.
+        subsurface: f32,
+        subsurface_color: SceneRgb,
+        subsurface_radius: f32,
+        /// What light passing through keeps after the distance in metres;
+        /// zero is clear.
+        attenuation_color: SceneRgb,
+        attenuation_distance: f32,
     },
 }
 
 /// The layers a standard surface can carry over its plain self: a specular
-/// weight, a varnish, a fabric's sheen, a brushed highlight. What a
+/// weight, a varnish, a fabric's sheen, a brushed highlight, light that
+/// scatters inside, a tint on what passes through. What a
 /// [`Material`](crate::document::Material) keeps for them, and what
 /// [`ShaderGraph::for_material`] puts on its surface. The default is none of
 /// them — the plain surface every file before them describes.
@@ -313,21 +323,25 @@ pub struct SurfaceLayers {
     pub sheen_roughness: f32,
     pub anisotropy: f32,
     pub anisotropy_rotation: f32,
+    /// How much of the diffuse light scatters inside, its colour coming
+    /// back, and how far it goes in metres.
+    pub subsurface: f32,
+    pub subsurface_color: SceneRgb,
+    pub subsurface_radius: f32,
+    /// What light passing through keeps after the distance, in metres; a
+    /// distance of zero is clear. glTF's `KHR_materials_volume`.
+    pub attenuation_color: SceneRgb,
+    pub attenuation_distance: f32,
 }
 
 impl Default for SurfaceLayers {
     fn default() -> Self {
-        Self {
-            specular: 1.0,
-            coat: 0.0,
-            coat_roughness: 0.03,
-            sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
-            sheen_roughness: 0.3,
-            anisotropy: 0.0,
-            anisotropy_rotation: 0.0,
-        }
+        Self::from_slice(&[])
     }
 }
+
+/// How many numbers [`SurfaceLayers::to_vec`] writes.
+pub const SURFACE_LAYER_NUMBERS: usize = 18;
 
 impl SurfaceLayers {
     /// Whether it is the plain surface: nothing to write, nothing to say.
@@ -335,9 +349,9 @@ impl SurfaceLayers {
         *self == Self::default()
     }
 
-    /// As nine numbers, in the order a file keeps them.
-    pub fn to_array(&self) -> [f32; 9] {
-        [
+    /// As numbers, in the order a file keeps them; new ones go last.
+    pub fn to_vec(&self) -> Vec<f32> {
+        vec![
             self.specular,
             self.coat,
             self.coat_roughness,
@@ -347,26 +361,39 @@ impl SurfaceLayers {
             self.sheen_roughness,
             self.anisotropy,
             self.anisotropy_rotation,
+            self.subsurface,
+            self.subsurface_color.r,
+            self.subsurface_color.g,
+            self.subsurface_color.b,
+            self.subsurface_radius,
+            self.attenuation_color.r,
+            self.attenuation_color.g,
+            self.attenuation_color.b,
+            self.attenuation_distance,
         ]
     }
 
-    /// From nine numbers, each one held to what it can mean.
-    pub fn from_array(v: [f32; 9]) -> Self {
-        let unit = |x: f32| {
-            if x.is_finite() {
-                x.clamp(0.0, 1.0)
-            } else {
-                0.0
-            }
+    /// From numbers, each held to what it can mean; any not given (a file
+    /// from before it) takes its default.
+    pub fn from_slice(v: &[f32]) -> Self {
+        let at = |i: usize, default: f32| match v.get(i) {
+            Some(x) if x.is_finite() => *x,
+            _ => default,
         };
+        let unit = |i: usize, default: f32| at(i, default).clamp(0.0, 1.0);
         Self {
-            specular: if v[0].is_finite() { v[0].max(0.0) } else { 1.0 },
-            coat: unit(v[1]),
-            coat_roughness: unit(v[2]),
-            sheen_color: SceneRgb::new(unit(v[3]), unit(v[4]), unit(v[5])),
-            sheen_roughness: unit(v[6]),
-            anisotropy: unit(v[7]),
-            anisotropy_rotation: if v[8].is_finite() { v[8] } else { 0.0 },
+            specular: at(0, 1.0).max(0.0),
+            coat: unit(1, 0.0),
+            coat_roughness: unit(2, 0.03),
+            sheen_color: SceneRgb::new(unit(3, 0.0), unit(4, 0.0), unit(5, 0.0)),
+            sheen_roughness: unit(6, 0.3),
+            anisotropy: unit(7, 0.0),
+            anisotropy_rotation: at(8, 0.0),
+            subsurface: unit(9, 0.0),
+            subsurface_color: SceneRgb::new(unit(10, 0.8), unit(11, 0.8), unit(12, 0.8)),
+            subsurface_radius: at(13, 0.01).max(0.0),
+            attenuation_color: SceneRgb::new(unit(14, 1.0), unit(15, 1.0), unit(16, 1.0)),
+            attenuation_distance: at(17, 0.0).max(0.0),
         }
     }
 }
@@ -804,6 +831,11 @@ impl NodeKind {
                 sheen_roughness,
                 anisotropy,
                 anisotropy_rotation,
+                subsurface,
+                subsurface_color,
+                subsurface_radius,
+                attenuation_color,
+                attenuation_distance,
             } => {
                 vec![
                     base_color.r,
@@ -827,6 +859,15 @@ impl NodeKind {
                     *sheen_roughness,
                     *anisotropy,
                     *anisotropy_rotation,
+                    *subsurface,
+                    subsurface_color.r,
+                    subsurface_color.g,
+                    subsurface_color.b,
+                    *subsurface_radius,
+                    attenuation_color.r,
+                    attenuation_color.g,
+                    attenuation_color.b,
+                    *attenuation_distance,
                 ]
             }
             NodeKind::Fresnel { ior } => vec![*ior],
@@ -968,6 +1009,11 @@ impl NodeKind {
                 sheen_roughness: at(18, 0.3),
                 anisotropy: at(19, 0.0),
                 anisotropy_rotation: at(20, 0.0),
+                subsurface: at(21, 0.0),
+                subsurface_color: SceneRgb::new(at(22, 0.8), at(23, 0.8), at(24, 0.8)),
+                subsurface_radius: at(25, 0.01),
+                attenuation_color: SceneRgb::new(at(26, 1.0), at(27, 1.0), at(28, 1.0)),
+                attenuation_distance: at(29, 0.0),
             },
             _ => return None,
         })
@@ -1190,6 +1236,11 @@ impl ShaderGraph {
                     sheen_roughness: 0.3,
                     anisotropy: 0.0,
                     anisotropy_rotation: 0.0,
+                    subsurface: 0.0,
+                    subsurface_color: SceneRgb::new(0.8, 0.8, 0.8),
+                    subsurface_radius: 0.01,
+                    attenuation_color: SceneRgb::new(1.0, 1.0, 1.0),
+                    attenuation_distance: 0.0,
                 },
             )],
             links: Vec::new(),
@@ -1235,6 +1286,11 @@ impl ShaderGraph {
             sheen_roughness,
             anisotropy,
             anisotropy_rotation,
+            subsurface,
+            subsurface_color,
+            subsurface_radius,
+            attenuation_color,
+            attenuation_distance,
             ..
         } = &mut graph.nodes[0].kind
         {
@@ -1251,6 +1307,11 @@ impl ShaderGraph {
             *sheen_roughness = l.sheen_roughness;
             *anisotropy = l.anisotropy;
             *anisotropy_rotation = l.anisotropy_rotation;
+            *subsurface = l.subsurface;
+            *subsurface_color = l.subsurface_color;
+            *subsurface_radius = l.subsurface_radius;
+            *attenuation_color = l.attenuation_color;
+            *attenuation_distance = l.attenuation_distance;
         }
         // `standard` puts the surface at zero and adds nothing else, so every
         // link below reaches nodes that are certainly there, of the types the
@@ -2138,6 +2199,11 @@ mod tests {
                     sheen_roughness: 0.3,
                     anisotropy: 0.0,
                     anisotropy_rotation: 0.0,
+                    subsurface: 0.0,
+                    subsurface_color: SceneRgb::new(0.8, 0.8, 0.8),
+                    subsurface_radius: 0.01,
+                    attenuation_color: SceneRgb::new(1.0, 1.0, 1.0),
+                    attenuation_distance: 0.0,
                 },
             )),
             None
@@ -2419,6 +2485,11 @@ mod tests {
                 sheen_roughness: 0.6,
                 anisotropy: 0.5,
                 anisotropy_rotation: 0.25,
+                subsurface: 0.6,
+                subsurface_color: SceneRgb::new(0.9, 0.4, 0.3),
+                subsurface_radius: 0.02,
+                attenuation_color: SceneRgb::new(0.5, 0.8, 0.9),
+                attenuation_distance: 0.1,
             },
         ];
         for kind in kinds {
