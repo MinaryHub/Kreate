@@ -589,6 +589,22 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
     }
 
     let mut specular = specular;
+    let sheen = surface.sheen_color.to_array();
+    let sheen_weight = sheen[0].max(sheen[1]).max(sheen[2]).clamp(0.0, 1.0);
+    if sheen_weight > 0.0 {
+        // The sheen over the surface, under any varnish: the surface lit by
+        // what the fibres leave it, coupled as the coat is below.
+        let table = sheen_table();
+        let r = surface.sheen_roughness;
+        let below = (1.0 - sheen_weight * table.lookup(nov, r))
+            * (1.0 - sheen_weight * table.lookup(nol, r))
+            / (1.0 - sheen_weight * table.average(r)).max(1e-3);
+        let lobe = sheen_distribution(noh, sheen_alpha(r)) * sheen_visibility(nov, nol);
+        for c in 0..3 {
+            diffuse[c] *= below;
+            specular[c] = specular[c] * below + sheen[c].clamp(0.0, 1.0) * lobe;
+        }
+    }
     let coat = surface.coat.clamp(0.0, 1.0);
     if coat > 0.0 {
         // The varnish: a colourless GGX lobe of its own roughness, at a
@@ -695,7 +711,9 @@ pub fn library_source() -> &'static str {
 /// The table, then its per-roughness averages. One buffer rather than two,
 /// because the forward pass will already be carrying lights, materials and a
 /// camera, and a binding saved there is a binding not spent.
-pub const DFG_ENTRIES: usize = ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT;
+/// Then the sheen's table and its averages, each entry `(E, 0)`: see
+/// [`SheenTable`].
+pub const DFG_ENTRIES: usize = 2 * (ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT);
 
 /// The buffer the shader reads: the table, then the averages.
 ///
@@ -706,8 +724,144 @@ pub const DFG_ENTRIES: usize = ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT;
 pub fn dfg_buffer(table: &AlbedoTable) -> Vec<f32> {
     let mut out = table.as_flat();
     out.extend(table.averages_flat());
+    let sheen = sheen_table();
+    for row in &sheen.entries {
+        for e in row {
+            out.extend([*e, 0.0]);
+        }
+    }
+    for a in &sheen.average {
+        out.extend([*a, 0.0]);
+    }
     debug_assert_eq!(out.len(), DFG_ENTRIES * 2);
     out
+}
+
+// --- sheen -------------------------------------------------------------------
+//
+// The soft brightening at a fabric's rim: fibres standing off the surface
+// catch light at grazing angles. Estevez and Kulla's "Charlie" distribution —
+// `sin θh` to a power, so it peaks where the half vector lies along the
+// surface — with Neubelt and Pettineo's visibility term, which is what glTF's
+// `KHR_materials_sheen` and Filament use.
+//
+// The lobe is not energy-conserving by itself, so the surface below is lit by
+// what it leaves, the same symmetric way the diffuse is coupled to the
+// specular and the coat to what is under it: from the lobe's directional
+// albedo, tabulated here.
+
+/// The sheen's roughness is held above this: the distribution's power is
+/// its inverse, and a power in the hundreds is a spike no table resolves.
+pub const MIN_SHEEN_ROUGHNESS: f32 = 0.07;
+
+/// The Charlie distribution.
+pub fn sheen_distribution(noh: f32, alpha: f32) -> f32 {
+    let inv = 1.0 / alpha;
+    let sin2 = (1.0 - noh * noh).max(0.0078125);
+    (2.0 + inv) * sin2.powf(inv * 0.5) / std::f32::consts::TAU
+}
+
+/// Neubelt and Pettineo's visibility, `1/(4·(NoL + NoV − NoL·NoV))`.
+pub fn sheen_visibility(nov: f32, nol: f32) -> f32 {
+    1.0 / (4.0 * (nol + nov - nol * nov)).max(1e-4)
+}
+
+fn sheen_alpha(roughness: f32) -> f32 {
+    let r = roughness.clamp(MIN_SHEEN_ROUGHNESS, 1.0);
+    r * r
+}
+
+/// The sheen lobe's directional albedo, per view angle and roughness, and
+/// its cosine-weighted average per roughness — what a white sheen reflects,
+/// and therefore what it takes from the surface below.
+pub struct SheenTable {
+    entries: [[f32; ALBEDO_LUT]; ALBEDO_LUT],
+    average: [f32; ALBEDO_LUT],
+}
+
+impl SheenTable {
+    /// By quadrature over the hemisphere: the lobe is broad, so a fixed grid
+    /// resolves it at every roughness the floor allows.
+    pub fn compute() -> Self {
+        const THETA: usize = 48;
+        const PHI: usize = 64;
+        let mut entries = [[0.0f32; ALBEDO_LUT]; ALBEDO_LUT];
+        for (ri, row) in entries.iter_mut().enumerate() {
+            let roughness = (ri as f32 + 0.5) / ALBEDO_LUT as f32;
+            let alpha = sheen_alpha(roughness);
+            for (vi, cell) in row.iter_mut().enumerate() {
+                let nov = ((vi as f32 + 0.5) / ALBEDO_LUT as f32).clamp(1e-3, 1.0);
+                let v = glam::Vec3::new((1.0 - nov * nov).max(0.0).sqrt(), 0.0, nov);
+                let mut sum = 0.0f32;
+                for i in 0..THETA {
+                    // Even in cos θ, so each ring is the same solid angle.
+                    let cos_t = (i as f32 + 0.5) / THETA as f32;
+                    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+                    for j in 0..PHI {
+                        let phi = (j as f32 + 0.5) / PHI as f32 * std::f32::consts::TAU;
+                        let l = glam::Vec3::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+                        let h = (v + l).normalize();
+                        let f = sheen_distribution(h.z.clamp(0.0, 1.0), alpha)
+                            * sheen_visibility(nov, cos_t);
+                        sum += f * cos_t;
+                    }
+                }
+                let d_omega = std::f32::consts::TAU / (THETA * PHI) as f32;
+                *cell = (sum * d_omega).clamp(0.0, 1.0);
+            }
+        }
+        let mut average = [0.0f32; ALBEDO_LUT];
+        for (ri, row) in entries.iter().enumerate() {
+            average[ri] = row
+                .iter()
+                .enumerate()
+                .map(|(vi, e)| {
+                    e * 2.0 * ((vi as f32 + 0.5) / ALBEDO_LUT as f32) / ALBEDO_LUT as f32
+                })
+                .sum();
+        }
+        Self { entries, average }
+    }
+
+    /// The albedo at `(NoV, roughness)`, interpolated as the DFG table is.
+    pub fn lookup(&self, nov: f32, roughness: f32) -> f32 {
+        let last = (ALBEDO_LUT - 1) as f32;
+        let to_index = |t: f32| (t.clamp(0.0, 1.0) * ALBEDO_LUT as f32 - 0.5).clamp(0.0, last);
+        let (x, y) = (to_index(nov), to_index(roughness));
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(ALBEDO_LUT - 1), (y0 + 1).min(ALBEDO_LUT - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let near = self.entries[y0][x0] * (1.0 - fx) + self.entries[y0][x1] * fx;
+        let far = self.entries[y1][x0] * (1.0 - fx) + self.entries[y1][x1] * fx;
+        near * (1.0 - fy) + far * fy
+    }
+
+    /// The cosine-weighted average at `roughness`.
+    pub fn average(&self, roughness: f32) -> f32 {
+        let last = (ALBEDO_LUT - 1) as f32;
+        let y = (roughness.clamp(0.0, 1.0) * ALBEDO_LUT as f32 - 0.5).clamp(0.0, last);
+        let y0 = y.floor() as usize;
+        let y1 = (y0 + 1).min(ALBEDO_LUT - 1);
+        let fy = y - y0 as f32;
+        self.average[y0] * (1.0 - fy) + self.average[y1] * fy
+    }
+}
+
+/// The one sheen table.
+pub fn sheen_table() -> &'static SheenTable {
+    static TABLE: std::sync::OnceLock<SheenTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(SheenTable::compute)
+}
+
+/// How much of a surface's light its sheen takes from the view `nov`: the
+/// sheen colour's brightest channel times the lobe's albedo.
+pub fn sheen_share(surface: &Surface, nov: f32) -> f32 {
+    let s = surface.sheen_color.to_array();
+    let w = s[0].max(s[1]).max(s[2]).clamp(0.0, 1.0);
+    if w <= 0.0 {
+        return 0.0;
+    }
+    w * sheen_table().lookup(nov, surface.sheen_roughness)
 }
 
 #[cfg(test)]
@@ -826,6 +980,69 @@ mod tests {
             Lobe::Specular,
         );
         assert!(varnished > bare * 1.5, "{bare} bare, {varnished} varnished");
+    }
+
+    #[test]
+    fn a_white_sheen_over_a_white_matte_keeps_its_energy() {
+        // The fibres' light is taken from what reaches the surface below, so
+        // a white cloth with a white sheen returns what it gets — face on and
+        // at a glance, soft sheen and tight, with a varnish over it too.
+        for sheen_roughness in [0.2, 0.5, 1.0] {
+            for coat in [0.0, 1.0] {
+                let cloth = Surface {
+                    base_color: SceneRgb::WHITE,
+                    roughness: 0.9,
+                    sheen_color: SceneRgb::WHITE,
+                    sheen_roughness,
+                    coat,
+                    coat_roughness: 0.4,
+                    ..Default::default()
+                };
+                for nov in [0.95, 0.5, 0.2] {
+                    let total = directional_albedo(&cloth, nov, Lobe::Both);
+                    assert!(
+                        (0.92..=1.04).contains(&total),
+                        "sheen {sheen_roughness}, coat {coat}, NoV {nov}: {total}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_sheen_brightens_the_rim_and_not_the_face() {
+        // What a sheen is for: velvet's glow at its silhouette. A dark cloth
+        // seen at a glance, lit at a glance from beside the viewer — the
+        // half vector lying along the surface, where the fibres stand —
+        // gives back far more with a sheen than without; seen and lit face
+        // on, about the same.
+        let dark = Surface {
+            base_color: SceneRgb::new(0.05, 0.05, 0.05),
+            roughness: 0.9,
+            ..Default::default()
+        };
+        let velvet = Surface {
+            sheen_color: SceneRgb::new(0.8, 0.8, 0.8),
+            sheen_roughness: 0.4,
+            ..dark
+        };
+        let n = glam::Vec3::Z;
+        let grazing = glam::Vec3::new(0.97, 0.0, 0.243).normalize();
+        let beside = glam::Vec3::new(0.95, 0.25, 0.19).normalize();
+        let rim = |s: &Surface| evaluate(s, n, grazing, beside).total()[0];
+        assert!(
+            rim(&velvet) > rim(&dark) * 3.0,
+            "{} against {}",
+            rim(&velvet),
+            rim(&dark)
+        );
+        let face = |s: &Surface| evaluate(s, n, n, n).total()[0];
+        assert!(
+            face(&velvet) < face(&dark) * 1.5,
+            "{} against {}",
+            face(&velvet),
+            face(&dark)
+        );
     }
 
     #[test]
@@ -1088,6 +1305,7 @@ mod tests {
             format!("const DIELECTRIC_F0: f32 = {DIELECTRIC_F0};"),
             format!("const DIELECTRIC_IOR: f32 = {DIELECTRIC_IOR};"),
             format!("const MIN_ROUGHNESS: f32 = {MIN_ROUGHNESS};"),
+            format!("const MIN_SHEEN_ROUGHNESS: f32 = {MIN_SHEEN_ROUGHNESS};"),
         ] {
             assert!(
                 source.contains(&declaration),

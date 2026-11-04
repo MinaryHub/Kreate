@@ -122,12 +122,19 @@ pub fn ambient_from(
         0.0
     };
     let below = 1.0 - coat * coat_share;
+    // The sheen over the surface: broad enough that the irradiance stands
+    // for what it reflects, and it takes its albedo from what is below.
+    let sheen = surface.sheen_color.to_array();
+    let sheen_e = brdf::sheen_table().lookup(nov, surface.sheen_roughness);
+    let sheen_below = 1.0 - brdf::sheen_share(surface, nov);
     let mut out = [0.0f32; 3];
     for c in 0..3 {
         // Irradiance over `π` is the radiance a Lambertian surface reflects.
         let base = prefiltered[c] * share[c]
             + albedo[c] * (1.0 - share[c]) * irradiance[c] / std::f32::consts::PI;
-        out[c] = base * below + coat_prefiltered[c] * coat * coat_share;
+        let sheened = base * sheen_below
+            + sheen[c].clamp(0.0, 1.0) * sheen_e * irradiance[c] / std::f32::consts::PI;
+        out[c] = sheened * below + coat_prefiltered[c] * coat * coat_share;
     }
     out
 }

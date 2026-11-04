@@ -657,7 +657,10 @@ fn pt_lobes(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
         let f = DIELECTRIC_F0 + (1.0 - DIELECTRIC_F0) * m * m * m * m * m;
         p_coat = clamp(clamp(s.coat, 0.0, 1.0) * (0.25 + f), 0.05, 0.6);
     }
-    let p_spec = clamp(mix(0.15, 1.0, s.metallic) * (1.0 - 0.5 * s.roughness), 0.1, 0.95);
+    var p_spec = clamp(mix(0.15, 1.0, s.metallic) * (1.0 - 0.5 * s.roughness), 0.1, 0.95);
+    // A sheen is broad, and the cosine lobe stands for it: on a metal, where
+    // that lobe would hardly be chosen, it is given its share.
+    p_spec = min(p_spec, 1.0 - 0.4 * sheen_weight(s));
     return vec3<f32>(p_coat, (1.0 - p_coat) * p_spec, (1.0 - p_coat) * (1.0 - p_spec));
 }
 

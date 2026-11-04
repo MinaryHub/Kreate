@@ -499,10 +499,13 @@ fn ambient_from(
     // is the one place the factor belongs: the coefficients carry it in for the
     // lookup and it comes back out here.
     let base = prefiltered * share + diffuse * irradiance / PI_SHADING;
-    // The varnish first, and the surface below with what it leaves: see
-    // `shading::ambient_from`.
+    // The sheen over it, lit by the irradiance; then the varnish over both:
+    // see `shading::ambient_from`.
+    let sheen_e = sheen_lookup(nov, s.sheen_roughness);
+    let sheened = base * (1.0 - sheen_weight(s) * sheen_e)
+        + clamp(s.sheen_color, vec3<f32>(0.0), vec3<f32>(1.0)) * sheen_e * irradiance / PI_SHADING;
     let coat_share = coat_reflects(s, nov);
-    return base * (1.0 - s.coat * coat_share) + coat_prefiltered * (clamp(s.coat, 0.0, 1.0) * coat_share);
+    return sheened * (1.0 - s.coat * coat_share) + coat_prefiltered * (clamp(s.coat, 0.0, 1.0) * coat_share);
 }
 
 /// How much of the arriving light the varnish takes, at its roughness; zero
@@ -601,7 +604,8 @@ fn environment_specular(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<
     // The surface's own reflection, under what the varnish takes; the
     // varnish's is the environment's alone, which the screen does not
     // replace.
-    let share = specular_share(surface_f0(s), nov, roughness) * (1.0 - s.coat * coat_reflects(s, nov));
+    let share = specular_share(surface_f0(s), nov, roughness) * (1.0 - s.coat * coat_reflects(s, nov))
+        * (1.0 - sheen_weight(s) * sheen_lookup(nov, s.sheen_roughness));
     if shading.world.w <= 0.0 {
         return shading.world.rgb * share;
     }

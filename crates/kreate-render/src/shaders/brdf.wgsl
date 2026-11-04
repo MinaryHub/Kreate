@@ -152,6 +152,60 @@ fn dfg_average(roughness: f32) -> vec2<f32> {
     return mix(dfg[base + y0], dfg[base + y1], y - floor(y));
 }
 
+// --- sheen: see `brdf.rs`'s section of the same name ---------------------
+
+const MIN_SHEEN_ROUGHNESS: f32 = 0.07;
+
+/// Where the sheen's table starts in the buffer: after the DFG table and its
+/// averages. Its own averages follow it.
+fn sheen_base() -> u32 {
+    return ALBEDO_LUT * ALBEDO_LUT + ALBEDO_LUT;
+}
+
+fn sheen_lookup(nov: f32, roughness: f32) -> f32 {
+    let x = lut_index(nov);
+    let y = lut_index(roughness);
+    let x0 = u32(floor(x));
+    let y0 = u32(floor(y));
+    let x1 = min(x0 + 1u, ALBEDO_LUT - 1u);
+    let y1 = min(y0 + 1u, ALBEDO_LUT - 1u);
+    let fx = x - floor(x);
+    let fy = y - floor(y);
+    let b = sheen_base();
+    let near = mix(dfg[b + y0 * ALBEDO_LUT + x0].x, dfg[b + y0 * ALBEDO_LUT + x1].x, fx);
+    let far = mix(dfg[b + y1 * ALBEDO_LUT + x0].x, dfg[b + y1 * ALBEDO_LUT + x1].x, fx);
+    return mix(near, far, fy);
+}
+
+fn sheen_average(roughness: f32) -> f32 {
+    let b = sheen_base() + ALBEDO_LUT * ALBEDO_LUT;
+    let y = lut_index(roughness);
+    let y0 = u32(floor(y));
+    let y1 = min(y0 + 1u, ALBEDO_LUT - 1u);
+    return mix(dfg[b + y0].x, dfg[b + y1].x, y - floor(y));
+}
+
+fn sheen_distribution(noh: f32, alpha: f32) -> f32 {
+    let inv = 1.0 / alpha;
+    let sin2 = max(1.0 - noh * noh, 0.0078125);
+    return (2.0 + inv) * pow(sin2, inv * 0.5) / (2.0 * PI);
+}
+
+fn sheen_visibility(nov: f32, nol: f32) -> f32 {
+    return 1.0 / max(4.0 * (nol + nov - nol * nov), 1e-4);
+}
+
+fn sheen_alpha(roughness: f32) -> f32 {
+    let r = clamp(roughness, MIN_SHEEN_ROUGHNESS, 1.0);
+    return r * r;
+}
+
+/// The sheen colour's brightest channel: how much of the lobe's albedo the
+/// sheen takes from the surface below.
+fn sheen_weight(s: Surface) -> f32 {
+    return clamp(max(max(s.sheen_color.r, s.sheen_color.g), s.sheen_color.b), 0.0, 1.0);
+}
+
 /// Trowbridge-Reitz.
 fn distribution(noh: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
@@ -243,6 +297,17 @@ fn brdf_evaluate(s: Surface, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> Respon
     out.diffuse = surface_diffuse_albedo(s) * INV_PI
         * (vec3<f32>(1.0) - share_v) * (vec3<f32>(1.0) - share_l)
         / (vec3<f32>(1.0) - avg);
+
+    // The sheen over the surface, under any varnish: see `brdf::evaluate`.
+    let sw = sheen_weight(s);
+    if sw > 0.0 {
+        let r = s.sheen_roughness;
+        let below = (1.0 - sw * sheen_lookup(nov, r)) * (1.0 - sw * sheen_lookup(nol, r))
+            / max(1.0 - sw * sheen_average(r), 1e-3);
+        let lobe = sheen_distribution(noh, sheen_alpha(r)) * sheen_visibility(nov, nol);
+        out.diffuse *= below;
+        out.specular = out.specular * below + clamp(s.sheen_color, vec3<f32>(0.0), vec3<f32>(1.0)) * lobe;
+    }
 
     // The varnish, and what it leaves the surface below: see `brdf::evaluate`.
     let coat = clamp(s.coat, 0.0, 1.0);

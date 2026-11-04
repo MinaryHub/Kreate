@@ -338,6 +338,17 @@ fn surfaces() -> Vec<Surface> {
             ..Default::default()
         });
     }
+    // Sheens, tight and soft, coloured, and under a varnish.
+    for (sheen_roughness, coat) in [(0.1f32, 0.0f32), (0.5, 0.0), (0.9, 0.6)] {
+        out.push(Surface {
+            base_color: kreate_math::SceneRgb::new(0.2, 0.1, 0.4),
+            roughness: 0.8,
+            sheen_color: kreate_math::SceneRgb::new(0.9, 0.6, 0.3),
+            sheen_roughness,
+            coat,
+            ..Default::default()
+        });
+    }
     out
 }
 

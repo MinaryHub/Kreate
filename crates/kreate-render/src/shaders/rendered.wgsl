@@ -214,7 +214,8 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     // Under the varnish, the surface's own reflection is what it lets through.
     out.share = vec4<f32>(
-        specular_share(surface_f0(surface), nov, roughness) * (1.0 - surface.coat * coat_reflects(surface, nov)),
+        specular_share(surface_f0(surface), nov, roughness) * (1.0 - surface.coat * coat_reflects(surface, nov))
+            * (1.0 - sheen_weight(surface) * sheen_lookup(nov, surface.sheen_roughness)),
         1.0,
     );
     out.environment = vec4<f32>(environment_specular(surface, normal, view) * sample.occlusion, 1.0);
