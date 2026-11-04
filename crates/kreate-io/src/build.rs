@@ -1568,6 +1568,7 @@ fn build_materials(
                 transmission: m.transmission,
                 ior: m.ior,
                 alpha_clip: m.alpha_clip,
+                layers: m.layers,
                 ..Default::default()
             })
         })
@@ -1691,6 +1692,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             transmission: material.transmission,
             ior: material.ior,
             alpha_clip: material.alpha_clip,
+            layers: material.surface_layers(),
         });
     }
 

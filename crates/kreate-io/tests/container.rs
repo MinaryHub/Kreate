@@ -833,6 +833,12 @@ fn every_map_and_the_normal_strength_survive_a_save() {
         emission_strength: 750.0,
         transmission: 0.6,
         ior: 1.33,
+        layers: kreate_scene::shader::SurfaceLayers {
+            coat: 0.5,
+            sheen_color: kreate_math::SceneRgb::new(0.2, 0.4, 0.6),
+            anisotropy: 0.3,
+            ..Default::default()
+        },
         ..Default::default()
     });
 
@@ -853,6 +859,12 @@ fn every_map_and_the_normal_strength_survive_a_save() {
     assert_eq!(m.emission, kreate_math::SceneRgb::new(1.0, 0.5, 0.25));
     assert_eq!(m.emission_strength, 750.0);
     assert_eq!((m.transmission, m.ior), (0.6, 1.33));
+    assert_eq!(m.layers.coat, 0.5);
+    assert_eq!(
+        m.layers.sheen_color,
+        kreate_math::SceneRgb::new(0.2, 0.4, 0.6)
+    );
+    assert_eq!(m.layers.anisotropy, 0.3);
 }
 
 #[test]
@@ -875,6 +887,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         transmission: None,
         thin: false,
         alpha_clip: None,
+        layers: None,
         emission_uid: None,
         occlusion_uid: None,
         occlusion_strength: None,

@@ -345,6 +345,7 @@ fn from_imported(
             ior: material.ior().unwrap_or(1.5),
             alpha_clip: (material.alpha_mode() == gltf::material::AlphaMode::Mask)
                 .then(|| material.alpha_cutoff().unwrap_or(0.5)),
+            layers: layers_of(&material),
         });
     }
 
@@ -890,6 +891,54 @@ fn ngon_faces(
         at += size;
     }
     Some(faces)
+}
+
+/// The layers a glTF material's extensions describe over its plain surface:
+/// `KHR_materials_specular`'s weight, `KHR_materials_clearcoat`,
+/// `KHR_materials_sheen` and `KHR_materials_anisotropy` — their factors, each
+/// at the specification's default where the file says nothing. Read from the
+/// raw JSON: the reader has no types for most of them.
+fn layers_of(material: &gltf::Material<'_>) -> kreate_scene::shader::SurfaceLayers {
+    use kreate_scene::shader::SurfaceLayers;
+    let mut out = SurfaceLayers::default();
+    let number = |ext: &str, key: &str| -> Option<f32> {
+        material
+            .extension_value(ext)?
+            .get(key)?
+            .as_f64()
+            .map(|v| v as f32)
+    };
+    if let Some(v) = number("KHR_materials_specular", "specularFactor") {
+        out.specular = v;
+    }
+    if material
+        .extension_value("KHR_materials_clearcoat")
+        .is_some()
+    {
+        out.coat = number("KHR_materials_clearcoat", "clearcoatFactor").unwrap_or(0.0);
+        out.coat_roughness =
+            number("KHR_materials_clearcoat", "clearcoatRoughnessFactor").unwrap_or(0.0);
+    }
+    if let Some(sheen) = material.extension_value("KHR_materials_sheen") {
+        let c = sheen
+            .get("sheenColorFactor")
+            .and_then(|v| v.as_array())
+            .map(|a| [0, 1, 2].map(|i| a.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32))
+            .unwrap_or([0.0; 3]);
+        out.sheen_color = kreate_math::SceneRgb::new(c[0], c[1], c[2]);
+        out.sheen_roughness = number("KHR_materials_sheen", "sheenRoughnessFactor").unwrap_or(0.0);
+    }
+    if material
+        .extension_value("KHR_materials_anisotropy")
+        .is_some()
+    {
+        out.anisotropy = number("KHR_materials_anisotropy", "anisotropyStrength").unwrap_or(0.0);
+        // Radians in the file, turns here.
+        out.anisotropy_rotation = number("KHR_materials_anisotropy", "anisotropyRotation")
+            .unwrap_or(0.0)
+            / std::f32::consts::TAU;
+    }
+    SurfaceLayers::from_array(out.to_array())
 }
 
 /// Reads a scalar `u32` accessor as a plain vector.

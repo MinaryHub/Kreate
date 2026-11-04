@@ -299,6 +299,78 @@ pub enum NodeKind {
     },
 }
 
+/// The layers a standard surface can carry over its plain self: a specular
+/// weight, a varnish, a fabric's sheen, a brushed highlight. What a
+/// [`Material`](crate::document::Material) keeps for them, and what
+/// [`ShaderGraph::for_material`] puts on its surface. The default is none of
+/// them — the plain surface every file before them describes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceLayers {
+    pub specular: f32,
+    pub coat: f32,
+    pub coat_roughness: f32,
+    pub sheen_color: SceneRgb,
+    pub sheen_roughness: f32,
+    pub anisotropy: f32,
+    pub anisotropy_rotation: f32,
+}
+
+impl Default for SurfaceLayers {
+    fn default() -> Self {
+        Self {
+            specular: 1.0,
+            coat: 0.0,
+            coat_roughness: 0.03,
+            sheen_color: SceneRgb::new(0.0, 0.0, 0.0),
+            sheen_roughness: 0.3,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
+        }
+    }
+}
+
+impl SurfaceLayers {
+    /// Whether it is the plain surface: nothing to write, nothing to say.
+    pub fn is_plain(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// As nine numbers, in the order a file keeps them.
+    pub fn to_array(&self) -> [f32; 9] {
+        [
+            self.specular,
+            self.coat,
+            self.coat_roughness,
+            self.sheen_color.r,
+            self.sheen_color.g,
+            self.sheen_color.b,
+            self.sheen_roughness,
+            self.anisotropy,
+            self.anisotropy_rotation,
+        ]
+    }
+
+    /// From nine numbers, each one held to what it can mean.
+    pub fn from_array(v: [f32; 9]) -> Self {
+        let unit = |x: f32| {
+            if x.is_finite() {
+                x.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            specular: if v[0].is_finite() { v[0].max(0.0) } else { 1.0 },
+            coat: unit(v[1]),
+            coat_roughness: unit(v[2]),
+            sheen_color: SceneRgb::new(unit(v[3]), unit(v[4]), unit(v[5])),
+            sheen_roughness: unit(v[6]),
+            anisotropy: unit(v[7]),
+            anisotropy_rotation: if v[8].is_finite() { v[8] } else { 0.0 },
+        }
+    }
+}
+
 /// What a Math node does to its two numbers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MathOp {
@@ -1156,6 +1228,13 @@ impl ShaderGraph {
             ior,
             alpha,
             clip,
+            specular,
+            coat,
+            coat_roughness,
+            sheen_color,
+            sheen_roughness,
+            anisotropy,
+            anisotropy_rotation,
             ..
         } = &mut graph.nodes[0].kind
         {
@@ -1164,6 +1243,14 @@ impl ShaderGraph {
             *ior = material.ior;
             *alpha = material.alpha;
             *clip = material.alpha_clip.unwrap_or(0.0);
+            let l = material.layers;
+            *specular = l.specular;
+            *coat = l.coat;
+            *coat_roughness = l.coat_roughness;
+            *sheen_color = l.sheen_color;
+            *sheen_roughness = l.sheen_roughness;
+            *anisotropy = l.anisotropy;
+            *anisotropy_rotation = l.anisotropy_rotation;
         }
         // `standard` puts the surface at zero and adds nothing else, so every
         // link below reaches nodes that are certainly there, of the types the

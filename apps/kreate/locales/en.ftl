@@ -2088,6 +2088,13 @@ op-object-add_roof-param-rise-name = Rise
 op-object-add_roof-param-thickness-name = Thickness
 op-object-add_roof-param-overhang-name = Overhang
 op-material-set_properties-param-thin-name = Thin Glass
+op-material-set_properties-param-specular-name = Specular
+op-material-set_properties-param-coat-name = Coat
+op-material-set_properties-param-coat_roughness-name = Coat Roughness
+op-material-set_properties-param-sheen-name = Sheen
+op-material-set_properties-param-sheen_roughness-name = Sheen Roughness
+op-material-set_properties-param-anisotropy-name = Anisotropy
+op-material-set_properties-param-anisotropy_rotation-name = Anisotropy Rotation
 render-preparing = Preparing the renderer…
 render-time-left = about { $seconds } s left
 
