@@ -77,6 +77,7 @@ struct Sample {
     params: [f32; 4],
     more: [f32; 4],
     sheen: [f32; 4],
+    tangent: [f32; 4],
     normal: [f32; 4],
     view: [f32; 4],
     light: [f32; 4],
@@ -102,6 +103,12 @@ fn sample_of(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) -> 
             let c = surface.sheen_color.to_array();
             [c[0], c[1], c[2], 0.0]
         },
+        tangent: [
+            surface.tangent[0],
+            surface.tangent[1],
+            surface.tangent[2],
+            0.0,
+        ],
         normal: [n.x, n.y, n.z, 0.0],
         view: [v.x, v.y, v.z, 0.0],
         light: [l.x, l.y, l.z, 0.0],
@@ -335,6 +342,18 @@ fn surfaces() -> Vec<Surface> {
             roughness: 0.5,
             coat: 0.8,
             coat_roughness,
+            ..Default::default()
+        });
+    }
+    // Brushed: stretched along X and turned a little, then a quarter turn.
+    for (anisotropy, anisotropy_rotation) in [(0.5f32, 0.1f32), (0.9, 0.25)] {
+        out.push(Surface {
+            base_color: kreate_math::SceneRgb::new(0.9, 0.9, 0.9),
+            metallic: 1.0,
+            roughness: 0.3,
+            anisotropy,
+            anisotropy_rotation,
+            tangent: [1.0, 0.0, 0.0],
             ..Default::default()
         });
     }

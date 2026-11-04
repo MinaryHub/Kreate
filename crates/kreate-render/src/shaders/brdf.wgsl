@@ -72,6 +72,9 @@ struct Surface {
     /// turns from the tangent.
     anisotropy: f32,
     anisotropy_rotation: f32,
+    /// The surface's tangent, filled in by the pass; zero where there is
+    /// none, and the highlight does not stretch.
+    tangent: vec3<f32>,
 }
 
 /// A surface with every field at the value that leaves it what the three
@@ -90,6 +93,7 @@ fn surface_default() -> Surface {
     s.sheen_roughness = 0.3;
     s.anisotropy = 0.0;
     s.anisotropy_rotation = 0.0;
+    s.tangent = vec3<f32>(0.0);
     return s;
 }
 
@@ -114,6 +118,17 @@ fn surface_diffuse_albedo(s: Surface) -> vec3<f32> {
     // Zero for a metal, and not as an approximation: a conductor absorbs what
     // enters it, so nothing scatters back out.
     return s.base_color * (1.0 - clamp(s.metallic, 0.0, 1.0));
+}
+
+/// The roughness the energy terms are read at: see `Surface::lobe_roughness`.
+fn surface_lobe_roughness(s: Surface) -> f32 {
+    let strength = clamp(s.anisotropy, 0.0, 1.0);
+    if strength <= 0.0 || all(s.tangent == vec3<f32>(0.0)) {
+        return clamp(s.roughness, 0.0, 1.0);
+    }
+    let alpha = surface_alpha(s);
+    let along = alpha + (1.0 - alpha) * strength * strength;
+    return sqrt((along + alpha) * 0.5);
 }
 
 fn surface_alpha(s: Surface) -> f32 {
@@ -206,6 +221,49 @@ fn sheen_weight(s: Surface) -> f32 {
     return clamp(max(max(s.sheen_color.r, s.sheen_color.g), s.sheen_color.b), 0.0, 1.0);
 }
 
+/// The stretched lobe's frame and widths: see `brdf::stretch`. `w` is zero
+/// for a lobe that does not stretch.
+struct Stretch {
+    along: vec3<f32>,
+    across: vec3<f32>,
+    at: f32,
+    ab: f32,
+    on: bool,
+}
+
+fn stretch(s: Surface, n: vec3<f32>, alpha: f32) -> Stretch {
+    var out: Stretch;
+    out.on = false;
+    let strength = clamp(s.anisotropy, 0.0, 1.0);
+    if strength <= 0.0 {
+        return out;
+    }
+    var t = s.tangent - n * dot(n, s.tangent);
+    if dot(t, t) < 1e-12 {
+        return out;
+    }
+    t = normalize(t);
+    let b = cross(n, t);
+    let a = s.anisotropy_rotation * 2.0 * PI;
+    out.along = t * cos(a) + b * sin(a);
+    out.across = cross(n, out.along);
+    out.at = alpha + (1.0 - alpha) * strength * strength;
+    out.ab = alpha;
+    out.on = true;
+    return out;
+}
+
+fn distribution_stretched(toh: f32, boh: f32, noh: f32, at: f32, ab: f32) -> f32 {
+    let x = (toh / at) * (toh / at) + (boh / ab) * (boh / ab) + noh * noh;
+    return 1.0 / max(PI * at * ab * x * x, 1.17549435e-38);
+}
+
+fn visibility_stretched(tov: f32, bov: f32, nov: f32, tol: f32, bol: f32, nol: f32, at: f32, ab: f32) -> f32 {
+    let v = nol * sqrt((at * tov) * (at * tov) + (ab * bov) * (ab * bov) + nov * nov);
+    let l = nov * sqrt((at * tol) * (at * tol) + (ab * bol) * (ab * bol) + nol * nol);
+    return 0.5 / max(v + l, 1.17549435e-38);
+}
+
 /// Trowbridge-Reitz.
 fn distribution(noh: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
@@ -279,11 +337,20 @@ fn brdf_evaluate(s: Surface, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> Respon
     let voh = clamp(dot(v, h), 0.0, 1.0);
 
     let alpha = surface_alpha(s);
-    let roughness = clamp(s.roughness, 0.0, 1.0);
+    let roughness = surface_lobe_roughness(s);
     let f0 = surface_f0(s);
     let f = fresnel(f0, voh);
-    let d = distribution(noh, alpha);
-    let vis = visibility(nov, nol, alpha);
+    var d = distribution(noh, alpha);
+    var vis = visibility(nov, nol, alpha);
+    let st = stretch(s, n, alpha);
+    if st.on {
+        d = distribution_stretched(dot(st.along, h), dot(st.across, h), noh, st.at, st.ab);
+        vis = visibility_stretched(
+            dot(st.along, v), dot(st.across, v), nov,
+            dot(st.along, l), dot(st.across, l), nol,
+            st.at, st.ab,
+        );
+    }
 
     out.specular = d * vis * f * energy_compensation(f0, nov, roughness);
 
@@ -379,6 +446,8 @@ struct Sample {
     more: vec4<f32>,
     /// rgb: the sheen's colour.
     sheen: vec4<f32>,
+    /// xyz: the tangent.
+    tangent: vec4<f32>,
     normal: vec4<f32>,
     view: vec4<f32>,
     light: vec4<f32>,
@@ -419,6 +488,7 @@ fn probe_brdf(@builtin(global_invocation_id) id: vec3<u32>) {
     s.anisotropy = sample.more.z;
     s.anisotropy_rotation = sample.more.w;
     s.sheen_color = sample.sheen.rgb;
+    s.tangent = sample.tangent.xyz;
 
     let r = brdf_evaluate(
         s,

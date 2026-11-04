@@ -172,6 +172,10 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     let sample = material_sample(in.uv, uv_dx, uv_dy, geometry);
     var surface = sample.surface;
     surface.base_color *= in.tint.rgb;
+    // The direction U runs here, for a stretched highlight. Taken whatever
+    // the material, because it takes derivatives, which must not sit
+    // behind a branch.
+    surface.tangent = uv_tangent(geometric, in.world, uv_dx, uv_dy);
     var normal = perturb_normal(geometric, in.world, uv_dx, uv_dy, sample.normal);
     // A bump's tilt, as a surface gradient in the object's space: carried
     // into this one the way a normal is, by the inverse transpose, and
@@ -209,7 +213,7 @@ fn fs_rendered(in: VertexOut) -> RenderedOut {
     // Linear and unbounded. The display transform is a later pass.
     var out: RenderedOut;
     out.light = vec4<f32>(lit, 1.0);
-    let roughness = clamp(surface.roughness, 0.0, 1.0);
+    let roughness = surface_lobe_roughness(surface);
     out.surface = vec4<f32>(normal, roughness);
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     // Under the varnish, the surface's own reflection is what it lets through.
@@ -266,6 +270,19 @@ fn through_glass(
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
     let f = DIELECTRIC_F0 + (1.0 - DIELECTRIC_F0) * pow(1.0 - nov, 5.0);
     return reflected + (1.0 - f) * surface.base_color * seen + shown_glow(sample.emission);
+}
+
+// The direction U runs on the surface at `p`, from the screen derivatives of
+// the position and the UV, as `perturb_normal`'s frame is; zero where the
+// UVs do not change.
+fn uv_tangent(n: vec3<f32>, p: vec3<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> vec3<f32> {
+    let dp_dx = dpdx(p);
+    let dp_dy = dpdy(p);
+    let t = cross(n, dp_dy) * uv_dx.x + cross(dp_dx, n) * uv_dy.x;
+    if dot(t, t) < 1e-30 {
+        return vec3<f32>(0.0);
+    }
+    return normalize(t);
 }
 
 // Tilts `n` by a tangent-space normal, with the tangent frame taken from the

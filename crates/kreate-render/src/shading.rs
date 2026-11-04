@@ -111,7 +111,7 @@ pub fn ambient_from(
     prefiltered: [f32; 3],
     coat_prefiltered: [f32; 3],
 ) -> [f32; 3] {
-    let roughness = surface.roughness.clamp(0.0, 1.0);
+    let roughness = surface.lobe_roughness();
     let share = brdf::specular_share(surface.f0(), nov, roughness);
     let albedo = surface.diffuse_albedo();
     let coat = surface.coat.clamp(0.0, 1.0);

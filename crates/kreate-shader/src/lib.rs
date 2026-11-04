@@ -1447,7 +1447,7 @@ mod tests {
     /// this one only says the generated text is WGSL at all.
     fn parses(compiled: &Compiled) {
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
             compiled.wgsl
         );
         naga::front::wgsl::parse_str(&source)
@@ -1457,7 +1457,7 @@ mod tests {
     /// Parses and validates, against the stand-in `Surface`.
     fn validates(compiled: &Compiled) {
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
             compiled.wgsl
         );
         let module = naga::front::wgsl::parse_str(&source)
@@ -1708,7 +1708,7 @@ mod tests {
         // layers seven and eight.
         assert!(b.contains(", 7, ") && b.contains(", 8, "), "{b}");
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}
 @group(0) @binding(0) var<storage, read> pt_material_values: array<vec4<f32>>;
 @group(0) @binding(1) var pt_colour_images: texture_2d_array<f32>;
 @group(0) @binding(2) var pt_data_images: texture_2d_array<f32>;
@@ -1862,7 +1862,7 @@ mod tests {
             }
             let compiled = compile(&g).expect("compiles");
             let source = format!(
-                "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}
+                "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}
 {}",
                 compiled.wgsl
             );
@@ -2300,7 +2300,7 @@ mod map_tests {
 
     fn parses(compiled: &Compiled) {
         let source = format!(
-            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32 }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
+            "struct Surface {{ base_color: vec3<f32>, metallic: f32, roughness: f32, specular: f32, ior: f32, coat: f32, coat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, anisotropy: f32, anisotropy_rotation: f32, tangent: vec3<f32> }} fn surface_default() -> Surface {{ var s: Surface; s.ior = 1.5; s.specular = 1.0; return s; }}\n{}",
             compiled.wgsl
         );
         naga::front::wgsl::parse_str(&source)

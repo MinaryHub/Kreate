@@ -636,7 +636,12 @@ fn pt_bsdf_pdf(s: Surface, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> f32 {
     // The BRDF's own width, floor and all, so the samples are spread as the
     // lobe they stand for is.
     let alpha = surface_alpha(s);
-    let spec = distribution(noh, alpha) * noh / (4.0 * voh);
+    var d = distribution(noh, alpha);
+    let st = stretch(s, n, alpha);
+    if (st.on) {
+        d = distribution_stretched(dot(st.along, h), dot(st.across, h), noh, st.at, st.ab);
+    }
+    let spec = d * noh / (4.0 * voh);
     var pdf = lobes.y * spec + lobes.z * nol / PI;
     if (lobes.x > 0.0) {
         let ca = pt_coat_alpha(s);
@@ -667,6 +672,19 @@ fn pt_lobes(s: Surface, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
 fn pt_coat_alpha(s: Surface) -> f32 {
     let r = clamp(s.coat_roughness, MIN_ROUGHNESS, 1.0);
     return r * r;
+}
+
+// A half vector from the stretched GGX lobe: slopes drawn for a width of
+// one and stretched by the two widths, which is a draw in proportion to
+// `D(h)·NoH` exactly as the round lobe's is.
+fn pt_ggx_half_stretched(st: Stretch, n: vec3<f32>) -> vec3<f32> {
+    let r1 = pt_random();
+    let r2 = pt_random();
+    let r = sqrt(r1 / max(1.0 - r1, 1e-7));
+    let phi = 6.2831853 * r2;
+    let sx = st.at * r * cos(phi);
+    let sy = st.ab * r * sin(phi);
+    return normalize(st.along * (-sx) + st.across * (-sy) + n);
 }
 
 // A GGX half vector about `frame`'s Z, for `alpha`.
@@ -1222,6 +1240,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // viewport runs — when it has one; light panels have none.
         let material_index = pt_surfaces[m + 3u].y;
         var made: PtMaterialOut;
+        // The direction U runs on the triangle, in the world: what a
+        // stretched highlight is measured from. Zero where the UVs give none.
+        var uv_tangent = vec3<f32>(0.0);
         if (material_index > 0.0) {
             let la = pt_local[tri.x * 2u].xyz;
             let lb = pt_local[tri.y * 2u].xyz;
@@ -1236,6 +1257,10 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let e2l = lc - la;
             let e1w = pt_positions[tri.y].xyz - a;
             let e2w = pt_positions[tri.z].xyz - a;
+            let uv_det = du1.x * du2.y - du2.x * du1.y;
+            if (abs(uv_det) > 1e-20) {
+                uv_tangent = (e1w * du2.y - e2w * du1.y) / uv_det;
+            }
             // How much bigger the object is here than in its own space.
             let grow = sqrt(length(cross(e1w, e2w)) / max(length(cross(e1l, e2l)), 1e-30));
             let width = max(spread * travelled, 1e-4) / max(grow, 1e-30);
@@ -1316,6 +1341,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         s.roughness = extra.x;
         if (material_index > 0.0) {
             s = made.surface;
+            s.tangent = uv_tangent;
         }
         // The images multiply the dials, as the rasterised material does: the
         // same corner of the same picture, wrapped the same way.
@@ -1531,11 +1557,14 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (lobe < lobes.x + lobes.y) {
             // GGX: a half vector from the distribution — the varnish's or
             // the surface's — and the mirror of the view about it.
-            var alpha = surface_alpha(s);
+            let st = stretch(s, n, surface_alpha(s));
             if (lobe < lobes.x) {
-                alpha = pt_coat_alpha(s);
+                next = reflect(-v, pt_ggx_half(frame, pt_coat_alpha(s)));
+            } else if (st.on) {
+                next = reflect(-v, pt_ggx_half_stretched(st, n));
+            } else {
+                next = reflect(-v, pt_ggx_half(frame, surface_alpha(s)));
             }
-            next = reflect(-v, pt_ggx_half(frame, alpha));
         } else {
             let r1 = pt_random();
             let r2 = pt_random();

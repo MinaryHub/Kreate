@@ -492,7 +492,7 @@ fn ambient_from(
     prefiltered: vec3<f32>,
     coat_prefiltered: vec3<f32>,
 ) -> vec3<f32> {
-    let roughness = clamp(s.roughness, 0.0, 1.0);
+    let roughness = surface_lobe_roughness(s);
     let share = specular_share(surface_f0(s), nov, roughness);
     let diffuse = surface_diffuse_albedo(s) * (vec3<f32>(1.0) - share);
     // Irradiance over `π` is the radiance a Lambertian surface reflects, which
@@ -506,6 +506,22 @@ fn ambient_from(
         + clamp(s.sheen_color, vec3<f32>(0.0), vec3<f32>(1.0)) * sheen_e * irradiance / PI_SHADING;
     let coat_share = coat_reflects(s, nov);
     return sheened * (1.0 - s.coat * coat_share) + coat_prefiltered * (clamp(s.coat, 0.0, 1.0) * coat_share);
+}
+
+/// The direction a reflection of the surroundings is looked up in: the
+/// mirror of the view, about a normal bent across a stretched highlight
+/// (Filament's way) — so a brushed metal's reflection smears along the
+/// brushing rather than sitting round. The prefiltered lookup has one width;
+/// the bend is what is left to say the lobe is long.
+fn reflection_direction(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
+    let st = stretch(s, normal, surface_alpha(s));
+    if !st.on {
+        return reflect(-view, normal);
+    }
+    let across_view = cross(st.across, view);
+    let bent_to = cross(across_view, st.across);
+    let bent = normalize(mix(normal, bent_to, clamp(s.anisotropy, 0.0, 1.0)));
+    return reflect(-view, bent);
 }
 
 /// How much of the arriving light the varnish takes, at its roughness; zero
@@ -566,12 +582,12 @@ fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f
     if shading.world.w <= 0.0 {
         return ambient_from(s, nov, shading.world.rgb * PI_SHADING, shading.world.rgb, shading.world.rgb);
     }
-    let roughness = clamp(s.roughness, 0.0, 1.0);
+    let roughness = surface_lobe_roughness(s);
     // The mirror direction, which is what a reflection is about. The prefilter
     // assumed the normal and the view agreed, so this is where that assumption
     // is paid for: head on it is exact, and at a grazing angle the highlight
     // does not stretch.
-    let reflection = reflect(-view, normal);
+    let reflection = reflection_direction(s, normal, view);
     let level = roughness * shading.environment.z;
     // The strength multiplies both halves, which is what makes it a dimmer on
     // the environment rather than on one lobe of it.
@@ -589,7 +605,8 @@ fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f
         coat_prefiltered = textureSampleLevel(
             environment_cube,
             environment_sampler,
-            unrotate(reflection),
+            // The varnish is round, whatever is under it.
+            unrotate(reflect(-view, normal)),
             clamp(s.coat_roughness, 0.0, 1.0) * shading.environment.z,
         ).rgb * strength;
     }
@@ -600,7 +617,7 @@ fn environment_ambient(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f
 /// reflection: what screen-space reflections swap for what the screen holds.
 fn environment_specular(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
     let nov = clamp(dot(normal, view), 1e-4, 1.0);
-    let roughness = clamp(s.roughness, 0.0, 1.0);
+    let roughness = surface_lobe_roughness(s);
     // The surface's own reflection, under what the varnish takes; the
     // varnish's is the environment's alone, which the screen does not
     // replace.
@@ -612,7 +629,7 @@ fn environment_specular(s: Surface, normal: vec3<f32>, view: vec3<f32>) -> vec3<
     let prefiltered = textureSampleLevel(
         environment_cube,
         environment_sampler,
-        unrotate(reflect(-view, normal)),
+        unrotate(reflection_direction(s, normal, view)),
         roughness * shading.environment.z,
     ).rgb * shading.environment.w;
     return prefiltered * share;

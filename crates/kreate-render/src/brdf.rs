@@ -92,6 +92,11 @@ pub struct Surface {
     pub anisotropy: f32,
     /// Which way it stretches, in turns from the surface's tangent.
     pub anisotropy_rotation: f32,
+    /// The surface's tangent — the direction its texture coordinates' U runs
+    /// — which the stretch is measured from. Geometry, not material: the
+    /// pass that shades fills it in. Zero where there is none, and then the
+    /// highlight does not stretch.
+    pub tangent: [f32; 3],
 }
 
 impl Default for Surface {
@@ -110,6 +115,7 @@ impl Default for Surface {
             sheen_roughness: 0.3,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
+            tangent: [0.0; 3],
         }
     }
 }
@@ -171,6 +177,24 @@ impl Surface {
         let r = self.roughness.clamp(MIN_ROUGHNESS, 1.0);
         r * r
     }
+
+    /// The roughness the energy terms — the compensation, the shares the
+    /// lobes leave each other — are read at. The surface's own, unless its
+    /// highlight is stretched; then one between its two widths, since the
+    /// wider is where a stretched lobe loses most of its light to bouncing
+    /// more than once.
+    pub fn lobe_roughness(&self) -> f32 {
+        let strength = self.anisotropy.clamp(0.0, 1.0);
+        let has_tangent = self.tangent.iter().any(|c| *c != 0.0);
+        if strength <= 0.0 || !has_tangent {
+            return self.roughness.clamp(0.0, 1.0);
+        }
+        let alpha = self.alpha();
+        // The mean of the two widths: the wider alone over-compensates a
+        // lightly brushed lobe, the round one under-compensates a long one.
+        let along = alpha + (1.0 - alpha) * strength * strength;
+        ((along + alpha) * 0.5).sqrt()
+    }
 }
 
 /// The smallest roughness the model will use.
@@ -212,6 +236,55 @@ impl Response {
 ///
 /// Chosen over Beckmann for its tail, which is what makes a rough metal look
 /// like metal rather than like chalk.
+/// The stretched lobe's frame and widths: the direction it stretches along
+/// and across, in the surface's plane, and the width along each. `None` for
+/// a lobe that does not stretch.
+///
+/// glTF's `KHR_materials_anisotropy`: along the direction, the width grows
+/// toward one as the strength's square, `mix(α, 1, s²)`; across it, it is
+/// the surface's own.
+pub fn stretch(
+    surface: &Surface,
+    n: glam::Vec3,
+    alpha: f32,
+) -> Option<(glam::Vec3, glam::Vec3, f32, f32)> {
+    let strength = surface.anisotropy.clamp(0.0, 1.0);
+    if strength <= 0.0 {
+        return None;
+    }
+    let t = glam::Vec3::from_array(surface.tangent);
+    let t = t - n * n.dot(t);
+    if t.length_squared() < 1e-12 {
+        return None;
+    }
+    let t = t.normalize();
+    let b = n.cross(t);
+    let (sin, cos) = (surface.anisotropy_rotation * std::f32::consts::TAU).sin_cos();
+    let along = t * cos + b * sin;
+    let across = n.cross(along);
+    let at = alpha + (1.0 - alpha) * strength * strength;
+    Some((along, across, at, alpha))
+}
+
+/// The stretched Trowbridge-Reitz distribution.
+pub fn distribution_stretched(toh: f32, boh: f32, noh: f32, at: f32, ab: f32) -> f32 {
+    let x = (toh / at).powi(2) + (boh / ab).powi(2) + noh * noh;
+    1.0 / (std::f32::consts::PI * at * ab * x * x).max(1.175_494_4e-38)
+}
+
+/// Smith's height-correlated visibility for the stretched lobe, with
+/// `1/(4·NoL·NoV)` folded in, as [`visibility`] is.
+pub fn visibility_stretched(
+    (tov, bov, nov): (f32, f32, f32),
+    (tol, bol, nol): (f32, f32, f32),
+    at: f32,
+    ab: f32,
+) -> f32 {
+    let v = nol * ((at * tov).powi(2) + (ab * bov).powi(2) + nov * nov).sqrt();
+    let l = nov * ((at * tol).powi(2) + (ab * bol).powi(2) + nol * nol).sqrt();
+    0.5 / (v + l).max(1.175_494_4e-38)
+}
+
 fn distribution(noh: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
     let d = noh * noh * (a2 - 1.0) + 1.0;
@@ -550,9 +623,17 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
     let alpha = surface.alpha();
     let f0 = surface.f0();
     let f = fresnel(f0, voh);
-    let d = distribution(noh, alpha);
-    let vis = visibility(nov, nol, alpha);
-    let compensation = energy_compensation(f0, nov, surface.roughness.clamp(0.0, 1.0));
+    // Stretched along the tangent where the surface says so; the energy
+    // terms below stay the round lobe's, which is close for the widths a
+    // brushed metal has and keeps one table.
+    let (d, vis) = match stretch(surface, n, alpha) {
+        Some((t, b, at, ab)) => (
+            distribution_stretched(t.dot(h), b.dot(h), noh, at, ab),
+            visibility_stretched((t.dot(v), b.dot(v), nov), (t.dot(l), b.dot(l), nol), at, ab),
+        ),
+        None => (distribution(noh, alpha), visibility(nov, nol, alpha)),
+    };
+    let compensation = energy_compensation(f0, nov, surface.lobe_roughness());
 
     let specular: [f32; 3] = [
         d * vis * f[0] * compensation[0],
@@ -571,7 +652,7 @@ pub fn evaluate(surface: &Surface, n: glam::Vec3, v: glam::Vec3, l: glam::Vec3) 
     //   is exactly `albedo·(1 - E(NoV))` — the energy the specular lobe left.
     //   Scaling by `1 - F(VoH)` is reciprocal, since the half-vector is
     //   symmetric, and gains a third of the arriving light at a grazing view.
-    let roughness = surface.roughness.clamp(0.0, 1.0);
+    let roughness = surface.lobe_roughness();
     let share_v = specular_share(f0, nov, roughness);
     let share_l = specular_share(f0, nol, roughness);
     let (avg_a, avg_b) = albedo_table().average(roughness);
@@ -1043,6 +1124,85 @@ mod tests {
             face(&velvet),
             face(&dark)
         );
+    }
+
+    #[test]
+    fn a_brushed_metal_stretches_its_highlight_along_the_brushing() {
+        // Brushed along X: a light tipped off the mirror direction along X
+        // still catches the highlight; tipped as far along Y, it does not.
+        let brushed = Surface {
+            base_color: SceneRgb::WHITE,
+            metallic: 1.0,
+            roughness: 0.2,
+            anisotropy: 0.8,
+            tangent: [1.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        let n = glam::Vec3::Z;
+        let v = n;
+        let along = glam::Vec3::new(0.35, 0.0, 1.0).normalize();
+        let across = glam::Vec3::new(0.0, 0.35, 1.0).normalize();
+        let f = |l| evaluate(&brushed, n, v, l).specular[0];
+        assert!(
+            f(along) > f(across) * 5.0,
+            "{} along, {} across",
+            f(along),
+            f(across)
+        );
+        // Turned a quarter, the other way about.
+        let turned = Surface {
+            anisotropy_rotation: 0.25,
+            ..brushed
+        };
+        let g = |l| evaluate(&turned, n, v, l).specular[0];
+        assert!(
+            g(across) > g(along) * 5.0,
+            "{} across, {} along",
+            g(across),
+            g(along)
+        );
+        // And with no tangent there is nothing to stretch along: round.
+        let lost = Surface {
+            tangent: [0.0; 3],
+            ..brushed
+        };
+        let h = |l| evaluate(&lost, n, v, l).specular[0];
+        assert!((h(along) - h(across)).abs() < 1e-4 * h(along).max(1.0));
+    }
+
+    #[test]
+    fn a_brushed_white_metal_keeps_its_energy_and_stays_reciprocal() {
+        for anisotropy in [0.4, 0.9] {
+            let brushed = Surface {
+                base_color: SceneRgb::WHITE,
+                metallic: 1.0,
+                roughness: 0.5,
+                anisotropy,
+                tangent: [1.0, 0.0, 0.0],
+                ..Default::default()
+            };
+            for nov in [0.9, 0.5] {
+                let albedo = directional_albedo(&brushed, nov, Lobe::Specular);
+                assert!(
+                    (0.85..=1.05).contains(&albedo),
+                    "anisotropy {anisotropy}, NoV {nov}: {albedo}"
+                );
+            }
+            // Reciprocal as the stretched lobe goes: on a dielectric, where
+            // the multiple-scattering compensation — which reads the view
+            // and so is not symmetric, stretched or not — is one to within
+            // a thousandth.
+            let plastic = Surface {
+                metallic: 0.0,
+                ..brushed
+            };
+            let n = glam::Vec3::Z;
+            let a = glam::Vec3::new(0.3, 0.5, 0.8).normalize();
+            let b = glam::Vec3::new(-0.6, 0.1, 0.7).normalize();
+            let ab = evaluate(&plastic, n, a, b).specular[0];
+            let ba = evaluate(&plastic, n, b, a).specular[0];
+            assert!((ab - ba).abs() < 2e-3 * ab.max(ba), "{ab} against {ba}");
+        }
     }
 
     #[test]
