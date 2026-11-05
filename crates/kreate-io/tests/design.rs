@@ -264,7 +264,7 @@ fn a_newer_builds_feature_is_kept_and_written_back() {
     };
     body.features = vec![known(1), known(3)];
     body.foreign_features = vec![
-        r#"{"kind":"loft","sketch":9,"seeds":[],"operation":"join","order":2,"twist":0.25}"#.into(),
+        r#"{"kind":"coil","sketch":9,"seeds":[],"operation":"join","order":2,"twist":0.25}"#.into(),
     ];
     let original = body.features.clone();
     doc.add_object(body);
@@ -273,7 +273,7 @@ fn a_newer_builds_feature_is_kept_and_written_back() {
     assert_eq!(o.features, original);
     assert_eq!(o.foreign_features.len(), 1);
     let kept: serde_json::Value = serde_json::from_str(&o.foreign_features[0]).unwrap();
-    assert_eq!(kept["kind"], "loft");
+    assert_eq!(kept["kind"], "coil");
     assert_eq!(kept["twist"], 0.25, "its own fields come back too");
     // Written between the two it was made between.
     let bytes = container::write(&back, &Manifest::default(), &[]).expect("writes");
@@ -288,5 +288,5 @@ fn a_newer_builds_feature_is_kept_and_written_back() {
     }
     let scene: String = scene.split_whitespace().collect();
     let at = |s: &str| scene.find(s).unwrap_or_else(|| panic!("{s} not written"));
-    assert!(at("\"loft\"") > at("\"order\":1") && at("\"loft\"") < at("\"order\":3"));
+    assert!(at("\"coil\"") > at("\"order\":1") && at("\"coil\"") < at("\"order\":3"));
 }
