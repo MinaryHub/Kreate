@@ -23,9 +23,15 @@ use; `scripts/release.sh` turns that section into the next release.
   first-angle projection, with an isometric view, the overall sizes, a
   title block and a parts list, written as a vector PDF (Korean text
   included) or a DXF. Made from the parts as they are each time.
+- Sweep and Loft are features (Mechanical ▸ Shapes): the body keeps them
+  on its timeline and follows when the profile, the path or a section is
+  edited, and they can join or cut an existing body. Sweep with no profile
+  sketch still makes a round pipe as a plain part.
 
 ### Fixed
 
+- Editing a pattern feature showed its count divided by the length unit
+  (3 copies read as 3000 in millimetres).
 - A file saved by a newer Kreate keeps the features this one does not know
   through an open and a save; opening it says how many were kept unbuilt.
 

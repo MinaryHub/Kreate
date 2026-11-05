@@ -1205,7 +1205,11 @@ pub fn feature_rows(
                 | kreate_scene::feature::Shape::Circular { count, .. } => {
                     (false, f64::from(count), false)
                 }
-                kreate_scene::feature::Shape::Mirror { .. } => (false, 0.0, false),
+                kreate_scene::feature::Shape::Mirror { .. }
+                | kreate_scene::feature::Shape::Loft { .. } => (false, 0.0, false),
+                kreate_scene::feature::Shape::Sweep {
+                    scale_end, caps, ..
+                } => (false, scale_end, caps),
             };
             let kind = catalog.get(match f.kind_tag() {
                 "revolve" => "sketch-tool-revolve",
@@ -1215,6 +1219,8 @@ pub fn feature_rows(
                 "pattern" => "feature-pattern",
                 "circular" => "feature-circular",
                 "mirror" => "feature-mirror",
+                "sweep" => "feature-sweep",
+                "loft" => "feature-loft",
                 _ => "sketch-tool-extrude",
             });
             rows.push(crate::shell::FeatureRow {

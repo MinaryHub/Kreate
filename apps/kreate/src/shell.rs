@@ -5462,8 +5462,8 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
     (
         "mech-shapes",
         &[
-            ("mech-sweep-along", "object.sweep_along", MechArg::None),
-            ("mech-loft", "object.loft", MechArg::None),
+            ("mech-sweep-along", "feature.sweep", MechArg::None),
+            ("mech-loft", "feature.loft", MechArg::None),
         ],
     ),
     (
@@ -16202,6 +16202,9 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                                 state.feature_edit = Some(FeatureEdit {
                                     amount: if row.revolve {
                                         row.amount.to_degrees()
+                                    } else if unitless(&row.kind) {
+                                        // A count or a ratio: no unit.
+                                        row.amount
                                     } else {
                                         row.amount / unit.max(1e-12)
                                     },
@@ -16215,6 +16218,12 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
         });
     ui.separator();
     draw_feature_edit(ui, state);
+}
+
+/// A feature whose amount is a count or a ratio, shown and set as it is
+/// rather than in the scene's unit of length.
+fn unitless(kind: &str) -> bool {
+    matches!(kind, "pattern" | "circular" | "sweep" | "loft" | "mirror")
 }
 
 fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
@@ -16252,7 +16261,17 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                                 .range(1.0..=1000.0)
                                 .fixed_decimals(0),
                         );
-                    } else if kind == "mirror" {
+                    } else if kind == "sweep" {
+                        ui.label(state.catalog.get("feature-scale-end"));
+                        ui.add(
+                            egui::DragValue::new(&mut edit.amount)
+                                .speed(0.01)
+                                .range(0.0..=10.0),
+                        );
+                        ui.end_row();
+                        ui.label(state.catalog.get("feature-caps"));
+                        ui.checkbox(&mut edit.row.symmetric, "");
+                    } else if matches!(kind, "mirror" | "loft") {
                         ui.label("");
                         ui.label("");
                     } else {
@@ -16293,6 +16312,8 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                         edit.amount.to_radians()
                     } else if matches!(edit.row.kind.as_str(), "pattern" | "circular") {
                         edit.amount.round()
+                    } else if unitless(&edit.row.kind) {
+                        edit.amount
                     } else {
                         edit.amount * unit
                     };

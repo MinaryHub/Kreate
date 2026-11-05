@@ -17,6 +17,8 @@ use kreate_reflect::Uid;
 
 use crate::Document;
 
+pub mod shapes;
+
 /// What a feature does to the body so far.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Operation {
@@ -69,6 +71,17 @@ pub enum Shape {
     /// The feature before it reflected across the body's plane through its
     /// origin square to the axis given, joined or cut as it was.
     Mirror { axis: u32 },
+    /// The sketch's picked regions carried along another object's lines —
+    /// a sketch's or a mesh's edges, by its identity — their size going
+    /// from one to `scale_end`, the ends closed when `caps`. Fusion's Sweep.
+    Sweep {
+        path: Uid,
+        scale_end: f64,
+        caps: bool,
+    },
+    /// A solid through the sketch's largest region and each of these
+    /// sketches', in order through space. Fusion's Loft.
+    Loft { sections: Vec<Uid> },
 }
 
 /// The directions a shell's open side may face, as `Shape::Shell::open`
@@ -113,12 +126,32 @@ impl Feature {
             Shape::Pattern { .. } => "pattern",
             Shape::Circular { .. } => "circular",
             Shape::Mirror { .. } => "mirror",
+            Shape::Sweep { .. } => "sweep",
+            Shape::Loft { .. } => "loft",
         }
+    }
+
+    /// Every object it is made from: its sketch, and a sweep's path or a
+    /// loft's other sections.
+    pub fn references(&self) -> Vec<Uid> {
+        let mut out = vec![self.sketch];
+        match &self.shape {
+            Shape::Sweep { path, .. } => out.push(*path),
+            Shape::Loft { sections } => out.extend(sections.iter().copied()),
+            _ => {}
+        }
+        out
     }
 
     /// Whether it works on the body so far rather than on a sketch.
     pub fn on_body(&self) -> bool {
-        !matches!(self.shape, Shape::Extrude { .. } | Shape::Revolve { .. })
+        !matches!(
+            self.shape,
+            Shape::Extrude { .. }
+                | Shape::Revolve { .. }
+                | Shape::Sweep { .. }
+                | Shape::Loft { .. }
+        )
     }
 }
 
@@ -381,6 +414,37 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
     let Some(sketch) = doc.object_by_uid(feature.sketch) else {
         return MeshData::empty();
     };
+    // A sweep and a loft are made in the world, from more than the one
+    // sketch, and brought into the sketch's space as the rest are made.
+    let world = match &feature.shape {
+        Shape::Sweep {
+            path,
+            scale_end,
+            caps,
+        } => Some(
+            doc.object_by_uid(*path)
+                .and_then(|p| shapes::object_path(doc, p))
+                .and_then(|(points, closed)| {
+                    let profiles = shapes::picked_regions(doc, sketch, &feature.seeds);
+                    shapes::sweep_world(&points, closed, &profiles, *scale_end, *caps).ok()
+                }),
+        ),
+        Shape::Loft { sections } => Some({
+            let all: Vec<_> = std::iter::once(sketch)
+                .chain(sections.iter().filter_map(|u| doc.object_by_uid(*u)))
+                .filter_map(|id| shapes::section_world(doc, id))
+                .collect();
+            shapes::loft_world(all).ok()
+        }),
+        _ => None,
+    };
+    if let Some(world) = world {
+        let Some(mesh) = world else {
+            return MeshData::empty();
+        };
+        let to_sketch = doc.world_transform(sketch).inverse();
+        return mapped(&mesh, false, |p| to_sketch.transform_point3(p));
+    }
     let all = shape_regions(doc, sketch, &feature.shape);
     let mut out = MeshData::empty();
     for i in picked(&all, &feature.seeds) {
@@ -407,7 +471,9 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
             | Shape::Shell { .. }
             | Shape::Pattern { .. }
             | Shape::Circular { .. }
-            | Shape::Mirror { .. } => continue,
+            | Shape::Mirror { .. }
+            | Shape::Sweep { .. }
+            | Shape::Loft { .. } => continue,
         };
         out = if out.num_faces() == 0 {
             piece
@@ -565,7 +631,10 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
                 }
                 continue;
             }
-            Shape::Extrude { .. } | Shape::Revolve { .. } => {}
+            Shape::Extrude { .. }
+            | Shape::Revolve { .. }
+            | Shape::Sweep { .. }
+            | Shape::Loft { .. } => {}
         }
         let mut piece = solid(doc, f);
         if piece.num_faces() == 0 {
@@ -594,8 +663,8 @@ pub fn key(doc: &Document, features: &[Feature], body_world: DAffine3) -> u64 {
     for v in body_world.to_cols_array() {
         v.to_bits().hash(&mut h);
     }
-    for f in features {
-        if let Some(id) = doc.object_by_uid(f.sketch) {
+    for uid in features.iter().flat_map(Feature::references) {
+        if let Some(id) = doc.object_by_uid(uid) {
             for v in doc.world_transform(id).to_cols_array() {
                 v.to_bits().hash(&mut h);
             }

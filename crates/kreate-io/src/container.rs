@@ -3453,13 +3453,28 @@ pub struct FeatureRecord {
     /// A shell's open side, as `kreate_scene::feature::SHELL_SIDES`.
     #[serde(default)]
     pub open: u32,
+    /// A sweep's path, by identity; zero for none.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub path: u64,
+    /// A loft's sections after its sketch, by identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<u64>,
     /// Fields a newer build added, kept for it.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
     use kreate_scene::feature::Shape;
+    let (path, sections) = match &f.shape {
+        Shape::Sweep { path, .. } => (path.raw(), Vec::new()),
+        Shape::Loft { sections } => (0, sections.iter().map(|u| u.raw()).collect()),
+        _ => (0, Vec::new()),
+    };
     let (distance, symmetric, axis, angle, count, step, open) = match f.shape {
         Shape::Extrude {
             distance,
@@ -3471,6 +3486,11 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         Shape::Pattern { count, step } => (0.0, false, [0, 0], 0.0, count, step, 0),
         Shape::Circular { count, axis } => (0.0, false, [axis, 0], 0.0, count, [0.0; 3], 0),
         Shape::Mirror { axis } => (0.0, false, [axis, 0], 0.0, 0, [0.0; 3], 0),
+        // A sweep's end size in `distance`, its caps in `symmetric`.
+        Shape::Sweep {
+            scale_end, caps, ..
+        } => (scale_end, caps, [0, 0], 0.0, 0, [0.0; 3], 0),
+        Shape::Loft { .. } => (0.0, false, [0, 0], 0.0, 0, [0.0; 3], 0),
     };
     FeatureRecord {
         kind: f.kind_tag().into(),
@@ -3485,6 +3505,8 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         count,
         step,
         open,
+        path,
+        sections,
         extra: BTreeMap::new(),
     }
 }
@@ -3508,8 +3530,9 @@ fn features_record(object: &Object) -> Vec<FeatureRecord> {
 /// one it cannot read is damaged, not newer.
 fn known_feature(r: &FeatureRecord) -> bool {
     use kreate_scene::feature::Operation;
-    const KINDS: [&str; 8] = [
+    const KINDS: [&str; 10] = [
         "extrude", "revolve", "fillet", "chamfer", "shell", "pattern", "circular", "mirror",
+        "sweep", "loft",
     ];
     KINDS.contains(&r.kind.as_str()) && Operation::from_tag(&r.operation).is_some()
 }
@@ -3546,6 +3569,18 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         },
         "mirror" => Shape::Mirror {
             axis: r.axis[0].min(2),
+        },
+        "sweep" if r.distance.is_finite() && r.path != 0 => Shape::Sweep {
+            path: kreate_scene::Uid::from_raw(r.path),
+            scale_end: r.distance,
+            caps: r.symmetric,
+        },
+        "loft" => Shape::Loft {
+            sections: r
+                .sections
+                .iter()
+                .map(|u| kreate_scene::Uid::from_raw(*u))
+                .collect(),
         },
         _ => return None,
     };
