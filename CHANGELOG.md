@@ -12,6 +12,22 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Outdoor's sky is a physical daylight model (Preetham's), its sun the
+  colour the air leaves it; and a Sunset room, the sun low and orange.
+- A point light or a spot can take a luminaire's measured shape from its
+  IES file (Light tab, Load IES…), in the viewport and the path tracer.
+
+### Changed
+
+- The path tracer uses the GPU's own ray tracing where it has it (Vulkan
+  ray queries); `KREATE_RAY_QUERY=0` turns that off. Elsewhere it walks its
+  own trees as before.
+- Linked copies of a mesh are stored once in the path tracer and placed
+  where each one stands, so a scene of many copies costs the memory and the
+  build time of one.
+
+### Added
+
 - Materials can scatter light below their surface — skin, marble, wax,
   milk — with a colour and a radius: the path tracer walks it through the
   solid, so a face out of the light glows with what came through; the

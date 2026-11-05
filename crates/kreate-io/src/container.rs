@@ -1035,6 +1035,13 @@ fn default_auto_exposure() -> bool {
 /// holds, so a glTF export is a copy rather than a conversion. Writing a unit
 /// of our own would put a rounding step in every round trip and leave nobody
 /// able to say which side was authoritative.
+/// A light's measured shape: see `kreate_scene::Light::profile`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileRecord {
+    pub name: String,
+    pub samples: Vec<f32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LightRecord {
     pub name: String,
@@ -1085,6 +1092,9 @@ pub struct LightRecord {
     /// Index into [`SceneFile::actions`]: what animates this light.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<usize>,
+    /// A measured luminaire's shape (an IES file's), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileRecord>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -1626,6 +1636,10 @@ fn light_record(light: &kreate_scene::Light) -> LightRecord {
         affect_diffuse: light.affect_diffuse,
         affect_specular: light.affect_specular,
         max_bounces: light.max_bounces,
+        profile: light.profile.as_ref().map(|p| ProfileRecord {
+            name: p.name.clone(),
+            samples: p.samples.clone(),
+        }),
         action: None,
         extra: BTreeMap::new(),
     };
@@ -1715,6 +1729,15 @@ fn light_from_record(record: &LightRecord) -> kreate_scene::Light {
         affect_specular: record.affect_specular,
         max_bounces: record.max_bounces,
         action: None,
+        profile: record.profile.as_ref().map(|p| kreate_scene::LightProfile {
+            name: p.name.clone(),
+            samples: p
+                .samples
+                .iter()
+                .map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 })
+                .take(4096)
+                .collect(),
+        }),
     }
 }
 

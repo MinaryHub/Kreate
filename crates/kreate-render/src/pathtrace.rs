@@ -23,19 +23,49 @@
 //!
 //! # What it does not, yet
 //!
-//! One lobe pair (Lambert and GGX): no clearcoat, sheen, subsurface or
-//! anisotropy. Area lights are discs and spheres. The scene is one BVH with
-//! no instancing, rebuilt when the scene is handed over again.
+//! Area lights are discs and spheres. The scene is rebuilt whole when it is
+//! handed over again.
+//!
+//! # Placings
+//!
+//! A mesh handed over more than once — the same slices of positions and
+//! indices, as linked copies of an object share — is stored once, in its own
+//! space, and placed: the rays are carried into each placing rather than the
+//! triangles out of it. Every other mesh is moved into the world and they go
+//! together under one placing that moves nothing, so a scene of distinct
+//! objects is walked as one tree as before. Where the device has ray tracing
+//! (`wgpu`'s ray queries) the same placings are built into its acceleration
+//! structure and the rays asked of it; elsewhere they walk the trees in the
+//! shader.
 
 use glam::{DAffine3, Mat4, Vec3};
 
-fn source(materials: &str, count: u32) -> String {
+fn source(materials: &str, count: u32, hardware: bool) -> String {
     format!(
-        "{}\n{}\n{materials}\n{}",
+        "{}{}\n{}\n{}\n{materials}\n{}",
+        if hardware {
+            "enable wgpu_ray_query;\n"
+        } else {
+            ""
+        },
         crate::shading::shader_source(),
         include_str!("shaders/pathtrace.wgsl"),
+        if hardware {
+            include_str!("shaders/pathtrace_rq.wgsl")
+        } else {
+            include_str!("shaders/pathtrace_bvh.wgsl")
+        },
         dispatch(count)
     )
+}
+
+/// Whether a device can trace with ray queries, and is let to:
+/// `KREATE_RAY_QUERY=0` keeps the shader's own walk.
+pub fn ray_queries_on(device: &wgpu::Device) -> bool {
+    device
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        && std::env::var("KREATE_RAY_QUERY").map_or(true, |v| v != "0")
 }
 
 /// `pt_material`: which compiled material a surface names, by number.
@@ -87,12 +117,18 @@ fn dispatch(count: u32) -> String {
 
 /// The tracer's shader as a device receives it, for the portability tests.
 pub fn shader_source() -> String {
-    source("", 0)
+    source("", 0, false)
 }
 
-/// The tracer's shader with materials, as [`PathTracer::set_scene`] builds it.
+/// The tracer's shader for a device with ray queries.
+pub fn shader_source_hardware() -> String {
+    source("", 0, true)
+}
+
+/// The tracer's shader with materials, as [`PathTracer::set_scene`] builds it
+/// for a device without ray queries.
 pub fn shader_source_with(materials: &PtMaterials<'_>) -> String {
-    source(materials.code, materials.count)
+    source(materials.code, materials.count, false)
 }
 
 /// The scene's compiled materials, as the tracer runs them.
@@ -258,6 +294,195 @@ struct GpuNode {
     count: u32,
 }
 
+/// A placing of a mesh, as `PtInstance` in the shader reads it.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuInstance {
+    world: [[f32; 4]; 3],
+    local: [[f32; 4]; 3],
+    root: u32,
+    first: u32,
+    pad: [u32; 2],
+}
+
+/// An affine map's rows, three of four: what the shader and the
+/// acceleration structure both take.
+fn rows(m: DAffine3) -> [[f32; 4]; 3] {
+    let (c, t) = (m.matrix3, m.translation);
+    [
+        [c.x_axis.x, c.y_axis.x, c.z_axis.x, t.x],
+        [c.x_axis.y, c.y_axis.y, c.z_axis.y, t.y],
+        [c.x_axis.z, c.y_axis.z, c.z_axis.z, t.z],
+    ]
+    .map(|r| r.map(|v| v as f32))
+}
+
+/// What makes two meshes one shape, placed twice: the same slices, the same
+/// surfaces on them.
+#[derive(PartialEq, Eq, Hash)]
+struct Shape {
+    positions: (usize, usize),
+    normals: usize,
+    uvs: usize,
+    colors: usize,
+    indices: (usize, usize),
+    surface: u32,
+    runs: Vec<(u32, u32)>,
+}
+
+impl Shape {
+    fn of(mesh: &PtMesh<'_>) -> Self {
+        Self {
+            positions: (mesh.positions.as_ptr() as usize, mesh.positions.len()),
+            normals: mesh.normals.as_ptr() as usize,
+            uvs: mesh.uvs.as_ptr() as usize,
+            colors: mesh.colors.as_ptr() as usize,
+            indices: (mesh.indices.as_ptr() as usize, mesh.indices.len()),
+            surface: mesh.surface,
+            runs: mesh.runs.to_vec(),
+        }
+    }
+}
+
+/// A run of the scene's vertices and triangles stored together: the
+/// meshes placed once, in the world, or one mesh placed many times, in its
+/// own space.
+#[derive(Clone, Copy, Default)]
+struct Stored {
+    first_vertex: u32,
+    vertices: u32,
+    first_triangle: u32,
+    triangles: u32,
+}
+
+/// The scene laid out for the shader: what [`lay_out`] makes of the meshes.
+#[derive(Default)]
+struct Layout {
+    local: Vec<[f32; 4]>,
+    uvs: Vec<[f32; 2]>,
+    colors: Vec<u32>,
+    positions: Vec<Vec3>,
+    normals: Vec<[f32; 4]>,
+    triangles: Vec<[u32; 4]>,
+    stored: Vec<Stored>,
+    /// Each placing: which stored run, and where it goes.
+    placings: Vec<(usize, DAffine3)>,
+}
+
+/// Sorts the meshes into stored runs and placings. A mesh whose shape comes
+/// more than once — and whose placing can be undone — is stored once and
+/// placed each time; the rest go into the world, together.
+fn lay_out(meshes: &[PtMesh<'_>]) -> Layout {
+    let invertible = |m: &PtMesh<'_>| {
+        let d = m.transform.matrix3.determinant();
+        d.is_finite() && d.abs() > 1e-18 && m.transform.translation.is_finite()
+    };
+    let mut uses: std::collections::HashMap<Shape, usize> = std::collections::HashMap::new();
+    for mesh in meshes.iter().filter(|m| invertible(m)) {
+        *uses.entry(Shape::of(mesh)).or_default() += 1;
+    }
+    let placed = |m: &PtMesh<'_>| invertible(m) && uses.get(&Shape::of(m)).is_some_and(|&n| n > 1);
+    let mut out = Layout::default();
+    let append = |out: &mut Layout, mesh: &PtMesh<'_>, to: DAffine3| {
+        let base = out.positions.len() as u32;
+        let normal_matrix = to.matrix3.inverse().transpose();
+        out.uvs.extend(
+            (0..mesh.positions.len()).map(|i| mesh.uvs.get(i).copied().unwrap_or([0.0; 2])),
+        );
+        out.colors.extend(
+            (0..mesh.positions.len()).map(|i| mesh.colors.get(i).copied().unwrap_or(u32::MAX)),
+        );
+        for (p, n) in mesh.positions.iter().zip(mesh.normals) {
+            out.local.push([p[0], p[1], p[2], 1.0]);
+            out.local.push([n.x, n.y, n.z, 0.0]);
+            let w = to.transform_point3(glam::DVec3::from_array(p.map(|c| c as f64)));
+            out.positions.push(w.as_vec3());
+            let wn = (normal_matrix * n.as_dvec3()).normalize_or_zero().as_vec3();
+            out.normals.push([wn.x, wn.y, wn.z, 0.0]);
+        }
+        // Positions without normals: the rest of the run, at the origin,
+        // so the indices still land.
+        for _ in mesh.normals.len()..mesh.positions.len() {
+            out.local.push([0.0, 0.0, 0.0, 1.0]);
+            out.local.push([0.0; 4]);
+            out.positions.push(Vec3::ZERO);
+            out.normals.push([0.0; 4]);
+        }
+        let mut run = 0;
+        let mut surface = mesh.surface;
+        for (k, t) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
+            while let Some(&(start, next)) = mesh.runs.get(run) {
+                if start as usize > k * 3 {
+                    break;
+                }
+                surface = next;
+                run += 1;
+            }
+            out.triangles
+                .push([base + t[0], base + t[1], base + t[2], surface]);
+        }
+    };
+    let begin = |out: &Layout| Stored {
+        first_vertex: out.positions.len() as u32,
+        first_triangle: out.triangles.len() as u32,
+        ..Default::default()
+    };
+    let end = |out: &Layout, mut s: Stored| {
+        s.vertices = out.positions.len() as u32 - s.first_vertex;
+        s.triangles = out.triangles.len() as u32 - s.first_triangle;
+        s
+    };
+    let world = begin(&out);
+    for mesh in meshes.iter().filter(|m| !placed(m)) {
+        append(&mut out, mesh, mesh.transform);
+    }
+    let world = end(&out, world);
+    if world.triangles > 0 {
+        out.stored.push(world);
+        out.placings.push((0, DAffine3::IDENTITY));
+    }
+    let mut stored_as: std::collections::HashMap<Shape, usize> = std::collections::HashMap::new();
+    for mesh in meshes.iter().filter(|m| placed(m)) {
+        let shape = Shape::of(mesh);
+        let index = match stored_as.get(&shape) {
+            Some(&i) => i,
+            None => {
+                let s = begin(&out);
+                append(&mut out, mesh, DAffine3::IDENTITY);
+                let s = end(&out, s);
+                out.stored.push(s);
+                stored_as.insert(shape, out.stored.len() - 1);
+                out.stored.len() - 1
+            }
+        };
+        if out.stored[index].triangles > 0 {
+            out.placings.push((index, mesh.transform));
+        }
+    }
+    out
+}
+
+/// The world box of a box seen through a placing: its eight corners moved.
+fn placed_box(b: kreate_math::Aabb, m: DAffine3) -> kreate_math::Aabb {
+    let mut out = kreate_math::Aabb::EMPTY;
+    for k in 0..8 {
+        let corner = Vec3::new(
+            if k & 1 == 0 { b.min.x } else { b.max.x },
+            if k & 2 == 0 { b.min.y } else { b.max.y },
+            if k & 4 == 0 { b.min.z } else { b.max.z },
+        );
+        out = out.extend(m.transform_point3(corner.as_dvec3()).as_vec3());
+    }
+    out
+}
+
+/// What the device's ray tracing holds of the scene: one bottom level per
+/// stored run, and the top level placing them. Kept alive with the scene.
+struct HardwareScene {
+    _bottom: Vec<Option<wgpu::Blas>>,
+    top: wgpu::Tlas,
+}
+
 struct Scene {
     uvs: wgpu::Buffer,
     colors: wgpu::Buffer,
@@ -276,6 +501,10 @@ struct Scene {
     values: wgpu::Buffer,
     /// Each vertex in its object's space: position, then normal.
     local: wgpu::Buffer,
+    /// The placings: see `GpuInstance`.
+    instances: wgpu::Buffer,
+    /// The device's acceleration structure, where it traces with one.
+    hardware: Option<HardwareScene>,
     emitter_count: u32,
     emitter_total: f32,
     /// The lowest point of the scene: where its floor is, when it is below
@@ -284,40 +513,45 @@ struct Scene {
 }
 
 /// The glowing triangles, for the path tracer to aim at: each one's index
-/// (its bits, in the first float) and the cumulative distribution of area
-/// times luminance (the second), and that weight's total.
+/// (its bits, in the first float), the cumulative distribution of area times
+/// luminance (the second) and the placing it is seen through (its bits, the
+/// third); and that weight's total. A mesh placed twice glows twice.
 ///
 /// Picked in proportion to how much light each gives — a big bright panel
 /// more often than a small dim one — and a point on the one picked uniformly,
 /// so the probability of a point is luminance over the total, whatever the
 /// triangle's size. The shader relies on that.
-fn emitters_of(
-    positions: &[Vec3],
-    triangles: &[[u32; 4]],
-    surfaces: &[PtSurface],
-) -> (Vec<[f32; 2]>, f32) {
+fn emitters_of(layout: &Layout, surfaces: &[PtSurface]) -> (Vec<[f32; 4]>, f32) {
     let luminance = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let glowing: Vec<Vec<(u32, f32)>> = layout
+        .stored
+        .iter()
+        .map(|run| {
+            (run.first_triangle..run.first_triangle + run.triangles)
+                .filter_map(|i| {
+                    let t = layout.triangles[i as usize];
+                    let lum = luminance(surfaces.get(t[3] as usize)?.emission);
+                    (lum > 0.0).then_some((i, lum))
+                })
+                .collect()
+        })
+        .collect();
     let mut out = Vec::new();
     let mut total = 0.0f32;
-    for (i, t) in triangles.iter().enumerate() {
-        let Some(surface) = surfaces.get(t[3] as usize) else {
-            continue;
-        };
-        let lum = luminance(surface.emission);
-        if lum <= 0.0 {
-            continue;
+    for (inst, &(run, to)) in layout.placings.iter().enumerate() {
+        for &(i, lum) in &glowing[run] {
+            let t = layout.triangles[i as usize];
+            let [a, b, c] = [t[0], t[1], t[2]].map(|v| {
+                to.transform_point3(layout.positions[v as usize].as_dvec3())
+                    .as_vec3()
+            });
+            let area = 0.5 * (b - a).cross(c - a).length();
+            if area.is_nan() || area <= 0.0 {
+                continue;
+            }
+            total += area * lum;
+            out.push([f32::from_bits(i), total, f32::from_bits(inst as u32), 0.0]);
         }
-        let (a, b, c) = (
-            positions[t[0] as usize],
-            positions[t[1] as usize],
-            positions[t[2] as usize],
-        );
-        let area = 0.5 * (b - a).cross(c - a).length();
-        if area <= 0.0 {
-            continue;
-        }
-        total += area * lum;
-        out.push([f32::from_bits(i as u32), total]);
     }
     if total > 0.0 {
         for e in &mut out {
@@ -325,6 +559,116 @@ fn emitters_of(
         }
     }
     (out, total)
+}
+
+/// Builds the device's acceleration structure over the placings: a bottom
+/// level per stored run, its own positions and indices copied to buffers
+/// the build reads, and a top level placing them, each numbered as the
+/// shader's placings are.
+fn build_hardware(device: &wgpu::Device, queue: &wgpu::Queue, layout: &Layout) -> HardwareScene {
+    use wgpu::util::DeviceExt;
+    let vertices: Vec<[f32; 3]> = layout.positions.iter().map(|p| p.to_array()).collect();
+    let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("path trace build positions"),
+        contents: bytemuck::cast_slice(if vertices.is_empty() {
+            &[[0.0f32; 3]][..]
+        } else {
+            &vertices
+        }),
+        usage: wgpu::BufferUsages::BLAS_INPUT,
+    });
+    // Each run's indices counted from its own first vertex.
+    let mut indices: Vec<u32> = Vec::with_capacity(layout.triangles.len() * 3);
+    for run in &layout.stored {
+        let first = run.first_triangle as usize;
+        for t in &layout.triangles[first..first + run.triangles as usize] {
+            indices.extend([t[0], t[1], t[2]].map(|v| v - run.first_vertex));
+        }
+    }
+    if indices.is_empty() {
+        indices.extend([0, 0, 0]);
+    }
+    let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("path trace build indices"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::BLAS_INPUT,
+    });
+    let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = layout
+        .stored
+        .iter()
+        .map(|run| wgpu::BlasTriangleGeometrySizeDescriptor {
+            vertex_format: wgpu::VertexFormat::Float32x3,
+            vertex_count: run.vertices,
+            index_format: Some(wgpu::IndexFormat::Uint32),
+            index_count: Some(run.triangles * 3),
+            // Not opaque: every candidate comes back to the shader, which
+            // decides about cut-outs, glass and the triangle a ray leaves.
+            flags: wgpu::AccelerationStructureGeometryFlags::empty(),
+        })
+        .collect();
+    let bottom: Vec<Option<wgpu::Blas>> = sizes
+        .iter()
+        .map(|size| {
+            // A run with no triangles has nothing to build, and no placing.
+            (size.index_count != Some(0)).then(|| {
+                device.create_blas(
+                    &wgpu::CreateBlasDescriptor {
+                        label: Some("path trace mesh"),
+                        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                    },
+                    wgpu::BlasGeometrySizeDescriptors::Triangles {
+                        descriptors: vec![size.clone()],
+                    },
+                )
+            })
+        })
+        .collect();
+    let mut top = device.create_tlas(&wgpu::CreateTlasDescriptor {
+        label: Some("path trace scene"),
+        max_instances: layout.placings.len().max(1) as u32,
+        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+    });
+    for (i, &(run, to)) in layout.placings.iter().enumerate() {
+        if let (Some(slot), Some(blas)) = (top.get_mut_single(i), &bottom[run]) {
+            *slot = Some(wgpu::TlasInstance::new(
+                blas,
+                rows(to).concat().try_into().unwrap_or([0.0; 12]),
+                i as u32,
+                0xff,
+            ));
+        }
+    }
+    let builds: Vec<wgpu::BlasBuildEntry<'_>> = layout
+        .stored
+        .iter()
+        .zip(&bottom)
+        .zip(&sizes)
+        .filter_map(|((run, blas), size)| Some((run, blas.as_ref()?, size)))
+        .map(|(run, blas, size)| wgpu::BlasBuildEntry {
+            blas,
+            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
+                size,
+                vertex_buffer: &vertices,
+                first_vertex: run.first_vertex,
+                vertex_stride: 12,
+                index_buffer: Some(&indices),
+                first_index: Some(run.first_triangle * 3),
+                transform_buffer: None,
+                transform_buffer_offset: None,
+            }]),
+        })
+        .collect();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("path trace scene build"),
+    });
+    encoder.build_acceleration_structures(builds.iter(), [&top]);
+    queue.submit([encoder.finish()]);
+    HardwareScene {
+        _bottom: bottom,
+        top,
+    }
 }
 
 pub struct PathTracer {
@@ -376,6 +720,9 @@ pub struct PathTracer {
     pub ground: bool,
     /// A baked gas the paths travel through: group 1.
     volume: PtVolumeGpu,
+    /// The rays are asked of the device's ray tracing, not walked in the
+    /// shader.
+    hardware: bool,
 }
 
 /// One gas's parameters, as `PtVolume` in the shader reads them.
@@ -622,6 +969,20 @@ impl PathTracer {
     /// `shading` is the layout of the shading library's group: the tracer
     /// reads the lights and the environment through it.
     pub fn new(device: &wgpu::Device, shading: &wgpu::BindGroupLayout) -> Self {
+        Self::new_tracing(device, shading, ray_queries_on(device))
+    }
+
+    /// As [`PathTracer::new`], told whether to trace with the device's ray
+    /// queries — which it must have — or the shader's own walk.
+    pub fn new_tracing(
+        device: &wgpu::Device,
+        shading: &wgpu::BindGroupLayout,
+        hardware: bool,
+    ) -> Self {
+        let hardware = hardware
+            && device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
         let storage = |binding: u32, read_only: bool, visibility: wgpu::ShaderStages| {
             wgpu::BindGroupLayoutEntry {
                 binding,
@@ -691,14 +1052,25 @@ impl PathTracer {
                 storage(16, true, c),
                 storage(17, false, c),
                 storage(18, true, c),
-            ],
+                storage(19, true, c),
+            ]
+            .into_iter()
+            .chain(hardware.then_some(wgpu::BindGroupLayoutEntry {
+                binding: 20,
+                visibility: c,
+                ty: wgpu::BindingType::AccelerationStructure {
+                    vertex_return: false,
+                },
+                count: None,
+            }))
+            .collect::<Vec<_>>(),
         });
         let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("path trace"),
             bind_group_layouts: &[Some(&scene_layout), Some(&volume.layout), Some(shading)],
             immediate_size: 0,
         });
-        let trace = Self::trace_pipeline(device, &trace_layout, &source("", 0));
+        let trace = Self::trace_pipeline(device, &trace_layout, &source("", 0, hardware));
 
         let f = wgpu::ShaderStages::FRAGMENT;
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -808,7 +1180,13 @@ impl PathTracer {
             noise_threshold: 0.01,
             max_bounces: 4,
             volume,
+            hardware,
         }
+    }
+
+    /// Whether the rays are asked of the device's ray tracing.
+    pub fn traces_in_hardware(&self) -> bool {
+        self.hardware
     }
 
     /// The gases the paths travel through — the first `MAX_VOLUMES` — or
@@ -983,60 +1361,53 @@ impl PathTracer {
             self.trace = Self::trace_pipeline(
                 device,
                 &self.trace_layout,
-                &source(materials.code, materials.count),
+                &source(materials.code, materials.count, self.hardware),
             );
             self.trace_code = (materials.code.to_string(), materials.count);
         }
-        let mut local: Vec<[f32; 4]> = Vec::new();
-        let mut uvs: Vec<[f32; 2]> = Vec::new();
-        let mut colors: Vec<u32> = Vec::new();
-        let mut positions: Vec<Vec3> = Vec::new();
-        let mut normals: Vec<[f32; 4]> = Vec::new();
-        let mut triangles: Vec<[u32; 4]> = Vec::new();
-        for mesh in meshes {
-            let base = positions.len() as u32;
-            let to_world = mesh.transform;
-            let normal_matrix = to_world.matrix3.inverse().transpose();
-            uvs.extend(
-                (0..mesh.positions.len()).map(|i| mesh.uvs.get(i).copied().unwrap_or([0.0; 2])),
-            );
-            colors.extend(
-                (0..mesh.positions.len()).map(|i| mesh.colors.get(i).copied().unwrap_or(u32::MAX)),
-            );
-            for (p, n) in mesh.positions.iter().zip(mesh.normals) {
-                local.push([p[0], p[1], p[2], 1.0]);
-                local.push([n.x, n.y, n.z, 0.0]);
-                let w = to_world.transform_point3(glam::DVec3::from_array(p.map(|c| c as f64)));
-                positions.push(w.as_vec3());
-                let wn = (normal_matrix * n.as_dvec3()).normalize_or_zero().as_vec3();
-                normals.push([wn.x, wn.y, wn.z, 0.0]);
-            }
-            let mut run = 0;
-            let mut surface = mesh.surface;
-            for (k, t) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
-                while let Some(&(start, next)) = mesh.runs.get(run) {
-                    if start as usize > k * 3 {
-                        break;
-                    }
-                    surface = next;
-                    run += 1;
-                }
-                triangles.push([base + t[0], base + t[1], base + t[2], surface]);
-            }
-        }
-        let indices: Vec<[u32; 3]> = triangles.iter().map(|t| [t[0], t[1], t[2]]).collect();
-        let bvh = kreate_math::Bvh::build(&positions, &indices);
-        let mut nodes: Vec<GpuNode> = bvh
-            .flat_nodes()
-            .into_iter()
-            .map(|(b, first, count)| GpuNode {
-                min: b.min.to_array(),
-                first,
-                max: b.max.to_array(),
-                count,
+        let layout = lay_out(meshes);
+        let indices: Vec<[u32; 3]> = layout
+            .triangles
+            .iter()
+            .map(|t| [t[0], t[1], t[2]])
+            .collect();
+        // A tree per stored run, over its own triangles.
+        let trees: Vec<kreate_math::Bvh> = layout
+            .stored
+            .iter()
+            .map(|run| {
+                let first = run.first_triangle as usize;
+                kreate_math::Bvh::build(
+                    &layout.positions,
+                    &indices[first..first + run.triangles as usize],
+                )
             })
             .collect();
-        let mut order = bvh.order().to_vec();
+        // The placings a ray can meet: the ones whose run has a tree.
+        let placings: Vec<(usize, DAffine3)> = layout
+            .placings
+            .iter()
+            .copied()
+            .filter(|&(run, _)| !trees[run].is_empty())
+            .collect();
+        let layout = Layout { placings, ..layout };
+        let top = kreate_math::Bvh::build_boxes(
+            &layout
+                .placings
+                .iter()
+                .map(|&(run, to)| placed_box(trees[run].bounds(), to))
+                .collect::<Vec<_>>(),
+        );
+        let node = |(b, first, count): (kreate_math::Aabb, u32, u32)| GpuNode {
+            min: b.min.to_array(),
+            first,
+            max: b.max.to_array(),
+            count,
+        };
+        // The placings' tree first, its root the walk's start; then each
+        // run's, its links moved to where it lands.
+        let mut nodes: Vec<GpuNode> = top.flat_nodes().into_iter().map(node).collect();
+        let mut order = top.order().to_vec();
         // An empty scene still binds: one node that nothing enters.
         if nodes.is_empty() {
             nodes.push(GpuNode {
@@ -1046,8 +1417,39 @@ impl PathTracer {
                 count: 0,
             });
         }
+        let mut roots = Vec::with_capacity(trees.len());
+        for (run, tree) in layout.stored.iter().zip(&trees) {
+            let (node_base, order_base) = (nodes.len() as u32, order.len() as u32);
+            roots.push(node_base);
+            nodes.extend(tree.flat_nodes().into_iter().map(|n| {
+                let mut n = node(n);
+                n.first += if n.count > 0 { order_base } else { node_base };
+                n
+            }));
+            order.extend(tree.order().iter().map(|i| i + run.first_triangle));
+        }
         if order.is_empty() {
             order.push(0);
+        }
+        let mut instances: Vec<GpuInstance> = layout
+            .placings
+            .iter()
+            .map(|&(run, to)| GpuInstance {
+                world: rows(to),
+                local: rows(to.inverse()),
+                root: roots[run],
+                first: layout.stored[run].first_triangle,
+                pad: [0; 2],
+            })
+            .collect();
+        if instances.is_empty() {
+            instances.push(GpuInstance {
+                world: rows(DAffine3::IDENTITY),
+                local: rows(DAffine3::IDENTITY),
+                root: 0,
+                first: 0,
+                pad: [0; 2],
+            });
         }
         // Each image to a layer of the array its kind goes in, and each
         // surface told which.
@@ -1158,11 +1560,34 @@ impl PathTracer {
                 [0.0; 4],
             ]);
         }
-        let (emitter_data, emitter_total) = emitters_of(&positions, &triangles, surfaces);
+        let (emitter_data, emitter_total) = emitters_of(&layout, surfaces);
         let emitter_count = emitter_data.len() as u32;
         // The lowest point, for where the floor goes when the scene reaches
         // below the ground.
-        let lowest = positions.iter().map(|p| p.z).fold(f32::INFINITY, f32::min);
+        let lowest = layout
+            .placings
+            .iter()
+            .flat_map(|&(run, to)| {
+                let run = layout.stored[run];
+                let row = to.matrix3.row(2);
+                layout.positions
+                    [run.first_vertex as usize..(run.first_vertex + run.vertices) as usize]
+                    .iter()
+                    .map(move |p| (row.dot(p.as_dvec3()) + to.translation.z) as f32)
+            })
+            .fold(f32::INFINITY, f32::min);
+        let hardware = self
+            .hardware
+            .then(|| build_hardware(device, queue, &layout));
+        let Layout {
+            local,
+            uvs,
+            colors,
+            positions,
+            normals,
+            triangles,
+            ..
+        } = layout;
         let positions: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
         let upload = |label, bytes: &[u8]| {
             let bytes = if bytes.is_empty() {
@@ -1203,6 +1628,8 @@ impl PathTracer {
                 bytemuck::cast_slice(materials.values),
             ),
             local: upload("path trace local", bytemuck::cast_slice(&local)),
+            instances: upload("path trace placings", bytemuck::cast_slice(&instances)),
+            hardware,
             emitter_count,
             emitter_total,
             lowest: if lowest.is_finite() { lowest } else { 0.0 },
@@ -1351,6 +1778,16 @@ impl PathTracer {
                 binding: 18,
                 resource: self.prev.as_entire_binding(),
             });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 19,
+                resource: scene.instances.as_entire_binding(),
+            });
+            if let Some(hardware) = &scene.hardware {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: hardware.top.as_binding(),
+                });
+            }
             self.scene_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path trace scene"),
                 layout: &self.scene_layout,
@@ -1661,5 +2098,79 @@ mod flame_tests {
         };
         assert!(share(index(1, 1, 1)) > share(index(3, 3, 3)) * 20.0);
         assert!(flame_cells(&[0u8; 8], [2, 2, 2]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod placing_tests {
+    use super::*;
+
+    fn mesh<'a>(
+        positions: &'a [[f32; 3]],
+        normals: &'a [Vec3],
+        indices: &'a [u32],
+        transform: DAffine3,
+    ) -> PtMesh<'a> {
+        PtMesh {
+            positions,
+            uvs: &[],
+            normals,
+            colors: &[],
+            indices,
+            transform,
+            surface: 0,
+            runs: &[],
+        }
+    }
+
+    /// The same slices handed over twice are one stored run, placed twice;
+    /// a copy of them is a mesh of its own, moved into the world; and a
+    /// glowing triangle placed at twice the size glows four times as much.
+    #[test]
+    fn a_mesh_handed_over_twice_is_stored_once_and_placed_twice() {
+        let positions = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let copy = positions;
+        let normals = [Vec3::Z; 3];
+        let indices = [0u32, 1, 2];
+        let away = DAffine3::from_translation(glam::DVec3::new(5.0, 0.0, -2.0));
+        let bigger = DAffine3::from_scale(glam::DVec3::splat(2.0));
+        let meshes = [
+            mesh(&positions, &normals, &indices, away),
+            mesh(&positions, &normals, &indices, bigger),
+            mesh(&copy, &normals, &indices, away),
+        ];
+        let layout = lay_out(&meshes);
+        assert_eq!(layout.stored.len(), 2, "the world's run and the placed one");
+        assert_eq!(layout.triangles.len(), 2, "each triangle stored once");
+        assert_eq!(layout.placings.len(), 3);
+        // The copy went into the world, moved.
+        assert_eq!(layout.positions[0], Vec3::new(5.0, 0.0, -2.0));
+        // The placed one is kept in its own space.
+        assert_eq!(layout.positions[3], Vec3::ZERO);
+        let glow = PtSurface {
+            emission: [1.0; 3],
+            ..Default::default()
+        };
+        let (emitters, total) = emitters_of(&layout, &[glow]);
+        assert_eq!(emitters.len(), 3);
+        assert!((total - 0.5 * (1.0 + 1.0 + 4.0)).abs() < 1e-5, "{total}");
+    }
+
+    /// A placing that flattens its mesh cannot be undone, so the rays could
+    /// not be carried into it: such a mesh goes into the world instead.
+    #[test]
+    fn a_flattened_copy_is_moved_into_the_world() {
+        let positions = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let normals = [Vec3::Z; 3];
+        let indices = [0u32, 1, 2];
+        let flat = DAffine3::from_scale(glam::DVec3::new(1.0, 1.0, 0.0));
+        let meshes = [
+            mesh(&positions, &normals, &indices, flat),
+            mesh(&positions, &normals, &indices, flat),
+        ];
+        let layout = lay_out(&meshes);
+        assert_eq!(layout.stored.len(), 1);
+        assert_eq!(layout.placings, vec![(0, DAffine3::IDENTITY)]);
+        assert_eq!(layout.triangles.len(), 2);
     }
 }

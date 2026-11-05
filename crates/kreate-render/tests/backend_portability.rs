@@ -92,6 +92,11 @@ fn shaders() -> Vec<(&'static str, std::borrow::Cow<'static, str>)> {
             "pathtrace",
             kreate_render::pathtrace::shader_source().into(),
         ),
+        // Its walk through the scene's trees, which it is assembled with.
+        (
+            "pathtrace_bvh",
+            kreate_render::pathtrace::shader_source().into(),
+        ),
         (
             "pathtrace_resolve",
             kreate_render::pathtrace::resolve_source().into(),
@@ -321,6 +326,25 @@ fn no_shader_needs_a_capability_beyond_the_webgpu_core() {
     }
 }
 
+/// Shaders used only where the device offers a feature beyond the core,
+/// tested by what that feature's backends need: see
+/// `the_ray_query_tracer_translates_to_spirv`.
+const BEYOND_THE_CORE: &[&str] = &["pathtrace_rq"];
+
+/// The path tracer as a device with ray queries runs it — Vulkan's, the one
+/// `wgpu` offers them on — and only there.
+#[test]
+fn the_ray_query_tracer_translates_to_spirv() {
+    let source = kreate_render::pathtrace::shader_source_hardware();
+    let module = naga::front::wgsl::parse_str(&source)
+        .unwrap_or_else(|e| panic!("pathtrace_rq: {}", e.emit_to_string(&source)));
+    let info = Validator::new(ValidationFlags::all(), Capabilities::RAY_QUERY)
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("pathtrace_rq does not validate: {e:?}"));
+    spv::write_vec(&module, &info, &spv::Options::default(), None)
+        .unwrap_or_else(|e| panic!("pathtrace_rq does not translate to SPIR-V: {e:?}"));
+}
+
 #[test]
 fn the_shader_list_covers_every_shader_in_the_directory() {
     // A shader added without being listed here would be tested on nothing. That
@@ -338,7 +362,11 @@ fn the_shader_list_covers_every_shader_in_the_directory() {
         .collect();
     on_disk.sort();
 
-    let mut listed: Vec<String> = shaders().iter().map(|(n, _)| n.to_string()).collect();
+    let mut listed: Vec<String> = shaders()
+        .iter()
+        .map(|(n, _)| n.to_string())
+        .chain(BEYOND_THE_CORE.iter().map(|n| n.to_string()))
+        .collect();
     listed.sort();
 
     assert_eq!(

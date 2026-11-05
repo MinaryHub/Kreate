@@ -278,6 +278,20 @@ pub struct Light {
     pub max_bounces: u8,
     /// The action animating this light's colour and brightness, if any.
     pub action: Option<crate::document::ActionId>,
+    /// A measured luminaire's shape, from its IES file: the intensity by
+    /// angle from the direction the light points, relative to `intensity`,
+    /// at even steps from 0° to 180°. `None` is the same every way. A point
+    /// or a spot points down its `-Z`, as a spot always has.
+    pub profile: Option<LightProfile>,
+}
+
+/// A luminaire's measured shape: see [`Light::profile`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightProfile {
+    /// Where it came from — a file's name — to show and to say.
+    pub name: String,
+    /// Relative intensities, 0° to 180° in even steps.
+    pub samples: Vec<f32>,
 }
 
 impl Default for Light {
@@ -299,6 +313,7 @@ impl Default for Light {
             affect_specular: true,
             max_bounces: 8,
             action: None,
+            profile: None,
         }
     }
 }

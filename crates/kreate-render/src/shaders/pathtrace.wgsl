@@ -9,7 +9,11 @@
 // pixel per frame, added to a running sum the viewport divides out.
 //
 // The scene is in world space, not eye-relative like the rasteriser's: a
-// path-traced scene is built once and the camera moves through it. The
+// path-traced scene is built once and the camera moves through it. It is
+// placed copies of meshes: each placing (`PtInstance`) names a mesh's
+// triangles, stored once in the mesh's own space, and where they go. A mesh
+// placed once is stored already in the world, under one placing that moves
+// nothing; a mesh placed many times is stored once and walked into each. The
 // lights arrive eye-relative, as every pass gets them, and are moved back with
 // `pt.eye` where they are used.
 
@@ -51,23 +55,14 @@ struct PtParams {
     ground: vec4<f32>,
 };
 
-struct PtNode {
-    min: vec3<f32>,
-    // Leaf: the first index into `order`. Interior: the left child; the
-    // right is the next.
-    first: u32,
-    max: vec3<f32>,
-    // Primitives in a leaf; zero for an interior node.
-    count: u32,
-};
-
 @group(0) @binding(0) var<uniform> pt: PtParams;
+// Each vertex where its mesh keeps it — in the world for the meshes placed
+// once, in their own space for the ones placed many times — and its normal
+// there. `pt_world` and `pt_normal_world` carry them out through a placing.
 @group(0) @binding(1) var<storage, read> pt_positions: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> pt_normals: array<vec4<f32>>;
 // a, b, c, and the material.
 @group(0) @binding(3) var<storage, read> pt_triangles: array<vec4<u32>>;
-@group(0) @binding(4) var<storage, read> pt_nodes: array<PtNode>;
-@group(0) @binding(5) var<storage, read> pt_order: array<u32>;
 // Four per material: base colour and metallic; roughness, the base colour
 // image's layer, the metallic-roughness image's (-1 for none) and the
 // transmission; emission and index of refraction; one-sidedness.
@@ -85,8 +80,9 @@ const PT_SURFACE: u32 = 4u;
 @group(0) @binding(10) var pt_data_images: texture_2d_array<f32>;
 @group(0) @binding(11) var pt_image_sampler: sampler;
 // The glowing triangles: x the triangle's index (its bits), y where it ends
-// in the cumulative distribution of area times luminance.
-@group(0) @binding(12) var<storage, read> pt_emitters: array<vec2<f32>>;
+// in the cumulative distribution of area times luminance, z the placing it
+// is seen through (its bits).
+@group(0) @binding(12) var<storage, read> pt_emitters: array<vec4<f32>>;
 // The environment's cumulative distributions: the rows, then each row's
 // columns. See `environment::ImportanceMap`.
 @group(0) @binding(13) var<storage, read> pt_env_cdf: array<f32>;
@@ -106,6 +102,39 @@ const PT_SURFACE: u32 = 4u;
 @group(0) @binding(17) var<storage, read_write> pt_aux: array<vec4<f32>>;
 // The last frame's sum, then its aux: copied when the view moves.
 @group(0) @binding(18) var<storage, read> pt_prev: array<vec4<f32>>;
+
+// A mesh placed in the scene: the rows of its object-to-world matrix, then
+// of world-to-object; the root of its triangles' tree in `pt_nodes`, and the
+// first of its triangles, which the hardware's numbering counts from.
+struct PtInstance {
+    world: array<vec4<f32>, 3>,
+    local: array<vec4<f32>, 3>,
+    root: u32,
+    first: u32,
+    pad0: u32,
+    pad1: u32,
+};
+@group(0) @binding(19) var<storage, read> pt_instances: array<PtInstance>;
+
+fn pt_point_through(m: array<vec4<f32>, 3>, p: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(m[0].xyz, p) + m[0].w, dot(m[1].xyz, p) + m[1].w, dot(m[2].xyz, p) + m[2].w);
+}
+
+fn pt_vector_through(m: array<vec4<f32>, 3>, d: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(m[0].xyz, d), dot(m[1].xyz, d), dot(m[2].xyz, d));
+}
+
+// Vertex `i` of a mesh seen through placing `inst`, in the world.
+fn pt_world(inst: u32, i: u32) -> vec3<f32> {
+    return pt_point_through(pt_instances[inst].world, pt_positions[i].xyz);
+}
+
+// A normal in a mesh's space, carried into the world by placing `inst`:
+// by the inverse's transpose, so a squashed object's normals stay normal.
+fn pt_normal_world(inst: u32, n: vec3<f32>) -> vec3<f32> {
+    let m = pt_instances[inst].local;
+    return normalize(m[0].xyz * n.x + m[1].xyz * n.y + m[2].xyz * n.z);
+}
 
 // What a compiled material decided at a point: the generated `pt_material`
 // fills it, from whichever material the surface names.
@@ -290,105 +319,48 @@ struct PtHit {
     triangle: u32,
     u: f32,
     v: f32,
+    // The placing it was met through.
+    instance: u32,
 };
 
-fn pt_box(origin: vec3<f32>, inv_dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, limit: f32) -> bool {
-    let a = (lo - origin) * inv_dir;
-    let b = (hi - origin) * inv_dir;
-    let near = max(max(min(a.x, b.x), min(a.y, b.y)), min(a.z, b.z));
-    let far = min(min(max(a.x, b.x), max(a.y, b.y)), max(a.z, b.z));
-    return far >= max(near, 0.0) && near < limit;
-}
-
-// The nearest hit, or `t` < 0. `any` stops at the first: a shadow ray.
-// `skip` is a triangle the ray leaves from and must not meet again, or
-// `PT_NONE`. With one, the ray may start exactly on its surface — and so meet
-// a surface lying flush against it, the floor under a glass on a table, which
-// any offset would step past.
+// `skip` is a triangle the ray leaves from and must not meet again — its
+// placing, then its index — or `PT_NOWHERE`. With one, the ray may start
+// exactly on its surface — and so meet a surface lying flush against it, the
+// floor under a glass on a table, which any offset would step past.
 const PT_NONE: u32 = 0xffffffffu;
+const PT_NOWHERE: vec2<u32> = vec2<u32>(0xffffffffu, 0xffffffffu);
 
-fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: u32) -> PtHit {
-    var best = PtHit(-1.0, 0u, 0.0, 0.0);
-    var nearest = limit;
-    let inv_dir = 1.0 / select(dir, vec3<f32>(1e-12), abs(dir) < vec3<f32>(1e-12));
-    var stack: array<u32, 48>;
-    var top = 1;
-    stack[0] = 0u;
-    loop {
-        if (top == 0) {
-            break;
-        }
-        top -= 1;
-        let node = pt_nodes[stack[top]];
-        if (!pt_box(origin, inv_dir, node.min, node.max, nearest)) {
-            continue;
-        }
-        if (node.count > 0u) {
-            for (var k = 0u; k < node.count; k++) {
-                let index = pt_order[node.first + k];
-                if (index == skip) {
-                    continue;
-                }
-                let tri = pt_triangles[index];
-                let a = pt_positions[tri.x].xyz;
-                let e1 = pt_positions[tri.y].xyz - a;
-                let e2 = pt_positions[tri.z].xyz - a;
-                let h = cross(dir, e2);
-                let det = dot(e1, h);
-                if (abs(det) < 1e-12) {
-                    continue;
-                }
-                let f = 1.0 / det;
-                let s = origin - a;
-                let u = f * dot(s, h);
-                if (u < 0.0 || u > 1.0) {
-                    continue;
-                }
-                let q = cross(s, e1);
-                let v = f * dot(dir, q);
-                if (v < 0.0 || u + v > 1.0) {
-                    continue;
-                }
-                let t = f * dot(e2, q);
-                // A shadow ray passes through a see-through surface as
-                // often as light does: always through clear glass, a fifth of
-                // the time through a fifth-transmissive one, so its shadow is
-                // four fifths dark. Untinted — the caustic a real block would
-                // focus is a path no shadow ray can find, and a black shadow
-                // under a window is the worse of the two errors.
-                if (any && pt_random() < pt_surfaces[tri.w * PT_SURFACE + 1u].w) {
-                    continue;
-                }
-                // A cut-out: where its picture is clear there is nothing to
-                // hit — for the camera's rays and the shadows' alike, so a
-                // leaf casts a leaf's shadow and not its card's.
-                let cut = pt_surfaces[tri.w * PT_SURFACE + 3u].z;
-                let layer = pt_surfaces[tri.w * PT_SURFACE + 1u].y;
-                if (cut > 0.0 && layer >= 0.0) {
-                    let w = 1.0 - u - v;
-                    let at = fract(pt_uvs[tri.x] * w + pt_uvs[tri.y] * u + pt_uvs[tri.z] * v);
-                    let alpha = textureSampleLevel(pt_colour_images, pt_image_sampler, vec2<f32>(at.x, 1.0 - at.y), i32(layer), 0.0).a;
-                    if (alpha < cut) {
-                        continue;
-                    }
-                }
-                let near = select(1e-4, -1e-5, skip != PT_NONE);
-                if (t > near && t < nearest) {
-                    nearest = t;
-                    best = PtHit(max(t, 0.0), index, u, v);
-                    if (any) {
-                        return best;
-                    }
-                }
-            }
-        } else if (top < 46) {
-            stack[top] = node.first;
-            stack[top + 1] = node.first + 1u;
-            top += 2;
+// Whether a ray that reaches triangle `index` at `(u, v)` stops there.
+fn pt_admit(index: u32, u: f32, v: f32, any: bool) -> bool {
+    let tri = pt_triangles[index];
+    // A shadow ray passes through a see-through surface as often as light
+    // does: always through clear glass, a fifth of the time through a
+    // fifth-transmissive one, so its shadow is four fifths dark. Untinted —
+    // the caustic a real block would focus is a path no shadow ray can find,
+    // and a black shadow under a window is the worse of the two errors.
+    if (any && pt_random() < pt_surfaces[tri.w * PT_SURFACE + 1u].w) {
+        return false;
+    }
+    // A cut-out: where its picture is clear there is nothing to hit — for
+    // the camera's rays and the shadows' alike, so a leaf casts a leaf's
+    // shadow and not its card's.
+    let cut = pt_surfaces[tri.w * PT_SURFACE + 3u].z;
+    let layer = pt_surfaces[tri.w * PT_SURFACE + 1u].y;
+    if (cut > 0.0 && layer >= 0.0) {
+        let w = 1.0 - u - v;
+        let at = fract(pt_uvs[tri.x] * w + pt_uvs[tri.y] * u + pt_uvs[tri.z] * v);
+        let alpha = textureSampleLevel(pt_colour_images, pt_image_sampler, vec2<f32>(at.x, 1.0 - at.y), i32(layer), 0.0).a;
+        if (alpha < cut) {
+            return false;
         }
     }
-    return best;
+    return true;
 }
+
+// `pt_trace`, the nearest hit or `t` < 0 (`any` stops at the first: a
+// shadow ray), is appended: walked through the scene's own trees
+// (`pathtrace_bvh.wgsl`), or asked of the device's ray tracing
+// (`pathtrace_rq.wgsl`) where it has some.
 
 // --- shading ------------------------------------------------------------------
 
@@ -628,7 +600,7 @@ fn pt_walk(entry: vec3<f32>, inward: vec3<f32>, s: Surface) -> PtWalk {
     var at = entry;
     for (var k = 0u; k < 256u; k = k + 1u) {
         let length = -log(max(1.0 - pt_random(), 1e-7)) / sigma;
-        let met = pt_trace(at, d, length, false, PT_NONE);
+        let met = pt_trace(at, d, length, false, PT_NOWHERE);
         if (met.t >= 0.0) {
             out.out = 1u;
             out.at = at;
@@ -1123,7 +1095,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // black. Its own, larger budget instead.
     var bounce = 0u;
     var crossings = 0u;
-    var skip = PT_NONE;
+    var skip = PT_NOWHERE;
     // The probability per solid angle the last bounce had of going where it
     // went, for weighting a glow it finds; negative when the light-aiming
     // could not have found it (the camera's ray, glass), and it counts whole.
@@ -1149,7 +1121,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         pt_dimensions(step);
         step = step + 1u;
         let hit = pt_trace(origin, dir, 1e30, false, skip);
-        skip = PT_NONE;
+        skip = PT_NOWHERE;
         // A product shot's floor, met by the camera's ray before anything
         // else: the backdrop where it is, darkened where what stands on it
         // keeps the light off, and a faint mirror of what is above. Only the
@@ -1181,7 +1153,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                         reach = length(light.position.xyz - rel) * 0.999;
                     }
                     lamp_all += e;
-                    if (!casts_shadow(light) || pt_trace(g, to_light, reach, true, PT_NONE).t < 0.0) {
+                    if (!casts_shadow(light) || pt_trace(g, to_light, reach, true, PT_NOWHERE).t < 0.0) {
                         lamp_seen += e;
                     }
                 }
@@ -1191,7 +1163,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let phi = 6.2831853 * pt_random();
                 let rr = sqrt(r1);
                 let up = vec3<f32>(rr * cos(phi), rr * sin(phi), sqrt(max(1.0 - r1, 0.0)));
-                let sky = select(1.0, 0.0, pt_trace(g, up, 1e30, true, PT_NONE).t >= 0.0);
+                let sky = select(1.0, 0.0, pt_trace(g, up, 1e30, true, PT_NOWHERE).t >= 0.0);
                 var seen = sky;
                 if (lamp_all > 0.0) {
                     seen = mix(sky, lamp_seen / lamp_all, 0.6);
@@ -1272,7 +1244,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                         if (pt_luminance(e) > 0.0) {
                             var lit = 1.0;
                             if (casts_shadow(light)) {
-                                if (pt_trace(at, to_light, reach, true, PT_NONE).t >= 0.0) {
+                                if (pt_trace(at, to_light, reach, true, PT_NOWHERE).t >= 0.0) {
                                     lit = 0.0;
                                 } else {
                                     lit = pt_transmittance(at, to_light, reach);
@@ -1323,9 +1295,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let tri = pt_triangles[hit.triangle];
         let w = 1.0 - hit.u - hit.v;
         let p = origin + dir * hit.t;
-        let a = pt_positions[tri.x].xyz;
-        var geometric = normalize(cross(pt_positions[tri.y].xyz - a, pt_positions[tri.z].xyz - a));
-        var n = normalize(pt_normals[tri.x].xyz * w + pt_normals[tri.y].xyz * hit.u + pt_normals[tri.z].xyz * hit.v);
+        let a = pt_world(hit.instance, tri.x);
+        let e1w = pt_world(hit.instance, tri.y) - a;
+        let e2w = pt_world(hit.instance, tri.z) - a;
+        var geometric = normalize(cross(e1w, e2w));
+        var n = pt_normal_world(hit.instance, pt_normals[tri.x].xyz * w + pt_normals[tri.y].xyz * hit.u + pt_normals[tri.z].xyz * hit.v);
         // Which side the path arrived from, before the normals are turned to
         // face it: glass bends the other way on the way out. Asked of the
         // mesh's normal, which points out of the solid; the winding of one
@@ -1358,8 +1332,6 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let uv = uva * w + pt_uvs[tri.y] * hit.u + pt_uvs[tri.z] * hit.v;
             let e1l = lb - la;
             let e2l = lc - la;
-            let e1w = pt_positions[tri.y].xyz - a;
-            let e2w = pt_positions[tri.z].xyz - a;
             let uv_det = du1.x * du2.y - du2.x * du1.y;
             if (abs(uv_det) > 1e-20) {
                 uv_tangent = (e1w * du2.y - e2w * du1.y) / uv_det;
@@ -1386,7 +1358,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             // as glass is not.
             if (made.clip > 0.0 && made.alpha < made.clip) {
                 origin = p;
-                skip = hit.triangle;
+                skip = vec2<u32>(hit.instance, hit.triangle);
                 crossings += 1u;
                 continue;
             }
@@ -1536,7 +1508,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 // offset through would step past whatever lies flush against
                 // the far side.
                 origin = p;
-                skip = hit.triangle;
+                skip = vec2<u32>(hit.instance, hit.triangle);
             } else {
                 if (dot(next, geometric) <= 0.0) {
                     break;
@@ -1571,7 +1543,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 throughput *= walked.carried;
                 origin = walked.at;
                 dir = walked.dir;
-                skip = PT_NONE;
+                skip = PT_NOWHERE;
                 leaving_below = true;
                 last_pdf = -1.0;
                 continue;
@@ -1591,7 +1563,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let l = pt_env_sample();
             if (dot(l, geometric) > 0.0) {
                 let pdf = env_share * pt_env_pdf(l);
-                if (pdf > 0.0 && pt_trace(start, l, 1e30, true, PT_NONE).t < 0.0) {
+                if (pdf > 0.0 && pt_trace(start, l, 1e30, true, PT_NOWHERE).t < 0.0) {
                     let e = pt_environment(l) / pdf * pt_transmittance(start, l, 1e30);
                     let weight = pt_power(pdf, pt_bsdf_pdf(s, n, v, l));
                     radiance += throughput * brdf_shade(s, n, v, l, e, true, true) * weight;
@@ -1599,11 +1571,12 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
         if (aim_at_glow) {
-            let picked = bitcast<u32>(pt_emitters[pt_pick_emitter(pt_random())].x);
-            let et = pt_triangles[picked];
-            let ea = pt_positions[et.x].xyz;
-            let eb = pt_positions[et.y].xyz;
-            let ec = pt_positions[et.z].xyz;
+            let entry = pt_emitters[pt_pick_emitter(pt_random())];
+            let picked = vec2<u32>(bitcast<u32>(entry.z), bitcast<u32>(entry.x));
+            let et = pt_triangles[picked.y];
+            let ea = pt_world(picked.x, et.x);
+            let eb = pt_world(picked.x, et.y);
+            let ec = pt_world(picked.x, et.z);
             let r1 = sqrt(pt_random());
             let r2 = pt_random();
             let q = ea * (1.0 - r1) + eb * (r1 * (1.0 - r2)) + ec * (r1 * r2);
@@ -1615,12 +1588,12 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             var le = pt_surfaces[et.w * PT_SURFACE + 2u].rgb;
             // A one-sided panel lights only what its normals face.
             if (pt_surfaces[et.w * PT_SURFACE + 3u].x != 0.0) {
-                let front = pt_normals[et.x].xyz + pt_normals[et.y].xyz + pt_normals[et.z].xyz;
+                let front = pt_normal_world(picked.x, pt_normals[et.x].xyz + pt_normals[et.y].xyz + pt_normals[et.z].xyz);
                 if (dot(front, -l) <= 0.0) {
                     le = vec3<f32>(0.0);
                 }
             }
-            if (picked != hit.triangle && dot(l, geometric) > 0.0 && cos_l > 1e-6 && pt_luminance(le) > 0.0) {
+            if (any(picked != vec2<u32>(hit.instance, hit.triangle)) && dot(l, geometric) > 0.0 && cos_l > 1e-6 && pt_luminance(le) > 0.0) {
                 let visible = pt_trace(start, l, sqrt(dist2) * 0.999, true, picked).t < 0.0;
                 if (visible) {
                     let pdf = pt_emitter_pdf(le, dist2, cos_l);
@@ -1639,7 +1612,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (pt_volumes.info.y > 0u) {
             let flame = pt_flame_light(p);
             if (pt_luminance(flame.e) > 0.0 && dot(flame.l, geometric) > 0.0) {
-                if (pt_trace(start, flame.l, flame.reach * 0.999, true, PT_NONE).t < 0.0) {
+                if (pt_trace(start, flame.l, flame.reach * 0.999, true, PT_NOWHERE).t < 0.0) {
                     let through = pt_transmittance(start, flame.l, flame.reach);
                     radiance += throughput * through * brdf_shade(s, n, v, flame.l, flame.e, true, true);
                 }
@@ -1680,7 +1653,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                     reach = length(offset) * 0.999;
                     aim = offset / max(length(offset), 1e-6);
                 }
-                let lit = !casts_shadow(light) || pt_trace(start, aim, reach, true, PT_NONE).t < 0.0;
+                let lit = !casts_shadow(light) || pt_trace(start, aim, reach, true, PT_NOWHERE).t < 0.0;
                 if (lit) {
                     var through = 1.0;
                     if (casts_shadow(light)) {

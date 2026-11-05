@@ -567,3 +567,25 @@ fn rewrite_scene(archive: &[u8], scene: &str) -> Vec<u8> {
     }
     out.finish().expect("finish").into_inner()
 }
+
+#[test]
+fn a_measured_shape_comes_back_with_its_name_and_numbers() {
+    let mut doc = Document::new();
+    let mut light = Light::of_kind("Downlight", LightKind::Point { radius: 0.02 });
+    light.profile = Some(kreate_scene::LightProfile {
+        name: "downlight.ies".into(),
+        samples: vec![1.0, 0.9, 0.5, 0.1, 0.0],
+    });
+    doc.add_light(light);
+    let back = round_trip(&doc);
+    let profile = only_light(&back)
+        .profile
+        .clone()
+        .expect("the shape came back");
+    assert_eq!(profile.name, "downlight.ies");
+    assert_eq!(profile.samples, vec![1.0, 0.9, 0.5, 0.1, 0.0]);
+    // And a light without one has none, and writes none.
+    let mut plain = Document::new();
+    plain.add_light(Light::new("Bulb"));
+    assert!(only_light(&round_trip(&plain)).profile.is_none());
+}

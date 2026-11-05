@@ -313,7 +313,46 @@ fn a_lighting_rig() -> Vec<PlacedLight> {
             radius: 0.5,
             ..PlacedLight::default()
         },
+        // A measured downlight: bright along its axis, nothing past 90°, with
+        // a dip at 40° so the interpolation between samples shows.
+        PlacedLight {
+            position: glam::DVec3::new(0.2, 0.3, 1.5),
+            direction: glam::Vec3::new(0.1, 0.0, -1.0).normalize(),
+            amount: [1500.0, 1400.0, 1300.0],
+            profile: Some(std::array::from_fn(|i| {
+                let deg = i as f32 * 180.0 / 31.0;
+                if deg > 90.0 {
+                    0.0
+                } else if (35.0..45.0).contains(&deg) {
+                    0.3
+                } else {
+                    (deg.to_radians().cos()).powf(2.0)
+                }
+            })),
+            ..PlacedLight::default()
+        },
     ]
+}
+
+/// A profiled light is bright where its profile says and dark where it says:
+/// along its axis the full amount, past its edge nothing.
+#[test]
+fn a_profile_shapes_the_light() {
+    let mut profile = [0.0f32; kreate_render::lights::PROFILE_SAMPLES];
+    profile[0] = 1.0;
+    profile[1] = 1.0;
+    let light = PlacedLight {
+        position: glam::DVec3::new(0.0, 0.0, 2.0),
+        direction: glam::Vec3::NEG_Z,
+        amount: [100.0; 3],
+        profile: Some(profile),
+        ..PlacedLight::default()
+    };
+    let packed = GpuLight::pack(&light, glam::DVec3::ZERO);
+    let below = packed.illuminance_at(glam::Vec3::ZERO);
+    assert!((below[0] - 25.0).abs() < 1e-3, "{below:?}");
+    let aside = packed.illuminance_at(glam::Vec3::new(2.0, 0.0, 2.0));
+    assert_eq!(aside[0], 0.0);
 }
 
 fn compare(gpu: &Gpu, eye: glam::DVec3) {

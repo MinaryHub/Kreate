@@ -7599,6 +7599,15 @@ impl App {
                 Command::PickWorldImage => self.pick_world_image(),
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
+                Command::PickLightProfile => self.pick_light_profile(),
+                Command::ClearLightProfile => {
+                    let mut params = PropertyMap::new();
+                    params.set(
+                        "samples",
+                        kreate_reflect::PropertyValue::Text(String::new()),
+                    );
+                    self.run_op("light.set_profile", params);
+                }
                 Command::PickNodeImage { slot, node } => self.pick_node_image(slot, node),
                 Command::NewMaterial => {
                     let params = self.material_slot_param();
@@ -8304,6 +8313,49 @@ impl App {
     /// The same division as `pick_world_image`, and the same consequence for
     /// undo: the datablock is added outside the history, so undoing the link
     /// leaves the image in the document with nothing pointing at it.
+    /// Reads an IES file and gives the active light its shape and peak.
+    fn pick_light_profile(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("IES", &["ies", "IES"])
+            .set_title("Light Profile")
+            .pick_file()
+        else {
+            return;
+        };
+        let text = match std::fs::read(&path) {
+            // IES files predate UTF-8 and some say so: read as Latin-1.
+            Ok(bytes) => bytes.iter().map(|b| *b as char).collect::<String>(),
+            Err(e) => return self.status(&format!("cannot read {}: {e}", path.display())),
+        };
+        let photometry = match kreate_io::ies::read(&text) {
+            Ok(p) => p,
+            Err(e) => return self.status(&format!("{}: {e}", path.display())),
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut params = PropertyMap::new();
+        params.set("name", kreate_reflect::PropertyValue::Text(name.clone()));
+        params.set(
+            "samples",
+            kreate_reflect::PropertyValue::Text(
+                photometry
+                    .profile
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        );
+        params.set(
+            "candela",
+            kreate_reflect::PropertyValue::Float(photometry.peak_candela),
+        );
+        self.run_op("light.set_profile", params);
+        self.status(&format!("light profile: {name}"));
+    }
+
     fn pick_material_image(&mut self, map: u32) {
         let Some(slot) = kreate_scene::MaterialMap::ALL.get(map as usize).copied() else {
             return;
@@ -12672,68 +12724,78 @@ impl App {
                     let key = h.finish();
                     if self.path_trace_key != Some(key) || fresh {
                         self.path_trace_key = Some(key);
-                        let mut extracted: Vec<_> = traced()
-                            .map(|(id, mesh)| {
+                        // Each mesh read once, however many objects show it:
+                        // linked copies hand the tracer the same slices,
+                        // which it stores once and places at each.
+                        type Shape = (
+                            Vec<[f32; 3]>,
+                            Vec<[f32; 2]>,
+                            Vec<kreate_math::Vec3>,
+                            Vec<u32>,
+                            Vec<u32>,
+                            Vec<kreate_render::mesh_gpu::Submesh>,
+                        );
+                        let mut shapes: std::collections::HashMap<usize, Shape> =
+                            std::collections::HashMap::new();
+                        for (_, mesh) in traced() {
+                            shapes.entry(Arc::as_ptr(mesh) as usize).or_insert_with(|| {
                                 let cpu = kreate_render::RenderMeshCpu::extract(mesh);
-                                let positions: Vec<[f32; 3]> =
-                                    cpu.positions.iter().map(|p| p.0).collect();
-                                let uvs = cpu.uvs.clone();
-                                let normals: Vec<kreate_math::Vec3> = cpu
-                                    .normals
-                                    .iter()
-                                    .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
-                                    .collect();
-                                let runs = materials.runs_of(&self.doc, *id, &cpu.submeshes);
                                 (
-                                    positions,
-                                    uvs,
-                                    normals,
+                                    cpu.positions.iter().map(|p| p.0).collect(),
+                                    cpu.uvs.clone(),
+                                    cpu.normals
+                                        .iter()
+                                        .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+                                        .collect(),
                                     cpu.indices,
+                                    cpu.colors,
+                                    cpu.submeshes,
+                                )
+                            });
+                        }
+                        let placed: Vec<_> = traced()
+                            .map(|(id, mesh)| {
+                                let shape = &shapes[&(Arc::as_ptr(mesh) as usize)];
+                                (
+                                    Arc::as_ptr(mesh) as usize,
                                     self.doc.world_transform(*id),
                                     materials.index_of(&self.doc, *id),
-                                    runs,
-                                    cpu.colors,
+                                    materials.runs_of(&self.doc, *id, &shape.5),
                                 )
                             })
                             .collect();
-                        extracted.extend(panels.iter().enumerate().map(|(i, p)| {
-                            (
-                                p.positions.clone(),
-                                vec![[0.0f32; 2]; p.positions.len()],
-                                p.normals.clone(),
-                                p.indices.clone(),
-                                p.transform,
-                                first_panel + i as u32,
-                                Vec::new(),
-                                Vec::new(),
-                            )
-                        }));
-                        let meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = extracted
+                        let mut meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = placed
                             .iter()
-                            .map(
-                                |(
+                            .map(|(key, transform, surface, runs)| {
+                                let (positions, uvs, normals, indices, colors, _) = &shapes[key];
+                                kreate_render::pathtrace::PtMesh {
                                     positions,
                                     uvs,
                                     normals,
-                                    indices,
-                                    transform,
-                                    surface,
-                                    runs,
                                     colors,
-                                )| {
-                                    kreate_render::pathtrace::PtMesh {
-                                        positions,
-                                        uvs,
-                                        normals,
-                                        colors,
-                                        indices,
-                                        transform: *transform,
-                                        surface: *surface,
-                                        runs,
-                                    }
-                                },
-                            )
+                                    indices,
+                                    transform: *transform,
+                                    surface: *surface,
+                                    runs,
+                                }
+                            })
                             .collect();
+                        let panel_uvs: Vec<Vec<[f32; 2]>> = panels
+                            .iter()
+                            .map(|p| vec![[0.0f32; 2]; p.positions.len()])
+                            .collect();
+                        meshes.extend(panels.iter().zip(&panel_uvs).enumerate().map(
+                            |(i, (p, uvs))| kreate_render::pathtrace::PtMesh {
+                                positions: &p.positions,
+                                uvs,
+                                normals: &p.normals,
+                                colors: &[],
+                                indices: &p.indices,
+                                transform: p.transform,
+                                surface: first_panel + i as u32,
+                                runs: &[],
+                            },
+                        ));
                         let pt_images: Vec<kreate_render::pathtrace::PtImage<'_>> = images
                             .iter()
                             .map(|i| kreate_render::pathtrace::PtImage {

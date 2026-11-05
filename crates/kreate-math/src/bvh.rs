@@ -103,6 +103,28 @@ impl Bvh {
             centroids.push(bb.center());
             bounds.push(bb);
         }
+        Self::over(order, bounds, centroids)
+    }
+
+    /// Builds a tree over boxes, one primitive each: what a scene of placed
+    /// objects is walked by before each object's own tree. A box that is
+    /// empty or not finite is left out, as a degenerate triangle is.
+    pub fn build_boxes(boxes: &[Aabb]) -> Self {
+        let mut order: Vec<u32> = Vec::with_capacity(boxes.len());
+        let mut bounds: Vec<Aabb> = Vec::with_capacity(boxes.len());
+        let mut centroids: Vec<Vec3> = Vec::with_capacity(boxes.len());
+        for (i, bb) in boxes.iter().enumerate() {
+            if !(bb.min.is_finite() && bb.max.is_finite()) || bb.min.cmpgt(bb.max).any() {
+                continue;
+            }
+            order.push(i as u32);
+            centroids.push(bb.center());
+            bounds.push(*bb);
+        }
+        Self::over(order, bounds, centroids)
+    }
+
+    fn over(order: Vec<u32>, mut bounds: Vec<Aabb>, mut centroids: Vec<Vec3>) -> Self {
         if order.is_empty() {
             return Self::default();
         }
@@ -476,6 +498,30 @@ mod tests {
             }
         }
         (positions, indices)
+    }
+
+    #[test]
+    fn a_tree_over_boxes_holds_each_box_in_one_leaf_that_contains_it() {
+        let boxes: Vec<Aabb> = (0..40)
+            .map(|i| {
+                let c = Vec3::new((i % 7) as f32 * 3.0, (i / 7) as f32 * 2.0, (i % 3) as f32);
+                Aabb::EMPTY
+                    .extend(c - Vec3::splat(0.5))
+                    .extend(c + Vec3::splat(0.5))
+            })
+            .chain([Aabb::EMPTY])
+            .collect();
+        let tree = Bvh::build_boxes(&boxes);
+        let mut seen = vec![0; boxes.len()];
+        for (bounds, first, count) in tree.flat_nodes() {
+            for &i in &tree.order()[first as usize..(first + count) as usize] {
+                seen[i as usize] += 1;
+                let b = boxes[i as usize];
+                assert!(bounds.min.cmple(b.min).all() && bounds.max.cmpge(b.max).all());
+            }
+        }
+        assert_eq!(seen[..40], [1; 40]);
+        assert_eq!(seen[40], 0, "the empty box is left out");
     }
 
     /// The answer a tree must agree with: test every triangle.

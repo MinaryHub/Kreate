@@ -18,6 +18,7 @@ pub mod exr;
 pub mod fbx;
 pub mod gltf_export;
 pub mod gltf_import;
+pub mod ies;
 pub mod image_import;
 pub mod ir;
 pub mod kbake;

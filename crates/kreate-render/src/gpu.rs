@@ -229,6 +229,15 @@ impl Gpu {
             );
         }
 
+        let ray_queries = if adapter
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            && std::env::var("KREATE_RAY_QUERY").map_or(true, |v| v != "0")
+        {
+            wgpu::Features::EXPERIMENTAL_RAY_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kreate device"),
@@ -237,7 +246,22 @@ impl Gpu {
                 // Vulkan, Metal and DX12 alike. Anything beyond that is an
                 // optional accelerator, never a load-bearing assumption, or
                 // macOS quietly becomes a second-class target.
-                required_features: wgpu::Features::empty(),
+                //
+                // Ray queries are one such: the path tracer asks them where
+                // the device has them and walks its own trees where not.
+                // They are marked experimental in `wgpu`, so the token is
+                // given only with them, and `KREATE_RAY_QUERY=0` keeps them
+                // off altogether.
+                required_features: ray_queries,
+                experimental_features: if ray_queries.is_empty() {
+                    wgpu::ExperimentalFeatures::disabled()
+                } else {
+                    // SAFETY: only ray queries are asked for under the
+                    // token, and the path tracer is the only user; its
+                    // shader-walked path is the same scene and is what the
+                    // tests compare it against.
+                    unsafe { wgpu::ExperimentalFeatures::enabled() }
+                },
                 // What the hardware actually offers, not the WebGPU default,
                 // which caps buffers at 256 MiB. Capping ourselves there would
                 // limit scene size for no portability gain — portability is

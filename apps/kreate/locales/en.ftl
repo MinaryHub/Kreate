@@ -2138,3 +2138,7 @@ render-environment-studio = Studio
 render-environment-bright = Bright Studio
 render-environment-grey_room = Grey Room
 render-environment-outdoor = Outdoor
+render-environment-sunset = Sunset
+light-profile = Measured shape (IES)
+light-profile-pick = Load IES…
+light-profile-clear = Take the measured shape off

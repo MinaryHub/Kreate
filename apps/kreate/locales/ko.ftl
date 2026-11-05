@@ -2144,3 +2144,7 @@ render-environment-studio = 스튜디오
 render-environment-bright = 밝은 스튜디오
 render-environment-grey_room = 회색 방
 render-environment-outdoor = 야외
+render-environment-sunset = 해 질 녘
+light-profile = 배광 (IES)
+light-profile-pick = IES 불러오기…
+light-profile-clear = 배광 지우기
