@@ -18,7 +18,6 @@ use; `scripts/release.sh` turns that section into the next release.
   that follows the sketch; File ▸ Export Drawing ▸ Sheet Metal Flat
   Pattern writes its blank as DXF or PDF, with the bend lines and each
   bend's direction, angle and radius.
-
 - Assembly joints (Mechanical ▸ Assembly Joints): a hinge, a slider or a
   fixed joint at the 3D cursor joins the active part to another; the part
   then turns or slides within its limits from the Robot panel's slider,
