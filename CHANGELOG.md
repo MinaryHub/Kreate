@@ -16,18 +16,6 @@ use; `scripts/release.sh` turns that section into the next release.
   colour the air leaves it; and a Sunset room, the sun low and orange.
 - A point light or a spot can take a luminaire's measured shape from its
   IES file (Light tab, Load IES…), in the viewport and the path tracer.
-
-### Changed
-
-- The path tracer uses the GPU's own ray tracing where it has it (Vulkan
-  ray queries); `KREATE_RAY_QUERY=0` turns that off. Elsewhere it walks its
-  own trees as before.
-- Linked copies of a mesh are stored once in the path tracer and placed
-  where each one stands, so a scene of many copies costs the memory and the
-  build time of one.
-
-### Added
-
 - Materials can scatter light below their surface — skin, marble, wax,
   milk — with a colour and a radius: the path tracer walks it through the
   solid, so a face out of the light glows with what came through; the
@@ -35,9 +23,6 @@ use; `scripts/release.sh` turns that section into the next release.
 - Glass can take colour out of what passes through it, by an absorption
   colour and distance: a wine bottle, sea water. glTF's
   `KHR_materials_volume` carries it.
-
-### Added
-
 - Materials have a clear coat (car paint, varnish), a fabric sheen, a
   brushed (anisotropic) highlight and a specular weight, in the Material
   tab, the path tracer and the viewport alike; glTF files carry them as
@@ -51,6 +36,12 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- The path tracer uses the GPU's own ray tracing where it has it (Vulkan
+  ray queries); `KREATE_RAY_QUERY=0` turns that off. Elsewhere it walks its
+  own trees as before.
+- Linked copies of a mesh are stored once in the path tracer and placed
+  where each one stands, so a scene of many copies costs the memory and the
+  build time of one.
 - The path tracer's samples are a scrambled Sobol sequence rather than
   independent random numbers: the same picture in about half the samples.
 - Among several lamps, the path tracer aims at each by how much it lights
