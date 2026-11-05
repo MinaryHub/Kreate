@@ -7773,6 +7773,21 @@ impl App {
                 self.file = file;
                 self.remember_recent(path);
                 self.status(&format!("opened {}", path.display()));
+                // Features a newer Kreate made, which this one keeps but
+                // cannot build: said, so a body missing a step is explained.
+                let foreign: usize = self
+                    .doc
+                    .objects()
+                    .map(|(_, o)| o.foreign_features.len())
+                    .sum();
+                if foreign > 0 {
+                    let count = foreign.to_string();
+                    self.status(&self.ui.catalog.format(
+                        "feature-foreign",
+                        kreate_i18n::TextKind::Ui,
+                        &[("count", count.as_str())],
+                    ));
+                }
             }
             // Reported, never fatal. A file that will not open is the most
             // ordinary thing a user can hand an application, and losing the

@@ -1552,6 +1552,7 @@ op-app-finish-sketch-desc = 스케치를 끝내고 오브젝트 모드로 돌아
 op-app-sketch-delete = 삭제
 op-app-sketch-delete-desc = 선택한 스케치 점과 선을 지웁니다.
 feature-made-mesh = 바디를 일반 메시로 바꿨습니다. 이제 점·선·면을 편집할 수 있습니다. 피처 기록은 사라졌고, Ctrl+Z로 되돌릴 수 있습니다.
+feature-foreign = 더 새 버전의 Kreate가 만든 피처 { $count }개는 파일에 보존되지만 이 버전에서는 만들어지지 않습니다. Kreate를 업데이트하면 보입니다.
 op-feature-to-mesh = 바디를 메시로 변환
 op-feature-to-mesh-desc = 스케치로 만든 바디를 편집 가능한 일반 메시로 바꿉니다. 피처 기록은 없어집니다.
 op-sketch-trim = 트림

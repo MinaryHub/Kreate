@@ -793,7 +793,10 @@ impl Operator for ToMesh {
         if let Some(m) = d.mesh_mut(mesh) {
             *m = built;
         }
-        d.object_mut(body).expect("a body").features.clear();
+        let object = d.object_mut(body).expect("a body");
+        object.features.clear();
+        // A newer build's features, never run here, go with the history.
+        object.foreign_features.clear();
         Ok(OpResult::Finished)
     }
 }

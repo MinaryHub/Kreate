@@ -240,3 +240,53 @@ fn a_path_array_is_saved_with_its_path_and_settings() {
         .unwrap();
     assert_eq!(built.num_faces(), 24, "four posts");
 }
+
+/// A feature a newer build made — a kind this one has never heard of, with
+/// fields of its own — is kept and written back in its place on the
+/// timeline: a file opened and saved here does not lose it, though the body
+/// here is built from the rest.
+#[test]
+fn a_newer_builds_feature_is_kept_and_written_back() {
+    use kreate_scene::document::{Object, ObjectData};
+    use kreate_scene::feature::{Feature, Operation, Shape};
+    let mut doc = Document::new();
+    let body_mesh = doc.add_mesh(kreate_mesh::MeshData::empty());
+    let mut body = Object::new("Body", ObjectData::Mesh(body_mesh));
+    let known = |order| Feature {
+        shape: Shape::Extrude {
+            distance: 0.1,
+            symmetric: false,
+        },
+        sketch: kreate_scene::Uid::from_raw(7),
+        seeds: vec![[0.0, 0.0]],
+        operation: Operation::Join,
+        order,
+    };
+    body.features = vec![known(1), known(3)];
+    body.foreign_features = vec![
+        r#"{"kind":"loft","sketch":9,"seeds":[],"operation":"join","order":2,"twist":0.25}"#.into(),
+    ];
+    let original = body.features.clone();
+    doc.add_object(body);
+    let back = round_trip_as_written(&doc);
+    let (_, o) = back.objects().find(|(_, o)| o.name == "Body").unwrap();
+    assert_eq!(o.features, original);
+    assert_eq!(o.foreign_features.len(), 1);
+    let kept: serde_json::Value = serde_json::from_str(&o.foreign_features[0]).unwrap();
+    assert_eq!(kept["kind"], "loft");
+    assert_eq!(kept["twist"], 0.25, "its own fields come back too");
+    // Written between the two it was made between.
+    let bytes = container::write(&back, &Manifest::default(), &[]).expect("writes");
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut scene = String::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).unwrap();
+        if entry.name().is_ok_and(|n| n.ends_with(".json")) {
+            use std::io::Read;
+            entry.read_to_string(&mut scene).unwrap();
+        }
+    }
+    let scene: String = scene.split_whitespace().collect();
+    let at = |s: &str| scene.find(s).unwrap_or_else(|| panic!("{s} not written"));
+    assert!(at("\"loft\"") > at("\"order\":1") && at("\"loft\"") < at("\"order\":3"));
+}

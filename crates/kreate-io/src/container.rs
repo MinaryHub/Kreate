@@ -2511,7 +2511,7 @@ pub fn write(
                     .collect(),
                 sketch_lines: object.sketch_lines.clone(),
                 drawing: object.drawing.as_deref().map(crate::drawing_record::record),
-                features: object.features.iter().map(feature_record).collect(),
+                features: features_record(object),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -3208,7 +3208,22 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
             .filter(|[a, b]| *a < points && *b < points)
             .copied()
             .collect();
-        object.features = record.features.iter().filter_map(feature_from).collect();
+        object.features.clear();
+        object.foreign_features.clear();
+        for r in &record.features {
+            match feature_from(r) {
+                Some(f) => object.features.push(f),
+                // A kind or an operation this build has never heard of: a
+                // newer build's, kept as it came. One it knows with numbers
+                // it cannot use is a damaged one, and is dropped.
+                None if !known_feature(r) => {
+                    if let Ok(text) = serde_json::to_string(r) {
+                        object.foreign_features.push(text);
+                    }
+                }
+                None => {}
+            }
+        }
         object.drawing = record
             .drawing
             .as_ref()
@@ -3438,6 +3453,9 @@ pub struct FeatureRecord {
     /// A shell's open side, as `kreate_scene::feature::SHELL_SIDES`.
     #[serde(default)]
     pub open: u32,
+    /// Fields a newer build added, kept for it.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
@@ -3467,11 +3485,38 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         count,
         step,
         open,
+        extra: BTreeMap::new(),
     }
 }
 
-/// A feature of a kind this build does not know is dropped, as a constraint
-/// is: the body is the rest of its features.
+/// A body's features as written: its own, and those a newer build wrote that
+/// this one kept, each in its place on the timeline.
+fn features_record(object: &Object) -> Vec<FeatureRecord> {
+    let mut out: Vec<FeatureRecord> = object.features.iter().map(feature_record).collect();
+    out.extend(
+        object
+            .foreign_features
+            .iter()
+            .filter_map(|text| serde_json::from_str::<FeatureRecord>(text).ok()),
+    );
+    // Stable: features of one order keep the order they were in.
+    out.sort_by_key(|r| r.order);
+    out
+}
+
+/// Whether this build knows a feature record's kind and operation — so that
+/// one it cannot read is damaged, not newer.
+fn known_feature(r: &FeatureRecord) -> bool {
+    use kreate_scene::feature::Operation;
+    const KINDS: [&str; 8] = [
+        "extrude", "revolve", "fillet", "chamfer", "shell", "pattern", "circular", "mirror",
+    ];
+    KINDS.contains(&r.kind.as_str()) && Operation::from_tag(&r.operation).is_some()
+}
+
+/// A feature of a kind this build does not know is not made into one: the
+/// body is the rest of its features, and the record is kept (see
+/// [`known_feature`]).
 fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
     use kreate_scene::feature::{Feature, Operation, Shape};
     let shape = match r.kind.as_str() {

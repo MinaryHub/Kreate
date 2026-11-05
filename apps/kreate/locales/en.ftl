@@ -1546,6 +1546,7 @@ op-app-finish-sketch-desc = Leaves the sketch and goes back to Object Mode.
 op-app-sketch-delete = Delete
 op-app-sketch-delete-desc = Deletes the selected sketch points and lines.
 feature-made-mesh = The body is now a plain mesh, so its vertices can be edited. Its features are gone; Ctrl+Z brings them back.
+feature-foreign = { $count } features from a newer Kreate are kept in the file but not built here; update Kreate to see them.
 op-feature-to-mesh = Convert Body to Mesh
 op-feature-to-mesh-desc = Makes a body built from sketches into a plain mesh you can edit, dropping its features.
 op-sketch-trim = Trim
