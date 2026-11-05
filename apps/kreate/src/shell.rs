@@ -5467,6 +5467,27 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
         ],
     ),
     (
+        "mech-assembly",
+        &[
+            (
+                "mech-joint-revolute",
+                "object.add_joint",
+                MechArg::Enum("kind", 1),
+            ),
+            (
+                "mech-joint-slider",
+                "object.add_joint",
+                MechArg::Enum("kind", 3),
+            ),
+            (
+                "mech-joint-fixed",
+                "object.add_joint",
+                MechArg::Enum("kind", 0),
+            ),
+            ("mech-motion-check", "robot.motion_check", MechArg::None),
+        ],
+    ),
+    (
         "mech-sheet",
         &[
             (
@@ -6872,6 +6893,16 @@ fn draw_physical_panel(
                         kreate_reflect::format_length(c.x),
                         kreate_reflect::format_length(c.y),
                         kreate_reflect::format_length(c.z)
+                    ),
+                ),
+                (
+                    "physical-inertia",
+                    // About the centroid, along the world's axes.
+                    format!(
+                        "{:.3e}, {:.3e}, {:.3e} kg·m²",
+                        mass.inertia[0] * density,
+                        mass.inertia[1] * density,
+                        mass.inertia[2] * density
                     ),
                 ),
             ];

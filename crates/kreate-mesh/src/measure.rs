@@ -24,6 +24,11 @@ pub struct MassProperties {
     pub centroid: DVec3,
     /// Every edge has exactly two faces: the volume means something.
     pub closed: bool,
+    /// How the solid resists turning, about its centroid along the axes of
+    /// the space it was measured in, for a density of one: Ixx, Iyy, Izz,
+    /// then the products Ixy, Ixz, Iyz as the tensor holds them (the
+    /// negated integrals). Times the density, kilogram square metres.
+    pub inertia: [f64; 6],
 }
 
 /// Measures `mesh` with its points placed by `to_space`.
@@ -36,6 +41,10 @@ pub fn mass_properties(mesh: &MeshData, to_space: impl Fn(DVec3) -> DVec3) -> Ma
     let mut volume = 0.0;
     let mut moment = DVec3::ZERO;
     let mut area = 0.0;
+    // The second moments ∫ x x^T dV, about the origin: each tetrahedron
+    // (origin, a, b, c) gives det · A K A^T, A its corners as columns and K
+    // the unit tetrahedron's, [[2,1,1],[1,2,1],[1,1,2]] / 120.
+    let mut second = kreate_math::DMat3::ZERO;
     for f in 0..mesh.num_faces() {
         let ring = mesh.face_verts(f);
         if ring.len() < 3 {
@@ -48,6 +57,13 @@ pub fn mass_properties(mesh: &MeshData, to_space: impl Fn(DVec3) -> DVec3) -> Ma
             let six = a.dot(b.cross(c));
             volume += six;
             moment += (a + b + c) * six;
+            let corners = kreate_math::DMat3::from_cols(a, b, c);
+            const K: kreate_math::DMat3 = kreate_math::DMat3::from_cols(
+                DVec3::new(2.0 / 120.0, 1.0 / 120.0, 1.0 / 120.0),
+                DVec3::new(1.0 / 120.0, 2.0 / 120.0, 1.0 / 120.0),
+                DVec3::new(1.0 / 120.0, 1.0 / 120.0, 2.0 / 120.0),
+            );
+            second += corners * K * corners.transpose() * six;
             area += (b - a).cross(c - a).length() * 0.5;
         }
     }
@@ -59,12 +75,31 @@ pub fn mass_properties(mesh: &MeshData, to_space: impl Fn(DVec3) -> DVec3) -> Ma
     } else {
         DVec3::ZERO
     };
+    // Moved to the centroid, and the tensor made of it; a surface wound
+    // inward measured the other way round.
+    let c = second - outer(centroid, centroid) * volume;
+    let sign = if volume < 0.0 { -1.0 } else { 1.0 };
+    let trace = c.x_axis.x + c.y_axis.y + c.z_axis.z;
+    let inertia = [
+        (trace - c.x_axis.x) * sign,
+        (trace - c.y_axis.y) * sign,
+        (trace - c.z_axis.z) * sign,
+        -c.y_axis.x * sign,
+        -c.z_axis.x * sign,
+        -c.z_axis.y * sign,
+    ];
     MassProperties {
         volume,
         area,
         centroid,
         closed: is_closed(mesh),
+        inertia,
     }
+}
+
+/// `a b^T`.
+fn outer(a: DVec3, b: DVec3) -> kreate_math::DMat3 {
+    kreate_math::DMat3::from_cols(a * b.x, a * b.y, a * b.z)
 }
 
 /// Every edge borders exactly two faces.
@@ -131,6 +166,39 @@ fn ray_hits(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> bool {
         return false;
     }
     e2.dot(q) * inv > 1e-12
+}
+
+#[cfg(test)]
+mod inertia_tests {
+    use super::*;
+
+    /// A 2 × 4 × 6 box, moved and turned a quarter about Z: about its
+    /// centre, Ixx = V (b² + c²) / 12 and so on, with the axes as it now
+    /// lies, and no products.
+    #[test]
+    fn a_boxs_inertia_is_the_textbook_one_wherever_it_is() {
+        let (x, y, z) = (2.0, 4.0, 6.0);
+        let mesh = crate::primitives::cube(1.0);
+        let props = mass_properties(&mesh, |p| {
+            let p = DVec3::new(p.x * x, p.y * y, p.z * z);
+            // A quarter turn about Z: X becomes Y.
+            DVec3::new(-p.y, p.x, p.z) + DVec3::new(10.0, -3.0, 7.0)
+        });
+        let v = x * y * z;
+        assert!((props.volume - v).abs() < 1e-9);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9 * b.abs().max(1.0);
+        // Turned: the 4 runs along X now, the 2 along Y.
+        assert!(
+            near(props.inertia[0], v * (x * x + z * z) / 12.0),
+            "{:?}",
+            props.inertia
+        );
+        assert!(near(props.inertia[1], v * (y * y + z * z) / 12.0));
+        assert!(near(props.inertia[2], v * (x * x + y * y) / 12.0));
+        for product in &props.inertia[3..] {
+            assert!(product.abs() < 1e-9, "{:?}", props.inertia);
+        }
+    }
 }
 
 #[cfg(test)]
