@@ -18,6 +18,11 @@ use; `scripts/release.sh` turns that section into the next release.
   and cutting machine reads, with its layers, colours and linetypes, arcs
   as arcs, ellipses and splines as fine polylines, and dimensions drawn out
   with their tolerances.
+- Drawing sheets (File ▸ Export Drawing ▸ Drawing Sheet…): the shown parts
+  on A4–A0 paper at a standard scale, in third-angle (KS B 0001) or
+  first-angle projection, with an isometric view, the overall sizes, a
+  title block and a parts list, written as a vector PDF (Korean text
+  included) or a DXF. Made from the parts as they are each time.
 
 ### Fixed
 

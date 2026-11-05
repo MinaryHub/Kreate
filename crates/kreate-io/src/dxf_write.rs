@@ -198,7 +198,7 @@ fn layer_name(name: &str) -> String {
 /// A linetype's description and dash pattern in millimetres (dashes
 /// positive, gaps negative, dots zero), for the ones drafting uses; an
 /// unknown name is written solid under its own name.
-fn linetype_pattern(name: &str) -> (&'static str, Vec<f64>) {
+pub(crate) fn linetype_pattern(name: &str) -> (&'static str, Vec<f64>) {
     match name {
         "DASHED" | "HIDDEN" => ("Dashed __ __ __", vec![5.0, -2.5]),
         "CENTER" => ("Center ____ _ ____ _", vec![12.5, -2.5, 2.5, -2.5]),
@@ -441,7 +441,7 @@ fn escape(s: &str) -> String {
 
 /// What a dimension says: its own text, or its value in the file's unit
 /// (degrees for an angle), with its tolerance.
-fn dimension_text(d: &Dimension, metres_per_unit: f64) -> String {
+pub(crate) fn dimension_text(d: &Dimension, metres_per_unit: f64) -> String {
     use kreate_scene::drawing::Tolerance;
     let length = |v: f64| {
         let v = v / metres_per_unit;
@@ -484,18 +484,18 @@ fn dimension_text(d: &Dimension, metres_per_unit: f64) -> String {
 /// A dimension's lines, an angle's arc (centre, radius, from, to in
 /// radians, anticlockwise), and where its number goes, how tall and at what
 /// angle.
-struct DimShape {
-    lines: Vec<[DVec2; 2]>,
-    arc: Option<(DVec2, f64, f64, f64)>,
-    at: DVec2,
-    angle: f64,
-    height: f64,
+pub(crate) struct DimShape {
+    pub(crate) lines: Vec<[DVec2; 2]>,
+    pub(crate) arc: Option<(DVec2, f64, f64, f64)>,
+    pub(crate) at: DVec2,
+    pub(crate) angle: f64,
+    pub(crate) height: f64,
 }
 
 /// How tall a dimension's number is: 2.5 mm, ISO-25's, in metres.
 const DIM_TEXT: f64 = 2.5e-3;
 
-fn dimension_shape(drawing: &Drawing, d: &Dimension) -> Option<DimShape> {
+pub(crate) fn dimension_shape(drawing: &Drawing, d: &Dimension) -> Option<DimShape> {
     let point = |i: usize| d.refs.get(i).and_then(|r| drawing.point_of(*r));
     let curve = |i: usize| d.refs.get(i).and_then(|r| drawing.curve(r.entity));
     let height = DIM_TEXT;

@@ -411,6 +411,7 @@ pub struct ShellState {
     pub pattern_dialog: PatternDialog,
     /// The ISO 286 fit calculator, when open.
     pub fits: FitsDialog,
+    pub sheet: SheetDialog,
     /// The feature list: every sketch and feature, in the order made.
     pub features: Vec<FeatureRow>,
     /// A feature being edited from the list.
@@ -939,6 +940,7 @@ impl Default for ShellState {
             solid_dialog: SolidDialog::default(),
             pattern_dialog: PatternDialog::default(),
             fits: FitsDialog::default(),
+            sheet: SheetDialog::default(),
             features: Vec::new(),
             feature_edit: None,
             measure_preview: Vec::new(),
@@ -1991,6 +1993,7 @@ struct Labels {
     drawing_front: String,
     drawing_right: String,
     drawing_active: String,
+    drawing_sheet: String,
     dissolve_limited: String,
     edges_to_sketch: String,
     sketch_construction: String,
@@ -2406,6 +2409,7 @@ impl Labels {
             drawing_front: t("drawing-front"),
             drawing_right: t("drawing-right"),
             drawing_active: t("drawing-active"),
+            drawing_sheet: t("menu-drawing-sheet"),
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
             sketch_construction: t("sketch-construction"),
@@ -4309,6 +4313,8 @@ enum Run {
     Command(Command),
     /// Opens the fit calculator, a window of the shell's own.
     Fits,
+    /// Opens the drawing sheet's dialog, a window of the shell's own.
+    Sheet,
 }
 
 /// One entry.
@@ -4350,7 +4356,7 @@ impl MenuEntry {
     pub fn runs(&self) -> Option<&'static str> {
         match &self.run {
             Run::Op(id, _) | Run::Dispatch(id, _) => Some(id),
-            Run::Command(_) | Run::Fits => None,
+            Run::Command(_) | Run::Fits | Run::Sheet => None,
         }
     }
 }
@@ -4505,6 +4511,14 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                             .variant("view", kreate_reflect::PropertyValue::Enum(view)),
                         )
                     })
+                    .chain([
+                        MenuNode::Separator,
+                        MenuNode::Entry(MenuEntry::new(
+                            "file.drawing_sheet",
+                            &l.drawing_sheet,
+                            Run::Sheet,
+                        )),
+                    ])
                     .collect(),
                 ),
             ],
@@ -4981,6 +4995,7 @@ fn run_entry(state: &mut ShellState, entry: &MenuEntry) {
         Run::Dispatch(id, params) => state.queue.dispatch(*id, params.clone()),
         Run::Command(command) => state.queue.push(command.clone()),
         Run::Fits => state.fits.open = true,
+        Run::Sheet => state.sheet.open = true,
     }
 }
 
@@ -7320,6 +7335,7 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
     draw_render_result(ctx, state, l);
     draw_render_progress(ctx, state);
     draw_fits(ctx, state, l);
+    draw_sheet(ctx, state);
 }
 
 /// The words of the fit calculator, from the Mechanical menu's catalog.
@@ -7335,6 +7351,133 @@ const FITS_KEYS: [&str; 10] = [
     "fits-min",
     "fits-none",
 ];
+
+/// The drawing sheet's choices, kept between openings: see
+/// `kreate_io::sheet`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetDialog {
+    pub open: bool,
+    /// Into `kreate_io::sheet::Paper::ALL`.
+    pub paper: usize,
+    pub landscape: bool,
+    /// Zero for the largest that fits; otherwise one past an index into
+    /// `kreate_io::sheet::SCALES`.
+    pub scale: usize,
+    pub third_angle: bool,
+    pub iso: bool,
+    pub title: String,
+    pub number: String,
+    pub material: String,
+    pub author: String,
+    pub date: String,
+}
+
+impl Default for SheetDialog {
+    fn default() -> Self {
+        // A3 across, third angle as KS B 0001 draws, with an isometric view.
+        Self {
+            open: false,
+            paper: 1,
+            landscape: true,
+            scale: 0,
+            third_angle: true,
+            iso: true,
+            title: String::new(),
+            number: String::new(),
+            material: String::new(),
+            author: String::new(),
+            date: String::new(),
+        }
+    }
+}
+
+/// The drawing sheet: the paper, the scale, the projection and the title
+/// block's words, then a PDF or a DXF of the shown parts.
+fn draw_sheet(ctx: &egui::Context, state: &mut ShellState) {
+    use kreate_io::sheet::{scale_label, Paper, SCALES};
+    if !state.sheet.open {
+        return;
+    }
+    let mut d = state.sheet.clone();
+    let mut open = true;
+    let t = |key: &str| state.catalog.get(key);
+    let mut export = None;
+    egui::Window::new(t("sheet-window"))
+        .id(egui::Id::new("drawing-sheet"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(ctx.content_rect().center())
+        .show(ctx, |ui| {
+            ui.weak(t("sheet-hint"));
+            egui::Grid::new("sheet-grid").num_columns(2).show(ui, |ui| {
+                ui.label(t("sheet-paper"));
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("sheet-paper")
+                        .width(60.0)
+                        .selected_text(Paper::ALL[d.paper.min(4)].name())
+                        .show_ui(ui, |ui| {
+                            for (i, p) in Paper::ALL.iter().enumerate() {
+                                ui.selectable_value(&mut d.paper, i, p.name());
+                            }
+                        });
+                    ui.checkbox(&mut d.landscape, t("sheet-landscape"));
+                });
+                ui.end_row();
+                ui.label(t("sheet-scale"));
+                let shown = |i: usize| {
+                    if i == 0 {
+                        t("sheet-scale-auto")
+                    } else {
+                        scale_label(SCALES[i - 1])
+                    }
+                };
+                egui::ComboBox::from_id_salt("sheet-scale")
+                    .width(90.0)
+                    .selected_text(shown(d.scale))
+                    .show_ui(ui, |ui| {
+                        for i in 0..=SCALES.len() {
+                            ui.selectable_value(&mut d.scale, i, shown(i));
+                        }
+                    });
+                ui.end_row();
+                ui.label(t("sheet-projection"));
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut d.third_angle, true, t("sheet-l-third"));
+                    ui.radio_value(&mut d.third_angle, false, t("sheet-l-first"));
+                });
+                ui.end_row();
+                ui.label(t("sheet-views"));
+                ui.checkbox(&mut d.iso, t("sheet-iso"));
+                ui.end_row();
+                for (key, value) in [
+                    ("sheet-l-title", &mut d.title),
+                    ("sheet-l-number", &mut d.number),
+                    ("sheet-l-material", &mut d.material),
+                    ("sheet-l-drawn", &mut d.author),
+                    ("sheet-l-date", &mut d.date),
+                ] {
+                    ui.label(t(key));
+                    ui.add(egui::TextEdit::singleline(value).desired_width(220.0));
+                    ui.end_row();
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(t("sheet-export-pdf")).clicked() {
+                    export = Some(true);
+                }
+                if ui.button(t("sheet-export-dxf")).clicked() {
+                    export = Some(false);
+                }
+            });
+        });
+    d.open = open;
+    state.sheet = d;
+    if let Some(pdf) = export {
+        state.queue.push(Command::ExportSheet { pdf });
+    }
+}
 
 /// The fit calculator's choices, kept between openings.
 #[derive(Clone, Debug, PartialEq)]
