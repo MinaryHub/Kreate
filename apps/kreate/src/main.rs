@@ -4246,11 +4246,16 @@ impl App {
     /// File > Export Drawing: the shown parts seen square from one side, as
     /// a DXF or an SVG drawing in the scene's unit, hidden lines dashed.
     fn export_drawing(&mut self, view: u32) {
+        if view == 3 {
+            self.export_active_drawing();
+            return;
+        }
         let view = kreate_io::drawing::View::ALL[(view as usize).min(2)];
         let name = match view {
             kreate_io::drawing::View::Top => "top",
             kreate_io::drawing::View::Front => "front",
             kreate_io::drawing::View::Right => "right",
+            kreate_io::drawing::View::Iso => "iso",
         };
         let Some(path) = rfd::FileDialog::new()
             .add_filter("DXF drawing", &["dxf"])
@@ -4262,6 +4267,154 @@ impl App {
             return;
         };
         let _ = self.write_drawing(&path, view);
+    }
+
+    /// File > Export Drawing > Drawing Sheet: the shown parts on paper as
+    /// the sheet's dialog says — views, sizes, title block, parts list —
+    /// as a PDF or a DXF. Composed from the parts as they are now.
+    fn export_sheet(&mut self, pdf: bool) {
+        use kreate_io::sheet::{compose, Labels, Paper, PartRow, Projection, SheetSpec, SCALES};
+        let parts = self.printable_parts();
+        if parts.is_empty() {
+            self.status(&self.ui.catalog.get("sheet-nothing"));
+            return;
+        }
+        // The parts list: a part once, however many objects show its mesh.
+        let mut rows: Vec<(usize, PartRow)> = Vec::new();
+        for (name, mesh, _) in &parts {
+            let key = Arc::as_ptr(mesh) as usize;
+            if let Some((_, row)) = rows.iter_mut().find(|(k, _)| *k == key) {
+                row.count += 1;
+                continue;
+            }
+            let material = self
+                .doc
+                .objects()
+                .find(|(_, o)| &o.name == name)
+                .and_then(|(_, o)| o.mesh())
+                .and_then(|m| self.doc.mesh_slots(m).iter().flatten().next().copied())
+                .and_then(|m| self.doc.material(m))
+                .map(|m| m.name.clone())
+                .unwrap_or_default();
+            rows.push((
+                key,
+                PartRow {
+                    name: name.clone(),
+                    count: 1,
+                    material,
+                },
+            ));
+        }
+        let c = &self.ui.catalog;
+        let t = |k: &str| c.get(k);
+        let labels = Labels {
+            title: t("sheet-l-title"),
+            number: t("sheet-l-number"),
+            scale: t("sheet-l-scale"),
+            projection: t("sheet-l-projection"),
+            first_angle: t("sheet-l-first"),
+            third_angle: t("sheet-l-third"),
+            material: t("sheet-l-material"),
+            drawn: t("sheet-l-drawn"),
+            date: t("sheet-l-date"),
+            unit: t("sheet-l-unit"),
+            item: t("sheet-l-item"),
+            part: t("sheet-l-part"),
+            quantity: t("sheet-l-qty"),
+            more: c.format("sheet-l-more", kreate_i18n::TextKind::Ui, &[("n", "{n}")]),
+        };
+        let d = &self.ui.sheet;
+        let unit = self.doc.design.length_unit;
+        let spec = SheetSpec {
+            paper: Paper::ALL[d.paper.min(Paper::ALL.len() - 1)],
+            landscape: d.landscape,
+            scale: d.scale.checked_sub(1).and_then(|i| SCALES.get(i).copied()),
+            projection: if d.third_angle {
+                Projection::Third
+            } else {
+                Projection::First
+            },
+            iso: d.iso,
+            title: d.title.clone(),
+            number: d.number.clone(),
+            material: d.material.clone(),
+            author: d.author.clone(),
+            date: d.date.clone(),
+            metres_per_unit: unit.metres(),
+            unit: unit.symbol().to_string(),
+            parts: rows.into_iter().map(|(_, r)| r).collect(),
+            labels,
+        };
+        let refs: Vec<(&MeshData, glam::DAffine3)> = parts
+            .iter()
+            .map(|(_, mesh, world)| (&**mesh, *world))
+            .collect();
+        let sheet = compose(&refs, &spec);
+        let (ext, filter) = if pdf { ("pdf", "PDF") } else { ("dxf", "DXF") };
+        let stem = if spec.number.trim().is_empty() {
+            self.file
+                .path()
+                .and_then(|p| p.file_stem())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "drawing".into())
+        } else {
+            spec.number.trim().to_string()
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(filter, &[ext])
+            .set_title("Drawing Sheet")
+            .set_file_name(format!("{stem}.{ext}"))
+            .save_file()
+        else {
+            return;
+        };
+        let bytes = if pdf {
+            kreate_io::pdf::write(
+                &sheet.drawing,
+                sheet.width_mm * 1e-3,
+                sheet.height_mm * 1e-3,
+            )
+        } else {
+            kreate_io::dxf_write::write(&sheet.drawing, 1e-3).into_bytes()
+        };
+        match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                let scale = kreate_io::sheet::scale_label(sheet.scale);
+                self.status(&self.ui.catalog.format(
+                    "sheet-written",
+                    kreate_i18n::TextKind::Ui,
+                    &[("path", &path.display().to_string()), ("scale", &scale)],
+                ));
+            }
+            Err(e) => self.status(&format!("cannot write the drawing: {e}")),
+        }
+    }
+
+    /// File > Export Drawing > the active 2D drawing: what was drawn in the
+    /// drafting mode, as a DXF any drafting program or cutting machine
+    /// reads (R12), in the scene's unit.
+    fn export_active_drawing(&mut self) {
+        let Some(object) = self.doc.selection.active.and_then(|id| self.doc.object(id)) else {
+            self.status(&self.ui.catalog.get("drawing-active-none"));
+            return;
+        };
+        let Some(drawing) = object.drawing.as_deref() else {
+            self.status(&self.ui.catalog.get("drawing-active-none"));
+            return;
+        };
+        let text = kreate_io::dxf_write::write(drawing, self.doc.design.length_unit.metres());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("DXF drawing", &["dxf"])
+            .set_title("Export Drawing")
+            .set_file_name(format!("{}.dxf", object.name))
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, text) {
+            Ok(()) => self.status(&format!("drawing written: {}", path.display())),
+            Err(e) => self.status(&format!("cannot write the drawing: {e}")),
+        }
     }
 
     fn write_drawing(
@@ -7596,6 +7749,7 @@ impl App {
                         }
                     }
                 }
+                Command::ExportSheet { pdf } => self.export_sheet(pdf),
                 Command::PickWorldImage => self.pick_world_image(),
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
@@ -7773,6 +7927,21 @@ impl App {
                 self.file = file;
                 self.remember_recent(path);
                 self.status(&format!("opened {}", path.display()));
+                // Features a newer Kreate made, which this one keeps but
+                // cannot build: said, so a body missing a step is explained.
+                let foreign: usize = self
+                    .doc
+                    .objects()
+                    .map(|(_, o)| o.foreign_features.len())
+                    .sum();
+                if foreign > 0 {
+                    let count = foreign.to_string();
+                    self.status(&self.ui.catalog.format(
+                        "feature-foreign",
+                        kreate_i18n::TextKind::Ui,
+                        &[("count", count.as_str())],
+                    ));
+                }
             }
             // Reported, never fatal. A file that will not open is the most
             // ordinary thing a user can hand an application, and losing the
@@ -7935,6 +8104,28 @@ impl App {
                 }
             }
             "csv" => Ok(self.parts_list().into_bytes()),
+            // A 2D drawing: the selected object's, or the only one there is.
+            "dxf" => {
+                let active = self
+                    .doc
+                    .selection
+                    .active
+                    .and_then(|id| self.doc.object(id))
+                    .and_then(|o| o.drawing.as_deref());
+                let mut all = self.doc.objects().filter_map(|(_, o)| o.drawing.as_deref());
+                let only = match (all.next(), all.next()) {
+                    (Some(d), None) => Some(d),
+                    _ => None,
+                };
+                match active.or(only) {
+                    Some(d) => Ok(kreate_io::dxf_write::write(
+                        d,
+                        self.doc.design.length_unit.metres(),
+                    )
+                    .into_bytes()),
+                    None => Err("select the object whose 2D drawing to write".to_string()),
+                }
+            }
             "3mf" => {
                 let parts = self.printable_parts();
                 if parts.is_empty() {

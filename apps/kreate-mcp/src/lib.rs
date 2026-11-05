@@ -469,7 +469,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "export_file",
-            "description": "Writes the scene to another format, chosen by the extension: .glb or .gltf (meshes, materials, lights, cameras, hierarchy, animation), .usda (with its pictures beside it) or .usdz (one file), .urdf (a robot: links, joints with their limits, inertia, visual and collision meshes written beside it as STL), .3mf, .step, .obj or .stl (geometry only). The document keeps its own file.",
+            "description": "Writes the scene to another format, chosen by the extension: .glb or .gltf (meshes, materials, lights, cameras, hierarchy, animation), .usda (with its pictures beside it) or .usdz (one file), .urdf (a robot: links, joints with their limits, inertia, visual and collision meshes written beside it as STL), .3mf, .step, .obj or .stl (geometry only), or .dxf (the selected object's 2D drawing — or the only one — as an R12 DXF in the scene's unit). The document keeps its own file.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "path": { "type": "string", "description": "An absolute path." } },

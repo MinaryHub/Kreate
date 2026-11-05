@@ -1257,55 +1257,7 @@ impl Operator for Draft {
     }
 }
 
-/// The largest region of a sketch, in its own plane — its outline and its
-/// holes: what a sweep carries or a loft passes through. `None` for an
-/// object with no closed region.
-type Region2 = (Vec<kreate_math::Vec2>, Vec<Vec<kreate_math::Vec2>>);
-
-fn sketch_region(doc: &Document, id: ObjectId) -> Option<Region2> {
-    kreate_scene::feature::sketch_regions(doc, id)
-        .into_iter()
-        .max_by(|a, b| {
-            a.area()
-                .abs()
-                .partial_cmp(&b.area().abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|r| (r.outline, r.holes))
-}
-
-/// `solid` with each of `holes` taken out of it.
-fn cut_out(
-    mut solid: kreate_mesh::MeshData,
-    holes: Vec<kreate_mesh::MeshData>,
-) -> Result<kreate_mesh::MeshData, OpError> {
-    for hole in holes {
-        solid = kreate_mesh::modifiers::boolean::try_boolean(
-            &solid,
-            &hole,
-            kreate_mesh::modifiers::BooleanOp::Difference,
-        )
-        .map_err(|e| OpError::Failed(e.to_string()))?;
-    }
-    Ok(solid)
-}
-
-/// An object's lines as one path, in the world: a sketch's lines, or a
-/// mesh's edges — the longest chain through them, and whether it closes.
-fn object_path(doc: &Document, id: ObjectId) -> Option<(Vec<DVec3>, bool)> {
-    let o = doc.object(id)?;
-    let mesh = doc.mesh(o.mesh()?)?;
-    let mut edges: Vec<[u32; 2]> = mesh.edges().to_vec();
-    edges.extend(o.sketch_lines.iter().copied());
-    let (points, closed) =
-        kreate_mesh::modifiers::path_array::path_chain(mesh.positions(), &edges)?;
-    let world = doc.world_transform(id);
-    let points: Vec<DVec3> = points
-        .iter()
-        .map(|p| world.transform_point3(p.as_dvec3()))
-        .collect();
-    (points.len() >= 2).then_some((points, closed))
-}
+use kreate_scene::feature::shapes;
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct SweepAlongParams {
@@ -1357,48 +1309,29 @@ impl Operator for SweepAlong {
             .selection
             .active
             .ok_or_else(|| OpError::Failed("make the path the active object".into()))?;
-        let (path, closed) = object_path(d, path_id).ok_or_else(|| {
+        let (path, closed) = shapes::object_path(d, path_id).ok_or_else(|| {
             OpError::Failed("the active object has no lines to sweep along".into())
         })?;
-        let (profile, holes) = match d
+        let profile = d
             .selection
             .objects
             .iter()
             .copied()
             .filter(|id| *id != path_id)
-            .find_map(|id| sketch_region(d, id))
-        {
-            Some(region) => region,
-            None => (
-                kreate_mesh::primitives::circle_profile(params.radius as f32, params.segments),
-                Vec::new(),
-            ),
-        };
+            .find_map(|id| shapes::largest_region(d, id))
+            .unwrap_or_else(|| {
+                (
+                    kreate_mesh::primitives::circle_profile(params.radius as f32, params.segments),
+                    Vec::new(),
+                )
+            });
         let start = path[0];
-        let local: Vec<kreate_math::Vec3> = path.iter().map(|p| (*p - start).as_vec3()).collect();
-        let swept = |profile: &[kreate_math::Vec2]| {
-            kreate_mesh::primitives::sweep(&kreate_mesh::primitives::Sweep {
-                path: &local,
-                profile,
-                resolution: 1,
-                closed,
-                scale: (1.0, params.scale_end as f32),
-                caps: params.caps,
-            })
-        };
-        let mesh = swept(&profile);
-        if mesh.num_faces() == 0 || !mesh.validate().is_empty() {
-            return Err(OpError::Failed(
-                "the profile cannot be swept along this path".into(),
-            ));
+        let mut mesh =
+            shapes::sweep_world(&path, closed, &[profile], params.scale_end, params.caps)
+                .map_err(OpError::Failed)?;
+        for p in mesh.positions_mut() {
+            *p = (p.as_dvec3() - start).as_vec3();
         }
-        // A profile with holes — a tube, a channel with slots — has each
-        // hole swept the same way and taken out: hollow all along.
-        let mesh = if holes.is_empty() || !params.caps && !closed {
-            mesh
-        } else {
-            cut_out(mesh, holes.iter().map(|h| swept(h)).collect())?
-        };
         add_part(doc, "Sweep".into(), mesh, start, DQuat::IDENTITY);
         Ok(OpResult::Finished)
     }
@@ -1425,92 +1358,24 @@ impl Operator for Loft {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let d = doc.document();
-        let mut sections: Vec<Vec<DVec3>> = Vec::new();
-        let mut section_holes: Vec<Vec<Vec<DVec3>>> = Vec::new();
-        for id in d.selection.objects.iter().copied() {
-            if let Some((outline, holes)) = sketch_region(d, id) {
-                let world = d.world_transform(id);
-                let place = |ring: &[kreate_math::Vec2]| -> Vec<DVec3> {
-                    ring.iter()
-                        .map(|p| world.transform_point3(DVec3::new(p.x as f64, p.y as f64, 0.0)))
-                        .collect()
-                };
-                sections.push(place(&outline));
-                section_holes.push(holes.iter().map(|h| place(h)).collect());
-            }
-        }
+        let sections: Vec<_> = d
+            .selection
+            .objects
+            .iter()
+            .filter_map(|id| shapes::section_world(d, *id))
+            .collect();
         if sections.len() < 2 {
             return Err(OpError::Failed(
                 "select two or more sketches with closed outlines".into(),
             ));
         }
-        // In order through space: from an end, each next the nearest left.
-        let centre = |s: &[DVec3]| s.iter().copied().sum::<DVec3>() / s.len() as f64;
-        let mid = sections.iter().map(|s| centre(s)).sum::<DVec3>() / sections.len() as f64;
-        let first = (0..sections.len())
-            .max_by(|a, b| {
-                centre(&sections[*a])
-                    .distance(mid)
-                    .partial_cmp(&centre(&sections[*b]).distance(mid))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or(0);
-        let mut order = vec![sections.swap_remove(first)];
-        let mut order_holes = vec![section_holes.swap_remove(first)];
-        while !sections.is_empty() {
-            let here = centre(order.last().expect("one"));
-            let next = (0..sections.len())
-                .min_by(|a, b| {
-                    centre(&sections[*a])
-                        .distance(here)
-                        .partial_cmp(&centre(&sections[*b]).distance(here))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .expect("one left");
-            order.push(sections.swap_remove(next));
-            order_holes.push(section_holes.swap_remove(next));
+        let mut mesh = shapes::loft_world(sections).map_err(OpError::Failed)?;
+        // Placed at its middle, as a part added is.
+        let start = mesh.positions().iter().map(|p| p.as_dvec3()).sum::<DVec3>()
+            / mesh.num_verts().max(1) as f64;
+        for p in mesh.positions_mut() {
+            *p = (p.as_dvec3() - start).as_vec3();
         }
-        let start = centre(&order[0]);
-        let local: Vec<Vec<kreate_math::Vec3>> = order
-            .iter()
-            .map(|s| s.iter().map(|p| (*p - start).as_vec3()).collect())
-            .collect();
-        let mesh = mech::loft(&local);
-        if mesh.num_faces() == 0 || !mesh.validate().is_empty() {
-            return Err(OpError::Failed("these outlines cannot be lofted".into()));
-        }
-        // Holes, when every section has as many: each lofted through the
-        // sections — matched by where they sit in their section — and taken
-        // out. A hole in some sections and not others has nothing to run to.
-        let k = order_holes[0].len();
-        let mesh = if k == 0 || order_holes.iter().any(|h| h.len() != k) {
-            mesh
-        } else {
-            let mut chains: Vec<Vec<Vec<kreate_math::Vec3>>> = Vec::new();
-            for i in 0..k {
-                let mut chain = vec![order_holes[0][i].clone()];
-                for (s, holes) in order_holes.iter().enumerate().skip(1) {
-                    let prev = chain.last().expect("one");
-                    let want = centre(prev) - centre(&order[s - 1]);
-                    let pick = holes
-                        .iter()
-                        .min_by(|a, b| {
-                            let da = (centre(a) - centre(&order[s])).distance(want);
-                            let db = (centre(b) - centre(&order[s])).distance(want);
-                            da.total_cmp(&db)
-                        })
-                        .expect("as many holes");
-                    chain.push(pick.clone());
-                }
-                chains.push(
-                    chain
-                        .iter()
-                        .map(|ring| ring.iter().map(|p| (*p - start).as_vec3()).collect())
-                        .collect(),
-                );
-            }
-            cut_out(mesh, chains.iter().map(|c| mech::loft(c)).collect())?
-        };
         add_part(doc, "Loft".into(), mesh, start, DQuat::IDENTITY);
         Ok(OpResult::Finished)
     }
@@ -1963,6 +1828,90 @@ mod tests {
         doc.selection.clear();
         doc.selection.add(a);
         assert!(run(&r, &mut h, &mut doc, "object.loft", &[]).is_err());
+    }
+
+    /// The same sweep and loft as features: a body that follows its
+    /// sketches — the profile drawn smaller, the top section moved up — and
+    /// that a round sweep with no sketch still falls back from.
+    #[test]
+    fn a_sweep_and_a_loft_as_features_follow_their_sketches() {
+        use kreate_math::Vec3;
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let square = |doc: &mut Document, z: f32, half: f32| {
+            let pts: Vec<Vec3> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                .iter()
+                .map(|(x, y)| Vec3::new(x * half, y * half, 0.0))
+                .collect();
+            let id = doc.add_mesh_object("Sketch", kreate_mesh::MeshData::from_faces(pts, &[]));
+            let o = doc.object_mut(id).unwrap();
+            o.sketch_lines = vec![[0, 1], [1, 2], [2, 3], [3, 0]];
+            o.transform.translation = kreate_math::DVec3::new(0.0, 0.0, z as f64);
+            id
+        };
+        let bodies = |doc: &Document| -> Vec<ObjectId> {
+            doc.objects()
+                .filter(|(_, o)| !o.features.is_empty())
+                .map(|(id, _)| id)
+                .collect()
+        };
+        let path = doc.add_mesh_object(
+            "Path",
+            kreate_mesh::MeshData::from_faces(vec![Vec3::ZERO, Vec3::new(0.1, 0.0, 0.0)], &[]),
+        );
+        doc.object_mut(path).unwrap().sketch_lines = vec![[0, 1]];
+        let profile = square(&mut doc, 0.0, 0.005);
+        doc.selection.clear();
+        doc.selection.add(profile);
+        doc.selection.add(path);
+        doc.selection.active = Some(path);
+        run(&r, &mut h, &mut doc, "feature.sweep", &[]).unwrap();
+        let sweep = bodies(&doc)[0];
+        let v = volume(&doc, sweep);
+        assert!((v - 0.01 * 0.01 * 0.1).abs() < 1e-8, "{v}");
+        // The profile drawn half the size: a quarter of the volume.
+        let mesh = doc.object(profile).unwrap().mesh().unwrap();
+        for p in doc.mesh_mut(mesh).unwrap().positions_mut() {
+            *p *= 0.5;
+        }
+        let v = volume(&doc, sweep);
+        assert!((v - 0.005 * 0.005 * 0.1).abs() < 1e-9, "{v}");
+        // It is kept as a feature through a save.
+        let kinds: Vec<&str> = doc
+            .object(sweep)
+            .unwrap()
+            .features
+            .iter()
+            .map(|f| f.kind_tag())
+            .collect();
+        assert_eq!(kinds, ["sweep"]);
+
+        let a = square(&mut doc, 0.0, 0.01);
+        let b = square(&mut doc, 0.02, 0.005);
+        doc.selection.clear();
+        doc.selection.add(b);
+        doc.selection.add(a);
+        doc.selection.active = Some(a);
+        run(&r, &mut h, &mut doc, "feature.loft", &[]).unwrap();
+        let loft = *bodies(&doc).iter().find(|id| **id != sweep).unwrap();
+        let frustum = |height: f64| height / 3.0 * (4e-4 + 1e-4 + (4e-4f64 * 1e-4).sqrt());
+        let v = volume(&doc, loft);
+        assert!((v - frustum(0.02)).abs() < frustum(0.02) * 1e-3, "{v}");
+        // The top section moved up: twice as tall.
+        doc.object_mut(b).unwrap().transform.translation.z = 0.04;
+        let v = volume(&doc, loft);
+        assert!((v - frustum(0.04)).abs() < frustum(0.04) * 1e-3, "{v}");
+
+        // No profile sketch: the round sweep, a plain part.
+        doc.selection.clear();
+        doc.selection.add(path);
+        doc.selection.active = Some(path);
+        let before = bodies(&doc).len();
+        run(&r, &mut h, &mut doc, "feature.sweep", &[]).unwrap();
+        assert_eq!(bodies(&doc).len(), before);
+        assert!(volume(&doc, doc.selection.active.unwrap()) > 0.0);
     }
 
     #[test]

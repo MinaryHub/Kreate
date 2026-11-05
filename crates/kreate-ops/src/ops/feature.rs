@@ -28,6 +28,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<ShellFeature>();
     registry.register::<PatternFeature>();
     registry.register::<CircularFeature>();
+    registry.register::<SweepFeature>();
+    registry.register::<LoftFeature>();
     registry.register::<MirrorFeature>();
 }
 
@@ -308,10 +310,24 @@ fn add(
 ) -> Result<OpResult, OpError> {
     let d = doc.document();
     let sketch = active_sketch(d).ok_or_else(|| OpError::Failed("no sketch is active".into()))?;
+    add_from(doc, shape, sketch, seeds_of(seeds), operation, target)
+}
+
+/// Adds a feature made from `sketch`'s regions that `seeds` pick (any for
+/// a loft, which takes each sketch's largest): to a new body, or to
+/// `target`.
+fn add_from(
+    doc: &mut DocMut<'_>,
+    shape: Shape,
+    sketch: ObjectId,
+    seeds: Vec<[f64; 2]>,
+    operation: u32,
+    target: &str,
+) -> Result<OpResult, OpError> {
+    let d = doc.document();
     let sketch_uid = d.object_uid(sketch).expect("an object");
-    let seeds = seeds_of(seeds);
     let regions = feature::shape_regions(d, sketch, &shape);
-    if feature::picked(&regions, &seeds).is_empty() {
+    if !matches!(shape, Shape::Loft { .. }) && feature::picked(&regions, &seeds).is_empty() {
         return Err(OpError::Failed("pick a closed region of the sketch".into()));
     }
     let order = feature::next_order(d);
@@ -413,6 +429,146 @@ fn join_or_cut_mesh(
         }
     }
     Ok(OpResult::Finished)
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SweepParams {
+    /// The profile's size at the path's end, against its start: a taper.
+    #[param(min = 0.0, soft_max = 4.0)]
+    pub scale_end: f64,
+    /// Close the ends of an open path.
+    pub caps: bool,
+    #[param(variants("new_body", "join", "cut"))]
+    pub operation: u32,
+    /// The body joined or cut, by name; the latest when empty.
+    pub target: String,
+}
+
+impl Default for SweepParams {
+    fn default() -> Self {
+        Self {
+            scale_end: 1.0,
+            caps: true,
+            operation: 0,
+            target: String::new(),
+        }
+    }
+}
+
+/// A sketch's regions carried along the active object's lines — a
+/// sketch's or a mesh's edges — as a feature: the body follows when the
+/// profile or the path is edited. With no profile sketch selected, a round
+/// profile is swept as a plain part (`object.sweep_along`).
+pub struct SweepFeature;
+
+impl Operator for SweepFeature {
+    type Params = SweepParams;
+    fn id() -> &'static str {
+        "feature.sweep"
+    }
+    fn label() -> &'static str {
+        "Sweep"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let path = d
+            .selection
+            .active
+            .ok_or_else(|| OpError::Failed("make the path the active object".into()))?;
+        let (points, closed) = feature::shapes::object_path(d, path).ok_or_else(|| {
+            OpError::Failed("the active object has no lines to sweep along".into())
+        })?;
+        let profile = d
+            .selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| *id != path)
+            .find(|id| !feature::sketch_regions(d, *id).is_empty());
+        let Some(profile) = profile else {
+            // No sketch to follow: the round profile of the one-off sweep.
+            let round = crate::ops::mech::SweepAlongParams {
+                scale_end: params.scale_end,
+                caps: params.caps,
+                ..Default::default()
+            };
+            return crate::ops::mech::SweepAlong::execute(&round, doc, ctx);
+        };
+        let seeds = feature::profile_seeds(d, profile);
+        let profiles = feature::shapes::picked_regions(d, profile, &seeds);
+        feature::shapes::sweep_world(&points, closed, &profiles, params.scale_end, params.caps)
+            .map_err(OpError::Failed)?;
+        let shape = Shape::Sweep {
+            path: d.object_uid(path).expect("an object"),
+            scale_end: params.scale_end,
+            caps: params.caps,
+        };
+        add_from(doc, shape, profile, seeds, params.operation, &params.target)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct LoftParams {
+    #[param(variants("new_body", "join", "cut"))]
+    pub operation: u32,
+    /// The body joined or cut, by name; the latest when empty.
+    pub target: String,
+}
+
+/// A solid through the selected sketches' outlines, in order through
+/// space, as a feature: the body follows when any of them is edited.
+pub struct LoftFeature;
+
+impl Operator for LoftFeature {
+    type Params = LoftParams;
+    fn id() -> &'static str {
+        "feature.loft"
+    }
+    fn label() -> &'static str {
+        "Loft"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let sketches: Vec<ObjectId> = d
+            .selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| feature::shapes::largest_region(d, *id).is_some())
+            .collect();
+        if sketches.len() < 2 {
+            return Err(OpError::Failed(
+                "select two or more sketches with closed outlines".into(),
+            ));
+        }
+        let sections: Vec<_> = sketches
+            .iter()
+            .filter_map(|id| feature::shapes::section_world(d, *id))
+            .collect();
+        feature::shapes::loft_world(sections).map_err(OpError::Failed)?;
+        let shape = Shape::Loft {
+            sections: sketches[1..]
+                .iter()
+                .map(|id| d.object_uid(*id).expect("an object"))
+                .collect(),
+        };
+        add_from(
+            doc,
+            shape,
+            sketches[0],
+            Vec::new(),
+            params.operation,
+            &params.target,
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -616,7 +772,13 @@ impl Operator for Set {
                 Shape::Pattern { count, .. } | Shape::Circular { count, .. } => {
                     *count = (params.amount.round() as i64).clamp(1, 1000) as u32;
                 }
-                Shape::Mirror { .. } => {}
+                Shape::Sweep {
+                    scale_end, caps, ..
+                } => {
+                    *scale_end = params.amount.abs();
+                    *caps = params.symmetric;
+                }
+                Shape::Mirror { .. } | Shape::Loft { .. } => {}
             }
         }
         f.operation = if params.operation == 1 {
@@ -793,7 +955,10 @@ impl Operator for ToMesh {
         if let Some(m) = d.mesh_mut(mesh) {
             *m = built;
         }
-        d.object_mut(body).expect("a body").features.clear();
+        let object = d.object_mut(body).expect("a body");
+        object.features.clear();
+        // A newer build's features, never run here, go with the history.
+        object.foreign_features.clear();
         Ok(OpResult::Finished)
     }
 }

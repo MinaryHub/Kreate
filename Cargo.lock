@@ -1532,6 +1532,7 @@ dependencies = [
  "gltf",
  "half",
  "image",
+ "kreate-fonts",
  "kreate-geom2d",
  "kreate-math",
  "kreate-mesh",

@@ -2511,7 +2511,7 @@ pub fn write(
                     .collect(),
                 sketch_lines: object.sketch_lines.clone(),
                 drawing: object.drawing.as_deref().map(crate::drawing_record::record),
-                features: object.features.iter().map(feature_record).collect(),
+                features: features_record(object),
                 visible: object.visible,
                 selectable: object.selectable,
                 linked: match &object.linkage {
@@ -3208,7 +3208,22 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
             .filter(|[a, b]| *a < points && *b < points)
             .copied()
             .collect();
-        object.features = record.features.iter().filter_map(feature_from).collect();
+        object.features.clear();
+        object.foreign_features.clear();
+        for r in &record.features {
+            match feature_from(r) {
+                Some(f) => object.features.push(f),
+                // A kind or an operation this build has never heard of: a
+                // newer build's, kept as it came. One it knows with numbers
+                // it cannot use is a damaged one, and is dropped.
+                None if !known_feature(r) => {
+                    if let Ok(text) = serde_json::to_string(r) {
+                        object.foreign_features.push(text);
+                    }
+                }
+                None => {}
+            }
+        }
         object.drawing = record
             .drawing
             .as_ref()
@@ -3438,10 +3453,28 @@ pub struct FeatureRecord {
     /// A shell's open side, as `kreate_scene::feature::SHELL_SIDES`.
     #[serde(default)]
     pub open: u32,
+    /// A sweep's path, by identity; zero for none.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub path: u64,
+    /// A loft's sections after its sketch, by identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<u64>,
+    /// Fields a newer build added, kept for it.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
     use kreate_scene::feature::Shape;
+    let (path, sections) = match &f.shape {
+        Shape::Sweep { path, .. } => (path.raw(), Vec::new()),
+        Shape::Loft { sections } => (0, sections.iter().map(|u| u.raw()).collect()),
+        _ => (0, Vec::new()),
+    };
     let (distance, symmetric, axis, angle, count, step, open) = match f.shape {
         Shape::Extrude {
             distance,
@@ -3453,6 +3486,11 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         Shape::Pattern { count, step } => (0.0, false, [0, 0], 0.0, count, step, 0),
         Shape::Circular { count, axis } => (0.0, false, [axis, 0], 0.0, count, [0.0; 3], 0),
         Shape::Mirror { axis } => (0.0, false, [axis, 0], 0.0, 0, [0.0; 3], 0),
+        // A sweep's end size in `distance`, its caps in `symmetric`.
+        Shape::Sweep {
+            scale_end, caps, ..
+        } => (scale_end, caps, [0, 0], 0.0, 0, [0.0; 3], 0),
+        Shape::Loft { .. } => (0.0, false, [0, 0], 0.0, 0, [0.0; 3], 0),
     };
     FeatureRecord {
         kind: f.kind_tag().into(),
@@ -3467,11 +3505,41 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         count,
         step,
         open,
+        path,
+        sections,
+        extra: BTreeMap::new(),
     }
 }
 
-/// A feature of a kind this build does not know is dropped, as a constraint
-/// is: the body is the rest of its features.
+/// A body's features as written: its own, and those a newer build wrote that
+/// this one kept, each in its place on the timeline.
+fn features_record(object: &Object) -> Vec<FeatureRecord> {
+    let mut out: Vec<FeatureRecord> = object.features.iter().map(feature_record).collect();
+    out.extend(
+        object
+            .foreign_features
+            .iter()
+            .filter_map(|text| serde_json::from_str::<FeatureRecord>(text).ok()),
+    );
+    // Stable: features of one order keep the order they were in.
+    out.sort_by_key(|r| r.order);
+    out
+}
+
+/// Whether this build knows a feature record's kind and operation — so that
+/// one it cannot read is damaged, not newer.
+fn known_feature(r: &FeatureRecord) -> bool {
+    use kreate_scene::feature::Operation;
+    const KINDS: [&str; 10] = [
+        "extrude", "revolve", "fillet", "chamfer", "shell", "pattern", "circular", "mirror",
+        "sweep", "loft",
+    ];
+    KINDS.contains(&r.kind.as_str()) && Operation::from_tag(&r.operation).is_some()
+}
+
+/// A feature of a kind this build does not know is not made into one: the
+/// body is the rest of its features, and the record is kept (see
+/// [`known_feature`]).
 fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
     use kreate_scene::feature::{Feature, Operation, Shape};
     let shape = match r.kind.as_str() {
@@ -3501,6 +3569,18 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         },
         "mirror" => Shape::Mirror {
             axis: r.axis[0].min(2),
+        },
+        "sweep" if r.distance.is_finite() && r.path != 0 => Shape::Sweep {
+            path: kreate_scene::Uid::from_raw(r.path),
+            scale_end: r.distance,
+            caps: r.symmetric,
+        },
+        "loft" => Shape::Loft {
+            sections: r
+                .sections
+                .iter()
+                .map(|u| kreate_scene::Uid::from_raw(*u))
+                .collect(),
         },
         _ => return None,
     };

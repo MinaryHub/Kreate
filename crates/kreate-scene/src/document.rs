@@ -196,6 +196,12 @@ pub struct Object {
     /// What makes it a body: its features, run in order, are what it shows
     /// in place of its mesh. See [`crate::feature`]. Empty for anything else.
     pub features: Vec<crate::feature::Feature>,
+    /// Features a newer build wrote that this one cannot run, as the file
+    /// had them (each a record, in the container's own words): kept and
+    /// written back in their place on the timeline, so opening and saving a
+    /// newer file here does not take them out of it. The body is built from
+    /// the rest.
+    pub foreign_features: Vec<String>,
     /// The action this object plays, if it is animated.
     pub action: Option<ActionId>,
     /// Actions laid on the timeline under the active one: see [`crate::nla`].
@@ -262,6 +268,7 @@ impl Object {
             sketch_lines: Vec::new(),
             drawing: None,
             features: Vec::new(),
+            foreign_features: Vec::new(),
             action: None,
             nla: Vec::new(),
             drivers: Vec::new(),

@@ -25,6 +25,9 @@ pub enum View {
     Front,
     /// From the right, looking along -X: Y across, Z up.
     Right,
+    /// Isometric, from the front, the right and above: Z up the page, X
+    /// running down to the right and Y up to the right.
+    Iso,
 }
 
 impl View {
@@ -36,6 +39,7 @@ impl View {
             View::Top => DVec3::Z,
             View::Front => -DVec3::Y,
             View::Right => DVec3::X,
+            View::Iso => DVec3::new(1.0, -1.0, 1.0).normalize(),
         }
     }
 
@@ -45,6 +49,12 @@ impl View {
             View::Top => [p.x, p.y],
             View::Front => [p.x, p.z],
             View::Right => [p.y, p.z],
+            View::Iso => {
+                let t = self.toward();
+                let right = DVec3::Z.cross(t).normalize();
+                let up = t.cross(right);
+                [p.dot(right), p.dot(up)]
+            }
         }
     }
 }

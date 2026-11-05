@@ -306,6 +306,11 @@ pub enum Command {
     ExportFormat {
         index: usize,
     },
+    /// File ▸ Export Drawing ▸ Drawing Sheet: the sheet its dialog
+    /// describes, as a PDF (`pdf`) or a DXF.
+    ExportSheet {
+        pdf: bool,
+    },
     /// From the asset browser: list this source (by its place in the menu).
     AssetSource {
         index: usize,
