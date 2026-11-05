@@ -10,6 +10,20 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- A 2D drawing — a sketch or a drafting drawing — can be exported as DXF
+  (File ▸ Export Drawing ▸ Active 2D Drawing, File ▸ Export, or the
+  connector's `export_file` with `.dxf`): R12, which every drafting program
+  and cutting machine reads, with its layers, colours and linetypes, arcs
+  as arcs, ellipses and splines as fine polylines, and dimensions drawn out
+  with their tolerances.
+
+### Fixed
+
+- A file saved by a newer Kreate keeps the features this one does not know
+  through an open and a save; opening it says how many were kept unbuilt.
+
 ## [0.6.0] - 2026-11-05
 
 ### Added

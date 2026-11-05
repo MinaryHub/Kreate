@@ -4246,6 +4246,10 @@ impl App {
     /// File > Export Drawing: the shown parts seen square from one side, as
     /// a DXF or an SVG drawing in the scene's unit, hidden lines dashed.
     fn export_drawing(&mut self, view: u32) {
+        if view == 3 {
+            self.export_active_drawing();
+            return;
+        }
         let view = kreate_io::drawing::View::ALL[(view as usize).min(2)];
         let name = match view {
             kreate_io::drawing::View::Top => "top",
@@ -4262,6 +4266,33 @@ impl App {
             return;
         };
         let _ = self.write_drawing(&path, view);
+    }
+
+    /// File > Export Drawing > the active 2D drawing: what was drawn in the
+    /// drafting mode, as a DXF any drafting program or cutting machine
+    /// reads (R12), in the scene's unit.
+    fn export_active_drawing(&mut self) {
+        let Some(object) = self.doc.selection.active.and_then(|id| self.doc.object(id)) else {
+            self.status(&self.ui.catalog.get("drawing-active-none"));
+            return;
+        };
+        let Some(drawing) = object.drawing.as_deref() else {
+            self.status(&self.ui.catalog.get("drawing-active-none"));
+            return;
+        };
+        let text = kreate_io::dxf_write::write(drawing, self.doc.design.length_unit.metres());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("DXF drawing", &["dxf"])
+            .set_title("Export Drawing")
+            .set_file_name(format!("{}.dxf", object.name))
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, text) {
+            Ok(()) => self.status(&format!("drawing written: {}", path.display())),
+            Err(e) => self.status(&format!("cannot write the drawing: {e}")),
+        }
     }
 
     fn write_drawing(
@@ -7950,6 +7981,28 @@ impl App {
                 }
             }
             "csv" => Ok(self.parts_list().into_bytes()),
+            // A 2D drawing: the selected object's, or the only one there is.
+            "dxf" => {
+                let active = self
+                    .doc
+                    .selection
+                    .active
+                    .and_then(|id| self.doc.object(id))
+                    .and_then(|o| o.drawing.as_deref());
+                let mut all = self.doc.objects().filter_map(|(_, o)| o.drawing.as_deref());
+                let only = match (all.next(), all.next()) {
+                    (Some(d), None) => Some(d),
+                    _ => None,
+                };
+                match active.or(only) {
+                    Some(d) => Ok(kreate_io::dxf_write::write(
+                        d,
+                        self.doc.design.length_unit.metres(),
+                    )
+                    .into_bytes()),
+                    None => Err("select the object whose 2D drawing to write".to_string()),
+                }
+            }
             "3mf" => {
                 let parts = self.printable_parts();
                 if parts.is_empty() {

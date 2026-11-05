@@ -103,6 +103,10 @@ pub const EXPORT: &[Format] = &[
         extensions: &["csv"],
     },
     Format {
+        name: "DXF (selected 2D drawing)",
+        extensions: &["dxf"],
+    },
+    Format {
         name: "USD (text)",
         extensions: &["usda"],
     },

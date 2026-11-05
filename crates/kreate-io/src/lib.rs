@@ -14,6 +14,7 @@ pub mod dae;
 pub mod drawing;
 pub mod drawing_record;
 pub mod dxf_read;
+pub mod dxf_write;
 pub mod exr;
 pub mod fbx;
 pub mod gltf_export;

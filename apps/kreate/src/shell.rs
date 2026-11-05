@@ -1990,6 +1990,7 @@ struct Labels {
     drawing_top: String,
     drawing_front: String,
     drawing_right: String,
+    drawing_active: String,
     dissolve_limited: String,
     edges_to_sketch: String,
     sketch_construction: String,
@@ -2404,6 +2405,7 @@ impl Labels {
             drawing_top: t("drawing-top"),
             drawing_front: t("drawing-front"),
             drawing_right: t("drawing-right"),
+            drawing_active: t("drawing-active"),
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
             sketch_construction: t("sketch-construction"),
@@ -4488,6 +4490,7 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                         (0u32, &l.drawing_top),
                         (1, &l.drawing_front),
                         (2, &l.drawing_right),
+                        (3, &l.drawing_active),
                     ]
                     .into_iter()
                     .map(|(view, label)| {
