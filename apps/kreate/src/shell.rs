@@ -1994,6 +1994,7 @@ struct Labels {
     drawing_right: String,
     drawing_active: String,
     drawing_sheet: String,
+    drawing_flat: String,
     dissolve_limited: String,
     edges_to_sketch: String,
     sketch_construction: String,
@@ -2410,6 +2411,7 @@ impl Labels {
             drawing_right: t("drawing-right"),
             drawing_active: t("drawing-active"),
             drawing_sheet: t("menu-drawing-sheet"),
+            drawing_flat: t("drawing-flat-pattern"),
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
             sketch_construction: t("sketch-construction"),
@@ -4497,6 +4499,7 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                         (1, &l.drawing_front),
                         (2, &l.drawing_right),
                         (3, &l.drawing_active),
+                        (4, &l.drawing_flat),
                     ]
                     .into_iter()
                     .map(|(view, label)| {
@@ -5499,6 +5502,11 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
                 "mech-sheet-flat",
                 "object.add_sheet_metal",
                 MechArg::Bool("flat", true),
+            ),
+            (
+                "mech-sheet-from-sketch",
+                "feature.sheet_metal",
+                MechArg::None,
             ),
         ],
     ),
@@ -16301,6 +16309,12 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                         );
                         ui.end_row();
                         ui.label(state.catalog.get("feature-caps"));
+                        ui.checkbox(&mut edit.row.symmetric, "");
+                    } else if kind == "sheet_metal" {
+                        ui.label(state.catalog.get("feature-flange-height"));
+                        ui.add(egui::DragValue::new(&mut edit.amount).speed(0.1));
+                        ui.end_row();
+                        ui.label(state.catalog.get("feature-flat"));
                         ui.checkbox(&mut edit.row.symmetric, "");
                     } else if matches!(kind, "mirror" | "loft") {
                         ui.label("");

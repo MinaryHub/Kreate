@@ -10,7 +10,7 @@ use std::f64::consts::TAU;
 
 use std::f64::consts::PI;
 
-use kreate_math::{DVec2, Vec3};
+use kreate_math::{DVec2, Vec2, Vec3};
 
 use crate::MeshData;
 
@@ -1660,6 +1660,319 @@ pub fn sheet_metal(p: &SheetMetal) -> MeshData {
     MeshData::from_faces(welded, &kept)
 }
 
+// --- sheet metal from an outline ------------------------------------------------
+
+/// A flange on one edge of a plate's outline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Flange {
+    /// The edge, by its first point in [`plate_outline`]'s order.
+    pub edge: usize,
+    /// From flat, radians: π/2 square up.
+    pub angle: f32,
+    /// Its straight length past the bend.
+    pub height: f32,
+}
+
+/// A plate cut to an outline, with flanges bent up from some of its edges.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plate {
+    /// The plate's outline anticlockwise, and its holes, in its plane.
+    pub outline: Vec<Vec2>,
+    pub holes: Vec<Vec<Vec2>>,
+    pub thickness: f32,
+    /// The bends' inside radius.
+    pub radius: f32,
+    /// Where the neutral line lies through the thickness, from the inside.
+    pub k_factor: f32,
+    pub flanges: Vec<Flange>,
+    /// Laid out flat: each flange unrolled to its bend allowance.
+    pub flat: bool,
+}
+
+/// An outline made ready to bend from: anticlockwise, and with the points
+/// that lie on a straight run between their neighbours taken out, so each
+/// straight edge is one edge however it was drawn.
+pub fn plate_outline(outline: &[Vec2]) -> Vec<Vec2> {
+    let mut pts: Vec<Vec2> = outline.to_vec();
+    let area: f32 = (0..pts.len())
+        .map(|i| pts[i].perp_dot(pts[(i + 1) % pts.len()]))
+        .sum();
+    if area < 0.0 {
+        pts.reverse();
+    }
+    let scale = pts
+        .iter()
+        .map(|p| p.length())
+        .fold(0.0f32, f32::max)
+        .max(1e-6);
+    loop {
+        let n = pts.len();
+        if n <= 3 {
+            break;
+        }
+        let drop = (0..n).find(|&i| {
+            let (a, b, c) = (pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n]);
+            let (u, v) = (b - a, c - b);
+            u.perp_dot(v).abs() <= 1e-6 * u.length() * v.length() + 1e-12 * scale && u.dot(v) > 0.0
+                || (b - a).length() < 1e-7 * scale
+        });
+        match drop {
+            Some(i) => {
+                pts.remove(i);
+            }
+            None => break,
+        }
+    }
+    pts
+}
+
+/// Whether the outline turns inward at point `i`: a flange on either edge
+/// that meets there would run into the other.
+fn reflex_at(outline: &[Vec2], i: usize) -> bool {
+    let n = outline.len();
+    let (a, b, c) = (outline[(i + n - 1) % n], outline[i], outline[(i + 1) % n]);
+    (b - a).perp_dot(c - b) < 0.0
+}
+
+/// The edges a flange can go on: straight edges at least `min_length` long
+/// whose ends both turn outward, so neighbouring flanges cannot meet.
+pub fn flangeable_edges(outline: &[Vec2], min_length: f32) -> Vec<usize> {
+    let n = outline.len();
+    (0..n)
+        .filter(|&i| {
+            let (a, b) = (outline[i], outline[(i + 1) % n]);
+            (b - a).length() >= min_length
+                && !reflex_at(outline, i)
+                && !reflex_at(outline, (i + 1) % n)
+        })
+        .collect()
+}
+
+impl Plate {
+    /// The length of sheet a flange's bend takes up, along the neutral line.
+    pub fn bend_allowance(&self, angle: f32) -> f32 {
+        angle * (self.radius + self.k_factor * self.thickness)
+    }
+}
+
+/// The plate as a solid, its underside at z = 0. Flanges on edges that do
+/// not exist or that meet another at an inward corner are left off.
+pub fn plate(p: &Plate) -> MeshData {
+    use std::f32::consts::PI;
+    let outline = plate_outline(&p.outline);
+    if outline.len() < 3 || p.thickness <= 0.0 {
+        return MeshData::empty();
+    }
+    let t = p.thickness;
+    let r = p.radius.max(t * 0.01);
+    let region = crate::regions::Region {
+        outline: outline.clone(),
+        holes: p.holes.clone(),
+    };
+    let base = crate::regions::extrude_region(&region, 0.0, t);
+    let mut positions: Vec<Vec3> = base.positions().to_vec();
+    let mut faces: Vec<Vec<u32>> = base.faces().map(|f| f.to_vec()).collect();
+    let n = outline.len();
+    let mut used = vec![false; n];
+    for f in &p.flanges {
+        if f.edge >= n
+            || used[f.edge]
+            || reflex_at(&outline, f.edge)
+            || reflex_at(&outline, (f.edge + 1) % n)
+        {
+            continue;
+        }
+        used[f.edge] = true;
+        let (a, b) = (outline[f.edge], outline[(f.edge + 1) % n]);
+        let span = (b - a).length();
+        if span < 1e-9 {
+            continue;
+        }
+        let along2 = (b - a) / span;
+        // Out of an anticlockwise outline: to the right of its way.
+        let out2 = Vec2::new(along2.y, -along2.x);
+        let mid = (a + b) * 0.5;
+        let (mid, out, along) = (
+            Vec3::new(mid.x, mid.y, 0.0),
+            Vec3::new(out2.x, out2.y, 0.0),
+            Vec3::new(along2.x, along2.y, 0.0),
+        );
+        let section: Vec<(Vec2, Vec2)> = if p.flat {
+            let u = p.bend_allowance(f.angle) + f.height;
+            vec![
+                (Vec2::new(0.0, t), Vec2::ZERO),
+                (Vec2::new(u, t), Vec2::new(u, 0.0)),
+            ]
+        } else {
+            let steps = 2 + (f.angle / (PI / 16.0)).ceil() as usize;
+            let at =
+                |radius: f32, phi: f32| Vec2::new(radius * phi.sin(), t + r - radius * phi.cos());
+            let mut s: Vec<(Vec2, Vec2)> = (0..=steps)
+                .map(|i| {
+                    let phi = f.angle * i as f32 / steps as f32;
+                    (at(r, phi), at(r + t, phi))
+                })
+                .collect();
+            let d = Vec2::new(f.angle.cos(), f.angle.sin()) * f.height;
+            let (i, o) = *s.last().expect("a bend");
+            if f.height > 0.0 {
+                s.push((i + d, o + d));
+            }
+            s
+        };
+        let place = |q: Vec2, s: f32| mid + out * q.x + Vec3::Z * q.y + along * s;
+        let ends = [-span * 0.5, span * 0.5];
+        let mut add = |q: Vec3| {
+            positions.push(q);
+            positions.len() as u32 - 1
+        };
+        let ring: Vec<[[u32; 2]; 2]> = section
+            .iter()
+            .map(|(i, o)| {
+                let mut v = [[0; 2]; 2];
+                for (e, s) in ends.iter().enumerate() {
+                    v[0][e] = add(place(*i, *s));
+                    v[1][e] = add(place(*o, *s));
+                }
+                v
+            })
+            .collect();
+        let (inner, outer, ea, eb) = (0, 1, 0, 1);
+        for j in 0..ring.len() - 1 {
+            let (c, nx) = (ring[j], ring[j + 1]);
+            faces.push(vec![
+                c[inner][ea],
+                nx[inner][ea],
+                nx[inner][eb],
+                c[inner][eb],
+            ]);
+            faces.push(vec![
+                c[outer][ea],
+                c[outer][eb],
+                nx[outer][eb],
+                nx[outer][ea],
+            ]);
+            faces.push(vec![
+                c[inner][ea],
+                c[outer][ea],
+                nx[outer][ea],
+                nx[inner][ea],
+            ]);
+            faces.push(vec![
+                c[inner][eb],
+                nx[inner][eb],
+                nx[outer][eb],
+                c[outer][eb],
+            ]);
+        }
+        let (first, last) = (ring[0], ring[ring.len() - 1]);
+        faces.push(vec![
+            last[inner][ea],
+            last[outer][ea],
+            last[outer][eb],
+            last[inner][eb],
+        ]);
+        faces.push(vec![
+            first[inner][ea],
+            first[inner][eb],
+            first[outer][eb],
+            first[outer][ea],
+        ]);
+    }
+    weld_and_cancel(positions, faces)
+}
+
+/// Welds what lies in one place, then drops each face met by another on
+/// the same corners: where a flange grows out of the plate's side.
+fn weld_and_cancel(positions: Vec<Vec3>, faces: Vec<Vec<u32>>) -> MeshData {
+    let mut index: std::collections::HashMap<[i64; 3], u32> = std::collections::HashMap::new();
+    let mut welded: Vec<Vec3> = Vec::new();
+    let remap: Vec<u32> = positions
+        .iter()
+        .map(|q| {
+            let key = (*q * 1e7).round().as_i64vec3().to_array();
+            *index.entry(key).or_insert_with(|| {
+                welded.push(*q);
+                welded.len() as u32 - 1
+            })
+        })
+        .collect();
+    let faces: Vec<Vec<u32>> = faces
+        .into_iter()
+        .map(|f| f.iter().map(|v| remap[*v as usize]).collect())
+        .collect();
+    let key = |f: &Vec<u32>| {
+        let mut k = f.clone();
+        k.sort_unstable();
+        k
+    };
+    let mut count: std::collections::HashMap<Vec<u32>, u32> = std::collections::HashMap::new();
+    for f in &faces {
+        *count.entry(key(f)).or_default() += 1;
+    }
+    let kept: Vec<Vec<u32>> = faces.into_iter().filter(|f| count[&key(f)] == 1).collect();
+    MeshData::from_faces(welded, &kept)
+}
+
+/// A bend on the flat pattern: the line it is made along, and which way
+/// and how far it goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BendLine {
+    pub a: Vec2,
+    pub b: Vec2,
+    /// Radians from flat, up.
+    pub angle: f32,
+    pub radius: f32,
+}
+
+/// The blank to cut: its outline as line segments — the plate's outline
+/// with each flange unrolled out of its edge, and the holes — and the bend
+/// lines, each down the middle of its bend's allowance.
+pub fn plate_flat_pattern(p: &Plate) -> (Vec<[Vec2; 2]>, Vec<BendLine>) {
+    let outline = plate_outline(&p.outline);
+    let n = outline.len();
+    let mut cut: Vec<[Vec2; 2]> = Vec::new();
+    let mut bends = Vec::new();
+    let mut flanged = vec![None; n];
+    for f in &p.flanges {
+        if f.edge < n
+            && flanged[f.edge].is_none()
+            && !reflex_at(&outline, f.edge)
+            && !reflex_at(&outline, (f.edge + 1) % n)
+        {
+            flanged[f.edge] = Some(*f);
+        }
+    }
+    for i in 0..n {
+        let (a, b) = (outline[i], outline[(i + 1) % n]);
+        let Some(f) = flanged[i] else {
+            cut.push([a, b]);
+            continue;
+        };
+        let along = (b - a).normalize_or_zero();
+        let out = Vec2::new(along.y, -along.x);
+        let allowance = p.bend_allowance(f.angle);
+        let reach = out * (allowance + f.height);
+        // Up the side, across the flange's end, back down.
+        cut.push([a, a + reach]);
+        cut.push([a + reach, b + reach]);
+        cut.push([b + reach, b]);
+        let mid = out * (allowance * 0.5);
+        bends.push(BendLine {
+            a: a + mid,
+            b: b + mid,
+            angle: f.angle,
+            radius: p.radius,
+        });
+    }
+    for h in &p.holes {
+        for k in 0..h.len() {
+            cut.push([h[k], h[(k + 1) % h.len()]]);
+        }
+    }
+    (cut, bends)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1672,6 +1985,70 @@ mod tests {
         let v = mass_properties(m, |q| q).volume;
         assert!(v > 0.0, "inside out: {v}");
         v
+    }
+
+    /// An L-shaped plate (an inward corner) with a hole: flanges on the
+    /// edges that may take one, none at the inward corner; the solid is
+    /// whole, and flat it weighs what its blank's area says.
+    #[test]
+    fn a_plate_of_any_outline_takes_flanges_and_lays_out_flat() {
+        let l = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.1, 0.0),
+            Vec2::new(0.1, 0.04),
+            // On the straight run: taken out.
+            Vec2::new(0.07, 0.04),
+            Vec2::new(0.04, 0.04),
+            Vec2::new(0.04, 0.08),
+            Vec2::new(0.0, 0.08),
+        ];
+        let outline = plate_outline(&l);
+        assert_eq!(outline.len(), 6, "{outline:?}");
+        let edges = flangeable_edges(&outline, 0.01);
+        // Two edges meet at the inward corner (0.04, 0.04): not those.
+        assert_eq!(edges.len(), 4, "{edges:?}");
+        let hole: Vec<Vec2> = (0..16)
+            .map(|k| {
+                let a = -(k as f32) / 16.0 * std::f32::consts::TAU;
+                Vec2::new(0.02, 0.02) + Vec2::new(a.cos(), a.sin()) * 0.005
+            })
+            .collect();
+        let mut p = Plate {
+            outline: l,
+            holes: vec![hole],
+            thickness: 0.0015,
+            radius: 0.0015,
+            k_factor: 0.44,
+            flanges: edges
+                .iter()
+                .map(|&edge| Flange {
+                    edge,
+                    angle: std::f32::consts::FRAC_PI_2,
+                    height: 0.015,
+                })
+                .collect(),
+            flat: false,
+        };
+        let bent = solid(&plate(&p));
+        p.flat = true;
+        let flat = solid(&plate(&p));
+        // Folding keeps the sheet's volume, near enough: the bend's inside
+        // squeezes as its outside stretches, about the neutral line.
+        assert!((bent - flat).abs() < flat * 0.03, "{bent} against {flat}");
+        let (cut, bends) = plate_flat_pattern(&p);
+        assert_eq!(bends.len(), 4);
+        // The blank's area times the thickness is the flat volume.
+        let area = cut
+            .iter()
+            .take(cut.len() - 16)
+            .map(|[a, b]| a.perp_dot(*b) as f64 * 0.5)
+            .sum::<f64>()
+            - std::f64::consts::PI * 0.005f64.powi(2) * (16.0 / TAU * (TAU / 16.0).sin());
+        assert!(
+            (area * 0.0015 - flat).abs() < flat * 1e-3,
+            "{} against {flat}",
+            area * 0.0015
+        );
     }
 
     fn m6() -> MetricSize {

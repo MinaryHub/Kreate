@@ -3459,6 +3459,9 @@ pub struct FeatureRecord {
     /// A loft's sections after its sketch, by identity.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<u64>,
+    /// A sheet metal feature's flanged edges, each by a point by it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<[f64; 2]>,
     /// Fields a newer build added, kept for it.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -3475,22 +3478,46 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         Shape::Loft { sections } => (0, sections.iter().map(|u| u.raw()).collect()),
         _ => (0, Vec::new()),
     };
-    let (distance, symmetric, axis, angle, count, step, open) = match f.shape {
+    let edges = match &f.shape {
+        Shape::SheetMetal { edges, .. } => edges.clone(),
+        _ => Vec::new(),
+    };
+    let (distance, symmetric, axis, angle, count, step, open) = match &f.shape {
         Shape::Extrude {
             distance,
             symmetric,
-        } => (distance, symmetric, [0, 0], 0.0, 0, [0.0; 3], 0),
-        Shape::Revolve { axis, angle } => (0.0, false, axis, angle, 0, [0.0; 3], 0),
-        Shape::Round { radius, .. } => (radius, false, [0, 0], 0.0, 0, [0.0; 3], 0),
-        Shape::Shell { thickness, open } => (thickness, false, [0, 0], 0.0, 0, [0.0; 3], open),
-        Shape::Pattern { count, step } => (0.0, false, [0, 0], 0.0, count, step, 0),
-        Shape::Circular { count, axis } => (0.0, false, [axis, 0], 0.0, count, [0.0; 3], 0),
-        Shape::Mirror { axis } => (0.0, false, [axis, 0], 0.0, 0, [0.0; 3], 0),
+        } => (*distance, *symmetric, [0, 0], 0.0, 0, [0.0; 3], 0),
+        Shape::Revolve { axis, angle } => (0.0, false, *axis, *angle, 0, [0.0; 3], 0),
+        Shape::Round { radius, .. } => (*radius, false, [0, 0], 0.0, 0, [0.0; 3], 0),
+        Shape::Shell { thickness, open } => (*thickness, false, [0, 0], 0.0, 0, [0.0; 3], *open),
+        Shape::Pattern { count, step } => (0.0, false, [0, 0], 0.0, *count, *step, 0),
+        Shape::Circular { count, axis } => (0.0, false, [*axis, 0], 0.0, *count, [0.0; 3], 0),
+        Shape::Mirror { axis } => (0.0, false, [*axis, 0], 0.0, 0, [0.0; 3], 0),
         // A sweep's end size in `distance`, its caps in `symmetric`.
         Shape::Sweep {
             scale_end, caps, ..
-        } => (scale_end, caps, [0, 0], 0.0, 0, [0.0; 3], 0),
+        } => (*scale_end, *caps, [0, 0], 0.0, 0, [0.0; 3], 0),
         Shape::Loft { .. } => (0.0, false, [0, 0], 0.0, 0, [0.0; 3], 0),
+        // A plate's thickness in `distance`, flat in `symmetric`, its
+        // flanges' angle in `angle`; its bend radius, k-factor and flange
+        // height in `step`.
+        Shape::SheetMetal {
+            thickness,
+            radius,
+            k_factor,
+            angle,
+            height,
+            flat,
+            ..
+        } => (
+            *thickness,
+            *flat,
+            [0, 0],
+            *angle,
+            0,
+            [*radius, *k_factor, *height],
+            0,
+        ),
     };
     FeatureRecord {
         kind: f.kind_tag().into(),
@@ -3507,6 +3534,7 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         open,
         path,
         sections,
+        edges,
         extra: BTreeMap::new(),
     }
 }
@@ -3530,9 +3558,18 @@ fn features_record(object: &Object) -> Vec<FeatureRecord> {
 /// one it cannot read is damaged, not newer.
 fn known_feature(r: &FeatureRecord) -> bool {
     use kreate_scene::feature::Operation;
-    const KINDS: [&str; 10] = [
-        "extrude", "revolve", "fillet", "chamfer", "shell", "pattern", "circular", "mirror",
-        "sweep", "loft",
+    const KINDS: [&str; 11] = [
+        "extrude",
+        "revolve",
+        "fillet",
+        "chamfer",
+        "shell",
+        "pattern",
+        "circular",
+        "mirror",
+        "sweep",
+        "loft",
+        "sheet_metal",
     ];
     KINDS.contains(&r.kind.as_str()) && Operation::from_tag(&r.operation).is_some()
 }
@@ -3575,6 +3612,27 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
             scale_end: r.distance,
             caps: r.symmetric,
         },
+        "sheet_metal"
+            if r.distance.is_finite()
+                && r.distance > 0.0
+                && r.angle.is_finite()
+                && r.step.iter().all(|v| v.is_finite()) =>
+        {
+            Shape::SheetMetal {
+                thickness: r.distance,
+                radius: r.step[0].max(0.0),
+                k_factor: r.step[1].clamp(0.0, 1.0),
+                angle: r.angle,
+                height: r.step[2].max(0.0),
+                edges: r
+                    .edges
+                    .iter()
+                    .filter(|e| e[0].is_finite() && e[1].is_finite())
+                    .copied()
+                    .collect(),
+                flat: r.symmetric,
+            }
+        }
         "loft" => Shape::Loft {
             sections: r
                 .sections

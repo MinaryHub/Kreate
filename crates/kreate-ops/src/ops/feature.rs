@@ -30,6 +30,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<CircularFeature>();
     registry.register::<SweepFeature>();
     registry.register::<LoftFeature>();
+    registry.register::<SheetMetalFeature>();
     registry.register::<MirrorFeature>();
 }
 
@@ -572,6 +573,123 @@ impl Operator for LoftFeature {
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SheetMetalParams {
+    /// The sheet's gauge.
+    #[param(min = 0.0001, soft_max = 0.01, unit = "length")]
+    pub thickness: f64,
+    /// The bends' inside radius.
+    #[param(min = 0.0, soft_max = 0.02, unit = "length")]
+    pub bend_radius: f64,
+    /// Where the neutral line lies through the thickness, from the inside.
+    #[param(min = 0.0, max = 1.0)]
+    pub k_factor: f64,
+    /// The flanges' bend, from flat.
+    #[param(min = 0.0, max = 3.0, unit = "angle")]
+    pub angle: f64,
+    /// The flanges' straight length past the bend.
+    #[param(min = 0.0, soft_max = 0.2, unit = "length")]
+    pub flange: f64,
+    /// The edges to flange, each by a point by it as x, y pairs in the
+    /// sketch's plane; empty for every edge that can take one.
+    #[param(hidden)]
+    pub edges: Vec<f64>,
+    /// Laid out flat: the blank to cut before bending.
+    pub flat: bool,
+}
+
+impl Default for SheetMetalParams {
+    fn default() -> Self {
+        Self {
+            thickness: 0.0015,
+            bend_radius: 0.0015,
+            k_factor: 0.44,
+            angle: std::f64::consts::FRAC_PI_2,
+            flange: 0.02,
+            edges: Vec::new(),
+            flat: false,
+        }
+    }
+}
+
+/// The active sketch's region as a sheet metal plate with its edges bent
+/// up into flanges, as a new body that follows the sketch. Its blank is
+/// File ▸ Export Drawing ▸ Sheet Metal Flat Pattern.
+pub struct SheetMetalFeature;
+
+impl Operator for SheetMetalFeature {
+    type Params = SheetMetalParams;
+    fn id() -> &'static str {
+        "feature.sheet_metal"
+    }
+    fn label() -> &'static str {
+        "Sheet Metal from Sketch"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let finite = [
+            params.thickness,
+            params.bend_radius,
+            params.k_factor,
+            params.angle,
+            params.flange,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite || params.thickness <= 0.0 {
+            return Err(OpError::Failed("sheet metal needs a thickness".into()));
+        }
+        let d = doc.document();
+        let sketch =
+            active_sketch(d).ok_or_else(|| OpError::Failed("no sketch is active".into()))?;
+        let region = feature::shapes::largest_region(d, sketch)
+            .ok_or_else(|| OpError::Failed("the sketch has no closed outline".into()))?;
+        // The largest region, picked by a point inside it.
+        let all = feature::sketch_regions(d, sketch);
+        let seeds: Vec<[f64; 2]> = feature::profile_seeds(d, sketch)
+            .into_iter()
+            .filter(|s| {
+                feature::picked(&all, &[*s])
+                    .first()
+                    .is_some_and(|i| all[*i].outline == region.0)
+            })
+            .take(1)
+            .collect();
+        let shape = Shape::SheetMetal {
+            thickness: params.thickness,
+            radius: params.bend_radius.max(0.0),
+            k_factor: params.k_factor.clamp(0.0, 1.0),
+            angle: params.angle,
+            height: params.flange.max(0.0),
+            edges: seeds_of(&params.edges),
+            flat: params.flat,
+        };
+        let f = Feature {
+            shape,
+            sketch: d.object_uid(sketch).expect("an object"),
+            seeds,
+            operation: Operation::Join,
+            order: feature::next_order(d),
+        };
+        if feature::solid(d, &f).num_faces() == 0 {
+            return Err(OpError::Failed("this outline makes no plate".into()));
+        }
+        let d = doc.document_mut();
+        let mesh = d.add_mesh(kreate_mesh::MeshData::empty());
+        let name = d.unique_object_name("Sheet Metal");
+        let mut object = Object::new(name, ObjectData::Mesh(mesh));
+        object.features.push(f);
+        d.add_object(object);
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct ExtrudeParams {
     /// A point in each region, as x, y pairs in the sketch's plane.
     #[param(hidden)]
@@ -777,6 +895,10 @@ impl Operator for Set {
                 } => {
                     *scale_end = params.amount.abs();
                     *caps = params.symmetric;
+                }
+                Shape::SheetMetal { height, flat, .. } => {
+                    *height = params.amount.abs();
+                    *flat = params.symmetric;
                 }
                 Shape::Mirror { .. } | Shape::Loft { .. } => {}
             }
@@ -993,6 +1115,69 @@ mod tests {
 
     fn body(doc: &Document) -> ObjectId {
         body_named(doc, "").expect("a body")
+    }
+
+    /// A 100 × 60 mm rectangle made sheet metal: four flanges, a closed
+    /// solid; flat, its volume is its blank's; with only the edge by a
+    /// point flanged, one bend; and it follows the sketch.
+    #[test]
+    fn a_sketch_becomes_sheet_metal_that_lays_out_flat() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "sketch.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([0.0, 0.0, 0.0])),
+                ("b", PropertyValue::Vec3([0.1, 0.06, 0.0])),
+            ],
+        )
+        .unwrap();
+        let (t, r_bend, k, height) = (0.0015, 0.0015, 0.44, 0.02);
+        let allowance = std::f64::consts::FRAC_PI_2 * (r_bend + k * t);
+        let flat_volume = |flanged_x: f64, flanged_y: f64| {
+            // Flanges along x add to y and the other way.
+            (0.1 + flanged_y * (allowance + height)) * (0.06 + flanged_x * (allowance + height)) * t
+                - flanged_x * flanged_y * (allowance + height).powi(2) * t
+        };
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.sheet_metal",
+            &[("flat", PropertyValue::Bool(true))],
+        )
+        .unwrap();
+        let sheet = body(&doc);
+        let mut cache = ModifierCache::new();
+        let mesh = cache.evaluated(&doc, sheet, &EvalCtx::still()).unwrap();
+        assert!(kreate_mesh::measure::is_closed(&mesh));
+        let v = volume(&doc, sheet);
+        let want = flat_volume(2.0, 2.0);
+        assert!((v - want).abs() < want * 1e-4, "{v} against {want}");
+        // Bent: a closed solid of about the same sheet.
+        let o = doc.object_mut(sheet).unwrap();
+        if let Shape::SheetMetal { flat, .. } = &mut o.features[0].shape {
+            *flat = false;
+        }
+        let bent = volume(&doc, sheet);
+        assert!((bent - want).abs() < want * 0.03, "{bent} against {want}");
+        // Only the edge along the bottom, by a point on it.
+        let o = doc.object_mut(sheet).unwrap();
+        if let Shape::SheetMetal { flat, edges, .. } = &mut o.features[0].shape {
+            *flat = true;
+            *edges = vec![[0.05, 0.0]];
+        }
+        let one = volume(&doc, sheet);
+        let want = (0.1 * 0.06 + 0.1 * (allowance + height)) * t;
+        assert!((one - want).abs() < want * 1e-4, "{one} against {want}");
+        let plate = feature::sheet_plate(&doc, &doc.object(sheet).unwrap().features[0]).unwrap();
+        assert_eq!(plate.flanges.len(), 1);
     }
 
     /// A profile drawn as one open run of lines beside the sketch's vertical

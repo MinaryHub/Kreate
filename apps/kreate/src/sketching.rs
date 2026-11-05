@@ -1210,6 +1210,9 @@ pub fn feature_rows(
                 kreate_scene::feature::Shape::Sweep {
                     scale_end, caps, ..
                 } => (false, scale_end, caps),
+                kreate_scene::feature::Shape::SheetMetal { height, flat, .. } => {
+                    (false, height, flat)
+                }
             };
             let kind = catalog.get(match f.kind_tag() {
                 "revolve" => "sketch-tool-revolve",
@@ -1221,6 +1224,7 @@ pub fn feature_rows(
                 "mirror" => "feature-mirror",
                 "sweep" => "feature-sweep",
                 "loft" => "feature-loft",
+                "sheet_metal" => "feature-sheet-metal",
                 _ => "sketch-tool-extrude",
             });
             rows.push(crate::shell::FeatureRow {
