@@ -12,6 +12,16 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Assembly joints (Mechanical ▸ Assembly Joints): a hinge, a slider or a
+  fixed joint at the 3D cursor joins the active part to another; the part
+  then turns or slides within its limits from the Robot panel's slider,
+  carrying what is joined to it. They are the same joints a URDF robot
+  has, so they pose, mimic, rig and export the same way. Check Joint
+  Motion takes a joint through its travel and says where its parts run
+  into the others.
+
+### Added
+
 - A 2D drawing — a sketch or a drafting drawing — can be exported as DXF
   (File ▸ Export Drawing ▸ Active 2D Drawing, File ▸ Export, or the
   connector's `export_file` with `.dxf`): R12, which every drafting program

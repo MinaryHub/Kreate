@@ -5467,6 +5467,27 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
         ],
     ),
     (
+        "mech-assembly",
+        &[
+            (
+                "mech-joint-revolute",
+                "object.add_joint",
+                MechArg::Enum("kind", 1),
+            ),
+            (
+                "mech-joint-slider",
+                "object.add_joint",
+                MechArg::Enum("kind", 3),
+            ),
+            (
+                "mech-joint-fixed",
+                "object.add_joint",
+                MechArg::Enum("kind", 0),
+            ),
+            ("mech-motion-check", "robot.motion_check", MechArg::None),
+        ],
+    ),
+    (
         "mech-sheet",
         &[
             (
