@@ -640,6 +640,7 @@ physical-volume = Volume
 physical-area = Surface Area
 physical-mass = Mass
 physical-centroid = Center of Mass
+physical-inertia = Inertia (Ixx, Iyy, Izz)
 physical-open = The surface is open, so the volume and mass mean nothing. Close it first (Mesh Check shows where).
 render-saved = Saved { $path }
 render-failed = Not saved: { $why }

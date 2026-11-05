@@ -617,6 +617,66 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
         Some(unique("base_link"))
     };
 
+    // A link's mass, centre of mass and inertia about it in the link's
+    // frame, from the closed visual meshes it holds and their densities:
+    // each one's about its own centre, moved to the whole's (the parallel
+    // axis theorem). `None` when it holds no closed mesh.
+    let measured_inertial = |link: ObjectId,
+                             to_link: kreate_math::DAffine3|
+     -> Option<(f64, kreate_math::DVec3, [f64; 6])> {
+        let mut pieces = Vec::new();
+        for &id in &objects {
+            let Some(o) = doc.object(id) else { continue };
+            let ObjectData::Mesh(mesh) = o.data else {
+                continue;
+            };
+            if link_of(id) != Some(link) || (robot_doc && is_link(id) && id != link) {
+                continue;
+            }
+            let mut at = Some(id);
+            let mut collision = false;
+            while let Some(i) = at.filter(|i| *i != link) {
+                collision |= matches!(part(i), Some(RobotPart::Collision));
+                at = doc.object(i).and_then(|o| o.parent);
+            }
+            let Some(data) = doc.mesh(mesh) else { continue };
+            if collision {
+                continue;
+            }
+            let into = to_link * rest_world(id);
+            let m = kreate_mesh::measure::mass_properties(data, |p| into.transform_point3(p));
+            if m.closed && m.volume > 0.0 {
+                pieces.push((m, doc.density_of(id)));
+            }
+        }
+        let mass: f64 = pieces.iter().map(|(m, d)| m.volume * d).sum();
+        if pieces.is_empty() || mass.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return None;
+        }
+        let centre = pieces
+            .iter()
+            .map(|(m, d)| m.centroid * (m.volume * d))
+            .sum::<kreate_math::DVec3>()
+            / mass;
+        let mut i = [0.0f64; 6];
+        for (m, d) in &pieces {
+            let w = m.volume * d;
+            let r = m.centroid - centre;
+            let shift = [
+                w * (r.y * r.y + r.z * r.z),
+                w * (r.x * r.x + r.z * r.z),
+                w * (r.x * r.x + r.y * r.y),
+                -w * r.x * r.y,
+                -w * r.x * r.z,
+                -w * r.y * r.z,
+            ];
+            for k in 0..6 {
+                i[k] += m.inertia[k] * d + shift[k];
+            }
+        }
+        Some((mass, centre, i))
+    };
+
     let mut out = String::new();
     let _ = writeln!(out, "<?xml version=\"1.0\"?>");
     let _ = writeln!(out, "<!-- Written by Kreate -->");
@@ -652,6 +712,22 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
             let _ = writeln!(out, "    <inertial>");
             let _ = writeln!(out, "      {}", origin(&t));
             let _ = writeln!(out, "      <mass value=\"{}\"/>", tidy(i.mass));
+            let _ = writeln!(
+                out,
+                "      <inertia ixx=\"{ixx}\" ixy=\"{ixy}\" ixz=\"{ixz}\" iyy=\"{iyy}\" iyz=\"{iyz}\" izz=\"{izz}\"/>"
+            );
+            let _ = writeln!(out, "    </inertial>");
+        } else if let Some((mass, centre, i)) = measured_inertial(link, inverse) {
+            // None given: measured from its closed meshes and what they are
+            // made of, so a simulator has a body to move.
+            let [ixx, iyy, izz, ixy, ixz, iyz] = i.map(tidy);
+            let _ = writeln!(out, "    <inertial>");
+            let _ = writeln!(
+                out,
+                "      <origin xyz=\"{}\" rpy=\"0 0 0\"/>",
+                fmt3(centre)
+            );
+            let _ = writeln!(out, "      <mass value=\"{}\"/>", tidy(mass));
             let _ = writeln!(
                 out,
                 "      <inertia ixx=\"{ixx}\" ixy=\"{ixy}\" ixz=\"{ixz}\" iyy=\"{iyy}\" iyz=\"{iyz}\" izz=\"{izz}\"/>"
@@ -969,6 +1045,41 @@ mod tests {
             .iter()
             .filter(|n| n.parent == Some(at))
             .all(|n| n.hidden));
+    }
+
+    /// A link with no inertial given is written with one measured from
+    /// its mesh: a 100 mm steel-free cube of the scene's density weighs
+    /// its volume times that, centred where it is, with the textbook
+    /// inertia.
+    #[test]
+    fn a_link_with_no_inertial_is_given_its_measured_one() {
+        let mut doc = kreate_scene::Document::new();
+        let mut cube = kreate_mesh::primitives::cube(1.0);
+        for p in cube.positions_mut() {
+            *p = *p * 0.1 + kreate_math::Vec3::new(0.0, 0.0, 0.05);
+        }
+        doc.add_mesh_object("Block", cube);
+        let rho = doc.design.density;
+        let written = write_urdf(&doc, "block");
+        let mass = 0.001 * rho;
+        let i = mass * (0.01 + 0.01) / 12.0;
+        assert!(
+            written
+                .urdf
+                .contains(&format!("<mass value=\"{}\"/>", tidy(mass))),
+            "{}",
+            written.urdf
+        );
+        assert!(written
+            .urdf
+            .contains("<origin xyz=\"0 0 0.05\" rpy=\"0 0 0\"/>"));
+        let ixx: f64 = written.urdf.split("ixx=\"").nth(1).unwrap()[..20]
+            .split('"')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((ixx - i).abs() < i * 1e-6, "{ixx} against {i}");
     }
 
     #[test]

@@ -656,6 +656,7 @@ physical-volume = 부피
 physical-area = 겉넓이
 physical-mass = 질량
 physical-centroid = 무게중심
+physical-inertia = 관성 모멘트 (Ixx, Iyy, Izz)
 physical-open = 표면이 닫혀 있지 않아 부피와 질량이 의미가 없습니다. 먼저 닫아 주세요(메시 검사로 위치 확인).
 render-saved = 저장됨: { $path }
 render-failed = 저장 안 됨: { $why }

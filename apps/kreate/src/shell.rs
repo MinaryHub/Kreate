@@ -6895,6 +6895,16 @@ fn draw_physical_panel(
                         kreate_reflect::format_length(c.z)
                     ),
                 ),
+                (
+                    "physical-inertia",
+                    // About the centroid, along the world's axes.
+                    format!(
+                        "{:.3e}, {:.3e}, {:.3e} kg·m²",
+                        mass.inertia[0] * density,
+                        mass.inertia[1] * density,
+                        mass.inertia[2] * density
+                    ),
+                ),
             ];
             if let Some(made_of) = &made_of {
                 ui.label(state.catalog.get("physical-material"));

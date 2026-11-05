@@ -19,6 +19,10 @@ use; `scripts/release.sh` turns that section into the next release.
   has, so they pose, mimic, rig and export the same way. Check Joint
   Motion takes a joint through its travel and says where its parts run
   into the others.
+- The Physical Properties panel shows a part's moments of inertia about
+  its centre of mass, by its material's density; a URDF export gives each
+  link with none of its own the mass, centre and inertia measured from its
+  meshes, so a simulator has bodies to move.
 
 ### Added
 
