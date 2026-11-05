@@ -82,6 +82,20 @@ pub enum Shape {
     /// A solid through the sketch's largest region and each of these
     /// sketches', in order through space. Fusion's Loft.
     Loft { sections: Vec<Uid> },
+    /// The sketch's picked region (its largest when none is) as a plate
+    /// `thickness` thick, with a flange bent up from each straight edge
+    /// nearest one of `edges` (points in the sketch's plane) — or from every
+    /// edge that can take one, when there are none. Laid out flat, the
+    /// blank. See `kreate_mesh::mech::plate`.
+    SheetMetal {
+        thickness: f64,
+        radius: f64,
+        k_factor: f64,
+        angle: f64,
+        height: f64,
+        edges: Vec<[f64; 2]>,
+        flat: bool,
+    },
 }
 
 /// The directions a shell's open side may face, as `Shape::Shell::open`
@@ -128,6 +142,7 @@ impl Feature {
             Shape::Mirror { .. } => "mirror",
             Shape::Sweep { .. } => "sweep",
             Shape::Loft { .. } => "loft",
+            Shape::SheetMetal { .. } => "sheet_metal",
         }
     }
 
@@ -151,6 +166,7 @@ impl Feature {
                 | Shape::Revolve { .. }
                 | Shape::Sweep { .. }
                 | Shape::Loft { .. }
+                | Shape::SheetMetal { .. }
         )
     }
 }
@@ -438,6 +454,12 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
         }),
         _ => None,
     };
+    // A plate is made in the sketch's own plane, as an extrude is.
+    if matches!(feature.shape, Shape::SheetMetal { .. }) {
+        return sheet_plate(doc, feature)
+            .map(|p| kreate_mesh::mech::plate(&p))
+            .unwrap_or_else(MeshData::empty);
+    }
     if let Some(world) = world {
         let Some(mesh) = world else {
             return MeshData::empty();
@@ -473,7 +495,8 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
             | Shape::Circular { .. }
             | Shape::Mirror { .. }
             | Shape::Sweep { .. }
-            | Shape::Loft { .. } => continue,
+            | Shape::Loft { .. }
+            | Shape::SheetMetal { .. } => continue,
         };
         out = if out.num_faces() == 0 {
             piece
@@ -482,6 +505,73 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
         };
     }
     out
+}
+
+/// A sheet metal feature's plate, in its sketch's plane: the picked region
+/// (or the largest), its outline made ready to bend, and a flange on each
+/// edge nearest one of the feature's edge points — or on every edge that
+/// can take one. `None` for another kind of feature or a sketch with no
+/// region.
+pub fn sheet_plate(doc: &Document, feature: &Feature) -> Option<kreate_mesh::mech::Plate> {
+    let Shape::SheetMetal {
+        thickness,
+        radius,
+        k_factor,
+        angle,
+        height,
+        edges,
+        flat,
+    } = &feature.shape
+    else {
+        return None;
+    };
+    let sketch = doc.object_by_uid(feature.sketch)?;
+    let (outline, holes) = shapes::picked_regions(doc, sketch, &feature.seeds)
+        .into_iter()
+        .next()
+        .or_else(|| shapes::largest_region(doc, sketch))?;
+    let outline = kreate_mesh::mech::plate_outline(&outline);
+    let t = *thickness as f32;
+    let chosen: Vec<usize> = if edges.is_empty() {
+        // Every edge long enough to bend: four times the bend's reach.
+        kreate_mesh::mech::flangeable_edges(&outline, 4.0 * (*radius as f32 + t))
+    } else {
+        let n = outline.len();
+        let mut out: Vec<usize> = edges
+            .iter()
+            .filter_map(|e| {
+                let q = kreate_math::Vec2::new(e[0] as f32, e[1] as f32);
+                (0..n).min_by(|&i, &j| {
+                    let d = |k: usize| {
+                        let (a, b) = (outline[k], outline[(k + 1) % n]);
+                        let ab = b - a;
+                        let s = ((q - a).dot(ab) / ab.length_squared().max(1e-20)).clamp(0.0, 1.0);
+                        (a + ab * s).distance(q)
+                    };
+                    d(i).total_cmp(&d(j))
+                })
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    };
+    Some(kreate_mesh::mech::Plate {
+        outline,
+        holes,
+        thickness: t,
+        radius: *radius as f32,
+        k_factor: *k_factor as f32,
+        flanges: chosen
+            .into_iter()
+            .map(|edge| kreate_mesh::mech::Flange {
+                edge,
+                angle: *angle as f32,
+                height: *height as f32,
+            })
+            .collect(),
+        flat: *flat,
+    })
 }
 
 /// `piece` joined to or cut from `out`, as `op` says; the first piece
@@ -634,7 +724,8 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
             Shape::Extrude { .. }
             | Shape::Revolve { .. }
             | Shape::Sweep { .. }
-            | Shape::Loft { .. } => {}
+            | Shape::Loft { .. }
+            | Shape::SheetMetal { .. } => {}
         }
         let mut piece = solid(doc, f);
         if piece.num_faces() == 0 {

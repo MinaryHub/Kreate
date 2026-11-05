@@ -4250,6 +4250,10 @@ impl App {
             self.export_active_drawing();
             return;
         }
+        if view == 4 {
+            self.export_flat_pattern();
+            return;
+        }
         let view = kreate_io::drawing::View::ALL[(view as usize).min(2)];
         let name = match view {
             kreate_io::drawing::View::Top => "top",
@@ -4387,6 +4391,70 @@ impl App {
                 ));
             }
             Err(e) => self.status(&format!("cannot write the drawing: {e}")),
+        }
+    }
+
+    /// File > Export Drawing > Sheet Metal Flat Pattern: the active sheet
+    /// metal body's blank — its cut outline, its bend lines and their notes
+    /// — as a DXF to cut it by, or a PDF to print, in the scene's unit.
+    fn export_flat_pattern(&mut self) {
+        let plate = self
+            .doc
+            .selection
+            .active
+            .and_then(|id| self.doc.object(id))
+            .and_then(|o| {
+                o.features
+                    .iter()
+                    .find_map(|f| kreate_scene::feature::sheet_plate(&self.doc, f))
+                    .map(|p| (o.name.clone(), p))
+            });
+        let Some((name, plate)) = plate else {
+            self.status(&self.ui.catalog.get("drawing-flat-none"));
+            return;
+        };
+        let unit = self.doc.design.length_unit;
+        let drawing = kreate_io::sheet::flat_pattern(&plate, unit.metres(), unit.symbol());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("DXF", &["dxf"])
+            .add_filter("PDF", &["pdf"])
+            .set_title("Flat Pattern")
+            .set_file_name(format!("{name} flat.dxf"))
+            .save_file()
+        else {
+            return;
+        };
+        let pdf = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+        let bytes = if pdf {
+            // A page around the blank, a centimetre of margin, the blank
+            // moved onto it.
+            let mut d = drawing;
+            let (lo, hi) = d.extents().unwrap_or_default();
+            let margin = kreate_math::DVec2::splat(0.01);
+            let shift = margin - lo;
+            for e in &mut d.entities {
+                match &mut e.kind {
+                    kreate_scene::drawing::EntityKind::Curve(kreate_geom2d::Curve2D::Line {
+                        a,
+                        b,
+                    }) => {
+                        *a += shift;
+                        *b += shift;
+                    }
+                    kreate_scene::drawing::EntityKind::Text(t) => t.at += shift,
+                    _ => {}
+                }
+            }
+            let size = hi - lo + margin * 2.0;
+            kreate_io::pdf::write(&d, size.x, size.y)
+        } else {
+            kreate_io::dxf_write::write(&drawing, unit.metres()).into_bytes()
+        };
+        match std::fs::write(&path, bytes) {
+            Ok(()) => self.status(&format!("flat pattern written: {}", path.display())),
+            Err(e) => self.status(&format!("cannot write the flat pattern: {e}")),
         }
     }
 

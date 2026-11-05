@@ -752,6 +752,65 @@ impl Pen<'_> {
     }
 }
 
+/// A sheet metal plate's blank as a drawing to cut it by: the outline and
+/// the holes on a CUT layer, each bend's line on a BEND layer, dashed, and
+/// beside it which way, how far and round what radius it is bent — in the
+/// plate's own plane, a metre a metre, its sizes written in `unit`.
+pub fn flat_pattern(p: &kreate_mesh::mech::Plate, metres_per_unit: f64, unit: &str) -> Drawing {
+    let (cut, bends) = kreate_mesh::mech::plate_flat_pattern(p);
+    let mut d = Drawing::new();
+    let layer = |d: &mut Drawing, name: &str, colour: u8, linetype: &str| {
+        let id = d.add_layer(name);
+        if let Some(l) = d.layers.iter_mut().find(|l| l.id == id) {
+            l.color = ColorRef::Index(colour);
+            l.linetype = linetype.into();
+        }
+        id
+    };
+    let cut_layer = layer(&mut d, "CUT", 7, "CONTINUOUS");
+    let bend_layer = layer(&mut d, "BEND", 1, "DASHED");
+    let note_layer = layer(&mut d, "NOTE", 3, "CONTINUOUS");
+    let v = |q: kreate_math::Vec2| DVec2::new(f64::from(q.x), f64::from(q.y));
+    d.current_layer = cut_layer;
+    for [a, b] in cut {
+        d.add_curve(Curve2D::Line { a: v(a), b: v(b) });
+    }
+    let size = |m: f64| {
+        let s = format!("{:.2}", m / metres_per_unit);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let height = (f64::from(p.thickness) * 2.0).max(0.002);
+    for b in bends {
+        let (a, e) = (v(b.a), v(b.b));
+        d.current_layer = bend_layer;
+        d.add_curve(Curve2D::Line { a, b: e });
+        let along = (e - a).normalize_or(DVec2::X);
+        let turn = along.y.atan2(along.x);
+        // Readable from the bottom or the right.
+        let turn = if turn.abs() > std::f64::consts::FRAC_PI_2 + 1e-9 {
+            turn + std::f64::consts::PI
+        } else {
+            turn
+        };
+        d.current_layer = note_layer;
+        d.add(EntityKind::Text(Text {
+            at: (a + e) * 0.5 + along.perp() * height * 0.6,
+            height,
+            rotation: turn,
+            content: format!(
+                "UP {:.0}° R{} {}",
+                f64::from(b.angle).to_degrees(),
+                size(f64::from(b.radius)),
+                unit
+            ),
+            align: TextAlign::Center,
+            font: String::new(),
+        }));
+    }
+    d.current_layer = LayerId(0);
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,5 +920,51 @@ mod tests {
                 assert!(apart, "the isometric view overlaps another");
             }
         }
+    }
+    /// A square plate with two flanges: its blank has the plate's two bare
+    /// edges, each flange unrolled, two bend lines and a note on each.
+    #[test]
+    fn a_flat_pattern_has_its_cut_its_bends_and_their_notes() {
+        use kreate_math::Vec2;
+        let p = kreate_mesh::mech::Plate {
+            outline: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(0.1, 0.0),
+                Vec2::new(0.1, 0.1),
+                Vec2::new(0.0, 0.1),
+            ],
+            holes: Vec::new(),
+            thickness: 0.002,
+            radius: 0.002,
+            k_factor: 0.5,
+            flanges: [0, 2]
+                .map(|edge| kreate_mesh::mech::Flange {
+                    edge,
+                    angle: std::f32::consts::FRAC_PI_2,
+                    height: 0.02,
+                })
+                .to_vec(),
+            flat: true,
+        };
+        let d = flat_pattern(&p, 1e-3, "mm");
+        let on = |name: &str| {
+            let id = d.layers.iter().find(|l| l.name == name).unwrap().id;
+            d.entities.iter().filter(move |e| e.layer == id)
+        };
+        // Two bare edges and three lines for each flange.
+        assert_eq!(on("CUT").count(), 2 + 3 + 3);
+        assert_eq!(on("BEND").count(), 2);
+        let notes: Vec<String> = on("NOTE")
+            .filter_map(|e| match &e.kind {
+                EntityKind::Text(t) => Some(t.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes, ["UP 90° R2 mm", "UP 90° R2 mm"]);
+        // The blank is the plate and each flange's allowance and height
+        // long: 100 + 2 × (π/2 × 3 + 20) mm.
+        let (lo, hi) = d.extents().unwrap();
+        let want = 0.1 + 2.0 * (std::f64::consts::FRAC_PI_2 * 0.003 + 0.02);
+        assert!(((hi.y - lo.y) - want).abs() < 1e-6, "{}", hi.y - lo.y);
     }
 }
