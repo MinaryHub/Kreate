@@ -26,3 +26,7 @@ thiserror.workspace = true
 [dev-dependencies]
 # A grouped graph is checked to compile to the shader it was.
 kreate-shader.workspace = true
+
+[features]
+# Feature bodies built exactly by OpenCASCADE: see kreate-occt.
+occt = ["kreate-scene/occt"]

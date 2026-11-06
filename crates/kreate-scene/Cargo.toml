@@ -11,7 +11,12 @@ repository.workspace = true
 kreate-math.workspace = true
 kreate-mesh.workspace = true
 kreate-geom2d.workspace = true
+kreate-occt.workspace = true
 rayon.workspace = true
 kreate-reflect.workspace = true
 glam.workspace = true
 thiserror.workspace = true
+
+[features]
+# Feature bodies built exactly by OpenCASCADE: see kreate-occt.
+occt = ["kreate-occt/occt"]

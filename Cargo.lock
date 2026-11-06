@@ -1575,6 +1575,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kreate-occt"
+version = "0.6.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "kreate-ops"
 version = "0.6.0"
 dependencies = [
@@ -1637,6 +1644,7 @@ dependencies = [
  "kreate-geom2d",
  "kreate-math",
  "kreate-mesh",
+ "kreate-occt",
  "kreate-reflect",
  "rayon",
  "thiserror 2.0.20",
