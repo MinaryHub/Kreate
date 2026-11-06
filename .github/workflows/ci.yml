@@ -14,6 +14,9 @@ env:
 jobs:
   check:
     name: fmt / clippy / test
+    # Windows takes about an hour and a half; a test that hangs fails here
+    # rather than after GitHub's six hours.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +92,18 @@ jobs:
         shell: bash
         run: |
           cargo test --workspace --exclude kreate --exclude kreate-render --no-fail-fast
+          # DirectX's shader compiler where the tests find it — cargo puts
+          # target/debug on their PATH — as the release puts it beside the
+          # program. Without it wgpu falls back on the old one, which takes
+          # ten minutes over the path tracer on a real GPU and did not finish
+          # in five hours on WARP.
+          sdk=$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin/"10.*/x64 2>/dev/null | sort -V | tail -1)
+          if [ -f "$sdk/dxcompiler.dll" ] && [ -f "$sdk/dxil.dll" ]; then
+            mkdir -p target/debug
+            cp "$sdk/dxcompiler.dll" "$sdk/dxil.dll" target/debug/
+          else
+            echo "::warning::no dxcompiler.dll in the Windows SDK"
+          fi
           cargo test -p kreate --no-fail-fast -- --test-threads=1
 
       # Arena handles carry a generation counter only when debug_assertions is

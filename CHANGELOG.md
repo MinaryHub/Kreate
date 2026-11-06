@@ -10,52 +10,7 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
-### Added
-
-- Sheet metal from a sketch (Mechanical ▸ Sheet Metal ▸ From Sketch): any
-  outline, holes and all, made a plate with flanges bent up from its
-  straight edges (every one that can take one, or those named), as a body
-  that follows the sketch; File ▸ Export Drawing ▸ Sheet Metal Flat
-  Pattern writes its blank as DXF or PDF, with the bend lines and each
-  bend's direction, angle and radius.
-- Assembly joints (Mechanical ▸ Assembly Joints): a hinge, a slider or a
-  fixed joint at the 3D cursor joins the active part to another; the part
-  then turns or slides within its limits from the Robot panel's slider,
-  carrying what is joined to it. They are the same joints a URDF robot
-  has, so they pose, mimic, rig and export the same way. Check Joint
-  Motion takes a joint through its travel and says where its parts run
-  into the others.
-- The Physical Properties panel shows a part's moments of inertia about
-  its centre of mass, by its material's density; a URDF export gives each
-  link with none of its own the mass, centre and inertia measured from its
-  meshes, so a simulator has bodies to move.
-
-### Added
-
-- A 2D drawing — a sketch or a drafting drawing — can be exported as DXF
-  (File ▸ Export Drawing ▸ Active 2D Drawing, File ▸ Export, or the
-  connector's `export_file` with `.dxf`): R12, which every drafting program
-  and cutting machine reads, with its layers, colours and linetypes, arcs
-  as arcs, ellipses and splines as fine polylines, and dimensions drawn out
-  with their tolerances.
-- Drawing sheets (File ▸ Export Drawing ▸ Drawing Sheet…): the shown parts
-  on A4–A0 paper at a standard scale, in third-angle (KS B 0001) or
-  first-angle projection, with an isometric view, the overall sizes, a
-  title block and a parts list, written as a vector PDF (Korean text
-  included) or a DXF. Made from the parts as they are each time.
-- Sweep and Loft are features (Mechanical ▸ Shapes): the body keeps them
-  on its timeline and follows when the profile, the path or a section is
-  edited, and they can join or cut an existing body. Sweep with no profile
-  sketch still makes a round pipe as a plain part.
-
-### Fixed
-
-- Editing a pattern feature showed its count divided by the length unit
-  (3 copies read as 3000 in millimetres).
-- A file saved by a newer Kreate keeps the features this one does not know
-  through an open and a save; opening it says how many were kept unbuilt.
-
-## [0.6.0] - 2026-11-05
+## [0.6.0] - 2026-11-06
 
 ### Added
 
@@ -81,6 +36,40 @@ use; `scripts/release.sh` turns that section into the next release.
   it — keeping fine texture and soft shading that the view's own filter
   blurs. Without it a render is filtered as before.
 
+- Sheet metal from a sketch (Mechanical ▸ Sheet Metal ▸ From Sketch): any
+  outline, holes and all, made a plate with flanges bent up from its
+  straight edges (every one that can take one, or those named), as a body
+  that follows the sketch; File ▸ Export Drawing ▸ Sheet Metal Flat
+  Pattern writes its blank as DXF or PDF, with the bend lines and each
+  bend's direction, angle and radius.
+- Assembly joints (Mechanical ▸ Assembly Joints): a hinge, a slider or a
+  fixed joint at the 3D cursor joins the active part to another; the part
+  then turns or slides within its limits from the Robot panel's slider,
+  carrying what is joined to it. They are the same joints a URDF robot
+  has, so they pose, mimic, rig and export the same way. Check Joint
+  Motion takes a joint through its travel and says where its parts run
+  into the others.
+- The Physical Properties panel shows a part's moments of inertia about
+  its centre of mass, by its material's density; a URDF export gives each
+  link with none of its own the mass, centre and inertia measured from its
+  meshes, so a simulator has bodies to move.
+
+- A 2D drawing — a sketch or a drafting drawing — can be exported as DXF
+  (File ▸ Export Drawing ▸ Active 2D Drawing, File ▸ Export, or the
+  connector's `export_file` with `.dxf`): R12, which every drafting program
+  and cutting machine reads, with its layers, colours and linetypes, arcs
+  as arcs, ellipses and splines as fine polylines, and dimensions drawn out
+  with their tolerances.
+- Drawing sheets (File ▸ Export Drawing ▸ Drawing Sheet…): the shown parts
+  on A4–A0 paper at a standard scale, in third-angle (KS B 0001) or
+  first-angle projection, with an isometric view, the overall sizes, a
+  title block and a parts list, written as a vector PDF (Korean text
+  included) or a DXF. Made from the parts as they are each time.
+- Sweep and Loft are features (Mechanical ▸ Shapes): the body keeps them
+  on its timeline and follows when the profile, the path or a section is
+  edited, and they can join or cut an existing body. Sweep with no profile
+  sketch still makes a round pipe as a plain part.
+
 ### Changed
 
 - The path tracer uses the GPU's own ray tracing where it has it (Vulkan
@@ -94,6 +83,13 @@ use; `scripts/release.sh` turns that section into the next release.
 - Among several lamps, the path tracer aims at each by how much it lights
   the point, so a scene with many dim lamps and one bright one is far less
   grainy.
+
+### Fixed
+
+- Editing a pattern feature showed its count divided by the length unit
+  (3 copies read as 3000 in millimetres).
+- A file saved by a newer Kreate keeps the features this one does not know
+  through an open and a save; opening it says how many were kept unbuilt.
 
 ## [0.5.3] - 2026-10-28
 
