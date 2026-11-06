@@ -17,6 +17,7 @@ use kreate_reflect::Uid;
 
 use crate::Document;
 
+pub mod exact;
 pub mod shapes;
 
 /// What a feature does to the body so far.
@@ -659,6 +660,11 @@ fn faces_facing(mesh: &MeshData, dir: kreate_math::DVec3) -> Vec<u32> {
 /// A body: its features run in order, in its own space. The first one
 /// starts it whatever it says; after that, each joins or cuts.
 pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshData {
+    // Exactly, by the kernel, where it is there and can; otherwise as
+    // meshes, as below.
+    if let Some(exact) = exact::body_mesh(doc, features, body_world) {
+        return exact;
+    }
     let to_body = body_world.inverse();
     let mut out = MeshData::empty();
     // The last solid a feature made, in the body's space, with what it did:

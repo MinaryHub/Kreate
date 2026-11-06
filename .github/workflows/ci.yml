@@ -122,6 +122,28 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo check -p kreate-mesh -p kreate-math -p kreate-geom2d --target wasm32-unknown-unknown
 
+  # Feature bodies built exactly by OpenCASCADE (design/brep-kernel.md):
+  # off in the release builds until every platform has the kernel, checked
+  # here on Linux against the distribution's OCCT so it does not rot.
+  occt:
+    name: exact kernel (OCCT)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: OpenCASCADE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libocct-modeling-algorithms-dev libocct-modeling-data-dev libocct-foundation-dev libocct-data-exchange-dev
+      - name: Clippy
+        run: cargo clippy -p kreate-occt -p kreate-scene -p kreate-ops --features kreate-ops/occt,kreate-occt/occt --all-targets -- -D warnings
+      - name: Test
+        run: cargo test -p kreate-occt -p kreate-scene -p kreate-ops --features kreate-ops/occt,kreate-occt/occt
+
   deny:
     name: licenses / advisories
     runs-on: ubuntu-latest

@@ -1,0 +1,18 @@
+[package]
+name = "kreate-occt"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Exact (B-rep) solids through OpenCASCADE, linked dynamically when the `occt` feature is on."
+
+[features]
+# Off by default: the crate then builds with no C++ and every operation
+# answers that there is no kernel, so the rest of Kreate falls back to its
+# meshes. See design/brep-kernel.md.
+occt = ["dep:cc"]
+
+[build-dependencies]
+cc = { version = "1", optional = true }

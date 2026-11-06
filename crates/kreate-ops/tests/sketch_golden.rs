@@ -181,7 +181,33 @@ fn the_sketches_of_format_one_four_still_read_as_they_did() {
         .expect("reads")
         .document;
     let want = std::fs::read_to_string(&expected).expect("the committed expectation");
-    assert_eq!(reading(&doc), want);
+    let got = reading(&doc);
+    if cfg!(feature = "occt") {
+        // Built exactly, a body's volume is the true one, where the meshes
+        // the expectation was written from cut its curves into chords: the
+        // same within what that took, everything else the same exactly.
+        for (g, w) in got.lines().zip(want.lines()) {
+            let volume = |line: &str| -> Option<f64> {
+                let rest = line.split(" volume ").nth(1)?;
+                rest.split_whitespace().next()?.parse().ok()
+            };
+            match (volume(g), volume(w)) {
+                (Some(a), Some(b)) => {
+                    assert!((a - b).abs() <= b.abs() * 3e-3, "{g}\nagainst\n{w}");
+                    let strip = |l: &str| {
+                        l.split(" volume ").next().unwrap().to_string()
+                            + " "
+                            + l.split(" bounds ").nth(1).unwrap_or("")
+                    };
+                    assert_eq!(strip(g), strip(w));
+                }
+                _ => assert_eq!(g, w),
+            }
+        }
+        assert_eq!(got.lines().count(), want.lines().count());
+    } else {
+        assert_eq!(got, want);
+    }
 }
 
 /// The migration's promise, on the committed file: each sketch becomes a

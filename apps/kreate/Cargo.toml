@@ -59,3 +59,7 @@ zip.workspace = true
 winresource = "0.1"
 
 [dev-dependencies]
+
+[features]
+# Feature bodies built exactly by OpenCASCADE: see kreate-occt.
+occt = ["kreate-scene/occt"]
