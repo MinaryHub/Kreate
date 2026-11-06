@@ -1,0 +1,9 @@
+[package]
+name = "spike-truck"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+truck-modeling = "0.6"
+truck-shapeops = "0.4"
+truck-meshalgo = "0.4"
