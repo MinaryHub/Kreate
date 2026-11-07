@@ -10,6 +10,13 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Wireframe overlay turns the wireframe on and off in the material
+  preview, the view Kreate works in; it had done so only in a shading
+  mode the program no longer offers, so the switch did nothing. The
+  preview starts with it off, as it always looked.
+
 ## [0.7.0] - 2026-11-06
 
 ### Added
