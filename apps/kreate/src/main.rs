@@ -14990,8 +14990,10 @@ impl ApplicationHandler for App {
             // A moving view smoothed as a still one is: see
             // `Viewport::temporal_aa`.
             viewport.temporal_aa = true;
-            // The preview: the materials under a light of their own.
+            // The preview: the materials under a light of their own, without
+            // the wireframe over them until the overlay asks for it.
             viewport.shading = ShadingMode::Material;
+            viewport.show_wireframe = false;
             // Pay for shader compilation now, while the window is still coming
             // up, rather than on the frame where the user first presses Tab or
             // moves the mouse over the scene. Creating a pipeline and compiling

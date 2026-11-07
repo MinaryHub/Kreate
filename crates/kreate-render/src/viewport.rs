@@ -73,9 +73,10 @@ pub fn wires_shown(shading: ShadingMode, overlay: bool) -> (bool, bool) {
     match shading {
         ShadingMode::Rendered => (false, false),
         ShadingMode::Wireframe => (true, true),
-        // The material preview is for judging materials, and a mesh's wires
-        // drawn over every surface were most of what it showed.
-        ShadingMode::Material => (false, true),
+        // The overlay's toggle decides in every lit-by-the-viewport mode, the
+        // material preview too: it is the view the application works in.
+        // The application starts it off there, since a mesh's wires drawn
+        // over every surface were most of what the preview showed.
         _ => (overlay, true),
     }
 }
@@ -6023,8 +6024,9 @@ mod tests {
         assert_eq!(wires_shown(ShadingMode::Studio, true), (true, true));
         assert_eq!(wires_shown(ShadingMode::Studio, false), (false, true));
         assert_eq!(wires_shown(ShadingMode::Wireframe, false), (true, true));
-        // The material preview shows materials, not wires.
-        assert_eq!(wires_shown(ShadingMode::Material, true), (false, true));
+        // The material preview follows the overlay's toggle.
+        assert_eq!(wires_shown(ShadingMode::Material, true), (true, true));
+        assert_eq!(wires_shown(ShadingMode::Material, false), (false, true));
     }
 
     use super::*;
