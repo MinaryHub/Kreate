@@ -46,10 +46,12 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftUnconstrain>();
     edit_tools::register(registry);
     project::register(registry);
+    shapes::register(registry);
 }
 
 pub mod edit_tools;
 pub mod project;
+pub mod shapes;
 
 /// The active object, when it is a drawing.
 pub fn active_drawing(doc: &Document) -> Option<ObjectId> {
@@ -725,7 +727,8 @@ pub struct DraftConstrainParams {
         "symmetric",
         "midpoint",
         "fixed",
-        "smooth"
+        "smooth",
+        "collinear"
     ))]
     pub kind: u32,
     /// What it holds, as `id` or `id.part`, in the order the kind names
@@ -801,6 +804,23 @@ impl Operator for DraftConstrain {
                 10 => {
                     need(2)?;
                     Constraint::Midpoint(refs[0], id(1))
+                }
+                // Two lines on one line: parallel, and one's start on the
+                // other carried on.
+                13 => {
+                    need(2)?;
+                    let before = freedom(d);
+                    d.constraints.push(Constraint::Parallel(id(0), id(1)));
+                    d.constraints.push(Constraint::PointOn(
+                        EntityRef::at(id(0), Part::Start),
+                        id(1),
+                    ));
+                    if adds_nothing(d, before) {
+                        return Err(OpError::Failed(
+                            "that is already held: it would over-constrain the drawing".into(),
+                        ));
+                    }
+                    return Ok(());
                 }
                 _ => {
                     need(1)?;

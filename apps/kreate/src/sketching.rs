@@ -62,6 +62,25 @@ pub enum Tool {
     /// Click a part: where the drawing's plane cuts it comes in, held, and
     /// follows it.
     Intersect,
+    /// A rectangle at any angle: one side's ends, then how far across.
+    Rectangle3,
+    /// A regular polygon round a circle: its centre, then an edge's middle.
+    PolygonOuter,
+    /// A regular polygon by one edge: its two ends.
+    PolygonEdge,
+    /// An ellipse: its centre, an axis's end, then how far the other
+    /// reaches.
+    Ellipse,
+    /// A slot round an arc: the arc's centre, the slot's start, its end,
+    /// then how wide.
+    SlotArc,
+    /// A circle tangent to two lines: click them, then the corner it goes
+    /// in (its radius typed, or as far as the click is from the first).
+    TangentCircle2,
+    /// A circle tangent to three lines: click them.
+    TangentCircle3,
+    /// A spline by its control points, as the spline tool takes points.
+    ControlSpline,
     /// A constraint, by its tag in `kreate_scene::sketch::KINDS` — or
     /// `concentric`, which is a coincidence of two centres.
     Constrain(&'static str),
@@ -100,6 +119,15 @@ impl Tool {
             "transform" => Tool::Transform,
             "project" => Tool::Project,
             "intersect" => Tool::Intersect,
+            "rectangle_3pt" => Tool::Rectangle3,
+            "polygon_outer" => Tool::PolygonOuter,
+            "polygon_edge" => Tool::PolygonEdge,
+            "ellipse" => Tool::Ellipse,
+            "slot_arc" => Tool::SlotArc,
+            "circle_tangent2" => Tool::TangentCircle2,
+            "circle_tangent3" => Tool::TangentCircle3,
+            "spline_cv" => Tool::ControlSpline,
+            "collinear" => Tool::Constrain("collinear"),
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
             "revolve" => Tool::Revolve,
@@ -142,6 +170,14 @@ impl Tool {
             Tool::Transform => "transform",
             Tool::Project => "project",
             Tool::Intersect => "intersect",
+            Tool::Rectangle3 => "rectangle_3pt",
+            Tool::PolygonOuter => "polygon_outer",
+            Tool::PolygonEdge => "polygon_edge",
+            Tool::Ellipse => "ellipse",
+            Tool::SlotArc => "slot_arc",
+            Tool::TangentCircle2 => "circle_tangent2",
+            Tool::TangentCircle3 => "circle_tangent3",
+            Tool::ControlSpline => "spline_cv",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
             Tool::Revolve => "revolve",
@@ -167,6 +203,12 @@ impl Tool {
                 | Tool::Spline
                 | Tool::Polygon
                 | Tool::Slot
+                | Tool::Rectangle3
+                | Tool::PolygonOuter
+                | Tool::PolygonEdge
+                | Tool::Ellipse
+                | Tool::SlotArc
+                | Tool::ControlSpline
         )
     }
 }
@@ -833,15 +875,17 @@ pub fn drawing_constraint_for(
         ("concentric", [a @ Round { .. }, b @ Round { .. }]) => {
             ("concentric", vec![whole(*a)?, whole(*b)?])
         }
-        ("parallel" | "perpendicular", [a @ Line(_), b @ Line(_)]) => {
+        ("parallel" | "perpendicular" | "collinear", [a @ Line(_), b @ Line(_)]) => {
             (kind, vec![whole(*a)?, whole(*b)?])
         }
         ("equal", [a, b]) if curve(a) && curve(b) => ("equal", vec![whole(*a)?, whole(*b)?]),
         ("tangent", [a, b]) if curve(a) && curve(b) => ("tangent", vec![whole(*a)?, whole(*b)?]),
         (_, []) => return Ok(None),
-        ("coincident" | "concentric" | "parallel" | "perpendicular" | "equal" | "tangent", [_]) => {
-            return Ok(None)
-        }
+        (
+            "coincident" | "concentric" | "parallel" | "perpendicular" | "collinear" | "equal"
+            | "tangent",
+            [_],
+        ) => return Ok(None),
         ("horizontal" | "vertical", [Point(_)]) => return Ok(None),
         _ => return Err(CannotConstrain),
     }))
@@ -1799,8 +1843,24 @@ fn overlay(
         view.axis = ui.axis;
     }
     let prompt_key = match (ui.tool, ui.clicks.len()) {
-        (Tool::Spline, 0) => "sketch-prompt-spline-start",
-        (Tool::Spline, _) => "sketch-prompt-spline-next",
+        (Tool::Spline | Tool::ControlSpline, 0) => "sketch-prompt-spline-start",
+        (Tool::Spline | Tool::ControlSpline, _) => "sketch-prompt-spline-next",
+        (Tool::Rectangle3, 0) => "sketch-prompt-corner",
+        (Tool::Rectangle3, 1) => "sketch-prompt-rect3-side",
+        (Tool::Rectangle3, _) => "sketch-prompt-rect3-across",
+        (Tool::PolygonOuter, 0) => "sketch-prompt-centre",
+        (Tool::PolygonOuter, _) => "sketch-prompt-polygon-edge-mid",
+        (Tool::PolygonEdge, 0) => "sketch-prompt-corner",
+        (Tool::PolygonEdge, _) => "sketch-prompt-polygon-edge-end",
+        (Tool::Ellipse, 0) => "sketch-prompt-centre",
+        (Tool::Ellipse, 1) => "sketch-prompt-ellipse-axis",
+        (Tool::Ellipse, _) => "sketch-prompt-ellipse-other",
+        (Tool::SlotArc, 0) => "sketch-prompt-centre",
+        (Tool::SlotArc, 1) => "sketch-prompt-slot-start",
+        (Tool::SlotArc, 2) => "sketch-prompt-slot-end",
+        (Tool::SlotArc, _) => "sketch-prompt-slot-width",
+        (Tool::TangentCircle2, _) => "sketch-prompt-tangent2",
+        (Tool::TangentCircle3, _) => "sketch-prompt-tangent3",
         (Tool::Line, 0) => "sketch-prompt-line-start",
         (Tool::Line, _) => "sketch-prompt-line-next",
         (Tool::Rectangle, 0) => "sketch-prompt-corner",

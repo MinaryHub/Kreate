@@ -518,7 +518,7 @@ const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 /// `draft.constrain`'s kinds and `draft.dimension`'s, in the order of their
 /// enums: what a tool's tag is sent as.
-const DRAFT_CONSTRAINTS: [&str; 13] = [
+const DRAFT_CONSTRAINTS: [&str; 14] = [
     "coincident",
     "horizontal",
     "vertical",
@@ -532,6 +532,7 @@ const DRAFT_CONSTRAINTS: [&str; 13] = [
     "midpoint",
     "fixed",
     "smooth",
+    "collinear",
 ];
 const DRAFT_DIMENSIONS: [&str; 9] = [
     "horizontal",
@@ -5511,7 +5512,19 @@ impl App {
     /// A spline tool's points so far, run as one stroke.
     fn commit_sketch_spline(&mut self, closed: bool) {
         let clicks = std::mem::take(&mut self.sketching.clicks);
-        if clicks.len() >= 2 && self.active_drawing().is_some() {
+        if clicks.len() >= 2
+            && self.active_drawing().is_some()
+            && self.sketching.tool == kreate::sketching::Tool::ControlSpline
+        {
+            let mut pts: Vec<f64> = clicks.iter().flat_map(|(p, _)| [p.x, p.y]).collect();
+            if closed {
+                pts.extend([clicks[0].0.x, clicks[0].0.y]);
+            }
+            self.run_op_with(
+                "draft.control_spline",
+                &[("points", PropertyValue::Floats(pts))],
+            );
+        } else if clicks.len() >= 2 && self.active_drawing().is_some() {
             self.run_op_with(
                 "draft.spline",
                 &[
@@ -5655,6 +5668,7 @@ impl App {
                         tool,
                         Tool::Line
                             | Tool::Spline
+                            | Tool::ControlSpline
                             | Tool::Select
                             | Tool::Pattern
                             | Tool::Extrude
@@ -5705,7 +5719,7 @@ impl App {
                             self.commit_sketch_line(true);
                         }
                     }
-                    Tool::Spline => {
+                    Tool::Spline | Tool::ControlSpline => {
                         if self.sketching.closing {
                             self.commit_sketch_spline(true);
                             return true;
@@ -5883,7 +5897,14 @@ impl App {
                     | Tool::Chamfer
                     | Tool::Transform
                     | Tool::Project
-                    | Tool::Intersect => {
+                    | Tool::Intersect
+                    | Tool::Rectangle3
+                    | Tool::PolygonOuter
+                    | Tool::PolygonEdge
+                    | Tool::Ellipse
+                    | Tool::SlotArc
+                    | Tool::TangentCircle2
+                    | Tool::TangentCircle3 => {
                         self.status(&self.ui.catalog.get("sketch-drawing-only"));
                     }
                     // Trim stays in hand: one click a piece, as many as there are.
@@ -6210,7 +6231,12 @@ impl App {
             | Tool::Arc
             | Tool::ArcCentre
             | Tool::Polygon
-            | Tool::Slot => {
+            | Tool::Slot
+            | Tool::Rectangle3
+            | Tool::PolygonOuter
+            | Tool::PolygonEdge
+            | Tool::Ellipse
+            | Tool::SlotArc => {
                 self.sketching.clicks.push((p, 0));
                 let c: Vec<glam::DVec2> = self.sketching.clicks.iter().map(|c| c.0).collect();
                 match (tool, c.len()) {
@@ -6253,6 +6279,94 @@ impl App {
                     }
                     (Tool::Rectangle, 2) => {
                         self.run_op_with("draft.rectangle", &[("a", v3(c[0])), ("b", v3(c[1]))]);
+                        self.sketch_tool_done();
+                    }
+                    (Tool::Rectangle3, 3) => {
+                        self.run_op_with(
+                            "draft.rectangle3",
+                            &[("a", v3(c[0])), ("b", v3(c[1])), ("c", v3(c[2]))],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    // Round a circle: the click is an edge's middle, so the
+                    // corners are further out by the half angle's secant.
+                    (Tool::PolygonOuter, 2) => {
+                        let sides = 6u32;
+                        let half = std::f64::consts::PI / sides as f64;
+                        let to = c[1] - c[0];
+                        let r = typed.first().map(|r| r.abs()).unwrap_or(to.length()) / half.cos();
+                        if r > 1e-9 {
+                            self.run_op_with(
+                                "draft.polygon",
+                                &[
+                                    ("centre", v3(c[0])),
+                                    ("radius", PropertyValue::Float(r)),
+                                    ("sides", PropertyValue::Int(i64::from(sides))),
+                                    ("rotation", PropertyValue::Float(to.y.atan2(to.x) + half)),
+                                ],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    // By an edge: its centre square off the edge's middle,
+                    // to the left of the way it was drawn.
+                    (Tool::PolygonEdge, 2) => {
+                        let sides = 6u32;
+                        let half = std::f64::consts::PI / sides as f64;
+                        let edge = c[1] - c[0];
+                        let len = edge.length();
+                        if len > 1e-9 {
+                            let r = len * 0.5 / half.sin();
+                            let centre = (c[0] + c[1]) * 0.5
+                                + edge.perp().normalize() * (len * 0.5 / half.tan());
+                            let first = c[0] - centre;
+                            self.run_op_with(
+                                "draft.polygon",
+                                &[
+                                    ("centre", v3(centre)),
+                                    ("radius", PropertyValue::Float(r)),
+                                    ("sides", PropertyValue::Int(i64::from(sides))),
+                                    ("rotation", PropertyValue::Float(first.y.atan2(first.x))),
+                                ],
+                            );
+                        }
+                        self.sketch_tool_done();
+                    }
+                    (Tool::Ellipse, 3) => {
+                        self.run_op_with(
+                            "draft.ellipse",
+                            &[
+                                ("centre", v3(c[0])),
+                                ("major", v3(c[1])),
+                                ("minor", v3(c[2])),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    (Tool::SlotArc, 3) if !typed.is_empty() => {
+                        self.run_op_with(
+                            "draft.arc_slot",
+                            &[
+                                ("centre", v3(c[0])),
+                                ("start", v3(c[1])),
+                                ("end", v3(c[2])),
+                                ("width", PropertyValue::Float(typed[0].abs())),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    (Tool::SlotArc, 4) => {
+                        let r = c[1].distance(c[0]);
+                        let w = (c[3].distance(c[0]) - r).abs() * 2.0;
+                        self.run_op_with(
+                            "draft.arc_slot",
+                            &[
+                                ("centre", v3(c[0])),
+                                ("start", v3(c[1])),
+                                ("end", v3(c[2])),
+                                ("width", PropertyValue::Float(w)),
+                            ],
+                        );
                         self.sketch_tool_done();
                     }
                     (Tool::Circle, 2) => {
@@ -6359,6 +6473,67 @@ impl App {
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                     self.sketch_hover();
                 }
+            }
+            // Tangent circles: the lines clicked, then — for two — the
+            // corner it goes in, its radius typed or as far as the click
+            // is from the first line.
+            Tool::TangentCircle2 | Tool::TangentCircle3 => {
+                let need = if tool == Tool::TangentCircle2 { 2 } else { 3 };
+                let picked: Vec<EntityId> = self
+                    .sketching
+                    .picks
+                    .iter()
+                    .filter_map(|k| g.entity_of(*k))
+                    .collect();
+                if picked.len() < need {
+                    match pick.and_then(|k| g.entity_of(k).map(|e| (k, e))) {
+                        Some((k, e))
+                            if matches!(d.curve(e), Some(kreate_geom2d::Curve2D::Line { .. })) =>
+                        {
+                            self.sketching.picks.push(k);
+                            self.sketching.clicks.push((p, 0));
+                            if tool == Tool::TangentCircle2 || picked.len() + 1 < need {
+                                return;
+                            }
+                        }
+                        _ => {
+                            if picked.len() < need {
+                                self.status(&self.ui.catalog.get("sketch-prompt-tangent2"));
+                                return;
+                            }
+                        }
+                    }
+                }
+                let lines: Vec<u32> = self
+                    .sketching
+                    .picks
+                    .iter()
+                    .filter_map(|k| g.entity_of(*k))
+                    .map(|e| e.0)
+                    .collect();
+                // Three lines: inside them, where the clicks were.
+                let near = if tool == Tool::TangentCircle3 {
+                    let c = &self.sketching.clicks;
+                    c.iter().map(|x| x.0).sum::<glam::DVec2>() / c.len().max(1) as f64
+                } else {
+                    p
+                };
+                let radius = typed.first().map(|r| r.abs()).unwrap_or_else(|| {
+                    lines
+                        .first()
+                        .and_then(|e| d.curve(EntityId(*e)))
+                        .map(|c| c.closest(p).1.distance(p))
+                        .unwrap_or(0.005)
+                });
+                self.run_op_with(
+                    "draft.tangent_circle",
+                    &[
+                        ("lines", PropertyValue::Ints(lines)),
+                        ("radius", PropertyValue::Float(radius)),
+                        ("near", v3(near)),
+                    ],
+                );
+                self.sketch_tool_done();
             }
             // Project or intersect: the part under the pointer, into the
             // drawing; the tool stays in hand for the next.
@@ -6480,6 +6655,7 @@ impl App {
             }
             Tool::Line
             | Tool::Spline
+            | Tool::ControlSpline
             | Tool::Select
             | Tool::Pattern
             | Tool::Extrude

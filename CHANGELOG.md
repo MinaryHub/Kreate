@@ -12,6 +12,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- More ways to draw in a sketch, as Fusion has them: a 3-point (turned)
+  rectangle, a polygon around a circle or by one edge, an ellipse, an arc
+  slot, a circle tangent to two lines (at a radius) or three, and a
+  control-point spline. A Collinear constraint keeps two lines on one line.
+
 - Project and Intersect in a sketch (Sketch menu): click a part and its
   outline and edges seen square to the drawing — or where the drawing's
   plane cuts it — come in held, on a PROJECTED layer, to draw against and
