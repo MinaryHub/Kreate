@@ -44,7 +44,10 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftMirror>();
     registry.register::<DraftPattern>();
     registry.register::<DraftUnconstrain>();
+    edit_tools::register(registry);
 }
+
+pub mod edit_tools;
 
 /// The active object, when it is a drawing.
 pub fn active_drawing(doc: &Document) -> Option<ObjectId> {
@@ -670,10 +673,33 @@ impl Operator for DraftConstrain {
                     Constraint::Fixed(refs[0], at)
                 }
             };
+            // One that holds nothing more than is held already says the
+            // same thing twice, as Fusion refuses it: it would make the
+            // drawing over-constrained.
+            let before = freedom(d);
             d.constraints.push(c);
+            if adds_nothing(d, before) {
+                return Err(OpError::Failed(
+                    "that is already held: it would over-constrain the drawing".into(),
+                ));
+            }
             Ok(())
         })
     }
+}
+
+/// What can still move in a drawing, all its pieces together, as it is
+/// held now.
+fn freedom(d: &Drawing) -> usize {
+    d.clone().solve().iter().map(|p| p.freedom).sum()
+}
+
+/// Whether the drawing, solved, holds nothing more than it did when it
+/// could move `before` ways: what was just added is redundant. One that
+/// does not solve is left to the caller's own refusal.
+fn adds_nothing(d: &Drawing, before: usize) -> bool {
+    let out = d.clone().solve();
+    out.iter().all(|p| p.converged) && out.iter().map(|p| p.freedom).sum::<usize>() >= before
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -770,7 +796,18 @@ impl Operator for DraftDimension {
             if dim.value == 0.0 || !dim.driving {
                 dim.value = now.abs();
             }
-            d.add(EntityKind::Dimension(dim));
+            // A driving dimension of what is already held would
+            // over-constrain it: it goes in driven, measuring, as Fusion
+            // offers to make it.
+            let before = freedom(d);
+            let driving = dim.driving;
+            let id = d.add(EntityKind::Dimension(dim));
+            if driving && adds_nothing(d, before) {
+                if let Some(EntityKind::Dimension(x)) = d.entity_mut(id).map(|e| &mut e.kind) {
+                    x.driving = false;
+                    x.value = now.abs();
+                }
+            }
             Ok(())
         })
     }

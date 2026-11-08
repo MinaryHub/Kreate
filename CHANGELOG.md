@@ -10,6 +10,19 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- Sketch tools as Fusion has them: Extend (a line or an arc on to what it
+  meets), Break (split where crossed), Chamfer (a straight cut between two
+  lines), and Move, Turn or Scale (about a point, or as a copy; a scale
+  takes the entities' own dimensions with it).
+
+### Changed
+
+- A constraint that says what is already held is refused, and a driving
+  dimension of what is already held goes in as a driven one, instead of
+  over-constraining the sketch.
+
 ## [0.7.1] - 2026-11-07
 
 ### Fixed

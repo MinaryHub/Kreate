@@ -46,6 +46,16 @@ pub enum Tool {
     /// Click a line, circle or arc to take out the piece between the
     /// crossings either side.
     Trim,
+    /// Click a line or an arc near an end to carry that end on to what it
+    /// meets.
+    Extend,
+    /// Click a curve to split it where the curves either side cross it.
+    Break,
+    /// Click a corner of two lines to cut it straight.
+    Chamfer,
+    /// What is selected turned, scaled and moved about the point clicked —
+    /// or copied — its numbers then the last operation's to change.
+    Transform,
     /// A constraint, by its tag in `kreate_scene::sketch::KINDS` — or
     /// `concentric`, which is a coincidence of two centres.
     Constrain(&'static str),
@@ -78,6 +88,10 @@ impl Tool {
             "mirror" => Tool::Mirror,
             "offset" => Tool::Offset,
             "trim" => Tool::Trim,
+            "extend" => Tool::Extend,
+            "break" => Tool::Break,
+            "chamfer" => Tool::Chamfer,
+            "transform" => Tool::Transform,
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
             "revolve" => Tool::Revolve,
@@ -114,6 +128,10 @@ impl Tool {
             Tool::Mirror => "mirror",
             Tool::Offset => "offset",
             Tool::Trim => "trim",
+            Tool::Extend => "extend",
+            Tool::Break => "break",
+            Tool::Chamfer => "chamfer",
+            Tool::Transform => "transform",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
             Tool::Revolve => "revolve",
@@ -1711,6 +1729,10 @@ fn overlay(
         (Tool::Mirror, _) => "sketch-prompt-mirror",
         (Tool::Offset, _) => "sketch-prompt-offset",
         (Tool::Trim, _) => "sketch-prompt-trim",
+        (Tool::Extend, _) => "sketch-prompt-extend",
+        (Tool::Break, _) => "sketch-prompt-break",
+        (Tool::Chamfer, _) => "sketch-prompt-chamfer",
+        (Tool::Transform, _) => "sketch-prompt-transform",
         (Tool::Dimension, _) => "sketch-prompt-dimension",
         (Tool::Constrain(_), _) => "sketch-prompt-constrain",
         (Tool::Extrude, _) => "sketch-prompt-region",

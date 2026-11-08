@@ -5077,7 +5077,12 @@ impl App {
             self.sketching.trim = None;
             return;
         };
-        if self.sketching.tool == kreate::sketching::Tool::Trim {
+        if matches!(
+            self.sketching.tool,
+            kreate::sketching::Tool::Trim
+                | kreate::sketching::Tool::Extend
+                | kreate::sketching::Tool::Break
+        ) {
             let trim = self
                 .sketch_cursor()
                 .zip(self.sketch_geometry())
@@ -5785,6 +5790,11 @@ impl App {
                         self.run_op_with("sketch.text", &[("at", v3(p))]);
                         self.sketch_tool_done();
                     }
+                    // Drawing-only tools: an older sketch is drawn again as a
+                    // drawing for them.
+                    Tool::Extend | Tool::Break | Tool::Chamfer | Tool::Transform => {
+                        self.status(&self.ui.catalog.get("sketch-drawing-only"));
+                    }
                     // Trim stays in hand: one click a piece, as many as there are.
                     Tool::Trim => {
                         if let Some((line, on)) = self.sketching.trim.take() {
@@ -6046,9 +6056,9 @@ impl App {
                     self.sketch_tool_done();
                 }
             }
-            // Fillet: a corner clicked, where two curves end; the radius as
-            // typed, or a fifth of the shorter.
-            Tool::Fillet => {
+            // Fillet or chamfer: a corner clicked, where two curves end; the
+            // radius or the distance as typed, or a fifth of the shorter.
+            Tool::Fillet | Tool::Chamfer => {
                 let Some(Pick::Point(v)) = pick else {
                     return;
                 };
@@ -6078,6 +6088,19 @@ impl App {
                     return;
                 };
                 let radius = typed.first().map(|r| r.abs()).unwrap_or(0.2 * la.min(lb));
+                if tool == Tool::Chamfer {
+                    self.run_op_with(
+                        "draft.chamfer",
+                        &[
+                            ("a", PropertyValue::Int(a.entity.0 as i64)),
+                            ("b", PropertyValue::Int(b.entity.0 as i64)),
+                            ("distance", PropertyValue::Float(radius)),
+                            ("near_a", v3(near_a)),
+                            ("near_b", v3(near_b)),
+                        ],
+                    );
+                    return;
+                }
                 self.run_op_with(
                     "draft.fillet",
                     &[
@@ -6227,18 +6250,44 @@ impl App {
                 self.run_op_with("sketch.text", &[("at", v3(p))]);
                 self.sketch_tool_done();
             }
-            // Trim stays in hand: one click a piece, as many as there are.
-            Tool::Trim => {
+            // Trim, extend and break stay in hand: one click a curve, as
+            // many as there are.
+            Tool::Trim | Tool::Extend | Tool::Break => {
                 if let Some((line, on)) = self.sketching.trim.take() {
                     if let Some(e) = g.entity_of_line(line) {
+                        let op = match tool {
+                            Tool::Extend => "draft.extend",
+                            Tool::Break => "draft.break",
+                            _ => "draft.trim",
+                        };
                         self.run_op_with(
-                            "draft.trim",
+                            op,
                             &[("id", PropertyValue::Int(e.0 as i64)), ("at", v3(on))],
                         );
                     }
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                     self.sketch_hover();
                 }
+            }
+            // Turn, scale or copy: about the point clicked, what is
+            // selected; the angle, the scale and copying are then the
+            // last operation's numbers to change.
+            Tool::Transform => {
+                let ids = g.entities_in(&self.sketching.points, &self.sketching.lines);
+                if ids.is_empty() {
+                    self.status(&self.ui.catalog.get("sketch-prompt-transform"));
+                    return;
+                }
+                self.run_op_with(
+                    "draft.transform",
+                    &[
+                        ("ids", PropertyValue::Ints(ids)),
+                        ("centre", v3(p)),
+                        ("angle", PropertyValue::Float(0.0)),
+                        ("scale", PropertyValue::Float(1.0)),
+                    ],
+                );
+                self.sketch_tool_done();
             }
             Tool::Constrain(_) | Tool::Dimension => {
                 let Some(pick) = pick else {
@@ -6338,7 +6387,7 @@ impl App {
         };
         // A fillet's radius is typed before its corner is clicked, and kept
         // for the corners after it.
-        let typing = drawing || matches!(tool, Tool::Fillet | Tool::Offset);
+        let typing = drawing || matches!(tool, Tool::Fillet | Tool::Chamfer | Tool::Offset);
         if let (true, Some(ch)) = (typing, typed) {
             self.sketching.typed.push(ch);
             self.redraw.set(RedrawReason::UI);
@@ -6346,7 +6395,9 @@ impl App {
         }
         let unit = self.doc.design.length_unit.metres();
         match code {
-            KeyCode::Backspace if matches!(tool, Tool::Fillet | Tool::Offset) && !drawing => {
+            KeyCode::Backspace
+                if matches!(tool, Tool::Fillet | Tool::Chamfer | Tool::Offset) && !drawing =>
+            {
                 self.sketching.typed.pop();
                 self.redraw.set(RedrawReason::UI);
                 true
