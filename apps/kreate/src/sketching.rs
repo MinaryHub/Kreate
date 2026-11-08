@@ -56,6 +56,12 @@ pub enum Tool {
     /// What is selected turned, scaled and moved about the point clicked —
     /// or copied — its numbers then the last operation's to change.
     Transform,
+    /// Click a part: its outline and edges seen square to the drawing come
+    /// in, held, and follow it.
+    Project,
+    /// Click a part: where the drawing's plane cuts it comes in, held, and
+    /// follows it.
+    Intersect,
     /// A constraint, by its tag in `kreate_scene::sketch::KINDS` — or
     /// `concentric`, which is a coincidence of two centres.
     Constrain(&'static str),
@@ -92,6 +98,8 @@ impl Tool {
             "break" => Tool::Break,
             "chamfer" => Tool::Chamfer,
             "transform" => Tool::Transform,
+            "project" => Tool::Project,
+            "intersect" => Tool::Intersect,
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
             "revolve" => Tool::Revolve,
@@ -132,6 +140,8 @@ impl Tool {
             Tool::Break => "break",
             Tool::Chamfer => "chamfer",
             Tool::Transform => "transform",
+            Tool::Project => "project",
+            Tool::Intersect => "intersect",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
             Tool::Revolve => "revolve",
@@ -1821,6 +1831,8 @@ fn overlay(
         (Tool::Break, _) => "sketch-prompt-break",
         (Tool::Chamfer, _) => "sketch-prompt-chamfer",
         (Tool::Transform, _) => "sketch-prompt-transform",
+        (Tool::Project, _) => "sketch-prompt-project",
+        (Tool::Intersect, _) => "sketch-prompt-intersect",
         (Tool::Dimension, _) => "sketch-prompt-dimension",
         (Tool::Constrain(_), _) => "sketch-prompt-constrain",
         (Tool::Extrude, _) => "sketch-prompt-region",

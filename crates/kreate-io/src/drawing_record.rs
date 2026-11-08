@@ -28,6 +28,17 @@ pub struct DrawingRecord {
     /// they were: see `Drawing::foreign`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign: Vec<Value>,
+    /// Geometry tied to parts: see `Drawing::projections`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projections: Vec<ProjectionRecord>,
+}
+
+/// One part's geometry in a drawing: the part, how, and the entities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectionRecord {
+    pub source: u64,
+    pub kind: String,
+    pub entities: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -485,6 +496,15 @@ pub fn record(d: &Drawing) -> DrawingRecord {
             .iter()
             .filter_map(|s| serde_json::from_str(s).ok())
             .collect(),
+        projections: d
+            .projections
+            .iter()
+            .map(|p| ProjectionRecord {
+                source: p.source.raw(),
+                kind: p.kind.tag().into(),
+                entities: p.entities.iter().map(|e| e.0).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -530,6 +550,22 @@ pub fn drawing_from(r: &DrawingRecord) -> (Drawing, Vec<Value>) {
         LayerId(0)
     };
     d.set_counters(r.next[0], r.next[1]);
+    d.projections = r
+        .projections
+        .iter()
+        .filter_map(|p| {
+            Some(kreate_scene::drawing::Projection {
+                source: kreate_scene::Uid::from_raw(p.source),
+                kind: kreate_scene::drawing::ProjectionKind::from_tag(&p.kind)?,
+                entities: p
+                    .entities
+                    .iter()
+                    .map(|e| EntityId(*e))
+                    .filter(|e| d.entity(*e).is_some())
+                    .collect(),
+            })
+        })
+        .collect();
     unread.extend(r.foreign.iter().cloned());
     d.foreign = unread.iter().map(Value::to_string).collect();
     (d, unread)
@@ -538,6 +574,33 @@ pub fn drawing_from(r: &DrawingRecord) -> (Drawing, Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a drawing projects from a part comes back tied to the part; an
+    /// entity gone from the file drops out of it.
+    #[test]
+    fn a_projection_comes_back_tied_to_its_part() {
+        let mut d = Drawing::new();
+        let a = d.add_curve(Curve2D::Line {
+            a: DVec2::ZERO,
+            b: DVec2::X,
+        });
+        let b = d.add_curve(Curve2D::Line {
+            a: DVec2::X,
+            b: DVec2::Y,
+        });
+        d.projections.push(kreate_scene::drawing::Projection {
+            source: kreate_scene::Uid::from_raw(42),
+            kind: kreate_scene::drawing::ProjectionKind::Intersect,
+            entities: vec![a, b],
+        });
+        let (back, _) = drawing_from(&record(&d));
+        assert_eq!(back.projections, d.projections);
+        let mut gone = record(&d);
+        gone.entities
+            .retain(|e| e["id"].as_u64() != Some(u64::from(b.0)));
+        let (back, _) = drawing_from(&gone);
+        assert_eq!(back.projections[0].entities, vec![a]);
+    }
 
     /// Everything a drawing can hold comes back from its record.
     #[test]
@@ -651,6 +714,7 @@ mod tests {
             current_layer: 5,
             next: [1, 1],
             foreign: Vec::new(),
+            projections: Vec::new(),
         };
         let (d, unread) = drawing_from(&rec);
         assert_eq!(d.entities.len(), 1);

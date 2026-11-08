@@ -22,8 +22,23 @@ use crate::MeshData;
 /// pointing at it) removed, and the cut capped when `cap` is on.
 pub fn section(mesh: &MeshData, point: Vec3, normal: Vec3, cap: bool) -> MeshData {
     let n = normal.normalize_or_zero();
-    if n == Vec3::ZERO {
+    let Some((out, mut faces, segments)) = clip(mesh, point, n) else {
         return mesh.clone();
+    };
+    if cap {
+        cap_faces(&out, &segments, n, &mut faces);
+    }
+    MeshData::from_faces(out, &faces)
+}
+
+/// The kept side of a mesh cut by a plane (`n` of unit length): its points,
+/// its faces, and the cut's segments, each run the way a cap over it winds.
+/// `None` when nothing is cut away.
+type Clipped = (Vec<Vec3>, Vec<Vec<u32>>, Vec<(u32, u32)>);
+
+fn clip(mesh: &MeshData, point: Vec3, n: Vec3) -> Option<Clipped> {
+    if n == Vec3::ZERO {
+        return None;
     }
     let positions = mesh.positions();
     let size = {
@@ -48,7 +63,7 @@ pub fn section(mesh: &MeshData, point: Vec3, normal: Vec3, cap: bool) -> MeshDat
         })
         .collect();
     if side.iter().all(|d| *d <= 0.0) {
-        return mesh.clone();
+        return None;
     }
 
     let mut out: Vec<Vec3> = Vec::new();
@@ -113,15 +128,25 @@ pub fn section(mesh: &MeshData, point: Vec3, normal: Vec3, cap: bool) -> MeshDat
         }
     }
 
-    if cap {
-        cap_faces(&out, &segments, n, &mut faces);
-    }
-    MeshData::from_faces(out, &faces)
+    Some((out, faces, segments))
 }
 
-/// Chains the cut's segments into loops and fills them, holes inside their
-/// outlines, as triangles.
-fn cap_faces(points: &[Vec3], segments: &[(u32, u32)], normal: Vec3, faces: &mut Vec<Vec<u32>>) {
+/// Where a plane cuts a mesh: each closed loop of the cut, in order, points
+/// in the mesh's space. What a sketch's Intersect takes of a body. Empty
+/// when the plane misses it.
+pub fn section_loops(mesh: &MeshData, point: Vec3, normal: Vec3) -> Vec<Vec<Vec3>> {
+    let Some((points, _, segments)) = clip(mesh, point, normal.normalize_or_zero()) else {
+        return Vec::new();
+    };
+    chain_loops(&segments)
+        .into_iter()
+        .map(|l| l.iter().map(|i| points[*i as usize]).collect())
+        .collect()
+}
+
+/// The cut's segments chained into closed loops; open chains (a cut
+/// through an open surface) are left out.
+fn chain_loops(segments: &[(u32, u32)]) -> Vec<Vec<u32>> {
     let next: HashMap<u32, u32> = segments.iter().copied().collect();
     let mut used: HashMap<u32, bool> = HashMap::new();
     let mut loops: Vec<Vec<u32>> = Vec::new();
@@ -146,11 +171,18 @@ fn cap_faces(points: &[Vec3], segments: &[(u32, u32)], normal: Vec3, faces: &mut
             chain.push(to);
             at = to;
         };
-        // An open chain is a cut through an open surface: nothing to close.
         if closed && chain.len() >= 3 {
             loops.push(chain);
         }
     }
+    loops
+}
+
+/// Chains the cut's segments into loops and fills them, holes inside their
+/// outlines, as triangles.
+fn cap_faces(points: &[Vec3], segments: &[(u32, u32)], normal: Vec3, faces: &mut Vec<Vec<u32>>) {
+    // An open chain is a cut through an open surface: nothing to close.
+    let loops = chain_loops(segments);
     if loops.is_empty() {
         return;
     }

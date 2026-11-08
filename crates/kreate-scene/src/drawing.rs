@@ -287,8 +287,45 @@ pub struct Drawing {
     /// a constraint of a kind it does not know — kept as the file had them
     /// and written back, so a drawing passes through this build whole.
     pub foreign: Vec<String>,
+    /// What was brought in from the model and stays tied to it: Fusion's
+    /// projected and intersected geometry. See [`Projection`].
+    pub projections: Vec<Projection>,
     next_entity: u32,
     next_layer: u32,
+}
+
+/// How geometry is brought into a drawing from a part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectionKind {
+    /// Its outline and edges seen square to the drawing's plane, laid onto
+    /// it: Fusion's Project.
+    Outline,
+    /// Where the drawing's plane cuts it: Fusion's Intersect.
+    Intersect,
+}
+
+impl ProjectionKind {
+    pub fn tag(self) -> &'static str {
+        match self {
+            ProjectionKind::Outline => "outline",
+            ProjectionKind::Intersect => "intersect",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        [ProjectionKind::Outline, ProjectionKind::Intersect]
+            .into_iter()
+            .find(|k| k.tag() == tag)
+    }
+}
+
+/// Geometry brought in from a part, by the part's identity: the entities it
+/// made, held where they are, made again from the part when it changes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Projection {
+    pub source: kreate_reflect::Uid,
+    pub kind: ProjectionKind,
+    pub entities: Vec<EntityId>,
 }
 
 impl Default for Drawing {
@@ -299,6 +336,7 @@ impl Default for Drawing {
             constraints: Vec::new(),
             current_layer: LayerId(0),
             foreign: Vec::new(),
+            projections: Vec::new(),
             next_entity: 1,
             next_layer: 1,
         }
@@ -414,6 +452,10 @@ impl Drawing {
             }
             self.entities.retain(|e| !gone.contains(&e.id));
         }
+        for p in &mut self.projections {
+            p.entities.retain(|e| !ids.contains(e));
+        }
+        self.projections.retain(|p| !p.entities.is_empty());
     }
 
     /// Where an entity's part is, if it has that part.
