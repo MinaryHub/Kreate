@@ -5119,6 +5119,30 @@ impl App {
                 },
             },
         };
+        // The line tool's next segment, turned onto what Fusion infers —
+        // level, upright, along or square to a line, on along an arc —
+        // when the pointer is near one and nothing caught it. Ctrl draws
+        // free.
+        let mut inferred = None;
+        let (hover, snapped) = match (
+            self.sketching.tool,
+            self.sketching.clicks.last(),
+            self.active_drawing(),
+        ) {
+            (kreate::sketching::Tool::Line, Some(&(from, _)), Some(d))
+                if hover.1 == 0 && !snapped && !self.input.ctrl_down =>
+            {
+                match kreate::sketching::infer_segment(d, from, hover.0) {
+                    Some((p, glyph)) => {
+                        inferred = Some(glyph);
+                        ((p, 0), false)
+                    }
+                    None => (hover, snapped),
+                }
+            }
+            _ => (hover, snapped),
+        };
+        self.sketching.inferred = inferred;
         // Drawing an outline, back at where it began: caught there, before
         // anything else. The first point is not in the sketch until the
         // outline is, so nothing above can find it — and an outline begun
@@ -5604,6 +5628,30 @@ impl App {
                     return true;
                 }
                 match tool {
+                    // A tangent arc on from the last segment: the lines so
+                    // far drawn, the arc from their end to here, and the
+                    // tool goes on from the arc's end.
+                    Tool::Line if self.sketching.arc_next && self.active_drawing().is_some() => {
+                        let n = self.sketching.clicks.len();
+                        if n >= 2 {
+                            let (before, last) = (
+                                self.sketching.clicks[n - 2].0,
+                                self.sketching.clicks[n - 1].0,
+                            );
+                            self.commit_sketch_line(false);
+                            self.run_op_with(
+                                "draft.tangent_arc",
+                                &[
+                                    ("start", v3(last)),
+                                    ("dir", v3(last - before)),
+                                    ("end", v3(p)),
+                                ],
+                            );
+                            self.sketching.tool = Tool::Line;
+                            self.sketching.clicks = vec![(p, 0)];
+                        }
+                        self.sketching.arc_next = false;
+                    }
                     Tool::Line => {
                         // On the outline's first point: closed.
                         if self.sketching.closing {
@@ -6394,6 +6442,12 @@ impl App {
             return true;
         }
         let unit = self.doc.design.length_unit.metres();
+        // A while drawing lines: the next segment a tangent arc, and back.
+        if code == KeyCode::KeyA && tool == Tool::Line && self.sketching.clicks.len() >= 2 {
+            self.sketching.arc_next = !self.sketching.arc_next;
+            self.redraw.set(RedrawReason::UI);
+            return true;
+        }
         match code {
             KeyCode::Backspace
                 if matches!(tool, Tool::Fillet | Tool::Chamfer | Tool::Offset) && !drawing =>

@@ -16,6 +16,11 @@ use; `scripts/release.sh` turns that section into the next release.
   meets), Break (split where crossed), Chamfer (a straight cut between two
   lines), and Move, Turn or Scale (about a point, or as a copy; a scale
   takes the entities' own dimensions with it).
+- The sketch line tool infers as Fusion's does: within two degrees a
+  segment turns level, upright, along or square to a line, or on along an
+  arc it leaves — shown by the pointer, held as a constraint (Ctrl draws
+  free); an end landing on a curve is held on it, at a line's middle to
+  it. A while drawing lines makes the next segment a tangent arc.
 
 ### Changed
 

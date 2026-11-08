@@ -17,6 +17,107 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftBreak>();
     registry.register::<DraftChamfer>();
     registry.register::<DraftTransform>();
+    registry.register::<DraftTangentArc>();
+}
+
+/// The arc that leaves `start` along `dir` and ends at `end`: on the
+/// circle tangent to `dir` at `start` through `end`. `None` when `end` is
+/// straight ahead or behind, where no arc turns.
+pub fn tangent_arc(start: DVec2, dir: DVec2, end: DVec2) -> Option<Curve2D> {
+    let dir = dir.normalize_or_zero();
+    let chord = end - start;
+    let left = dir.perp();
+    let across = chord.dot(left);
+    if dir == DVec2::ZERO || across.abs() <= 1e-12 * chord.length().max(1e-12) {
+        return None;
+    }
+    // The centre on the normal at the start, as far as makes it as far
+    // from the end: signed, to the left when positive.
+    let r = chord.length_squared() / (2.0 * across);
+    let c = start + left * r;
+    let a0 = (start - c).y.atan2((start - c).x);
+    let a1 = (end - c).y.atan2((end - c).x);
+    // Round the way `dir` sets off: anticlockwise when the centre is to
+    // its left.
+    let sweep = if r > 0.0 {
+        (a1 - a0).rem_euclid(std::f64::consts::TAU)
+    } else {
+        -(a0 - a1).rem_euclid(std::f64::consts::TAU)
+    };
+    Some(Curve2D::Arc {
+        c,
+        r: r.abs(),
+        start: a0,
+        sweep,
+    })
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DraftTangentArcParams {
+    #[param(unit = "length")]
+    pub start: [f64; 3],
+    /// The way it sets off from its start.
+    pub dir: [f64; 3],
+    #[param(unit = "length")]
+    pub end: [f64; 3],
+}
+
+/// An arc on from the end of what was drawn, along it, to a point: what
+/// Fusion's line tool draws when dragged from a line's end. Joined to what
+/// ends at its start, and held tangent to it.
+pub struct DraftTangentArc;
+
+impl Operator for DraftTangentArc {
+    type Params = DraftTangentArcParams;
+    fn id() -> &'static str {
+        "draft.tangent_arc"
+    }
+    fn label() -> &'static str {
+        "Tangent Arc"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let arc = tangent_arc(xy(params.start), xy(params.dir), xy(params.end))
+            .ok_or_else(|| OpError::Failed("straight ahead: that is a line, not an arc".into()))?;
+        super::draw(doc, |d| {
+            let first = d.counters().0;
+            d.add_curve(arc);
+            // Tangent to a line or an arc ending where it starts, as it
+            // leaves along it.
+            let start = xy(params.start);
+            let dir = xy(params.dir).normalize_or_zero();
+            let arc_id = EntityId(first);
+            let touching: Vec<EntityId> = d
+                .entities
+                .iter()
+                .filter(|e| e.id.0 < first)
+                .filter_map(|e| match &e.kind {
+                    EntityKind::Curve(c) if !c.is_closed() => {
+                        let (lo, hi) = c.domain();
+                        [lo, hi]
+                            .into_iter()
+                            .find(|t| {
+                                c.point(*t).distance(start) <= 1e-9 * start.length().max(1.0)
+                                    && c.derivative(*t).normalize_or_zero().perp_dot(dir).abs()
+                                        <= 1e-6
+                            })
+                            .map(|_| e.id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            for t in touching {
+                d.constraints.push(Constraint::Tangent(arc_id, t));
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Where every other curve crosses `curve`, along it.
@@ -811,5 +912,89 @@ mod tests {
         // Something it does not yet say is still taken.
         b.run("draft.constrain(kind=\"fixed\", refs=\"1.start\")")
             .unwrap();
+    }
+
+    /// What the line tool turned a segment onto is held as drawn: along
+    /// another line, square to it, on from an arc's end, ending on a curve
+    /// or at a line's middle.
+    #[test]
+    fn what_a_line_was_turned_onto_is_held() {
+        let has =
+            |b: &Bench, f: &dyn Fn(&Constraint) -> bool| b.drawing().constraints.iter().any(f);
+        let mut b = Bench::new();
+        // A slanted line, then one exactly along it and one exactly square.
+        b.run("draft.line(points=[0, 0, 0.02, 0.01])").unwrap();
+        b.run("draft.line(points=[0, 0.02, 0.04, 0.04])").unwrap();
+        assert!(has(
+            &b,
+            &|c| matches!(c, Constraint::Parallel(x, y) if x.0 == 2 && y.0 == 1)
+        ));
+        b.run("draft.line(points=[0.05, 0, 0.04, 0.02])").unwrap();
+        assert!(has(
+            &b,
+            &|c| matches!(c, Constraint::Perpendicular(x, y) if x.0 == 3 && y.0 == 1)
+        ));
+        // A line ending on the first one's middle, and one on it elsewhere.
+        b.run("draft.line(points=[0.01, -0.01, 0.01, 0.005])")
+            .unwrap();
+        assert!(has(
+            &b,
+            &|c| matches!(c, Constraint::Midpoint(r, l) if r.entity.0 == 4 && l.0 == 1)
+        ));
+        b.run("draft.line(points=[0.016, -0.01, 0.016, 0.008])")
+            .unwrap();
+        assert!(has(
+            &b,
+            &|c| matches!(c, Constraint::PointOn(r, l) if r.entity.0 == 5 && l.0 == 1)
+        ));
+        // A line leaving a quarter arc's end along it.
+        let mut b = Bench::new();
+        b.run(
+            "draft.arc(start=(0.01, 0, 0), through=(0.00707107, 0.00707107, 0), end=(0, 0.01, 0))",
+        )
+        .unwrap();
+        let arc = b.curve(1);
+        let (_, hi) = arc.domain();
+        let (end, dir) = (arc.point(hi), arc.derivative(hi).normalize());
+        let to = end + dir * 0.02;
+        b.run(&format!(
+            "draft.line(points=[{}, {}, {}, {}])",
+            end.x, end.y, to.x, to.y
+        ))
+        .unwrap();
+        assert!(has(
+            &b,
+            &|c| matches!(c, Constraint::Tangent(x, y) if x.0 == 2 && y.0 == 1)
+        ));
+    }
+
+    /// An arc on from a line's end: tangent to it, through the point, the
+    /// right way round, joined and held tangent.
+    #[test]
+    fn a_tangent_arc_goes_on_from_a_lines_end() {
+        let arc = tangent_arc(DVec2::ZERO, DVec2::X, DVec2::new(0.01, 0.01)).unwrap();
+        let Curve2D::Arc { c, r, sweep, .. } = arc else {
+            panic!()
+        };
+        assert!(near(c, DVec2::new(0.0, 0.01)) && (r - 0.01).abs() < 1e-12);
+        assert!(
+            (sweep - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+            "{sweep}"
+        );
+        // Turning right: clockwise.
+        let Curve2D::Arc { sweep, .. } =
+            tangent_arc(DVec2::ZERO, DVec2::X, DVec2::new(0.01, -0.01)).unwrap()
+        else {
+            panic!()
+        };
+        assert!(sweep < 0.0);
+        assert!(tangent_arc(DVec2::ZERO, DVec2::X, DVec2::new(0.02, 0.0)).is_none());
+        let mut b = Bench::new();
+        b.run("draft.line(points=[-0.02, 0, 0, 0])").unwrap();
+        b.run("draft.tangent_arc(start=(0, 0, 0), dir=(1, 0, 0), end=(0.01, 0.01, 0))")
+            .unwrap();
+        let held = &b.drawing().constraints;
+        assert!(held.iter().any(|c| matches!(c, Constraint::Tangent(..))));
+        assert!(held.iter().any(|c| matches!(c, Constraint::Coincident(..))));
     }
 }
