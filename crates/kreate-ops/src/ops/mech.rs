@@ -1828,6 +1828,35 @@ mod tests {
         doc.selection.clear();
         doc.selection.add(a);
         assert!(run(&r, &mut h, &mut doc, "object.loft", &[]).is_err());
+        // A 3D path — a curve object, a wire with no mesh of its own — is
+        // swept along as well: 100 mm then 50 mm up, bent at the corner.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "curve.path3d",
+            &[
+                (
+                    "points",
+                    PropertyValue::Floats(vec![0.5, 0.0, 0.0, 0.6, 0.0, 0.0, 0.6, 0.0, 0.05]),
+                ),
+                ("bend", PropertyValue::Float(0.02)),
+            ],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "object.sweep_along",
+            &[("radius", PropertyValue::Float(0.005))],
+        )
+        .unwrap();
+        let v = volume(&doc, doc.selection.active.unwrap());
+        // Its length: the runs less the corner's cut, plus the quarter arc.
+        let len = 0.15 - 2.0 * 0.02 + std::f64::consts::FRAC_PI_2 * 0.02;
+        let want = std::f64::consts::PI * 0.005 * 0.005 * len;
+        assert!(v > 0.9 * want && v < 1.02 * want, "{v} against {want}");
     }
 
     /// The same sweep and loft as features: a body that follows its

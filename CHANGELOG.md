@@ -12,6 +12,15 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- 3D paths (Add ▸ Curve ▸ 3D Path), Fusion's 3D sketch: click points in
+  space — they catch on corners, edges and faces — and Enter makes a curve
+  object through them, straight or smooth, its corners bent to a radius
+  as a pipe's are. A sweep follows it; any curve object is now a path a
+  sweep can take.
+- Conic curves in a sketch (exact: an ellipse's arc, a parabola or a
+  hyperbola's by rho), and Text on Path: letters along a curve as outlines
+  to extrude or cut, round a closed curve outside it and centred on top.
+
 - More ways to draw in a sketch, as Fusion has them: a 3-point (turned)
   rectangle, a polygon around a circle or by one edge, an ellipse, an arc
   slot, a circle tangent to two lines (at a radius) or three, and a

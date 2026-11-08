@@ -759,6 +759,9 @@ struct MeasureTool {
     /// Ctrl was held on the second click: the second point is the corner of
     /// an angle, and a third is wanted.
     angle: bool,
+    /// Drawing a 3D path rather than measuring: points are taken until
+    /// Enter (or a right click) makes them a path. See `begin_path3d`.
+    path: bool,
 }
 
 struct SkinnedGpu {
@@ -4754,9 +4757,45 @@ impl App {
             points: Vec::new(),
             hover: None,
             angle: false,
+            path: false,
         });
         self.status("Measure: click two points (Ctrl on the second for an angle), Esc to stop");
         self.update_measure();
+    }
+
+    /// Add ▸ Curve ▸ 3D Path: Fusion's 3D sketch. Points are clicked in
+    /// space as the Measure tool takes them — on corners, edges and faces of
+    /// anything shown, or on the plane facing the view through the last
+    /// point — and Enter or a right click makes them a curve object, a path
+    /// a sweep follows; its shape and bends are then the last operation's.
+    fn begin_path3d(&mut self) {
+        if self.gesture.is_some() || self.measure.is_some() {
+            return;
+        }
+        self.begin_measure();
+        if let Some(tool) = &mut self.measure {
+            tool.path = true;
+        }
+        let message = self.ui.catalog.get("path3d-prompt");
+        self.status(&message);
+    }
+
+    /// The 3D path's points made a curve object, when there are two.
+    fn finish_path3d(&mut self) {
+        let points = match self.measure.take() {
+            Some(tool) if tool.path => tool.points,
+            other => {
+                self.measure = other;
+                return;
+            }
+        };
+        self.end_measure("");
+        if points.len() >= 2 {
+            let flat: Vec<f64> = points.iter().flat_map(|p| p.to_array()).collect();
+            self.run_op_with("curve.path3d", &[("points", PropertyValue::Floats(flat))]);
+        } else {
+            self.status(&self.ui.catalog.get("path3d-too-few"));
+        }
     }
 
     /// Where the next point would go: what the pointer is near, or failing
@@ -4806,6 +4845,10 @@ impl App {
         };
         let Some(at) = tool.hover else { return };
         tool.points.push(at);
+        if tool.path {
+            self.update_measure();
+            return;
+        }
         if tool.points.len() == 2 && ctrl {
             tool.angle = true;
         }
@@ -5904,7 +5947,9 @@ impl App {
                     | Tool::Ellipse
                     | Tool::SlotArc
                     | Tool::TangentCircle2
-                    | Tool::TangentCircle3 => {
+                    | Tool::TangentCircle3
+                    | Tool::Conic
+                    | Tool::TextPath => {
                         self.status(&self.ui.catalog.get("sketch-drawing-only"));
                     }
                     // Trim stays in hand: one click a piece, as many as there are.
@@ -6236,7 +6281,8 @@ impl App {
             | Tool::PolygonOuter
             | Tool::PolygonEdge
             | Tool::Ellipse
-            | Tool::SlotArc => {
+            | Tool::SlotArc
+            | Tool::Conic => {
                 self.sketching.clicks.push((p, 0));
                 let c: Vec<glam::DVec2> = self.sketching.clicks.iter().map(|c| c.0).collect();
                 match (tool, c.len()) {
@@ -6330,6 +6376,25 @@ impl App {
                                 ],
                             );
                         }
+                        self.sketch_tool_done();
+                    }
+                    // A conic: its ends, then the apex; rho typed, or a
+                    // parabola's one half.
+                    (Tool::Conic, 3) => {
+                        let rho = typed
+                            .first()
+                            .copied()
+                            .filter(|r| *r > 0.0 && *r < 1.0)
+                            .unwrap_or(0.5);
+                        self.run_op_with(
+                            "draft.conic",
+                            &[
+                                ("start", v3(c[0])),
+                                ("end", v3(c[1])),
+                                ("apex", v3(c[2])),
+                                ("rho", PropertyValue::Float(rho)),
+                            ],
+                        );
                         self.sketch_tool_done();
                     }
                     (Tool::Ellipse, 3) => {
@@ -6474,6 +6539,18 @@ impl App {
                     self.sketch_hover();
                 }
             }
+            // Text along the curve clicked: its words, font and place then
+            // the last operation's to change.
+            Tool::TextPath => match pick.and_then(|k| g.entity_of(k)) {
+                Some(e) if d.curve(e).is_some() => {
+                    self.run_op_with(
+                        "draft.text_on_path",
+                        &[("path", PropertyValue::Int(i64::from(e.0)))],
+                    );
+                    self.sketch_tool_done();
+                }
+                _ => self.status(&self.ui.catalog.get("sketch-prompt-text-path")),
+            },
             // Tangent circles: the lines clicked, then — for two — the
             // corner it goes in, its radius typed or as far as the click
             // is from the first line.
@@ -14054,6 +14131,12 @@ impl App {
         }
         if self.measure.is_some() {
             match code {
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space
+                    if self.measure.as_ref().is_some_and(|t| t.path) =>
+                {
+                    self.finish_path3d();
+                    return;
+                }
                 KeyCode::Escape => {
                     self.end_measure("Measure cancelled");
                     return;
@@ -14489,6 +14572,7 @@ impl App {
                 }
             }
             "view.measure" => self.begin_measure(),
+            "app.path3d" => self.begin_path3d(),
             "view.walk" => self.begin_walk(),
             "object.align_faces" => {
                 self.end_loop_cut_hover();
@@ -15587,6 +15671,10 @@ impl ApplicationHandler for App {
                     match button {
                         MouseButton::Left if self.press_belongs_to_viewport() => {
                             self.measure_click();
+                            return;
+                        }
+                        MouseButton::Right if self.measure.as_ref().is_some_and(|t| t.path) => {
+                            self.finish_path3d();
                             return;
                         }
                         MouseButton::Right => {
@@ -18824,6 +18912,50 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         app.end_measure("");
         assert!(app.measure.is_none());
         assert!(app.ui.measure_preview.is_empty());
+    }
+
+    /// Add ▸ Curve ▸ 3D Path: points clicked in space, Enter makes them a
+    /// curve object through them, in the world; one point alone makes none.
+    #[test]
+    fn the_3d_path_tool_makes_a_curve_through_the_points_clicked() {
+        let mut app = app();
+        app.begin_path3d();
+        let click = |app: &mut App, at: DVec3| {
+            app.measure.as_mut().expect("the tool is out").hover = Some(at);
+            app.measure_click();
+        };
+        let pts = [
+            DVec3::ZERO,
+            DVec3::new(0.05, 0.0, 0.0),
+            DVec3::new(0.05, 0.0, 0.05),
+        ];
+        for p in pts {
+            click(&mut app, p);
+        }
+        // Clicks alone measure nothing and make nothing yet.
+        assert!(app.doc.design.measurements.is_empty());
+        let before = app.doc.objects().count();
+        app.finish_path3d();
+        assert!(app.measure.is_none());
+        assert_eq!(app.doc.objects().count(), before + 1);
+        let id = app.doc.selection.active.expect("the path is selected");
+        let o = app.doc.object(id).unwrap();
+        let curve = o.curve.as_ref().expect("a curve object");
+        let world = app.doc.world_transform(id);
+        let through: Vec<DVec3> = curve.splines[0]
+            .points
+            .iter()
+            .map(|p| world.transform_point3(p.position))
+            .collect();
+        for (a, b) in through.iter().zip(&pts) {
+            assert!(a.distance(*b) < 1e-9);
+        }
+
+        app.begin_path3d();
+        click(&mut app, DVec3::ZERO);
+        let before = app.doc.objects().count();
+        app.finish_path3d();
+        assert_eq!(app.doc.objects().count(), before);
     }
 
     /// Blender's Alt+E: the region, or each face along its own normal.

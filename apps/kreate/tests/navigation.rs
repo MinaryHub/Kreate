@@ -296,6 +296,7 @@ const APP_ACTIONS: &[&str] = &[
     "app.sketch_free",
     "app.sketch_slice",
     "app.place_text",
+    "app.path3d",
     "app.finish_sketch",
     // F / Shift+F: the brush's size and strength, which live in the
     // interface, not the document.

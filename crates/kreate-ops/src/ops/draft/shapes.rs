@@ -16,6 +16,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftArcSlot>();
     registry.register::<DraftTangentCircle>();
     registry.register::<DraftControlSpline>();
+    registry.register::<DraftConic>();
 }
 
 // --- three-point rectangle ----------------------------------------------------
@@ -448,6 +449,91 @@ impl Operator for DraftControlSpline {
     }
 }
 
+// --- conic --------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct DraftConicParams {
+    #[param(unit = "length")]
+    pub start: [f64; 3],
+    #[param(unit = "length")]
+    pub end: [f64; 3],
+    /// Where the tangents at the two ends meet.
+    #[param(unit = "length")]
+    pub apex: [f64; 3],
+    /// How full it is: under one half an ellipse's arc, one half a
+    /// parabola, over it a hyperbola's — towards the apex.
+    #[param(min = 0.01, max = 0.99)]
+    pub rho: f64,
+}
+
+impl Default for DraftConicParams {
+    fn default() -> Self {
+        Self {
+            start: [0.0; 3],
+            end: [0.0; 3],
+            apex: [0.0; 3],
+            rho: 0.5,
+        }
+    }
+}
+
+/// The conic from `start` to `end` whose tangents there meet at `apex`,
+/// its fullness `rho`, exactly: a rational quadratic spline.
+pub fn conic(start: DVec2, end: DVec2, apex: DVec2, rho: f64) -> Option<Spline> {
+    let rho = rho.clamp(0.01, 0.99);
+    let chord = end - start;
+    // The apex off the chord, or the "conic" is a line.
+    if chord.length() < 1e-12 || chord.perp_dot(apex - start).abs() < 1e-12 * chord.length_squared()
+    {
+        return None;
+    }
+    let w = rho / (1.0 - rho);
+    Some(Spline {
+        degree: 2,
+        ctrl: vec![start, apex, end],
+        knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        weights: Some(vec![1.0, w, 1.0]),
+        fit: Vec::new(),
+    })
+}
+
+/// A conic curve, Fusion's: from one end to the other, bent towards where
+/// their tangents meet as far as `rho` says — a blend no arc or spline
+/// makes exactly.
+pub struct DraftConic;
+
+impl Operator for DraftConic {
+    type Params = DraftConicParams;
+    fn id() -> &'static str {
+        "draft.conic"
+    }
+    fn label() -> &'static str {
+        "Conic Curve"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let s = conic(
+            xy(params.start),
+            xy(params.end),
+            xy(params.apex),
+            params.rho,
+        )
+        .ok_or_else(|| {
+            OpError::Failed("a conic needs its apex off the line between its ends".into())
+        })?;
+        draw(doc, |d| {
+            d.add_curve(Curve2D::Spline(s));
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +750,51 @@ mod tests {
             &mut h,
             &mut doc,
             "draft.constrain(kind=\"collinear\", refs=\"2 1\")"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_conic_passes_its_shoulder_at_rho() {
+        let (r, mut h, mut doc) = bench();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.conic(start=(0,0,0), end=(0.02,0,0), apex=(0.01,0.01,0), rho=0.3)",
+        )
+        .unwrap();
+        let d = drawing(&doc);
+        let c = d
+            .curve(EntityId(1))
+            .or_else(|| d.curve(EntityId(0)))
+            .expect("a conic");
+        assert!(c.start().distance(DVec2::ZERO) < 1e-12);
+        assert!(c.end().distance(DVec2::new(0.02, 0.0)) < 1e-12);
+        // Half way along, the shoulder: rho of the way from the chord's
+        // middle to the apex.
+        let (a, b) = c.domain();
+        let mid = c.point((a + b) * 0.5);
+        assert!(mid.distance(DVec2::new(0.01, 0.003)) < 1e-12, "{mid}");
+        // A parabola at one half: its points satisfy y = x(0.02 - x)/0.02.
+        let p = conic(
+            DVec2::ZERO,
+            DVec2::new(0.02, 0.0),
+            DVec2::new(0.01, 0.01),
+            0.5,
+        )
+        .unwrap();
+        let c = Curve2D::Spline(p);
+        for k in 1..10 {
+            let q = c.point(k as f64 / 10.0);
+            assert!((q.y - q.x * (0.02 - q.x) / 0.02).abs() < 1e-12, "{q}");
+        }
+        // An apex on the chord is no conic.
+        assert!(run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.conic(start=(0,0,0), end=(1,0,0), apex=(0.5,0,0))"
         )
         .is_err());
     }
