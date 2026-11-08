@@ -423,6 +423,8 @@ pub struct ShellState {
     pub mass: Option<kreate_mesh::measure::MassProperties>,
     /// The thinnest wall Mesh Check allows, in metres.
     pub check_thickness: f64,
+    /// Sketch mode cuts away what is in front of the drawing's plane.
+    pub sketch_slice: bool,
     /// What the last Mesh Check found, and on which object: counts in the
     /// order of `kreate_ops::ops::mesh::CHECK_ISSUES`.
     pub mesh_check: Option<(ObjectId, [usize; 7])>,
@@ -946,6 +948,7 @@ impl Default for ShellState {
             measure_preview: Vec::new(),
             mass: None,
             check_thickness: 0.001,
+            sketch_slice: false,
             mesh_check: None,
             circle_select: None,
             snap_target: None,
@@ -1997,6 +2000,8 @@ struct Labels {
     drawing_flat: String,
     dissolve_limited: String,
     edges_to_sketch: String,
+    sketch_project_update: String,
+    sketch_slice: String,
     sketch_construction: String,
     design_section: String,
     design_parameters: String,
@@ -2414,6 +2419,8 @@ impl Labels {
             drawing_flat: t("drawing-flat-pattern"),
             dissolve_limited: t("menu-dissolve-limited"),
             edges_to_sketch: t("op-mesh-edges-to-sketch"),
+            sketch_project_update: t("sketch-project-update"),
+            sketch_slice: t("sketch-slice"),
             sketch_construction: t("sketch-construction"),
             design_section: t("design-section"),
             design_parameters: t("design-parameters"),
@@ -4795,6 +4802,20 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "app.sketch_construction",
                         &l.sketch_construction,
                         dispatch("app.sketch_construction"),
+                    ),
+                    MenuNode::Separator,
+                ])
+                .chain(sketch_tool_nodes(l, &["project", "intersect"]))
+                .chain([
+                    MenuNode::Entry(MenuEntry::new(
+                        "draft.project_update",
+                        &l.sketch_project_update,
+                        Run::Op("draft.project_update", PropertyMap::new()),
+                    )),
+                    entry(
+                        "app.sketch_slice",
+                        &l.sketch_slice,
+                        dispatch("app.sketch_slice"),
                     ),
                 ])
                 .collect(),
@@ -15207,7 +15228,7 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 34] = [
+const SKETCH_TOOLS: [&str; 36] = [
     "select",
     "pattern",
     "line",
@@ -15229,6 +15250,8 @@ const SKETCH_TOOLS: [&str; 34] = [
     "break",
     "chamfer",
     "transform",
+    "project",
+    "intersect",
     "dimension",
     "coincident",
     "perpendicular",

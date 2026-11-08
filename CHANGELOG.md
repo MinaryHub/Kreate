@@ -12,6 +12,13 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Project and Intersect in a sketch (Sketch menu): click a part and its
+  outline and edges seen square to the drawing — or where the drawing's
+  plane cuts it — come in held, on a PROJECTED layer, to draw against and
+  close profiles with; they follow the part when the drawing is taken up
+  again (or Update Projections). Slice cuts away what is in front of the
+  drawing's plane while drawing.
+
 - Sketch tools as Fusion has them: Extend (a line or an arc on to what it
   meets), Break (split where crossed), Chamfer (a straight cut between two
   lines), and Move, Turn or Scale (about a point, or as a copy; a scale

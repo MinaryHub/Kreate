@@ -1650,6 +1650,17 @@ impl App {
                 self.status(&message);
             }
         }
+        // A drawing taken up again: what it projects from the parts made
+        // again from them as they now are, as Fusion keeps projected
+        // geometry tied. Nothing is done, and nothing recorded, when no
+        // part moved.
+        if self.op_ctx.mode == OpMode::Sketch
+            && kreate_ops::ops::draft::active_drawing(&self.doc)
+                .and_then(|id| self.doc.object(id)?.drawing.as_deref())
+                .is_some_and(|d| !d.projections.is_empty())
+        {
+            self.run_op_with("draft.project_update", &[]);
+        }
         self.refresh_command_info();
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
@@ -4548,11 +4559,38 @@ impl App {
     /// by the plane and capped, in its own space. Kept per input and plane,
     /// so an unchanged scene is not cut again every frame.
     fn cut_sections(&mut self, editing: &[ObjectId]) {
-        let Some(section) = self.doc.design.section else {
-            self.sectioned.clear();
-            return;
+        // Slicing a drawing being edited: everything in front of its plane
+        // cut away, as Fusion's Slice shows a sketch inside a part.
+        let slice = (self.op_ctx.mode == OpMode::Sketch && self.ui.sketch_slice)
+            .then(|| self.sketch_target())
+            .flatten()
+            .map(|(id, world)| {
+                (
+                    id,
+                    kreate_scene::design::Section {
+                        axis: 3,
+                        offset: 0.0,
+                        flip: false,
+                        cap: false,
+                    },
+                    world.translation,
+                    world.matrix3 * DVec3::Z,
+                )
+            });
+        let (section, point, normal) = match (slice, self.doc.design.section) {
+            (Some((_, s, point, normal)), _) => (s, point, normal.normalize_or_zero()),
+            (None, Some(section)) => {
+                let (point, normal) = section.plane(self.doc.cursor, self.doc.cursor_rotation);
+                (section, point, normal)
+            }
+            (None, None) => {
+                self.sectioned.clear();
+                return;
+            }
         };
-        let (point, normal) = section.plane(self.doc.cursor, self.doc.cursor_rotation);
+        let drawing = slice.map(|s| s.0);
+        let editing: Vec<ObjectId> = editing.iter().copied().chain(drawing).collect();
+        let editing = editing.as_slice();
         let mut kept = Vec::new();
         for (id, mesh) in self.evaluated.iter_mut() {
             if editing.contains(id) {
@@ -5840,7 +5878,12 @@ impl App {
                     }
                     // Drawing-only tools: an older sketch is drawn again as a
                     // drawing for them.
-                    Tool::Extend | Tool::Break | Tool::Chamfer | Tool::Transform => {
+                    Tool::Extend
+                    | Tool::Break
+                    | Tool::Chamfer
+                    | Tool::Transform
+                    | Tool::Project
+                    | Tool::Intersect => {
                         self.status(&self.ui.catalog.get("sketch-drawing-only"));
                     }
                     // Trim stays in hand: one click a piece, as many as there are.
@@ -6316,6 +6359,39 @@ impl App {
                     self.redraw.set(RedrawReason::SCENE_CHANGED);
                     self.sketch_hover();
                 }
+            }
+            // Project or intersect: the part under the pointer, into the
+            // drawing; the tool stays in hand for the next.
+            Tool::Project | Tool::Intersect => {
+                let hit = self.cursor_ndc().and_then(|ndc| {
+                    let aspect = self.viewport_aspect();
+                    self.pick
+                        .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)
+                });
+                let drawing = kreate_ops::ops::draft::active_drawing(&self.doc);
+                let Some(name) = hit
+                    .filter(|h| Some(h.object) != drawing)
+                    .and_then(|h| self.doc.object(h.object))
+                    .map(|o| o.name.clone())
+                else {
+                    self.status(&self.ui.catalog.get(if tool == Tool::Project {
+                        "sketch-prompt-project"
+                    } else {
+                        "sketch-prompt-intersect"
+                    }));
+                    return;
+                };
+                self.run_op_with(
+                    "draft.project",
+                    &[
+                        ("objects", PropertyValue::Text(name)),
+                        (
+                            "kind",
+                            PropertyValue::Enum(u32::from(tool == Tool::Intersect)),
+                        ),
+                    ],
+                );
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
             // Turn, scale or copy: about the point clicked, what is
             // selected; the angle, the scale and copying are then the
@@ -14242,6 +14318,10 @@ impl App {
                 self.end_loop_cut_hover();
                 self.mate = Some(None);
                 self.status("Align Faces: click the face of the part that moves, then the face it goes against (Esc stops)");
+            }
+            "app.sketch_slice" => {
+                self.ui.sketch_slice = !self.ui.sketch_slice;
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
             "file.export_drawing" => {
                 let view = action

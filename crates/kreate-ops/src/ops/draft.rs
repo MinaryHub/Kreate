@@ -45,9 +45,11 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftPattern>();
     registry.register::<DraftUnconstrain>();
     edit_tools::register(registry);
+    project::register(registry);
 }
 
 pub mod edit_tools;
+pub mod project;
 
 /// The active object, when it is a drawing.
 pub fn active_drawing(doc: &Document) -> Option<ObjectId> {
