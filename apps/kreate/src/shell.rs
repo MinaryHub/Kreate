@@ -4793,6 +4793,14 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "slot",
                         "point",
                         "text",
+                        "rectangle_3pt",
+                        "polygon_outer",
+                        "polygon_edge",
+                        "ellipse",
+                        "slot_arc",
+                        "circle_tangent2",
+                        "circle_tangent3",
+                        "spline_cv",
                     ],
                 )
                 .into_iter()
@@ -4848,6 +4856,7 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "horizontal",
                         "vertical",
                         "parallel",
+                        "collinear",
                         "equal",
                         "tangent",
                         "concentric",
@@ -15228,7 +15237,7 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 36] = [
+const SKETCH_TOOLS: [&str; 45] = [
     "select",
     "pattern",
     "line",
@@ -15252,6 +15261,15 @@ const SKETCH_TOOLS: [&str; 36] = [
     "transform",
     "project",
     "intersect",
+    "rectangle_3pt",
+    "polygon_outer",
+    "polygon_edge",
+    "ellipse",
+    "slot_arc",
+    "circle_tangent2",
+    "circle_tangent3",
+    "spline_cv",
+    "collinear",
     "dimension",
     "coincident",
     "perpendicular",
