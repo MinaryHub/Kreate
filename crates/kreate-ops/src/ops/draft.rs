@@ -44,7 +44,10 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DraftMirror>();
     registry.register::<DraftPattern>();
     registry.register::<DraftUnconstrain>();
+    edit_tools::register(registry);
 }
+
+pub mod edit_tools;
 
 /// The active object, when it is a drawing.
 pub fn active_drawing(doc: &Document) -> Option<ObjectId> {
@@ -99,6 +102,7 @@ fn draw(
         let first = d.counters().0;
         change(d)?;
         join_new(d, first);
+        relate_new(d, first);
         Ok(())
     })
 }
@@ -124,6 +128,140 @@ fn join_new(d: &mut Drawing, first: u32) {
             d.constraints.push(Constraint::Coincident(r, *o));
         }
     }
+}
+
+/// What Fusion infers of what was just drawn, held as it was drawn: a new
+/// line exactly along or square to one drawn before (and not already level
+/// or upright), or leaving an arc's end along it; a new point exactly on a
+/// curve drawn before — at a line's middle, its midpoint. Exactly, because
+/// the line tool turns a segment onto these when it comes near them, and
+/// only then.
+fn relate_new(d: &mut Drawing, first: u32) {
+    let exact = |x: f64| x.abs() <= 1e-9;
+    let squared: Vec<EntityId> = d
+        .constraints
+        .iter()
+        .filter_map(|c| match c {
+            Constraint::Horizontal(r, None) | Constraint::Vertical(r, None) => Some(r.entity),
+            _ => None,
+        })
+        .collect();
+    let old_lines: Vec<(EntityId, DVec2, DVec2)> = d
+        .entities
+        .iter()
+        .filter(|e| e.id.0 < first)
+        .filter_map(|e| match &e.kind {
+            EntityKind::Curve(Curve2D::Line { a, b }) => Some((e.id, *a, *b)),
+            _ => None,
+        })
+        .collect();
+    let old_arcs: Vec<(EntityId, Curve2D)> = d
+        .entities
+        .iter()
+        .filter(|e| e.id.0 < first)
+        .filter_map(|e| match &e.kind {
+            EntityKind::Curve(c @ Curve2D::Arc { .. }) => Some((e.id, c.clone())),
+            _ => None,
+        })
+        .collect();
+    let new_lines: Vec<(EntityId, DVec2, DVec2)> = d
+        .entities
+        .iter()
+        .filter(|e| e.id.0 >= first)
+        .filter_map(|e| match &e.kind {
+            EntityKind::Curve(Curve2D::Line { a, b }) => Some((e.id, *a, *b)),
+            _ => None,
+        })
+        .collect();
+    let mut add = Vec::new();
+    for (id, a, b) in &new_lines {
+        let dir = (*b - *a).normalize_or_zero();
+        if dir == DVec2::ZERO {
+            continue;
+        }
+        // Leaving an arc's end along it.
+        let mut tangent = false;
+        for (arc, c) in &old_arcs {
+            let (lo, hi) = c.domain();
+            for t in [lo, hi] {
+                let at = c.point(t);
+                let along = c.derivative(t).normalize_or_zero();
+                let touches = at.distance(*a) <= 1e-9 * at.length().max(1.0)
+                    || at.distance(*b) <= 1e-9 * at.length().max(1.0);
+                if touches && exact(along.perp_dot(dir)) {
+                    add.push(Constraint::Tangent(*id, *arc));
+                    tangent = true;
+                }
+            }
+        }
+        if tangent || squared.contains(id) {
+            continue;
+        }
+        if let Some((other, _, _)) = old_lines.iter().find(|(_, p, q)| {
+            let o = (*q - *p).normalize_or_zero();
+            o != DVec2::ZERO && exact(o.perp_dot(dir))
+        }) {
+            add.push(Constraint::Parallel(*id, *other));
+        } else if let Some((other, _, _)) = old_lines.iter().find(|(_, p, q)| {
+            let o = (*q - *p).normalize_or_zero();
+            o != DVec2::ZERO && exact(o.dot(dir))
+        }) {
+            add.push(Constraint::Perpendicular(*id, *other));
+        }
+    }
+    // New points on old curves, where they are not already joined to a
+    // point there.
+    let joined: Vec<EntityRef> = d
+        .constraints
+        .iter()
+        .filter_map(|c| match c {
+            Constraint::Coincident(x, _) if x.entity.0 >= first => Some(*x),
+            _ => None,
+        })
+        .collect();
+    let new_points: Vec<(EntityRef, DVec2)> = d
+        .entities
+        .iter()
+        .filter(|e| e.id.0 >= first)
+        .flat_map(|e| d.parts(e.id))
+        .filter(|(r, _)| matches!(r.part, Part::Start | Part::End | Part::Whole))
+        .filter(|(r, _)| !joined.contains(r))
+        .collect();
+    for (r, p) in new_points {
+        if matches!(
+            d.entity(r.entity).map(|e| &e.kind),
+            Some(EntityKind::Curve(_))
+        ) && r.part == Part::Whole
+        {
+            continue;
+        }
+        let eps = kreate_geom2d::POINT_EPS * p.length().max(1.0);
+        for e in d
+            .entities
+            .iter()
+            .filter(|e| e.id.0 < first && !e.construction)
+        {
+            let EntityKind::Curve(c) = &e.kind else {
+                continue;
+            };
+            let (t, q) = c.closest(p);
+            let (lo, hi) = c.domain();
+            let at_end = !c.is_closed()
+                && (c.point(lo).distance(p) <= eps || c.point(hi).distance(p) <= eps);
+            if q.distance(p) > eps || at_end {
+                continue;
+            }
+            let middle = matches!(c, Curve2D::Line { .. })
+                && (t - (lo + hi) * 0.5).abs() <= 1e-9 * (hi - lo);
+            add.push(if middle {
+                Constraint::Midpoint(r, e.id)
+            } else {
+                Constraint::PointOn(r, e.id)
+            });
+            break;
+        }
+    }
+    d.constraints.extend(add);
 }
 
 /// Whether anything holds an entity: a constraint or a driving dimension.
@@ -670,10 +808,32 @@ impl Operator for DraftConstrain {
                     Constraint::Fixed(refs[0], at)
                 }
             };
+            // One that holds nothing more than is held already says the
+            // same thing twice, as Fusion refuses it: it would make the
+            // drawing over-constrained.
+            let before = freedom(d);
             d.constraints.push(c);
+            if adds_nothing(d, before) {
+                return Err(OpError::Failed(
+                    "that is already held: it would over-constrain the drawing".into(),
+                ));
+            }
             Ok(())
         })
     }
+}
+
+/// What can still move in a drawing, all its pieces together, as it is
+/// held now.
+fn freedom(d: &Drawing) -> usize {
+    d.freedom()
+}
+
+/// Whether the drawing, solved, holds nothing more than it did when it
+/// could move `before` ways: what was just added is redundant. One that
+/// does not solve is left to the caller's own refusal.
+fn adds_nothing(d: &Drawing, before: usize) -> bool {
+    d.clone().solve().iter().all(|p| p.converged) && d.freedom() >= before
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -770,7 +930,18 @@ impl Operator for DraftDimension {
             if dim.value == 0.0 || !dim.driving {
                 dim.value = now.abs();
             }
-            d.add(EntityKind::Dimension(dim));
+            // A driving dimension of what is already held would
+            // over-constrain it: it goes in driven, measuring, as Fusion
+            // offers to make it.
+            let before = freedom(d);
+            let driving = dim.driving;
+            let id = d.add(EntityKind::Dimension(dim));
+            if driving && adds_nothing(d, before) {
+                if let Some(EntityKind::Dimension(x)) = d.entity_mut(id).map(|e| &mut e.kind) {
+                    x.driving = false;
+                    x.value = now.abs();
+                }
+            }
             Ok(())
         })
     }

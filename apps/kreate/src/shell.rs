@@ -4801,7 +4801,20 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
             }),
             kreate_ops::mode::Menu::Modify => out.push(TopMenu {
                 label: l.menu_modify.clone(),
-                nodes: sketch_tool_nodes(l, &["fillet", "trim", "offset", "mirror", "pattern"]),
+                nodes: sketch_tool_nodes(
+                    l,
+                    &[
+                        "fillet",
+                        "chamfer",
+                        "trim",
+                        "extend",
+                        "break",
+                        "offset",
+                        "mirror",
+                        "pattern",
+                        "transform",
+                    ],
+                ),
             }),
             kreate_ops::mode::Menu::Constrain => out.push(TopMenu {
                 label: l.menu_constrain.clone(),
@@ -15194,7 +15207,7 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 30] = [
+const SKETCH_TOOLS: [&str; 34] = [
     "select",
     "pattern",
     "line",
@@ -15212,6 +15225,10 @@ const SKETCH_TOOLS: [&str; 30] = [
     "offset",
     "point",
     "trim",
+    "extend",
+    "break",
+    "chamfer",
+    "transform",
     "dimension",
     "coincident",
     "perpendicular",

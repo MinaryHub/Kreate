@@ -46,6 +46,16 @@ pub enum Tool {
     /// Click a line, circle or arc to take out the piece between the
     /// crossings either side.
     Trim,
+    /// Click a line or an arc near an end to carry that end on to what it
+    /// meets.
+    Extend,
+    /// Click a curve to split it where the curves either side cross it.
+    Break,
+    /// Click a corner of two lines to cut it straight.
+    Chamfer,
+    /// What is selected turned, scaled and moved about the point clicked —
+    /// or copied — its numbers then the last operation's to change.
+    Transform,
     /// A constraint, by its tag in `kreate_scene::sketch::KINDS` — or
     /// `concentric`, which is a coincidence of two centres.
     Constrain(&'static str),
@@ -78,6 +88,10 @@ impl Tool {
             "mirror" => Tool::Mirror,
             "offset" => Tool::Offset,
             "trim" => Tool::Trim,
+            "extend" => Tool::Extend,
+            "break" => Tool::Break,
+            "chamfer" => Tool::Chamfer,
+            "transform" => Tool::Transform,
             "dimension" => Tool::Dimension,
             "extrude" => Tool::Extrude,
             "revolve" => Tool::Revolve,
@@ -114,6 +128,10 @@ impl Tool {
             Tool::Mirror => "mirror",
             Tool::Offset => "offset",
             Tool::Trim => "trim",
+            Tool::Extend => "extend",
+            Tool::Break => "break",
+            Tool::Chamfer => "chamfer",
+            Tool::Transform => "transform",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
             Tool::Revolve => "revolve",
@@ -873,6 +891,73 @@ pub fn ref_text(r: EntityRef) -> String {
     format!("{}.{part}", r.entity.0)
 }
 
+/// How near, in radians, the line tool's next segment has to come to a
+/// direction to be turned onto it: two degrees.
+pub const INFER_ANGLE: f64 = 2.0 * std::f64::consts::PI / 180.0;
+
+/// The line tool's next segment from `from` toward `to`, turned onto the
+/// nearest of what Fusion infers while drawing — level, upright, along or
+/// square to a line of the drawing, on along an arc that ends at `from` —
+/// when it comes within [`INFER_ANGLE`] of it. The point it then goes to
+/// (as far along as `to` is) and what it was turned square to; `None` when
+/// nothing is near enough.
+pub fn infer_segment(d: &Drawing, from: DVec2, to: DVec2) -> Option<(DVec2, &'static str)> {
+    let run = to - from;
+    let len = run.length();
+    if len < 1e-12 {
+        return None;
+    }
+    let angle = run.y.atan2(run.x);
+    // Each direction a line may be turned onto, the same either way along.
+    let mut ways: Vec<(DVec2, &'static str)> = vec![(DVec2::X, "H"), (DVec2::Y, "V")];
+    for e in &d.entities {
+        match &e.kind {
+            EntityKind::Curve(Curve2D::Line { a, b }) => {
+                let dir = (*b - *a).normalize_or_zero();
+                if dir != DVec2::ZERO {
+                    ways.push((dir, "//"));
+                    ways.push((dir.perp(), "⊥"));
+                }
+            }
+            // An arc ending where the segment starts: on along it.
+            EntityKind::Curve(c @ Curve2D::Arc { .. }) => {
+                let (lo, hi) = c.domain();
+                for t in [lo, hi] {
+                    if c.point(t).distance(from) <= 1e-9 * from.length().max(1.0) {
+                        let dir = c.derivative(t).normalize_or_zero();
+                        if dir != DVec2::ZERO {
+                            ways.push((dir, "T"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let off = |dir: DVec2| {
+        let a = dir.y.atan2(dir.x);
+        // The difference either way along, folded into [0, π/2].
+        let d = (angle - a).rem_euclid(std::f64::consts::PI);
+        d.min(std::f64::consts::PI - d)
+    };
+    // Level and upright first, as Fusion prefers them, then the nearest.
+    let best = ways
+        .iter()
+        .filter(|(dir, _)| off(*dir) <= INFER_ANGLE)
+        .min_by(|a, b| {
+            let rank = |g: &str| u8::from(!matches!(g, "H" | "V"));
+            (rank(a.1), off(a.0))
+                .partial_cmp(&(rank(b.1), off(b.0)))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    let dir = if run.dot(best.0) >= 0.0 {
+        best.0
+    } else {
+        -best.0
+    };
+    Some((from + dir * run.dot(dir), best.1))
+}
+
 /// A typed length in the scene's unit, as metres: "40", "12.5", or "40,20"
 /// for two. Commas and spaces separate.
 pub fn typed_lengths(text: &str, unit_metres: f64) -> Vec<f64> {
@@ -936,6 +1021,12 @@ pub struct SketchUi {
     pub closing: bool,
     /// A drag-box: where it began and where the pointer is, on screen.
     pub band: Option<[DVec2; 2]>,
+    /// What the line tool's next segment was turned square to, as Fusion
+    /// shows it by the pointer: "H", "V", "//", "⊥" or "T".
+    pub inferred: Option<&'static str>,
+    /// The line tool's next segment is a tangent arc on from the last one
+    /// (A while drawing), as Fusion's drag from a line's end draws.
+    pub arc_next: bool,
 }
 
 impl SketchUi {
@@ -1493,6 +1584,9 @@ fn overlay(
         if join > 0 || ui.snapped {
             view.snap = Some(to_world(h));
         }
+        if let Some(glyph) = ui.inferred {
+            view.glyphs.push((to_world(h), glyph.to_string()));
+        }
         let clicks: Vec<DVec2> = ui.clicks.iter().map(|c| c.0).collect();
         let unit = view.unit.0;
         let typed = typed_lengths(&ui.typed, unit);
@@ -1506,6 +1600,18 @@ fn overlay(
                 .collect::<Vec<_>>()
         };
         match (ui.tool, clicks.as_slice()) {
+            (Tool::Line, [.., before, last]) if ui.arc_next => {
+                if let Some(arc) =
+                    kreate_ops::ops::draft::edit_tools::tangent_arc(*last, *last - *before, h)
+                {
+                    let mut pts = clicks.clone();
+                    pts.pop();
+                    pts.push(*last);
+                    view.preview.push(polyline(pts));
+                    view.preview
+                        .push(arc.tessellate(1e-4).into_iter().map(to_world).collect());
+                }
+            }
             (Tool::Line, [.., last]) => {
                 let next = typed.first().map(|l| along(*last, h, *l)).unwrap_or(h);
                 let mut pts = clicks.clone();
@@ -1711,6 +1817,10 @@ fn overlay(
         (Tool::Mirror, _) => "sketch-prompt-mirror",
         (Tool::Offset, _) => "sketch-prompt-offset",
         (Tool::Trim, _) => "sketch-prompt-trim",
+        (Tool::Extend, _) => "sketch-prompt-extend",
+        (Tool::Break, _) => "sketch-prompt-break",
+        (Tool::Chamfer, _) => "sketch-prompt-chamfer",
+        (Tool::Transform, _) => "sketch-prompt-transform",
         (Tool::Dimension, _) => "sketch-prompt-dimension",
         (Tool::Constrain(_), _) => "sketch-prompt-constrain",
         (Tool::Extrude, _) => "sketch-prompt-region",
@@ -2156,6 +2266,51 @@ mod tests {
     }
 
     use super::*;
+
+    /// The line tool's next segment turns onto level within two degrees,
+    /// onto along or square to a line of the drawing, and onto on along an
+    /// arc it leaves; further off, it goes where it is pointed.
+    #[test]
+    fn a_segment_near_a_direction_is_turned_onto_it() {
+        let mut d = Drawing::new();
+        let slant = DVec2::new(1.0, 0.5).normalize();
+        d.add_curve(Curve2D::Line {
+            a: DVec2::ZERO,
+            b: slant * 0.02,
+        });
+        let from = DVec2::new(0.0, 0.05);
+        let turn = |deg: f64, len: f64| {
+            let a = deg.to_radians();
+            from + DVec2::new(a.cos(), a.sin()) * len
+        };
+        let (p, g) = infer_segment(&d, from, turn(1.5, 0.01)).unwrap();
+        assert_eq!(g, "H");
+        assert!((p.y - from.y).abs() < 1e-12);
+        let along = slant.y.atan2(slant.x).to_degrees();
+        let (p, g) = infer_segment(&d, from, turn(along + 1.0, 0.01)).unwrap();
+        assert_eq!(g, "//");
+        assert!((p - from).normalize().perp_dot(slant).abs() < 1e-12);
+        let (_, g) = infer_segment(&d, from, turn(along + 90.0 - 1.0, 0.01)).unwrap();
+        assert_eq!(g, "⊥");
+        assert!(infer_segment(&d, from, turn(along + 10.0, 0.01)).is_none());
+        // On from a quarter arc's end, round toward -X.
+        let mut d = Drawing::new();
+        d.add_curve(Curve2D::Arc {
+            c: DVec2::ZERO,
+            r: 0.01,
+            start: 0.0,
+            sweep: std::f64::consts::FRAC_PI_2 - 0.3,
+        });
+        let end = DVec2::new(
+            (std::f64::consts::FRAC_PI_2 - 0.3).cos(),
+            (std::f64::consts::FRAC_PI_2 - 0.3).sin(),
+        ) * 0.01;
+        let tangent = DVec2::new(-end.y, end.x).normalize();
+        let a = tangent.y.atan2(tangent.x) + 0.01;
+        let (p, g) = infer_segment(&d, end, end + DVec2::new(a.cos(), a.sin()) * 0.01).unwrap();
+        assert_eq!(g, "T");
+        assert!((p - end).normalize().perp_dot(tangent).abs() < 1e-12);
+    }
 
     /// A unit square on screen at 100 px a unit, and a circle.
     /// A rectangle's corners joined, a circle and an arc: one point per

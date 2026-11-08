@@ -517,6 +517,26 @@ fn dimension(d: &Dimension, sign: f64, layout: &Layout, x: &[f64], out: &mut Vec
 }
 
 impl Drawing {
+    /// What can still move in the whole drawing: each held piece's freedom,
+    /// and every number of what nothing holds at all — a free circle moves
+    /// three ways. Measured on a copy, solved.
+    pub fn freedom(&self) -> usize {
+        let mut d = self.clone();
+        let pieces = d.solve();
+        let held: std::collections::BTreeSet<EntityId> = pieces
+            .iter()
+            .flat_map(|p| p.entities.iter().copied())
+            .collect();
+        let loose: usize = d
+            .entities
+            .iter()
+            .filter(|e| !held.contains(&e.id))
+            .filter(|e| matches!(e.kind, EntityKind::Point(_) | EntityKind::Curve(_)))
+            .map(|e| Layout::new(&d, &[e.id]).len)
+            .sum();
+        pieces.iter().map(|p| p.freedom).sum::<usize>() + loose
+    }
+
     /// Holds the drawing to its constraints and driving dimensions, piece
     /// by piece, and measures its driven dimensions afterwards.
     pub fn solve(&mut self) -> Vec<PieceSolve> {
