@@ -723,12 +723,27 @@ fn common() -> Vec<Binding> {
             Context::Timeline,
             Action::new("marker.remove"),
         ),
-        // X takes what is selected out of the sketch.
+        // As in Fusion: Delete takes what is selected out of the sketch, and
+        // X makes it construction — or ordinary again.
         key(
-            "sketch.delete_x",
-            "X",
+            "sketch.delete",
+            "Delete",
             Context::Sketch,
             Action::new("app.sketch_delete"),
+        ),
+        // A Mac's delete key is Backspace. While drawing, the tools take it
+        // first, to take back the last point.
+        key(
+            "sketch.delete_back",
+            "Backspace",
+            Context::Sketch,
+            Action::new("app.sketch_delete"),
+        ),
+        key(
+            "sketch.construction",
+            "X",
+            Context::Sketch,
+            Action::new("app.sketch_construction"),
         ),
         // Blender's F and Shift+F: the brush's size and strength, set by
         // moving the pointer, in every brush mode.
@@ -1133,6 +1148,12 @@ fn common() -> Vec<Binding> {
             Context::ObjectMode,
             Action::new("object.delete"),
         ),
+        key(
+            "object.delete_key",
+            "Delete",
+            Context::ObjectMode,
+            Action::new("object.delete"),
+        ),
         // Copy and paste on the keys every application puts them on. Both are
         // the application's rather than operators — `edit.`, like undo: copy
         // edits nothing, and paste has to be given the clipboard's text before
@@ -1229,6 +1250,12 @@ fn common() -> Vec<Binding> {
         key(
             "mesh.delete",
             "X",
+            Context::EditMesh,
+            Action::new("mesh.delete"),
+        ),
+        key(
+            "mesh.delete_key",
+            "Delete",
             Context::EditMesh,
             Action::new("mesh.delete"),
         ),

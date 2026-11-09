@@ -5345,6 +5345,13 @@ impl App {
         }
         // Last, a point along one of the sketch's lines.
         if matches!(mode, Mode::Element | Mode::Edge) {
+            // In a drawing, onto the curve itself and not the chord drawing
+            // it: exactly on, so the drawing holds the point there.
+            if let (Some(d), Some(line)) = (self.active_drawing(), g.line_near(at, REACH)) {
+                if let Some(c) = g.entity_of_line(line).and_then(|e| d.curve(e)) {
+                    return Some(c.closest(on_plane).1);
+                }
+            }
             return g.on_line(at, on_plane, REACH);
         }
         None
@@ -5475,6 +5482,7 @@ impl App {
     /// A line tool's points so far, run as one stroke.
     fn commit_sketch_line(&mut self, closed: bool) {
         let clicks = std::mem::take(&mut self.sketching.clicks);
+        let typed = std::mem::take(&mut self.sketching.typed_segments);
         if clicks.len() >= 2 && self.active_drawing().is_some() {
             self.run_op_with(
                 "draft.line",
@@ -5486,6 +5494,7 @@ impl App {
                         ),
                     ),
                     ("closed", PropertyValue::Bool(closed)),
+                    ("dimensions", PropertyValue::Ints(typed)),
                 ],
             );
         } else if clicks.len() >= 2 {
@@ -5791,7 +5800,11 @@ impl App {
                         }
                     }
                     // Drawn in drawings, which every sketch now is.
-                    Tool::Circle2 | Tool::Circle3 | Tool::ArcCentre => {
+                    Tool::Circle2
+                    | Tool::Circle3
+                    | Tool::ArcCentre
+                    | Tool::RectangleCentre
+                    | Tool::TangentArc => {
                         self.status("this tool draws in a drawing: F2 to open one");
                     }
                     Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
@@ -5975,6 +5988,48 @@ impl App {
                         let extend = self.input.shift_down;
                         let g = self.sketch_geometry().unwrap_or_default();
                         let lines_of = |pick: Pick| g.lines_of(pick);
+                        let at = self.sketch_cursor();
+                        let now = std::time::Instant::now();
+                        let double =
+                            self.sketching
+                                .last_press
+                                .zip(at)
+                                .is_some_and(|((t, p), a)| {
+                                    now.duration_since(t).as_millis() < 400 && p.distance(a) < 6.0
+                                });
+                        self.sketching.last_press = at.map(|a| (now, a));
+                        // Ctrl (Cmd on a Mac) takes what is clicked back out.
+                        if self.input.ctrl_down || self.input.command_down {
+                            match pick {
+                                Some(Pick::Point(v)) => self.sketching.points.retain(|p| *p != v),
+                                Some(other) => {
+                                    let ls = lines_of(other);
+                                    self.sketching.lines.retain(|l| !ls.contains(l));
+                                }
+                                None => {}
+                            }
+                            self.redraw.set(RedrawReason::UI);
+                            return true;
+                        }
+                        // A double-click on a curve of a drawing: all of the
+                        // chain it is joined into, as Fusion selects one.
+                        if let (true, Some(e)) = (double, pick.and_then(|k| g.entity_of(k))) {
+                            let chain = g.chain_of(e);
+                            if !extend {
+                                self.sketching.points.clear();
+                                self.sketching.lines.clear();
+                            }
+                            for l in 0..g.lines.len() as u32 {
+                                if g.entity_of_line(l).is_some_and(|x| chain.contains(&x))
+                                    && !self.sketching.lines.contains(&l)
+                                {
+                                    self.sketching.lines.push(l);
+                                }
+                            }
+                            self.sketching.drag = None;
+                            self.redraw.set(RedrawReason::UI);
+                            return true;
+                        }
                         // Taking hold of what is already selected drags all
                         // of it; anything else is selected first (Shift adds).
                         let held = match pick {
@@ -6149,9 +6204,25 @@ impl App {
             // Offset: the selected curves, as far as the click is from the
             // first of them, to its side — or as typed.
             Tool::Offset => {
-                let ids = g.entities_in(&[], &self.sketching.lines);
-                if let Some(first) = ids.first().and_then(|i| d.curve(EntityId(*i))) {
-                    let (_, near) = first.closest(p);
+                // What is selected; else the chain clicked, as Fusion takes
+                // it — then the next click says how far.
+                let mut ids = g.entities_in(&[], &self.sketching.lines);
+                if ids.is_empty() {
+                    if let Some(e) = pick.and_then(|k| g.entity_of(k)) {
+                        let chain = g.chain_of(e);
+                        self.sketching.lines = (0..g.lines.len() as u32)
+                            .filter(|l| g.entity_of_line(*l).is_some_and(|x| chain.contains(&x)))
+                            .collect();
+                    }
+                    return;
+                }
+                ids.retain(|i| d.curve(EntityId(*i)).is_some());
+                let nearest = ids
+                    .iter()
+                    .filter_map(|i| d.curve(EntityId(*i)))
+                    .map(|c| c.closest(p).1)
+                    .min_by(|a, b| a.distance(p).total_cmp(&b.distance(p)));
+                if let Some(near) = nearest {
                     let distance = typed.first().map(|t| t.abs()).unwrap_or(near.distance(p));
                     if distance > 1e-9 {
                         // One step for them all: the panel's distance after
@@ -6224,7 +6295,51 @@ impl App {
                     ],
                 );
             }
+            // The tangent arc: first the end it runs on from, then where it
+            // ends.
+            Tool::TangentArc => match self.sketching.tangent {
+                None => {
+                    let end = match pick {
+                        Some(Pick::Point(v)) => g
+                            .map
+                            .as_ref()
+                            .map(|m| m.refs[v as usize].clone())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .find(|r| {
+                                matches!(r.part, Part::Start | Part::End)
+                                    && d.curve(r.entity).is_some()
+                            }),
+                        _ => None,
+                    };
+                    let Some(r) = end else {
+                        self.status(&self.ui.catalog.get("sketch-prompt-tangent-start"));
+                        return;
+                    };
+                    let (Some(c), Some(at)) = (d.curve(r.entity), d.point_of(r)) else {
+                        return;
+                    };
+                    let (lo, hi) = c.domain();
+                    let along = if r.part == Part::Start {
+                        -c.derivative(lo)
+                    } else {
+                        c.derivative(hi)
+                    };
+                    self.sketching.tangent = Some((r, at, along.normalize_or_zero()));
+                    self.sketching.clicks.push((at, 0));
+                }
+                Some((_, start, along)) => {
+                    // From the end, along it: joined there and held tangent
+                    // by the operator.
+                    self.run_op_with(
+                        "draft.tangent_arc",
+                        &[("start", v3(start)), ("dir", v3(along)), ("end", v3(p))],
+                    );
+                    self.sketch_tool_done();
+                }
+            },
             Tool::Rectangle
+            | Tool::RectangleCentre
             | Tool::Circle
             | Tool::Circle2
             | Tool::Circle3
@@ -6365,6 +6480,17 @@ impl App {
                                 ("start", v3(c[1])),
                                 ("end", v3(c[2])),
                                 ("width", PropertyValue::Float(w)),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    (Tool::RectangleCentre, 2) => {
+                        self.run_op_with(
+                            "draft.rectangle",
+                            &[
+                                ("a", v3(c[0])),
+                                ("b", v3(c[1])),
+                                ("centred", PropertyValue::Bool(true)),
                             ],
                         );
                         self.sketch_tool_done();
@@ -6711,6 +6837,8 @@ impl App {
             KeyCode::Backspace if drawing => {
                 if self.sketching.typed.pop().is_none() {
                     self.sketching.clicks.pop();
+                    let segments = self.sketching.clicks.len().saturating_sub(1) as u32;
+                    self.sketching.typed_segments.retain(|s| *s < segments);
                 }
                 self.redraw.set(RedrawReason::UI);
                 true
@@ -6727,9 +6855,20 @@ impl App {
                 );
                 let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
                 match (tool, lengths.as_slice()) {
-                    (Tool::Line, [length, ..]) => {
-                        let next = kreate::sketching::along(last, toward, *length);
+                    // A length, and with it an angle in degrees from the
+                    // drawing's X, as Fusion's two fields take them: the
+                    // length stays as the segment's dimension.
+                    (Tool::Line, [length, rest @ ..]) => {
+                        let next = match rest.first() {
+                            Some(angle) => {
+                                let a = (angle / unit).to_radians();
+                                last + glam::DVec2::new(a.cos(), a.sin()) * length.abs()
+                            }
+                            None => kreate::sketching::along(last, toward, *length),
+                        };
                         self.sketching.clicks.push((next, 0));
+                        let segment = self.sketching.clicks.len() as u32 - 2;
+                        self.sketching.typed_segments.push(segment);
                         self.sketching.typed.clear();
                     }
                     (Tool::Line, []) => self.commit_sketch_line(false),
@@ -6737,7 +6876,14 @@ impl App {
                     (Tool::Rectangle, [w, h, ..]) if self.active_drawing().is_some() => {
                         let first = self.sketching.clicks[0];
                         let far = kreate::sketching::corner(first.0, toward, *w, *h);
-                        self.run_op_with("draft.rectangle", &[("a", v3(first.0)), ("b", v3(far))]);
+                        self.run_op_with(
+                            "draft.rectangle",
+                            &[
+                                ("a", v3(first.0)),
+                                ("b", v3(far)),
+                                ("dimensioned", PropertyValue::Bool(true)),
+                            ],
+                        );
                         self.sketch_tool_done();
                     }
                     (Tool::Circle, [d, ..]) if self.active_drawing().is_some() => {
@@ -6747,6 +6893,7 @@ impl App {
                             &[
                                 ("centre", v3(first.0)),
                                 ("radius", PropertyValue::Float(d.abs() * 0.5)),
+                                ("dimensioned", PropertyValue::Bool(true)),
                             ],
                         );
                         self.sketch_tool_done();
@@ -15012,6 +15159,8 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::Digit4 => "Digit4",
         KeyCode::Digit5 => "Digit5",
         KeyCode::Tab => "Tab",
+        KeyCode::Delete => "Delete",
+        KeyCode::Backspace => "Backspace",
         KeyCode::Backquote => "Backquote",
         KeyCode::Space => "Space",
         KeyCode::ArrowLeft => "ArrowLeft",
@@ -19313,6 +19462,63 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         assert!(view.drafting);
         assert_eq!(view.dims.len(), 1);
         assert!(view.lines.len() >= 5);
+    }
+
+    /// Typed lengths stay as dimensions, and a tangent arc runs on from a
+    /// line's end held tangent to it.
+    #[test]
+    fn typed_lengths_are_dimensioned_and_an_arc_runs_on_tangent() {
+        use kreate::sketching::{Pick, Tool};
+        use kreate_scene::drawing::{Constraint, EntityId, EntityKind, EntityRef, Part};
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        app.update_ui_state_for_test();
+        let unit = app.doc.design.length_unit.metres();
+        app.sketching.take(Tool::Line);
+        app.sketching.clicks = vec![(glam::DVec2::ZERO, 0)];
+        app.sketching.hover = Some((glam::DVec2::new(1.0, 0.0), 0));
+        app.sketching.typed = "40".into();
+        assert!(app.sketch_key(KeyCode::Enter));
+        assert!(
+            app.sketch_key(KeyCode::Enter),
+            "an empty Enter ends the line"
+        );
+        let d = app.active_drawing().unwrap();
+        let dims: Vec<f64> = d
+            .entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Dimension(x) => Some(x.value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dims.len(), 1);
+        assert!((dims[0] - 40.0 * unit).abs() < 1e-12, "{dims:?}");
+        // The tangent arc: the line's far end, then where it goes.
+        let end = EntityRef::at(EntityId(1), Part::End);
+        let g = app.sketch_geometry().unwrap();
+        let v = (0..g.points.len() as u32)
+            .find(|v| g.map.as_ref().unwrap().refs[*v as usize].contains(&end))
+            .unwrap();
+        app.sketching.take(Tool::TangentArc);
+        let tip = 40.0 * unit;
+        app.drawing_click(
+            Tool::TangentArc,
+            glam::DVec2::new(tip, 0.0),
+            Some(Pick::Point(v)),
+        );
+        assert!(app.sketching.tangent.is_some());
+        app.drawing_click(
+            Tool::TangentArc,
+            glam::DVec2::new(tip + 10.0 * unit, 10.0 * unit),
+            None,
+        );
+        let d = app.active_drawing().unwrap();
+        assert!(d
+            .constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::Tangent(..))));
     }
 
     /// F2 goes into the drawing and out again; in 2D what would turn the

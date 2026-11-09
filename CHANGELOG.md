@@ -33,12 +33,33 @@ use; `scripts/release.sh` turns that section into the next release.
   arc it leaves — shown by the pointer, held as a constraint (Ctrl draws
   free); an end landing on a curve is held on it, at a line's middle to
   it. A while drawing lines makes the next segment a tangent arc.
+- Typed values stay as dimensions: a line's typed length, a rectangle's
+  width and height, and a circle's diameter. A line takes a second typed
+  value as its angle, in degrees.
+- Sketch tools: Center Rectangle, Tangent Arc on its own (from the end of a
+  line or arc), and the Midpoint and Symmetry constraints.
+- Offset takes a chain whole: curves joined end to end are offset to one
+  side together and meet at their corners again, lines where they cross
+  and curves round the corner. With nothing selected, the first click takes
+  the chain under it.
+- Selecting in a sketch: a double-click takes the chain a curve is joined
+  into; Ctrl-click (Cmd-click on a Mac) takes something back out; a box
+  drawn right to left is a crossing box, dashed, taking what it touches.
 
 ### Changed
 
 - A constraint that says what is already held is refused, and a driving
   dimension of what is already held goes in as a driven one, instead of
   over-constraining the sketch.
+- In a sketch, Delete (and a Mac's delete key) removes what is selected,
+  and X makes it construction, as in Fusion; X had deleted. Delete also
+  removes objects and mesh elements, beside X.
+- A sketch no longer marks every corner where two ends meet.
+
+### Fixed
+
+- The Delete key did nothing anywhere: no binding on it could be reached,
+  the timeline's included.
 
 ## [0.7.1] - 2026-11-07
 

@@ -4783,11 +4783,13 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "select",
                         "line",
                         "rectangle",
+                        "rectangle_centre",
                         "circle",
                         "circle_2pt",
                         "circle_3pt",
                         "arc",
                         "arc_centre",
+                        "arc_tangent",
                         "spline",
                         "polygon",
                         "slot",
@@ -4860,6 +4862,8 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "equal",
                         "tangent",
                         "concentric",
+                        "midpoint",
+                        "symmetric",
                         "fixed",
                     ],
                 )
@@ -15237,11 +15241,15 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 45] = [
+const SKETCH_TOOLS: [&str; 49] = [
     "select",
     "pattern",
     "line",
     "rectangle",
+    "rectangle_centre",
+    "arc_tangent",
+    "midpoint",
+    "symmetric",
     "circle",
     "circle_2pt",
     "circle_3pt",
@@ -15808,12 +15816,30 @@ fn draw_sketches(
             egui::pos2(b.x as f32, b.y as f32),
         );
         painter.rect_filled(rect, 0.0, theme.accent.gamma_multiply(0.08));
-        painter.rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(1.0, theme.accent),
-            egui::StrokeKind::Inside,
-        );
+        if b.x < a.x {
+            // Right to left, a crossing box: dashed, as CAD draws one.
+            let c = [
+                rect.left_top(),
+                rect.right_top(),
+                rect.right_bottom(),
+                rect.left_bottom(),
+            ];
+            for k in 0..4 {
+                painter.add(egui::Shape::dashed_line(
+                    &[c[k], c[(k + 1) % 4]],
+                    egui::Stroke::new(1.0, theme.accent),
+                    5.0,
+                    3.0,
+                ));
+            }
+        } else {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(1.0, theme.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
     draw_tool_badge(ui, state, &view, inner);
     // A drawing tool's pointer is a cross, so a click is plainly a point.
