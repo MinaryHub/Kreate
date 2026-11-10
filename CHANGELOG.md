@@ -45,6 +45,10 @@ use; `scripts/release.sh` turns that section into the next release.
 - Selecting in a sketch: a double-click takes the chain a curve is joined
   into; Ctrl-click (Cmd-click on a Mac) takes something back out; a box
   drawn right to left is a crossing box, dashed, taking what it touches.
+- The AI chat picks its model: beside the assistant, a list of the models
+  its program takes (Claude's Opus, Sonnet and Haiku; Gemini's and
+  ChatGPT's), its own default first, and a box at the bottom for any
+  other model name. Remembered for each assistant.
 
 ### Changed
 

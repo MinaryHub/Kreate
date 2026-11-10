@@ -2033,6 +2033,8 @@ fn shot_claude() {
     for (label, locale) in [("claude", "en"), ("claude-ko", "ko-KR")] {
         let Some(shot) = composite_with(&doc, locale, false, |state| {
             state.switch_workspace(5);
+            state.chat_models = ["", "opus", "sonnet", "haiku"].map(String::from).to_vec();
+            state.chat_model = 1;
             state.chat_busy = true;
             state.chat_account = kreate_ui::chat::ChatAccount::SignedIn {
                 email: "artist@studio.kr".into(),

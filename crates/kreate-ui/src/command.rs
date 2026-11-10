@@ -214,6 +214,11 @@ pub enum Command {
     ChatModel {
         index: usize,
     },
+    /// From the chat panel: answer with the model named — one typed, which
+    /// the list did not have.
+    ChatModelName {
+        name: String,
+    },
     /// From the Claude panel: sign Claude Code in, in the browser.
     ChatSignIn,
     /// From the Claude panel: the code the sign-in page showed.

@@ -8744,6 +8744,15 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             kreate_i18n::TextKind::Ui,
             &[("count", "{count}")],
         ),
+        model_default: state
+            .catalog
+            .format("chat-model-default", kreate_i18n::TextKind::Ui, &[]),
+        model_other: state
+            .catalog
+            .format("chat-model-other", kreate_i18n::TextKind::Ui, &[]),
+        model_hint: state
+            .catalog
+            .format("chat-model-hint", kreate_i18n::TextKind::Tooltip, &[]),
     };
     let mut input = std::mem::take(&mut state.chat_input);
     let mut code = std::mem::take(&mut state.chat_code);
@@ -8756,6 +8765,9 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         current: state.chat_provider,
         models: &state.chat_models,
         model: state.chat_model,
+        other: crate::claude::Provider::ALL
+            .get(state.chat_provider)
+            .is_some_and(|p| *p != crate::claude::Provider::Ollama),
     };
     state.chat_focused = kreate_ui::chat::chat(
         ui,

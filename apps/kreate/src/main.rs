@@ -7843,7 +7843,13 @@ impl App {
                         chat.set_provider(provider);
                     }
                     self.ui.chat_provider = index;
-                    self.ui.chat_models.clear();
+                    // A program's own list now; Ollama's when it answers.
+                    self.ui.chat_models = self
+                        .chat
+                        .as_ref()
+                        .map(|c| c.model_names())
+                        .unwrap_or_default();
+                    self.ui.chat_model = self.chat.as_ref().map_or(0, |c| c.model_index());
                     self.ui.chat_log.clear();
                     self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
                     self.ui.chat_busy = false;
@@ -7851,7 +7857,15 @@ impl App {
                 Command::ChatModel { index } => {
                     if let Some(chat) = &mut self.chat {
                         chat.set_model(index);
-                        self.ui.chat_model = chat.model().unwrap_or(0);
+                        self.ui.chat_models = chat.model_names();
+                        self.ui.chat_model = chat.model_index();
+                    }
+                }
+                Command::ChatModelName { name } => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.set_model_name(&name);
+                        self.ui.chat_models = chat.model_names();
+                        self.ui.chat_model = chat.model_index();
                     }
                 }
                 Command::ChatSignIn => {
@@ -16803,6 +16817,8 @@ fn main() {
     // Asked once at start, off the main thread: the panel shows who it will
     // talk as before anything is typed.
     chat.check_account();
+    app.ui.chat_models = chat.model_names();
+    app.ui.chat_model = chat.model_index();
     app.chat = Some(chat);
     app.restore_chat();
     let outbox_proxy = std::sync::Mutex::new(event_loop.create_proxy());

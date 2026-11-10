@@ -111,6 +111,48 @@ impl Provider {
         )
     }
 
+    /// Models to offer for a tool that takes `--model`: names its own CLI
+    /// knows. The tool's default comes first in the panel and any other name
+    /// can be typed; Ollama's are asked of Ollama instead.
+    pub fn suggested_models(self) -> &'static [&'static str] {
+        match self {
+            // Claude Code's aliases, which follow the newest of each.
+            Provider::Claude => &["opus", "sonnet", "haiku"],
+            Provider::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
+            Provider::ChatGpt => &["gpt-5", "gpt-5-codex"],
+            Provider::Ollama => &[],
+        }
+    }
+
+    /// The key its model is remembered under.
+    fn key(self) -> &'static str {
+        match self {
+            Provider::Claude => "claude",
+            Provider::Gemini => "gemini",
+            Provider::ChatGpt => "codex",
+            Provider::Ollama => "ollama",
+        }
+    }
+
+    /// The model picked for it last time; `None` is the tool's own default.
+    pub fn saved_model(self) -> Option<String> {
+        let text = std::fs::read_to_string(chat_models_path()?).ok()?;
+        saved_model_in(&text, self.key())
+    }
+
+    /// Remembers the model picked for it; `None` goes back to the tool's
+    /// default.
+    pub fn save_model(self, model: Option<&str>) {
+        let Some(path) = chat_models_path() else {
+            return;
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, with_saved_model(&text, self.key(), model));
+    }
+
     /// A folder of Kreate's own for the tool to run in.
     fn folder(self) -> Option<PathBuf> {
         let id = match self {
@@ -126,6 +168,32 @@ impl Provider {
         std::fs::create_dir_all(&dir).ok()?;
         Some(dir)
     }
+}
+
+fn chat_models_path() -> Option<PathBuf> {
+    Some(crate::prefs::config_dir()?.join("chat-models.txt"))
+}
+
+/// The model `key = model` names in `text`, the remembered choices.
+fn saved_model_in(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|l| l.split_once('='))
+        .find(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// `text` with `key`'s line set to `model`, or dropped for the default.
+fn with_saved_model(text: &str, key: &str, model: Option<&str>) -> String {
+    let mut out: String = text
+        .lines()
+        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != key))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        out.push_str(&format!("{key} = {model}\n"));
+    }
+    out
 }
 
 /// Claude Code's name for a project folder: the path with everything but
@@ -311,6 +379,8 @@ pub struct Chat {
     /// is Kreate's to keep.
     models: Vec<crate::ollama::Model>,
     model: Option<usize>,
+    /// The model a CLI tool is asked for, `None` its own default.
+    cli_model: Option<String>,
     local: Arc<std::sync::Mutex<Vec<Value>>>,
     /// A message waiting on its YouTube links being read.
     preparing: Option<Preparing>,
@@ -349,6 +419,7 @@ impl Chat {
             sign_in: None,
             models: Vec::new(),
             model: None,
+            cli_model: Provider::default().saved_model(),
             local: Arc::default(),
             preparing: None,
         }
@@ -364,14 +435,71 @@ impl Chat {
         self.model
     }
 
-    /// Answers with another of Ollama's models from the next message on,
-    /// remembered for next time. The conversation carries over: it is
-    /// Kreate's, not the model's.
-    pub fn set_model(&mut self, index: usize) {
-        if let Some(m) = self.models.get(index) {
-            crate::ollama::save_model(&m.name);
-            self.model = Some(index);
+    /// The models the panel offers. For a CLI tool the first is its own
+    /// default, as an empty name, then the suggestions, then a name typed
+    /// before that is none of them; for Ollama, what Ollama has.
+    pub fn model_names(&self) -> Vec<String> {
+        if self.provider == Provider::Ollama {
+            return self.models.iter().map(|m| m.name.clone()).collect();
         }
+        let mut names = vec![String::new()];
+        names.extend(
+            self.provider
+                .suggested_models()
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        if let Some(m) = &self.cli_model {
+            if !names.contains(m) {
+                names.push(m.clone());
+            }
+        }
+        names
+    }
+
+    /// Which of [`Chat::model_names`] answers.
+    pub fn model_index(&self) -> usize {
+        if self.provider == Provider::Ollama {
+            return self.model.unwrap_or(0);
+        }
+        self.cli_model
+            .as_ref()
+            .and_then(|m| self.model_names().iter().position(|n| n == m))
+            .unwrap_or(0)
+    }
+
+    /// The model a CLI tool is asked for; `None` is its own default.
+    pub fn cli_model(&self) -> Option<&str> {
+        self.cli_model.as_deref()
+    }
+
+    /// Answers with another of [`Chat::model_names`] from the next message
+    /// on, remembered for next time. The conversation carries over.
+    pub fn set_model(&mut self, index: usize) {
+        if self.provider == Provider::Ollama {
+            if let Some(m) = self.models.get(index) {
+                crate::ollama::save_model(&m.name);
+                self.model = Some(index);
+            }
+            return;
+        }
+        if let Some(name) = self.model_names().get(index).cloned() {
+            self.set_model_name(&name);
+        }
+    }
+
+    /// Answers with the model named, for a CLI tool: one the panel does not
+    /// list, typed. Empty goes back to the tool's default.
+    pub fn set_model_name(&mut self, name: &str) {
+        if self.provider == Provider::Ollama {
+            if let Some(index) = self.models.iter().position(|m| m.name == name.trim()) {
+                self.set_model(index);
+            }
+            return;
+        }
+        let name = name.trim();
+        self.cli_model = (!name.is_empty()).then(|| name.to_string());
+        self.provider.save_model(self.cli_model.as_deref());
     }
 
     /// The assistant's session, which the next message carries on.
@@ -399,6 +527,7 @@ impl Chat {
         self.reset();
         self.cancel_sign_in();
         self.provider = provider;
+        self.cli_model = provider.saved_model();
         self.check_account();
     }
 
@@ -668,6 +797,9 @@ impl Chat {
                 // refused, there being nobody to ask.
                 command.args(claude_tool_args(memory_rule(folder.as_deref(), &tool)));
                 command.arg("--append-system-prompt").arg(SYSTEM_PROMPT);
+                if let Some(model) = &self.cli_model {
+                    command.arg("--model").arg(model);
+                }
                 if let Some(session) = &self.session {
                     command.args(["--resume", session]);
                 }
@@ -686,6 +818,9 @@ impl Chat {
                     .args(["--allowed-mcp-server-names", "kreate"]);
                 if skip_trust {
                     command.arg("--skip-trust");
+                }
+                if let Some(model) = &self.cli_model {
+                    command.arg("--model").arg(model);
                 }
                 // Kreate's folder holds only Kreate's conversation, so the
                 // latest session in it is this one.
@@ -715,6 +850,9 @@ impl Chat {
                         toml_string(&connector.to_string_lossy())
                     ))
                     .args(["-c", "approval_policy=\"never\""]);
+                if let Some(model) = &self.cli_model {
+                    command.arg("--model").arg(model);
+                }
                 // Pictures as files in Kreate's own folder for the tool, the
                 // only place it is let read.
                 if has_pictures {
@@ -1834,5 +1972,67 @@ mod tests {
     fn noise_is_ignored() {
         assert!(parse_line("not json").is_empty());
         assert!(parse_line(r#"{"type":"stream_event"}"#).is_empty());
+    }
+
+    /// Each assistant's model is its own line; the default drops it, and the
+    /// others' lines stay.
+    #[test]
+    fn the_models_picked_are_kept_one_line_each() {
+        let text = with_saved_model("", "claude", Some("opus"));
+        let text = with_saved_model(&text, "gemini", Some(" gemini-2.5-pro "));
+        assert_eq!(saved_model_in(&text, "claude").as_deref(), Some("opus"));
+        assert_eq!(
+            saved_model_in(&text, "gemini").as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        let text = with_saved_model(&text, "claude", Some("haiku"));
+        assert_eq!(saved_model_in(&text, "claude").as_deref(), Some("haiku"));
+        assert_eq!(text.matches("claude").count(), 1, "{text}");
+        let text = with_saved_model(&text, "claude", None);
+        assert_eq!(saved_model_in(&text, "claude"), None);
+        assert_eq!(
+            saved_model_in(&text, "gemini").as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(saved_model_in(&text, "codex"), None);
+    }
+
+    /// A program's list starts with its own default, then what it is known
+    /// to take; a name typed is added to it, picked, and kept for that
+    /// assistant only.
+    #[test]
+    fn a_model_is_picked_from_the_list_or_typed() {
+        let mut chat = Chat::new(|| {});
+        chat.set_provider(Provider::Gemini);
+        chat.set_model_name("");
+        let names = chat.model_names();
+        assert_eq!(names[0], "", "the default first");
+        assert!(names.iter().any(|n| n == "gemini-2.5-flash"));
+        assert_eq!(chat.model_index(), 0);
+        assert_eq!(chat.cli_model(), None);
+
+        let flash = names.iter().position(|n| n == "gemini-2.5-flash").unwrap();
+        chat.set_model(flash);
+        assert_eq!(chat.cli_model(), Some("gemini-2.5-flash"));
+        assert_eq!(chat.model_index(), flash);
+
+        chat.set_model_name("  gemini-exp-1  ");
+        assert_eq!(chat.cli_model(), Some("gemini-exp-1"));
+        assert_eq!(
+            chat.model_names().last().map(String::as_str),
+            Some("gemini-exp-1")
+        );
+        assert_eq!(chat.model_index(), chat.model_names().len() - 1);
+
+        // Another assistant has its own; coming back finds this one's.
+        chat.set_provider(Provider::ChatGpt);
+        chat.set_model_name("");
+        assert_eq!(chat.cli_model(), None);
+        chat.set_provider(Provider::Gemini);
+        assert_eq!(chat.cli_model(), Some("gemini-exp-1"));
+
+        chat.set_model(0);
+        assert_eq!(chat.cli_model(), None);
+        assert_eq!(Provider::Gemini.saved_model(), None);
     }
 }
