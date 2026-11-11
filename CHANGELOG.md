@@ -74,6 +74,10 @@ use; `scripts/release.sh` turns that section into the next release.
 - A feature can be suppressed and put back, and moved earlier or later
   among its body's, from its right-click menu in the timeline — with
   Delete there too. `feature.suppress` and `feature.move` for scripts.
+- A part mated to another (Align Faces) keeps its mate: the Object tab's
+  Mate panel changes the gap between the two faces and turns the part
+  about their normal, the faces staying together, or takes the mate off.
+  `object.mate_set` for scripts. Saved with the document.
 - Drawing sheets mark what is round and seen end on — holes, bosses,
   shafts — with a centre mark, write its diameter once for all of one
   size ("4x Ø5"), and say where each is from the view's corner.

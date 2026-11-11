@@ -137,6 +137,29 @@ impl Linkage {
     }
 }
 
+/// A part put face to face against another, as it was put: the two faces,
+/// each by a point on it and the way it looks, in its own part's space — so
+/// they stay the faces they were however the parts are moved — with the gap
+/// between them and how far the part is turned about the faces' normal.
+/// Fusion's planar joint, kept, where `object.mate` alone only placed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mate {
+    /// The part it is against, by identity.
+    pub target: Uid,
+    /// A point on this part's face and the face's outward normal, in this
+    /// part's own space.
+    pub from: DVec3,
+    pub from_normal: DVec3,
+    /// The same for the other part's face, in that part's space.
+    pub to: DVec3,
+    pub to_normal: DVec3,
+    /// The gap left between the faces, in metres.
+    pub offset: f64,
+    /// How far it is turned about the normal from where it was put, in
+    /// radians.
+    pub angle: f64,
+}
+
 /// One object.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Object {
@@ -240,6 +263,9 @@ pub struct Object {
     /// Carried along a curve object as the clock runs. See
     /// [`crate::curve::FollowPath`].
     pub path: Option<crate::curve::FollowPath>,
+    /// The mate that puts it against another part, kept so its gap and its
+    /// turn can be changed after: see [`Mate`].
+    pub mate: Option<Mate>,
     /// The script line that made its mesh — `object.add_door(width=0.9, …)`
     /// — kept so its parameters can be changed after (the Properties
     /// editor's Architecture panel), which makes the mesh again. Where it
@@ -283,6 +309,7 @@ impl Object {
             robot: None,
             curve: None,
             path: None,
+            mate: None,
             generator: None,
         }
     }

@@ -372,6 +372,9 @@ pub struct ObjectRecord {
     /// The curve it follows as the clock runs, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<FollowPathRecord>,
+    /// The mate that puts it against another part, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mate: Option<MateRecord>,
     /// The script line that made its mesh, for its parameters to be changed
     /// after. See `Object::generator`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1798,6 +1801,21 @@ fn world_from_record(record: &WorldRecord, document: &Document) -> kreate_scene:
     }
 }
 
+/// A part's mate, as the file holds it: see `kreate_scene::document::Mate`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MateRecord {
+    /// The part it is against, by identity.
+    pub target: u64,
+    pub from: [f64; 3],
+    pub from_normal: [f64; 3],
+    pub to: [f64; 3],
+    pub to_normal: [f64; 3],
+    #[serde(default)]
+    pub offset: f64,
+    #[serde(default)]
+    pub angle: f64,
+}
+
 /// An object's path to follow, as the file holds it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FollowPathRecord {
@@ -2450,6 +2468,15 @@ pub fn write(
                     offset: p.offset,
                     follow: p.follow,
                     cyclic: p.cyclic,
+                }),
+                mate: object.mate.as_ref().map(|m| MateRecord {
+                    target: m.target.raw(),
+                    from: m.from.to_array(),
+                    from_normal: m.from_normal.to_array(),
+                    to: m.to.to_array(),
+                    to_normal: m.to_normal.to_array(),
+                    offset: m.offset,
+                    angle: m.angle,
                 }),
                 generator: object.generator.clone(),
                 material_overrides: object
@@ -3278,6 +3305,27 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
                 offset: p.offset,
                 follow: p.follow,
                 cyclic: p.cyclic,
+            });
+        object.mate = record
+            .mate
+            .as_ref()
+            .filter(|m| {
+                m.from
+                    .iter()
+                    .chain(&m.from_normal)
+                    .chain(&m.to)
+                    .chain(&m.to_normal)
+                    .chain([&m.offset, &m.angle])
+                    .all(|v| v.is_finite())
+            })
+            .map(|m| kreate_scene::document::Mate {
+                target: kreate_scene::Uid::from_raw(m.target),
+                from: glam::DVec3::from_array(m.from),
+                from_normal: glam::DVec3::from_array(m.from_normal),
+                to: glam::DVec3::from_array(m.to),
+                to_normal: glam::DVec3::from_array(m.to_normal),
+                offset: m.offset,
+                angle: m.angle,
             });
         object.linkage = match &record.linked {
             None => Linkage::Local,

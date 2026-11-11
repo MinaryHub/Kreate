@@ -317,6 +317,11 @@ impl Document {
             if let Some(p) = &mut copy.path {
                 p.curve = re(p.curve);
             }
+            // A mate without the part it is against is no mate.
+            copy.mate = copy.mate.and_then(|mut m| {
+                m.target = *uids.get(&m.target)?;
+                Some(m)
+            });
             for s in &mut copy.physics.particles {
                 s.instance = s.instance.and_then(|u| uids.get(&u).copied());
             }

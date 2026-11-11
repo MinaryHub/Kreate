@@ -11964,6 +11964,7 @@ fn draw_object_tab(
     });
     draw_arch_panel(ui, state, registry, active);
     draw_follow_path_panel(ui, state, doc, registry, l, active);
+    draw_mate_panel(ui, state, doc, registry, l, active);
     draw_robot_panel(ui, state, doc, object);
     draw_physical_panel(ui, state, doc, registry);
     draw_mesh_check_panel(ui, state, doc, object);
@@ -13125,6 +13126,65 @@ fn draw_follow_path_panel(
         state
             .queue
             .run("object.follow_path_clear", PropertyMap::new());
+    }
+}
+
+/// The active part's mate: what it is against, the gap between the two
+/// faces and how far it is turned about their normal, each to change —
+/// the part is put again by them — and a button to take the mate off.
+fn draw_mate_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+    object: &kreate_scene::document::Object,
+) {
+    let Some(mate) = &object.mate else {
+        return;
+    };
+    let Some(info) = registry.get("object.mate_set") else {
+        return;
+    };
+    let against = doc
+        .object_by_uid(mate.target)
+        .and_then(|id| doc.object(id))
+        .map(|o| o.name.clone());
+    let mut params = PropertyMap::new();
+    params.set("offset", kreate_reflect::PropertyValue::Float(mate.offset));
+    params.set("angle", kreate_reflect::PropertyValue::Float(mate.angle));
+    let title = state.catalog.get("panel-mate");
+    let remove = state.catalog.get("mate-remove");
+    let (_, closed) = kreate_ui::panel::section_closable(ui, &title, true, &remove, |ui| {
+        if let Some(against) = &against {
+            ui.horizontal(|ui| {
+                ui.label(state.catalog.get("mate-against"));
+                // i18n-exempt: an object's name is the user's own text
+                ui.label(against);
+            });
+        }
+        let text = field_menu_text(&state.catalog);
+        let out = kreate_ui::property_editor_full(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+            |name| matches!(name, "offset" | "angle"),
+            |_| None,
+            &l.key_property,
+            |_| None,
+            &text,
+        );
+        if out.changed {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "object.mate_set", params.clone(), dragging);
+        }
+    });
+    if closed {
+        let mut p = PropertyMap::new();
+        p.set("remove", kreate_reflect::PropertyValue::Bool(true));
+        state.queue.run("object.mate_set", p);
     }
 }
 
