@@ -538,7 +538,18 @@ pub fn drawing_from(r: &DrawingRecord) -> (Drawing, Vec<Value>) {
             _ => unread.push(v.clone()),
         }
     }
-    for v in &r.constraints {
+    // What an older build could not read and kept aside: tried again, as an
+    // entity now and as a constraint below. Carried straight on unread, a
+    // newer build's entity stayed dead in the file for good once an older
+    // one had saved it.
+    let mut aside: Vec<&Value> = Vec::new();
+    for v in &r.foreign {
+        match entity_from(v) {
+            Some(e) if d.entity(e.id).is_none() => d.entities.push(e),
+            _ => aside.push(v),
+        }
+    }
+    for v in r.constraints.iter().chain(aside) {
         match constraint_from(v) {
             Some(c) if c.entities().iter().all(|e| d.entity(*e).is_some()) => d.constraints.push(c),
             _ => unread.push(v.clone()),
@@ -566,7 +577,6 @@ pub fn drawing_from(r: &DrawingRecord) -> (Drawing, Vec<Value>) {
             })
         })
         .collect();
-    unread.extend(r.foreign.iter().cloned());
     d.foreign = unread.iter().map(Value::to_string).collect();
     (d, unread)
 }

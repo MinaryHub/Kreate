@@ -8067,8 +8067,21 @@ impl App {
                     }
                 }
                 Command::MoveObjectToCollection { object, collection } => {
-                    let uid = shell::object_from_key(&self.doc, object)
-                        .and_then(|id| self.doc.object_uid(id));
+                    let id = shell::object_from_key(&self.doc, object);
+                    let uid = id.and_then(|id| self.doc.object_uid(id));
+                    // A child dropped on the scene's own row comes off its
+                    // parent: there was a way to hang one object on another
+                    // in the outliner and none to take it down again.
+                    let child = id
+                        .and_then(|id| self.doc.object(id))
+                        .is_some_and(|o| o.parent.is_some());
+                    if let (true, true, Some(uid)) = (collection.is_empty(), child, uid) {
+                        let mut params = PropertyMap::new();
+                        params.set("child", PropertyValue::Text(uid.raw().to_string()));
+                        params.set("parent", PropertyValue::Text(String::new()));
+                        self.run_op("object.parent_one", params);
+                        continue;
+                    }
                     if let Some(uid) = uid {
                         let mut params = PropertyMap::new();
                         params.set("uid", PropertyValue::Text(uid.raw().to_string()));
@@ -10480,12 +10493,13 @@ impl App {
                 changed = true;
                 let target =
                     ViewportTarget::new(&gfx.gpu.device, &mut gfx.egui_renderer, size.0, size.1);
-                let viewport = Viewport::new(
+                let mut viewport = Viewport::new(
                     &gfx.gpu.device,
                     ViewportTarget::FORMAT,
                     target.size.0,
                     target.size.1,
                 );
+                viewport.path_trace_allowed = gfx.gpu.info.can_path_trace();
                 ExtraView {
                     viewport,
                     target,
@@ -14365,7 +14379,13 @@ impl App {
             // is nothing to cancel — so it does nothing, as in Blender. It used
             // to quit, which is what a Blender user's hand does after every
             // transform: a session lost to the key that means "never mind".
-            KeyCode::Escape => return,
+            KeyCode::Escape => {
+                // And a binding waiting for its key stops waiting.
+                if self.ui.capturing.take().is_some() {
+                    self.redraw.set(RedrawReason::UI);
+                }
+                return;
+            }
             // Quit on the key every application quits on.
             KeyCode::KeyQ
                 if self.input.ctrl_down && !self.input.shift_down && !self.input.alt_down =>
@@ -14384,6 +14404,22 @@ impl App {
         // command. Checked before the keymap gate, because the gate is exactly
         // what capturing turns off.
         if let Some(id) = self.ui.capturing.clone() {
+            // A modifier going down is the start of a chord, not the key:
+            // taken as "a key with no name", Ctrl on the way to Ctrl+E ended
+            // the capture with nothing bound.
+            if matches!(
+                code,
+                KeyCode::ControlLeft
+                    | KeyCode::ControlRight
+                    | KeyCode::ShiftLeft
+                    | KeyCode::ShiftRight
+                    | KeyCode::AltLeft
+                    | KeyCode::AltRight
+                    | KeyCode::SuperLeft
+                    | KeyCode::SuperRight
+            ) {
+                return;
+            }
             if let Some(name) = key_name(code) {
                 let change = kreate_ui::keymap_editor::capture(
                     self.key_overrides.get(&id),
@@ -15614,6 +15650,7 @@ impl ApplicationHandler for App {
                 target.size.0,
                 target.size.1,
             );
+            viewport.path_trace_allowed = gpu.info.can_path_trace();
             // A moving view smoothed as a still one is: see
             // `Viewport::temporal_aa`.
             viewport.temporal_aa = true;

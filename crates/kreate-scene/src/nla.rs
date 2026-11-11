@@ -253,6 +253,30 @@ mod tests {
             assert!((t.scale.z - z).abs() < 1e-9, "{blend:?}: z {}", t.scale.z);
             // Not keyed by either: left as it was.
             assert!((t.scale.x - 1.0).abs() < 1e-12);
+            // And the same again however often the frame is asked for, and
+            // from wherever the object was left: a frame is one pose.
+            let o = doc.object_mut(id).unwrap();
+            o.transform.translation.x = 40.0;
+            doc.animate(10.0);
+            doc.animate(11.0);
+            doc.animate(10.0);
+            let again = doc.object(id).unwrap().transform;
+            assert!(
+                (again.translation.x - x).abs() < 1e-9 && (again.scale.z - z).abs() < 1e-9,
+                "{blend:?}: played again {again:?}"
+            );
+        }
+        // An Add strip with nothing under it adds to rest, each frame anew:
+        // it had added to the last frame's answer, and the object flew off.
+        let o = doc.object_mut(id).unwrap();
+        o.nla.clear();
+        over.blend = NlaBlend::Add;
+        over.influence = 1.0;
+        o.nla.push(over);
+        for frame in [10.0, 11.0, 12.0, 10.0] {
+            doc.animate(frame);
+            let x = doc.object(id).unwrap().transform.translation.x;
+            assert!((x - 0.5).abs() < 1e-9, "frame {frame}: x {x}");
         }
     }
 

@@ -1771,6 +1771,10 @@ pub struct Viewport {
     /// Whether the rendered view switches to the path tracer whenever the
     /// view is still, and back to the raster passes when it moves.
     pub path_trace_when_still: bool,
+    /// Whether this adapter can path trace at all: see
+    /// `AdapterSummary::can_path_trace`. Without it no scene is handed to
+    /// the tracer, so nothing asks it for a frame.
+    pub path_trace_allowed: bool,
     /// Whether this still view is being traced for that reason.
     auto_trace: bool,
     /// How many frames in a row the picture has been the same.
@@ -2890,6 +2894,7 @@ impl Viewport {
             show_grid: true,
             show_ground_shadow: true,
             path_trace_when_still: false,
+            path_trace_allowed: true,
             auto_trace: false,
             still_frames: 0,
             studio_lit: false,
@@ -5194,6 +5199,9 @@ impl Viewport {
         images: &[crate::pathtrace::PtImage<'_>],
         materials: &crate::pathtrace::PtMaterials<'_>,
     ) {
+        if !self.path_trace_allowed {
+            return;
+        }
         self.pathtracer
             .set_scene(device, queue, meshes, surfaces, images, materials);
         self.accum_samples = 0;

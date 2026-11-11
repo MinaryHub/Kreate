@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use kreate_geom2d::{Curve2D, DVec2, Spline};
 use kreate_scene::document::{Object, ObjectData};
-use kreate_scene::drawing::{ColorRef, Drawing, EntityKind, LayerId, Text, TextAlign};
+use kreate_scene::drawing::{ColorRef, Drawing, EntityKind, LayerId, LinetypeRef, Text, TextAlign};
 use kreate_scene::Document;
 
 /// Reads a DXF into a document holding one drawing, named `name`, lying in
@@ -51,7 +51,7 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
 
     let mut drawing = Drawing::new();
     let mut layers: HashMap<String, LayerId> = HashMap::new();
-    for (lname, color, on) in &file.layers {
+    for (lname, color, on, linetype, frozen) in &file.layers {
         let id = if lname == "0" {
             LayerId(0)
         } else {
@@ -62,6 +62,8 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
                 layer.color = ColorRef::Index(*c);
             }
             layer.on = *on;
+            layer.linetype = linetype.clone();
+            layer.frozen = *frozen;
         }
         layers.insert(lname.clone(), id);
     }
@@ -179,7 +181,9 @@ fn records<'a>(pairs: &[(i32, &'a str)]) -> Vec<Record<'a>> {
 struct DxfFile<'a> {
     insunits: i64,
     /// Name, colour, shown.
-    layers: Vec<(String, Option<u8>, bool)>,
+    /// Each layer's name, colour, whether it is on, its linetype (empty
+    /// for continuous) and whether it is frozen.
+    layers: Vec<(String, Option<u8>, bool, String, bool)>,
     /// Name to base point and entities.
     blocks: HashMap<String, (DVec2, Vec<Record<'a>>)>,
     entities: Vec<Record<'a>>,
@@ -209,7 +213,22 @@ impl<'a> DxfFile<'a> {
             let index = u8::try_from(color.unsigned_abs())
                 .ok()
                 .filter(|c| (1..=255).contains(c));
-            self.layers.push((name.to_string(), index, color >= 0));
+            // The linetype and the frozen bit, which the writer writes: read
+            // back without them, a hidden-line layer came in continuous and a
+            // flat pattern's bend lines could not be told from its cuts.
+            let linetype = r
+                .get(6)
+                .map(str::trim)
+                .filter(|l| !l.eq_ignore_ascii_case("CONTINUOUS") && !l.is_empty())
+                .unwrap_or("")
+                .to_string();
+            self.layers.push((
+                name.to_string(),
+                index,
+                color >= 0,
+                linetype,
+                r.i(70) & 1 != 0,
+            ));
         }
     }
 
@@ -355,6 +374,16 @@ impl Out<'_, '_> {
             let c = r.i(62);
             if (1..=255).contains(&c) {
                 e.color = ColorRef::Index(c as u8);
+            }
+            // Its own linetype, where it has one that is not its layer's.
+            if let Some(name) = r.get(6).map(str::trim) {
+                if !name.is_empty() && !name.eq_ignore_ascii_case("BYLAYER") {
+                    e.linetype = if name.eq_ignore_ascii_case("BYBLOCK") {
+                        LinetypeRef::ByBlock
+                    } else {
+                        LinetypeRef::Named(name.to_string())
+                    };
+                }
             }
         }
     }

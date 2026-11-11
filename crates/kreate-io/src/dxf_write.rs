@@ -783,6 +783,19 @@ mod tests {
         // The dimension's number, in millimetres.
         assert!(back.entities.iter().any(|e| matches!(&e.kind,
             EntityKind::Text(t) if t.content == "40")));
+        // A layer's linetype and its frozen bit come back with it.
+        let mut dashed = drawing();
+        if let Some(l) = dashed.layers.iter_mut().find(|l| l.name == "CUT") {
+            l.linetype = "HIDDEN".into();
+            l.frozen = true;
+        }
+        let again = crate::dxf_read::parse_dxf(&write(&dashed, 1e-3), "back").expect("reads");
+        let again = again
+            .objects()
+            .find_map(|(_, o)| o.drawing.as_deref())
+            .expect("a drawing");
+        let cut = again.layers.iter().find(|l| l.name == "CUT").expect("CUT");
+        assert_eq!((cut.linetype.as_str(), cut.frozen), ("HIDDEN", true));
         // And the note as it was written, its per cent sign one sign.
         assert!(back.entities.iter().any(|e| matches!(&e.kind,
             EntityKind::Text(t) if t.content == "50% PLATE")));

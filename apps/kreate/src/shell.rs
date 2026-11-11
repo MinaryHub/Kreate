@@ -333,6 +333,10 @@ pub struct ShellState {
     /// interface, is what sees the key event — the panel only says which binding
     /// is listening.
     pub capturing: Option<kreate_input::BindingId>,
+    /// Whether the keymap editor was drawn this frame: a binding left
+    /// listening after its panel has gone takes the next key pressed
+    /// anywhere, and every shortcut is off until then.
+    pub keymap_editor_shown: bool,
     /// F3's search: open or not, what is typed, what was run from it lately.
     pub palette: kreate_ui::command_palette::PaletteState,
     /// The pie menu that is open, if one is.
@@ -725,7 +729,7 @@ impl ShellState {
             } else if kind == kreate_ui::EditorId::NLA {
                 over(self.nla_views.get(&id).and_then(|s| s.rect))
             } else if kind == kreate_ui::EditorId::GRAPH {
-                over(self.graph_views.get(&id).and_then(|s| s.rect))
+                over(self.graph_views.get(&id).and_then(|s| s.area.or(s.rect)))
             } else {
                 false
             }
@@ -913,6 +917,7 @@ impl Default for ShellState {
             adjust_seen: None,
             appearance: kreate_ui::Appearance::Dark,
             capturing: None,
+            keymap_editor_shown: false,
             palette: Default::default(),
             pie: Default::default(),
             keymap_edits: Vec::new(),
@@ -2506,6 +2511,11 @@ pub fn draw(
     // rather than by each drawer, so an overlay that stops being drawn stops
     // blocking the pointer on the very next frame.
     state.viewport_blockers.clear();
+    // The keymap editor was not drawn last frame: its panel is gone, and a
+    // binding it left listening is let go.
+    if !std::mem::take(&mut state.keymap_editor_shown) {
+        state.capturing = None;
+    }
     // A gesture lasts as long as the pointer is down. Ended here, at the top of
     // the frame, so that a panel changing a value knows whether it is
     // continuing one — see `send_edit`.
@@ -3839,6 +3849,7 @@ fn draw_area(
                         &mut edits,
                     );
                     state.keymap_edits = edits;
+                    state.keymap_editor_shown = true;
                 }
                 // An area naming an editor this build does not have. Said out
                 // loud, with the id it wants, because the likeliest cause is a
@@ -13067,9 +13078,12 @@ fn draw_parameters(ui: &mut Ui, state: &mut ShellState, doc: &Document, l: &Labe
                 let field = ui.add(egui::TextEdit::singleline(buffer).desired_width(110.0));
                 let done = field.lost_focus()
                     || (field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                // Escape is "never mind": it left the field, and leaving
+                // the field kept what had been typed.
+                let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if done {
                     let typed = buffer.trim().to_string();
-                    if !typed.is_empty() && typed != p.expression {
+                    if !escaped && !typed.is_empty() && typed != p.expression {
                         let mut m = PropertyMap::new();
                         m.set("name", V::Text(p.name.clone()));
                         m.set("expression", V::Text(typed));
@@ -14155,7 +14169,21 @@ fn toggle_key(
 /// Draws the modifier stack for the active object.
 fn draw_modifier_stack(ui: &mut Ui, state: &mut ShellState, rows: &mut [kreate_ui::ModifierRow]) {
     let text = kreate_ui::modifier_stack::ModifierText::resolve(&state.catalog, KIND_KEYS);
-    kreate_ui::modifier_stack(ui, &text, &state.catalog, rows, &mut state.queue);
+    // Into a queue of its own, so a parameter's change goes the way every
+    // other panel's does: a slider dragged is one step that follows the
+    // pointer. Straight onto the queue it was a step a frame, and Ctrl+Z
+    // after a drag took back a hair of it.
+    let mut asked = kreate_ui::CommandQueue::new();
+    kreate_ui::modifier_stack(ui, &text, &state.catalog, rows, &mut asked);
+    let dragging = ui.ctx().input(|i| i.pointer.any_down());
+    for command in asked.drain() {
+        match command {
+            Command::RunOperator { op_id, params } if op_id.starts_with("object.modifier_set") => {
+                send_edit(state, &op_id, params, dragging);
+            }
+            other => state.queue.push(other),
+        }
+    }
 }
 
 /// Translation keys for the addable modifier kinds, in the order the add
@@ -16032,7 +16060,10 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
                     if ui.button(&cancel).clicked() {
                         done = Some(false);
                     }
-                    if ui.add_enabled(picked, egui::Button::new(&ok)).clicked() {
+                    let enter = picked
+                        && !ui.ctx().egui_wants_keyboard_input()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.add_enabled(picked, egui::Button::new(&ok)).clicked() || enter {
                         done = Some(true);
                     }
                 });
@@ -16272,7 +16303,23 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                         done = Some(false);
                     }
                     let ready = !view.seeds.is_empty() && (!revolve || view.axis.is_some());
-                    if ui.add_enabled(ready, egui::Button::new(&ok)).clicked() {
+                    let why = if view.seeds.is_empty() {
+                        state.catalog.get("feature-profile-pick")
+                    } else {
+                        state.catalog.get("feature-axis-pick")
+                    };
+                    // Enter is OK: a distance typed and Enter pressed is the
+                    // whole of it, with no trip to the button. Not while a
+                    // field elsewhere is being typed into.
+                    let enter = ready
+                        && !ui.ctx().egui_wants_keyboard_input()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui
+                        .add_enabled(ready, egui::Button::new(&ok))
+                        .on_disabled_hover_text(why)
+                        .clicked()
+                        || enter
+                    {
                         done = Some(true);
                     }
                 });
@@ -16467,10 +16514,19 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                     ui.end_row();
                 });
             ui.horizontal(|ui| {
-                if ui.button(&cancel).clicked() {
+                // Enter is OK and Escape is Cancel, unless a field is being
+                // typed into, when they are the field's.
+                let typing = ui.ctx().egui_wants_keyboard_input();
+                let (enter, escape) = ui.input(|i| {
+                    (
+                        !typing && i.key_pressed(egui::Key::Enter),
+                        !typing && i.key_pressed(egui::Key::Escape),
+                    )
+                });
+                if ui.button(&cancel).clicked() || escape {
                     keep = false;
                 }
-                if ui.button(&ok).clicked() {
+                if ui.button(&ok).clicked() || enter {
                     use kreate_reflect::PropertyValue as V;
                     let mut p = PropertyMap::new();
                     p.set("body", V::Text(edit.row.body.clone()));

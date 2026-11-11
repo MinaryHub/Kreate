@@ -127,6 +127,8 @@ enum Menu {
 #[derive(Clone, Debug, Default)]
 pub struct GraphState {
     pub rect: Option<Rect>,
+    /// The whole editor on screen, its channel list with the plot.
+    pub area: Option<Rect>,
     /// Curves hidden from the plot, by target: the channel list's eyes.
     /// Hidden is a view setting, as in Blender — the curve still plays.
     hidden: std::collections::BTreeSet<String>,
@@ -358,6 +360,10 @@ pub fn graph_editor(
             graph_plot(ui, &shown, state, text)
         })
         .inner;
+    // The whole editor, its list of channels with it: with only the plot,
+    // a key pressed over the list was the view's behind — X there deleted
+    // the object.
+    state.area = state.rect.map(|_| full);
     out.extend(edits);
     out
 }

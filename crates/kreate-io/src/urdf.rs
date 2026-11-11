@@ -644,7 +644,10 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
                 continue;
             }
             let into = to_link * rest_world(id);
-            let m = kreate_mesh::measure::mass_properties(data, |p| into.transform_point3(p));
+            let mut m = kreate_mesh::measure::mass_properties(data, |p| into.transform_point3(p));
+            // A mirrored part is wound inside out and measures a volume
+            // below nothing: it weighs what it weighs all the same.
+            m.volume = m.volume.abs();
             if m.closed && m.volume > 0.0 {
                 pieces.push((m, doc.density_of(id)));
             }
@@ -720,14 +723,26 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
         } else if let Some((mass, centre, i)) = measured_inertial(link, inverse) {
             // None given: measured from its closed meshes and what they are
             // made of, so a simulator has a body to move.
-            let [ixx, iyy, izz, ixy, ixz, iyz] = i.map(tidy);
+            // In full: a part of a few millimetres has moments of 1e-10,
+            // which rounded as a pose is were written as zero beside a mass
+            // that was not — a body a simulator refuses, or throws.
+            // Rounding let go beside the largest of them, not beside one.
+            let largest = i.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let full = |v: f64| {
+                if v.abs() <= largest * 1e-9 {
+                    "0".to_string()
+                } else {
+                    format!("{}", v as f32)
+                }
+            };
+            let [ixx, iyy, izz, ixy, ixz, iyz] = i.map(full);
             let _ = writeln!(out, "    <inertial>");
             let _ = writeln!(
                 out,
                 "      <origin xyz=\"{}\" rpy=\"0 0 0\"/>",
                 fmt3(centre)
             );
-            let _ = writeln!(out, "      <mass value=\"{}\"/>", tidy(mass));
+            let _ = writeln!(out, "      <mass value=\"{}\"/>", mass as f32);
             let _ = writeln!(
                 out,
                 "      <inertia ixx=\"{ixx}\" ixy=\"{ixy}\" ixz=\"{ixz}\" iyy=\"{iyy}\" iyz=\"{iyz}\" izz=\"{izz}\"/>"

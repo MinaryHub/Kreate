@@ -39,7 +39,7 @@ fn gpu() -> Option<Gpu> {
     Some(Gpu {
         device: gpu.device.clone(),
         queue: gpu.queue.clone(),
-        tracer: !(gpu.info.backend == "Dx12" && gpu.info.device_type == "Cpu"),
+        tracer: gpu.info.can_path_trace(),
     })
 }
 

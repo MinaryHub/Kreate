@@ -122,7 +122,10 @@ fn field(
         None
     } else if response.lost_focus() {
         state.typing.remove(&key);
-        (text != shown).then_some(text)
+        // Escape is "never mind": it leaves the field, and leaving the
+        // field had sent what was typed.
+        let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        (!escaped && text != shown).then_some(text)
     } else {
         state.typing.remove(&key);
         None

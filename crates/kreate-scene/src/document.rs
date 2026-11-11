@@ -1271,8 +1271,13 @@ impl Document {
             }
         }
 
+        // A parent scaled to nothing on an axis has no inverse — not a
+        // finite one — and that went into the file as numbers no reader
+        // takes. The child then simply rides on it.
         let parent_inverse = match parent {
-            Some(p) => self.world_transform(p).inverse(),
+            Some(p) => Some(self.world_transform(p).inverse())
+                .filter(|m| m.is_finite())
+                .unwrap_or(DAffine3::IDENTITY),
             None => DAffine3::IDENTITY,
         };
         let was_root = self.objects[id].parent.is_none();
@@ -2034,6 +2039,55 @@ impl Document {
             let before = o.transform;
             let pose_before = o.pose.clone();
             let shapes_before = o.shape_keys.clone();
+            // What the strips key starts each frame from the channel's own
+            // rest — not moved, not turned, not scaled, a shape at nothing —
+            // as in Blender. Started from where the last frame left it, a
+            // strip that adds flew the object away as it played, and one of
+            // part influence crept on with every frame; the same frame
+            // asked for twice gave two poses.
+            {
+                let mut euler = crate::animation::to_euler(o.transform.rotation);
+                let mut turned = false;
+                for (strip, played) in &strips {
+                    if strip.action_frame(frame).is_none() || strip.influence <= 0.0 {
+                        continue;
+                    }
+                    for curve in &played.curves {
+                        let property = curve.path.property.as_ref();
+                        if let Some((bone, channel)) = crate::animation::parse_bone_path(property) {
+                            let rest = &mut o.pose.entry(bone).transform;
+                            match channel {
+                                "location" => rest.translation = DVec3::ZERO,
+                                "scale" => rest.scale = DVec3::ONE,
+                                _ => rest.rotation = kreate_math::DQuat::IDENTITY,
+                            }
+                            continue;
+                        }
+                        if let Some(key) = crate::animation::parse_shape_path(property) {
+                            if let Some(k) = o.shape_keys.iter_mut().find(|k| k.name == key) {
+                                k.value = 0.0;
+                            }
+                            continue;
+                        }
+                        let Some(i) = curve.path.index.map(|i| i as usize).filter(|i| *i <= 2)
+                        else {
+                            continue;
+                        };
+                        match property {
+                            "location" => o.transform.translation[i] = 0.0,
+                            "scale" => o.transform.scale[i] = 1.0,
+                            "rotation_euler" => {
+                                euler[i] = 0.0;
+                                turned = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if turned {
+                    o.transform.rotation = crate::animation::from_euler(euler);
+                }
+            }
             for (strip, played) in &strips {
                 let Some(local) = strip.action_frame(frame) else {
                     continue;

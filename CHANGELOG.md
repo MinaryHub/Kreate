@@ -65,6 +65,15 @@ use; `scripts/release.sh` turns that section into the next release.
 - An operation that fails says why in the status bar; it had said so only
   to the console.
 - The Save, Undo and Redo buttons show their keys.
+- In the Extrude, Revolve, Pattern and Edit Feature dialogs Enter is OK
+  (and Escape cancels Edit Feature); a greyed OK says what it is waiting
+  for.
+- A child dragged onto the outliner's Scene Collection row comes off its
+  parent.
+- The console brings back the lines run before, with Up and Down.
+- NLA strips play from rest each frame, as in Blender: a strip that adds,
+  with nothing under it, adds to no movement rather than to the last
+  frame's.
 
 ### Fixed
 
@@ -120,6 +129,31 @@ use; `scripts/release.sh` turns that section into the next release.
   ran twice. Clicking a pie menu's entry also clicked the view behind it.
   The graph editor's keys stopped working after a middle-button pan.
 - The chat's box for another model's name could not be clicked into.
+- NLA: an Add, Subtract or Multiply strip built on the last frame's
+  result, so the object flew off as it played, and a strip of part
+  influence crept; the same frame asked for twice gave two poses.
+- Where there is only Windows' software renderer (a virtual machine, a
+  remote desktop without a GPU) asking for path tracing stopped the
+  program; the rendered view stays rasterised there.
+- A long text file or video transcript attached to a Claude chat message
+  kept the assistant from starting.
+- What was saved in a crash was never offered back at the next start.
+- The keymap editor could not take a key with Ctrl, Shift or Alt; a key
+  captured onto a mouse binding killed it; a binding left listening when
+  its panel closed took the next key pressed anywhere. Escape stops it
+  listening.
+- The Solidify modifier dropped UVs, materials and smooth shading.
+- A DXF's layer linetypes and frozen layers were lost on import.
+- A drawing entity written by a newer Kreate stayed unread for good once
+  an older one had saved the file.
+- A small part's measured inertia was written to URDF as zero, and a
+  mirrored part left out of its link's mass.
+- A document holding a number that is not finite saved as a file that
+  would not open; the save is refused instead and says why. Parenting to
+  an object scaled to nothing no longer makes one.
+- Dragging a modifier's value was an undo step for every frame. Escape in
+  a driver's or a parameter's expression kept what was typed. X over the
+  graph editor's channel list deleted the object.
 
 ## [0.7.1] - 2026-11-07
 

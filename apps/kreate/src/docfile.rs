@@ -369,9 +369,26 @@ impl DocumentFile {
     /// idea of the document may be exactly what caused the panic — and
     /// overwriting good work with it would turn a crash into data loss.
     pub fn emergency_save(&self, document: &Document) -> Option<PathBuf> {
-        let dir = autosave_root()?;
-        std::fs::create_dir_all(&dir).ok()?;
-        let path = dir.join("quit.kreate");
+        // In this session's own folder, which is where the next start
+        // looks for what to offer back: beside the folders, as it was, it
+        // was written and never seen again — and each crash wrote over the
+        // last.
+        let path = match &self.session {
+            Some(session) => {
+                let stem = self
+                    .path
+                    .as_deref()
+                    .and_then(Path::file_stem)
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "untitled".to_string());
+                session.dir.join(format!("crash-{stem}.kreate"))
+            }
+            None => {
+                let dir = autosave_root()?;
+                std::fs::create_dir_all(&dir).ok()?;
+                dir.join("quit.kreate")
+            }
+        };
         let bytes = container::write(document, &self.manifest, &self.unknown).ok()?;
         write_atomic(&path, &bytes).ok()?;
         Some(path)

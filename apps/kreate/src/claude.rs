@@ -785,7 +785,11 @@ impl Chat {
                     command.args(["--input-format", "stream-json"]);
                     stdin_turn = Some(claude_user_message(text, attachments).to_string());
                 } else {
-                    command.arg(&words);
+                    // On its input, not as an argument: a command line has
+                    // a length — 32,767 characters on Windows — and a text
+                    // file attached, or a long video's words, went past it
+                    // and the tool would not start.
+                    stdin_turn = Some(words.clone());
                 }
                 command
                     .args(["--output-format", "stream-json", "--verbose"])

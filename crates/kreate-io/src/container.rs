@@ -2529,7 +2529,18 @@ pub fn write(
             .collect();
 
         zip.start_file(SCENE, text)?;
-        zip.write_all(&canonical_json(&scene)?)?;
+        let scene_bytes = canonical_json(&scene)?;
+        // Read back before it is kept. A number that is not finite is
+        // written as `null`, which nothing reads as a number: the save
+        // "worked" and the file never opened again. Refused here, the file
+        // there was stays, and the save says why.
+        serde_json::from_slice::<SceneFile>(&scene_bytes).map_err(|source| {
+            ContainerError::Json {
+                entry: format!("{SCENE} (a value that is not a finite number?)"),
+                source,
+            }
+        })?;
+        zip.write_all(&scene_bytes)?;
 
         for (slot, (_, mesh)) in document.meshes().enumerate() {
             zip.start_file(format!("{MESH_DIR}{}.kmesh", mesh_key(slot)), binary)?;
