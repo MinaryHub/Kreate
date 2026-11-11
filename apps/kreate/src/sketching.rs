@@ -1440,6 +1440,8 @@ pub fn feature_rows(
                 amount,
                 symmetric,
                 cut: f.operation == kreate_scene::feature::Operation::Cut,
+                suppressed: f.suppressed,
+                count: o.features.len() as u32,
                 expression: doc
                     .design
                     .binding(&kreate_scene::design::Bound::FeatureAmount {
@@ -1473,6 +1475,8 @@ pub fn feature_rows(
             amount: 0.0,
             symmetric: false,
             cut: false,
+            suppressed: false,
+            count: 0,
             expression: None,
         });
     }

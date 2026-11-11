@@ -128,6 +128,9 @@ pub struct Feature {
     /// Where it stands on the document's timeline: features of every body
     /// in the order they were made, for the feature list.
     pub order: u64,
+    /// Left out of the body for now, and kept: Fusion's Suppress. What comes
+    /// after it is built as if it were not there.
+    pub suppressed: bool,
 }
 
 impl Feature {
@@ -660,6 +663,14 @@ fn faces_facing(mesh: &MeshData, dir: kreate_math::DVec3) -> Vec<u32> {
 /// A body: its features run in order, in its own space. The first one
 /// starts it whatever it says; after that, each joins or cuts.
 pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshData {
+    // Without what is suppressed, for the kernel and the meshes alike.
+    let live: Vec<Feature>;
+    let features = if features.iter().any(|f| f.suppressed) {
+        live = features.iter().filter(|f| !f.suppressed).cloned().collect();
+        &live[..]
+    } else {
+        features
+    };
     // Exactly, by the kernel, where it is there and can; otherwise as
     // meshes, as below.
     if let Some(exact) = exact::body_mesh(doc, features, body_world) {
@@ -861,6 +872,7 @@ mod tests {
             seeds: vec![[0.002, 0.002], [0.02, 0.01]],
             operation: Operation::Join,
             order: 1,
+            suppressed: false,
         };
         let hole = Feature {
             seeds: vec![[0.02, 0.01]],
@@ -897,6 +909,7 @@ mod tests {
             seeds: vec![[0.5, 0.5]],
             operation: Operation::Join,
             order: 1,
+            suppressed: false,
         };
         let solid = body(&doc, &[f], DAffine3::IDENTITY);
         let lo = solid
@@ -919,6 +932,7 @@ mod tests {
             seeds: vec![[5.0, 5.0]],
             operation: Operation::Join,
             order: 1,
+            suppressed: false,
         };
         assert_eq!(body(&doc, &[f], DAffine3::IDENTITY).num_faces(), 0);
     }

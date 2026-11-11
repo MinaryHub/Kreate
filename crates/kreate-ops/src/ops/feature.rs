@@ -23,6 +23,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Revolve>();
     registry.register::<Set>();
     registry.register::<Remove>();
+    registry.register::<Suppress>();
+    registry.register::<Move>();
     registry.register::<ToMesh>();
     registry.register::<Round>();
     registry.register::<ShellFeature>();
@@ -62,6 +64,7 @@ fn add_on_body(doc: &mut DocMut<'_>, body: ObjectId, shape: Shape) -> Result<OpR
         seeds: Vec::new(),
         operation,
         order,
+        suppressed: false,
     };
     doc.document_mut()
         .object_mut(body)
@@ -350,6 +353,7 @@ fn add_from(
             Operation::Join
         },
         order,
+        suppressed: false,
     };
     let plain = into.filter(|o| d.object(*o).is_some_and(|o| o.features.is_empty()));
     if let Some(target) = plain {
@@ -675,6 +679,7 @@ impl Operator for SheetMetalFeature {
             seeds,
             operation: Operation::Join,
             order: feature::next_order(d),
+            suppressed: false,
         };
         if feature::solid(d, &f).num_faces() == 0 {
             return Err(OpError::Failed("this outline makes no plate".into()));
@@ -1004,6 +1009,101 @@ impl Operator for Remove {
 }
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SuppressParams {
+    pub body: String,
+    pub index: u32,
+    /// Left out of the body, or put back.
+    pub suppressed: bool,
+}
+
+impl Default for SuppressParams {
+    fn default() -> Self {
+        Self {
+            body: String::new(),
+            index: 0,
+            suppressed: true,
+        }
+    }
+}
+
+/// Leaves a feature out of its body without taking it off the timeline, or
+/// puts it back: Fusion's Suppress.
+pub struct Suppress;
+
+impl Operator for Suppress {
+    type Params = SuppressParams;
+    fn id() -> &'static str {
+        "feature.suppress"
+    }
+    fn label() -> &'static str {
+        "Suppress Feature"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let body = body_named(doc.document(), &params.body)
+            .filter(|_| !params.body.trim().is_empty())
+            .ok_or_else(|| OpError::Failed("no such body".into()))?;
+        let o = doc.document_mut().object_mut(body).expect("a body");
+        let Some(f) = o.features.get_mut(params.index as usize) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if f.suppressed == params.suppressed {
+            return Ok(OpResult::Cancelled);
+        }
+        f.suppressed = params.suppressed;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MoveParams {
+    pub body: String,
+    pub index: u32,
+    /// Where it goes among the body's features, counted as `index` is.
+    pub to: u32,
+}
+
+/// Moves a feature earlier or later among its body's: what the body is
+/// built in the order of. Its place on the timeline goes with it.
+pub struct Move;
+
+impl Operator for Move {
+    type Params = MoveParams;
+    fn id() -> &'static str {
+        "feature.move"
+    }
+    fn label() -> &'static str {
+        "Move Feature"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let body = body_named(doc.document(), &params.body)
+            .filter(|_| !params.body.trim().is_empty())
+            .ok_or_else(|| OpError::Failed("no such body".into()))?;
+        let o = doc.document_mut().object_mut(body).expect("a body");
+        let (from, to) = (params.index as usize, params.to as usize);
+        if from >= o.features.len() || to >= o.features.len() || from == to {
+            return Ok(OpResult::Cancelled);
+        }
+        // The places on the timeline stay where they are and the features
+        // move through them, so the list reads in the order it is built.
+        let orders: Vec<u64> = o.features.iter().map(|f| f.order).collect();
+        let moved = o.features.remove(from);
+        o.features.insert(to, moved);
+        for (f, order) in o.features.iter_mut().zip(orders) {
+            f.order = order;
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct RoundParams {
     /// The body by name; empty for the active one.
     pub body: String,
@@ -1068,6 +1168,7 @@ impl Operator for Round {
             seeds: Vec::new(),
             operation: Operation::Join,
             order,
+            suppressed: false,
         };
         doc.document_mut()
             .object_mut(body)
@@ -1161,6 +1262,116 @@ mod tests {
 
     fn body(doc: &Document) -> ObjectId {
         body_named(doc, "").expect("a body")
+    }
+
+    /// A plate and a boss on it: the boss suppressed, the body is the plate
+    /// alone and the boss still on its timeline; put back, both again; and
+    /// moved first, it is first, with the plate's place on the timeline.
+    #[test]
+    fn a_feature_is_suppressed_put_back_and_moved() {
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        run(&r, &mut h, &mut doc, "sketch.new", &[]).unwrap();
+        let sketch = active_sketch(&doc).unwrap();
+        for (a, b) in [
+            ([0.0, 0.0, 0.0], [0.04, 0.02, 0.0]),
+            ([0.1, 0.0, 0.0], [0.11, 0.01, 0.0]),
+        ] {
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                "sketch.rectangle",
+                &[("a", PropertyValue::Vec3(a)), ("b", PropertyValue::Vec3(b))],
+            )
+            .unwrap();
+        }
+        // The plate a new body, the boss joined to it.
+        for (seed, distance, operation) in [([0.02, 0.01], 0.01, 0), ([0.105, 0.005], 0.02, 1)] {
+            doc.selection.clear();
+            doc.selection.add(sketch);
+            doc.selection.active = Some(sketch);
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                "feature.extrude",
+                &[
+                    ("seeds", PropertyValue::Floats(seed.to_vec())),
+                    ("distance", PropertyValue::Float(distance)),
+                    ("operation", PropertyValue::Enum(operation)),
+                ],
+            )
+            .unwrap();
+        }
+        let id = body(&doc);
+        let name = doc.object(id).unwrap().name.clone();
+        assert_eq!(
+            doc.object(id).unwrap().features.len(),
+            2,
+            "one body, two features"
+        );
+        let (plate, boss) = (0.04 * 0.02 * 0.01, 0.01 * 0.01 * 0.02);
+        let near = |v: f64, want: f64| (v - want).abs() < want * 1e-3;
+        assert!(near(volume(&doc, id), plate + boss), "{}", volume(&doc, id));
+
+        let on = |suppressed: bool| {
+            vec![
+                ("body", PropertyValue::Text(name.clone())),
+                ("index", PropertyValue::Int(1)),
+                ("suppressed", PropertyValue::Bool(suppressed)),
+            ]
+        };
+        assert_eq!(
+            run(&r, &mut h, &mut doc, "feature.suppress", &on(true)),
+            Ok(OpResult::Finished)
+        );
+        assert!(near(volume(&doc, id), plate), "{}", volume(&doc, id));
+        assert_eq!(
+            doc.object(id).unwrap().features.len(),
+            2,
+            "kept on the timeline"
+        );
+        // Again is nothing to do.
+        assert_eq!(
+            run(&r, &mut h, &mut doc, "feature.suppress", &on(true)),
+            Ok(OpResult::Cancelled)
+        );
+        run(&r, &mut h, &mut doc, "feature.suppress", &on(false)).unwrap();
+        assert!(near(volume(&doc, id), plate + boss));
+
+        let orders: Vec<u64> = doc
+            .object(id)
+            .unwrap()
+            .features
+            .iter()
+            .map(|f| f.order)
+            .collect();
+        let boss_seeds = doc.object(id).unwrap().features[1].seeds.clone();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.move",
+            &[
+                ("body", PropertyValue::Text(name.clone())),
+                ("index", PropertyValue::Int(1)),
+                ("to", PropertyValue::Int(0)),
+            ],
+        )
+        .unwrap();
+        let features = &doc.object(id).unwrap().features;
+        assert_eq!(features[0].seeds, boss_seeds, "the boss is first");
+        assert_eq!(
+            features.iter().map(|f| f.order).collect::<Vec<_>>(),
+            orders,
+            "the timeline's places stay, in order"
+        );
+        assert!(near(volume(&doc, id), plate + boss));
+        h.undo(&mut doc);
+        assert_ne!(doc.object(id).unwrap().features[0].seeds, boss_seeds);
     }
 
     /// A 100 × 60 mm rectangle made sheet metal: four flanges, a closed

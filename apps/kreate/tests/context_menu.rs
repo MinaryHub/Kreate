@@ -324,7 +324,7 @@ fn each_variant_finds_its_own_shortcut_rather_than_the_others() {
         keymap
             .shortcut_for_action("mesh.normals", &recalculate, Context::EditMesh)
             .as_deref(),
-        Some("Ctrl+N")
+        Some("Alt+N")
     );
     assert_eq!(
         keymap

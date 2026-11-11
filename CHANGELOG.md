@@ -71,6 +71,12 @@ use; `scripts/release.sh` turns that section into the next release.
 - A child dragged onto the outliner's Scene Collection row comes off its
   parent.
 - The console brings back the lines run before, with Up and Down.
+- A feature can be suppressed and put back, and moved earlier or later
+  among its body's, from its right-click menu in the timeline — with
+  Delete there too. `feature.suppress` and `feature.move` for scripts.
+- An HDRI of your own as the environment (Render ▸ Environment ▸ Add
+  HDRI…): it lights the part, is what its metal reflects and is what is
+  behind it, in the preview and in renders, and stays in the list.
 - In edit mode Subdivide is Alt+S and Recalculate Normals is Alt+N: on
   Shift+S and Ctrl+N they hid the snap pie and New File there.
 - NLA strips play from rest each frame, as in Blender: a strip that adds,

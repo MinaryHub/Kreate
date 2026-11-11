@@ -404,6 +404,8 @@ impl App {
                 Ok(json!({
                     "environment": self.ui.studio_preset.name(),
                     "choices": Preset::ALL.map(|p| p.name()),
+                    // An HDRI of the user's own in use in the room's place.
+                    "file": self.ui.environment_file.as_ref().map(|f| f.display().to_string()),
                 }))
             }
             // The model's outline against a picture's, and where they differ.

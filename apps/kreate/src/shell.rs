@@ -310,6 +310,10 @@ pub struct ShellState {
     /// The room the lit views and renders show a part in when the scene
     /// brings no light of its own. See `prefs::load_room`.
     pub studio_preset: kreate_render::studio::Preset,
+    /// HDRI files the user has added as environments, and the one in use
+    /// in place of `studio_preset` when one is.
+    pub environment_files: Vec<std::path::PathBuf>,
+    pub environment_file: Option<std::path::PathBuf>,
     /// Whether the rendered view traces whenever it is still.
     pub trace_when_still: bool,
     /// The open document's name, `*` in front while it has unsaved changes:
@@ -910,6 +914,8 @@ impl Default for ShellState {
             resolution_scale: 1.0,
             punchy: true,
             studio_preset: Default::default(),
+            environment_files: Vec::new(),
+            environment_file: None,
             trace_when_still: true,
             document_title: "untitled".into(),
             adjust_open: false,
@@ -8452,16 +8458,71 @@ fn draw_render_tab(
                 .catalog
                 .get(&format!("render-environment-{}", p.name()))
         };
-        let mut chosen = state.studio_preset;
+        // A room of the program's, or a picture of the user's own.
+        let file_name = |f: &std::path::Path| {
+            f.file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+        let shown = match &state.environment_file {
+            Some(f) => file_name(f),
+            None => name(state.studio_preset),
+        };
+        let mut room = None;
+        let mut file = None;
+        let mut add = false;
         egui::ComboBox::from_id_salt("render-environment")
-            .selected_text(name(chosen))
+            .selected_text(shown)
             .show_ui(ui, |ui| {
                 for p in Preset::ALL {
-                    ui.selectable_value(&mut chosen, p, name(p));
+                    let on = state.environment_file.is_none() && state.studio_preset == p;
+                    if ui.selectable_label(on, name(p)).clicked() {
+                        room = Some(p);
+                    }
+                }
+                if !state.environment_files.is_empty() {
+                    ui.separator();
+                }
+                for f in &state.environment_files {
+                    let on = state.environment_file.as_ref() == Some(f);
+                    // i18n-exempt: the user's own file's name
+                    if ui
+                        .selectable_label(on, file_name(f))
+                        .on_hover_text(f.display().to_string())
+                        .clicked()
+                    {
+                        file = Some(f.clone());
+                    }
+                }
+                ui.separator();
+                if ui
+                    .button(state.catalog.get("render-environment-add"))
+                    .on_hover_text(state.catalog.get("render-environment-add-desc"))
+                    .clicked()
+                {
+                    add = true;
+                    ui.close();
                 }
             });
-        if chosen != state.studio_preset {
-            choose_environment(state, chosen);
+        if let Some(room) = room {
+            choose_environment(state, room);
+        }
+        if let Some(file) = file {
+            choose_environment_file(state, Some(file));
+        }
+        if add {
+            state.queue.push(Command::EnvironmentAdd);
+        }
+        // The one in use, when it is the user's own, can be taken off the list.
+        if state.environment_file.is_some()
+            && ui
+                .small_button("✕")
+                .on_hover_text(state.catalog.get("render-environment-remove"))
+                .clicked()
+        {
+            let gone = state.environment_file.take();
+            state.environment_files.retain(|f| Some(f) != gone.as_ref());
+            choose_environment_file(state, None);
         }
     });
     // The quality in one choice: samples, bounces and the denoiser together.
@@ -15608,6 +15669,10 @@ pub struct FeatureRow {
     pub amount: f64,
     pub symmetric: bool,
     pub cut: bool,
+    /// Left out of its body for now.
+    pub suppressed: bool,
+    /// How many features its body has, for moving it among them.
+    pub count: u32,
     /// What holds its amount to the parameters, when something does.
     pub expression: Option<String>,
 }
@@ -16408,14 +16473,73 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                         } else {
                             "⬆"
                         };
-                        let colour = if row.cut { theme.info } else { theme.text };
+                        let colour = if row.suppressed {
+                            theme.text_faint
+                        } else if row.cut {
+                            theme.info
+                        } else {
+                            theme.text
+                        };
                         // i18n-exempt: a symbol and the user's own names
                         let text = if row.is_sketch {
                             format!("{icon}  {}", row.label)
                         } else {
                             format!("{icon}  {}  · {}", row.label, row.body)
                         };
-                        let r = ui.selectable_label(false, egui::RichText::new(text).color(colour));
+                        let mut text = egui::RichText::new(text).color(colour);
+                        if row.suppressed {
+                            text = text.strikethrough();
+                        }
+                        let r = ui.selectable_label(false, text);
+                        // A feature's own menu: leave it out or put it back,
+                        // move it among its body's, or take it away.
+                        if !row.is_sketch {
+                            let row = row.clone();
+                            r.context_menu(|ui| {
+                                use kreate_reflect::PropertyValue as V;
+                                let named = |row: &FeatureRow| {
+                                    let mut p = PropertyMap::new();
+                                    p.set("body", V::Text(row.body.clone()));
+                                    p.set("index", V::Int(row.index as i64));
+                                    p
+                                };
+                                let suppress = state.catalog.get(if row.suppressed {
+                                    "feature-unsuppress"
+                                } else {
+                                    "feature-suppress"
+                                });
+                                if ui.button(suppress).clicked() {
+                                    let mut p = named(&row);
+                                    p.set("suppressed", V::Bool(!row.suppressed));
+                                    state.queue.run("feature.suppress", p);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                let mut moved = |ui: &mut Ui, key: &str, to: Option<u32>| {
+                                    let label = state.catalog.get(key);
+                                    if ui
+                                        .add_enabled(to.is_some(), egui::Button::new(label))
+                                        .clicked()
+                                    {
+                                        let mut p = named(&row);
+                                        p.set("to", V::Int(i64::from(to.unwrap_or(0))));
+                                        state.queue.run("feature.move", p);
+                                        ui.close();
+                                    }
+                                };
+                                moved(ui, "feature-move-earlier", row.index.checked_sub(1));
+                                moved(
+                                    ui,
+                                    "feature-move-later",
+                                    Some(row.index + 1).filter(|to| *to < row.count),
+                                );
+                                ui.separator();
+                                if ui.button(state.catalog.get("feature-delete")).clicked() {
+                                    state.queue.run("feature.remove", named(&row));
+                                    ui.close();
+                                }
+                            });
+                        }
                         if r.double_clicked() {
                             if row.is_sketch {
                                 state.queue.push(Command::EditSketch(row.label.clone()));
@@ -18453,6 +18577,10 @@ mod ribbon {
 /// tab's choice, and the connector's.
 pub fn choose_environment(state: &mut ShellState, room: kreate_render::studio::Preset) {
     state.studio_preset = room;
+    // A room chosen is in place of a file.
+    if state.environment_file.is_some() {
+        choose_environment_file(state, None);
+    }
     if let Some(path) = crate::prefs::viewport_path() {
         let _ = crate::prefs::save_viewport(
             &path,
@@ -18460,6 +18588,25 @@ pub fn choose_environment(state: &mut ShellState, room: kreate_render::studio::P
             state.punchy,
             state.trace_when_still,
             room,
+        );
+    }
+}
+
+/// Uses one of the user's own HDRI files as the environment, or with `None`
+/// goes back to the room chosen; adds a file not on the list yet, and
+/// remembers both for the next session.
+pub fn choose_environment_file(state: &mut ShellState, file: Option<std::path::PathBuf>) {
+    if let Some(f) = &file {
+        if !state.environment_files.contains(f) {
+            state.environment_files.push(f.clone());
+        }
+    }
+    state.environment_file = file;
+    if let Some(path) = crate::prefs::environments_path() {
+        let _ = crate::prefs::save_environments(
+            &path,
+            &state.environment_files,
+            state.environment_file.as_deref(),
         );
     }
 }

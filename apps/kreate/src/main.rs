@@ -836,7 +836,7 @@ struct App {
     /// *document*, and `kreate-render` does not see one.
     environment: Option<kreate::environment::EnvironmentKey>,
     /// Whether the viewports hold the studio's room as their environment.
-    studio_environment: Option<kreate_render::studio::Preset>,
+    studio_environment: Option<StudioKey>,
     /// Whether the scene's own sky must be rebuilt, the studio having held
     /// the environment in the meantime.
     environment_stale: bool,
@@ -1165,6 +1165,11 @@ impl App {
         app.ui.studio_preset = kreate::prefs::viewport_path()
             .map(|p| kreate::prefs::load_room(&p))
             .unwrap_or_default();
+        if let Some(p) = kreate::prefs::environments_path() {
+            let (files, chosen) = kreate::prefs::load_environments(&p);
+            app.ui.environment_files = files;
+            app.ui.environment_file = chosen;
+        }
         app.ui.trace_when_still =
             kreate::prefs::viewport_path().is_none_or(|p| kreate::prefs::load_trace_when_still(&p));
         app.ui.appearance = kreate::prefs::interface_path()
@@ -8413,6 +8418,16 @@ impl App {
                 }
                 Command::ExportSheet { pdf } => self.export_sheet(pdf),
                 Command::PickWorldImage => self.pick_world_image(),
+                Command::EnvironmentAdd => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("HDRI", &["hdr", "exr"])
+                        .set_title("Environment")
+                        .pick_file()
+                    {
+                        shell::choose_environment_file(&mut self.ui, Some(path));
+                        self.redraw.set(RedrawReason::SETTINGS);
+                    }
+                }
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
                 Command::PickLightProfile => self.pick_light_profile(),
@@ -13344,12 +13359,23 @@ impl App {
             v.viewport.path_trace_when_still = self.ui.trace_when_still;
         }
         let room = self.ui.studio_preset;
+        // The room in use: one of the program's, or a picture of the user's.
+        let studio = match &self.ui.environment_file {
+            Some(file) => StudioKey::File(file.clone()),
+            None => StudioKey::Room(room),
+        };
+        let custom = matches!(studio, StudioKey::File(_));
         let preview = match gfx.viewport.shading {
+            kreate_render::ShadingMode::Material if custom => Some(scenelights::file_environment()),
             kreate_render::ShadingMode::Material => {
                 Some(scenelights::material_preview_in(self.camera.rotation, room))
             }
             kreate_render::ShadingMode::Rendered if scenelights::uses_studio(&self.doc) => {
-                Some(scenelights::rendered_studio_in(&self.doc, room))
+                Some(if custom {
+                    scenelights::file_environment()
+                } else {
+                    scenelights::rendered_studio_in(&self.doc, room)
+                })
             }
             _ => None,
         };
@@ -13374,35 +13400,56 @@ impl App {
                 // one in use: six faces and their mips are not a frame's cost.
                 self.environment = None;
                 let (device, queue) = (&gfx.gpu.device, &gfx.gpu.queue);
-                let upload = self.studio_environment != Some(room);
-                let pixels = (upload || fresh).then(|| kreate_render::studio::equirect_of(room));
-                gfx.viewport.set_world(preview.world);
-                if upload {
-                    if let Some(pixels) = &pixels {
-                        gfx.viewport.set_environment(
-                            device,
-                            queue,
+                let upload = self.studio_environment.as_ref() != Some(&studio);
+                // Its picture, with its size: the room's own, or the file's
+                // — read once, when it comes into use.
+                let pixels: Option<(u32, u32, Vec<u8>)> = if upload || fresh {
+                    match &studio {
+                        StudioKey::Room(room) => Some((
                             kreate_render::studio::WIDTH,
                             kreate_render::studio::HEIGHT,
-                            pixels,
-                        );
+                            kreate_render::studio::equirect_of(*room),
+                        )),
+                        StudioKey::File(file) => {
+                            match kreate_io::load_image_file(file, kreate_scene::ColorSpace::Srgb) {
+                                Ok(image) => Some((
+                                    image.width(),
+                                    image.height(),
+                                    kreate::environment::pixels_of(&image),
+                                )),
+                                Err(e) => {
+                                    // Gone, or not a picture: back to the
+                                    // room, and said.
+                                    self.ui.status =
+                                        Some(format!("cannot read {}: {e}", file.display()));
+                                    self.ui.environment_file = None;
+                                    None
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
+                gfx.viewport.set_world(preview.world);
+                if upload {
+                    if let Some((width, height, pixels)) = &pixels {
+                        gfx.viewport
+                            .set_environment(device, queue, *width, *height, pixels);
                     }
                 }
                 for v in gfx.extra.values_mut() {
                     v.viewport.set_world(preview.world);
                     if upload || v.fresh {
-                        if let Some(pixels) = &pixels {
-                            v.viewport.set_environment(
-                                device,
-                                queue,
-                                kreate_render::studio::WIDTH,
-                                kreate_render::studio::HEIGHT,
-                                pixels,
-                            );
+                        if let Some((width, height, pixels)) = &pixels {
+                            v.viewport
+                                .set_environment(device, queue, *width, *height, pixels);
                         }
                     }
                 }
-                self.studio_environment = Some(room);
+                if !upload || pixels.is_some() {
+                    self.studio_environment = Some(studio);
+                }
             } else {
                 // Out of the studio: its room goes, and the scene's own sky
                 // is rebuilt below as if it had never been there.
@@ -20110,4 +20157,12 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         let own = app.build_own_snap_world();
         assert_eq!(own.verts.len(), 16);
     }
+}
+
+/// Which studio the views are lit by: one of the program's rooms, or an
+/// HDRI file of the user's.
+#[derive(Clone, Debug, PartialEq)]
+enum StudioKey {
+    Room(kreate_render::studio::Preset),
+    File(std::path::PathBuf),
 }

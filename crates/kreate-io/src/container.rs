@@ -3473,6 +3473,9 @@ pub struct FeatureRecord {
     /// A sheet metal feature's flanged edges, each by a point by it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<[f64; 2]>,
+    /// Left out of the body for now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suppressed: bool,
     /// Fields a newer build added, kept for it.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -3546,6 +3549,7 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         path,
         sections,
         edges,
+        suppressed: f.suppressed,
         extra: BTreeMap::new(),
     }
 }
@@ -3664,5 +3668,6 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
             .collect(),
         operation: Operation::from_tag(&r.operation)?,
         order: r.order,
+        suppressed: r.suppressed,
     })
 }
