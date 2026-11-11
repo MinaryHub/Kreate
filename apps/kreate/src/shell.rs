@@ -9681,6 +9681,9 @@ fn draw_geometry_editor(
         open_image: String::new(),
     };
     let mut editor = state.node_views.remove(&area).unwrap_or_default();
+    editor.showing(graph_key(("geometry", doc.selection.active)));
+    // No duplicate, group or clipboard for these yet.
+    editor.plain = true;
     let mut asked = false;
     let edits = kreate_ui::node_editor(ui, view.as_ref(), &mut editor, &text, &mut asked);
     state.node_views.insert(area, editor);
@@ -9740,6 +9743,15 @@ fn draw_geometry_editor(
     }
 }
 
+/// A number for the graph a node editor is showing, from what names it.
+fn graph_key(of: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    of.hash(&mut h);
+    // Never zero, which is "nothing shown yet".
+    h.finish() | 1
+}
+
 /// The shader editor, for the material the Material tab is showing.
 ///
 /// Same slot as the tab: the active object's, the row selected there. One
@@ -9776,6 +9788,8 @@ fn draw_shader_editor(
         open_image: l.node_open_image.clone(),
     };
     let mut editor = state.node_views.remove(&area).unwrap_or_default();
+    editor.showing(graph_key(("shader", doc.selection.active, slot)));
+    editor.plain = false;
     let mut asked = false;
     let edits = kreate_ui::node_editor(ui, view.as_ref(), &mut editor, &text, &mut asked);
     state.node_views.insert(area, editor);

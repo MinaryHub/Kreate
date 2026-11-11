@@ -1243,11 +1243,11 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             Action::new("mesh.subdivide").with("iterations", PropertyValue::Int(1)),
         )
-        // Moved off the bare `S` when Scale took it. `Shift+S` rather than
-        // somewhere else entirely: the muscle memory for subdivide is already on
-        // this key, and a modifier is a smaller thing to relearn than a new
-        // letter.
-        .with_modifiers(Modifiers::shift()),
+        // Moved off the bare `S` when Scale took it, and off `Shift+S`
+        // since: that is the snap pie everywhere, and held here it could not
+        // be opened in edit mode — which is where the cursor is most often
+        // put on what is selected. Still on S, a modifier along.
+        .with_modifiers(Modifiers::alt()),
         key(
             "mesh.loop_cut",
             "R",
@@ -1328,7 +1328,9 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             enum_param(Action::new("mesh.normals"), "action", 0),
         )
-        .with_modifiers(Modifiers::ctrl()),
+        // Not Ctrl+N: that is New File, everywhere, and in edit mode it
+        // quietly recalculated normals instead.
+        .with_modifiers(Modifiers::alt()),
         key(
             "mesh.normals_flip",
             "N",

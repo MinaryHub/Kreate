@@ -71,6 +71,8 @@ use; `scripts/release.sh` turns that section into the next release.
 - A child dragged onto the outliner's Scene Collection row comes off its
   parent.
 - The console brings back the lines run before, with Up and Down.
+- In edit mode Subdivide is Alt+S and Recalculate Normals is Alt+N: on
+  Shift+S and Ctrl+N they hid the snap pie and New File there.
 - NLA strips play from rest each frame, as in Blender: a strip that adds,
   with nothing under it, adds to no movement rather than to the last
   frame's.
@@ -144,6 +146,13 @@ use; `scripts/release.sh` turns that section into the next release.
   listening.
 - The Solidify modifier dropped UVs, materials and smooth shading.
 - A DXF's layer linetypes and frozen layers were lost on import.
+- In a render, the studio floor and backdrop were missing behind glass
+  and cut-out materials: a glass on the floor stood on the bare
+  environment with no shadow under it.
+- The node editors kept one graph's selection when another was shown, so
+  X removed nodes of a material nobody had touched. In Geometry Nodes,
+  Shift+D, Ctrl+G, Alt+G and copy and paste emptied the selection and did
+  nothing; they are off there until those exist.
 - A drawing entity written by a newer Kreate stayed unread for good once
   an older one had saved the file.
 - A small part's measured inertia was written to URDF as zero, and a

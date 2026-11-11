@@ -275,6 +275,29 @@ pub struct NodeEditorState {
     /// The panel's rect last frame, so the application can tell whether the
     /// pointer is over it.
     pub rect: Option<Rect>,
+    /// Which graph this was last shown: see [`NodeEditorState::showing`].
+    shown: u64,
+    /// Whether the editor's host has no duplicate, group, copy or paste for
+    /// its graph: the keys for them then do nothing, rather than emptying
+    /// the selection for an edit nobody carries out.
+    pub plain: bool,
+}
+
+impl NodeEditorState {
+    /// Says which graph is about to be drawn, by any number that is its
+    /// own. When it is another than last time, what was selected and how
+    /// the view was framed are let go: they are by node number, and the
+    /// same numbers in another graph are other nodes — X then removed
+    /// nodes of a material nobody had touched.
+    pub fn showing(&mut self, graph: u64) {
+        if graph != self.shown {
+            self.shown = graph;
+            self.selected.clear();
+            self.drag = Drag::None;
+            self.add_at = None;
+            self.framed = false;
+        }
+    }
 }
 
 impl Default for NodeEditorState {
@@ -287,6 +310,8 @@ impl Default for NodeEditorState {
             add_at: None,
             framed: false,
             rect: None,
+            shown: 0,
+            plain: false,
         }
     }
 }
@@ -717,14 +742,15 @@ pub fn node_editor(
         };
         let all = pressed_with(egui::Key::A, |m| !m.shift && !m.alt && !m.command);
         let none = pressed_with(egui::Key::A, |m| m.alt);
-        let duplicate = pressed_with(egui::Key::D, |m| m.shift);
-        let group = pressed_with(egui::Key::G, |m| m.command && !m.alt);
-        let ungroup = pressed_with(egui::Key::G, |m| m.alt && !m.command);
+        let whole = !state.plain;
+        let duplicate = whole && pressed_with(egui::Key::D, |m| m.shift);
+        let group = whole && pressed_with(egui::Key::G, |m| m.command && !m.alt);
+        let ungroup = whole && pressed_with(egui::Key::G, |m| m.alt && !m.command);
         // Copy and paste arrive as events of their own, not as key presses.
         let (copy, paste) = ui.input(|i| {
             (
-                i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+                whole && i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                whole && i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
             )
         });
         let sorted = |state: &NodeEditorState| {
