@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-11
+
 ### Added
 
 - More ways to draw in a sketch, as Fusion has them: a 3-point (turned)
@@ -786,7 +788,8 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.8.0
 [0.7.1]: https://github.com/MinaryHub/Kreate/releases/tag/v0.7.1
 [0.7.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.7.0
 [0.5.3]: https://github.com/MinaryHub/Kreate/releases/tag/v0.5.3
