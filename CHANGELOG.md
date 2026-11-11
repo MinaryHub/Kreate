@@ -59,11 +59,67 @@ use; `scripts/release.sh` turns that section into the next release.
   and X makes it construction, as in Fusion; X had deleted. Delete also
   removes objects and mesh elements, beside X.
 - A sketch no longer marks every corner where two ends meet.
+- Ctrl+Shift+Z redoes, beside Ctrl+Y.
+- Add Modifier lists every modifier: Triangulate, Weld, Displace, Simple
+  Deform, Screw, Decimate and Shrinkwrap were missing from the panel.
+- An operation that fails says why in the status bar; it had said so only
+  to the console.
+- The Save, Undo and Redo buttons show their keys.
 
 ### Fixed
 
 - The Delete key did nothing anywhere: no binding on it could be reached,
   the timeline's included.
+- Importing a DXF whose text held Hangul, or any letters from a code-page
+  file, stopped the program. A DXF with an absurd block array no longer
+  hangs the import, a large one reads in a fraction of the time, and a
+  turned block inside a mirrored one lands where it should.
+- DXF export writes text an R12 reader can read: degrees, diameter and
+  plus-minus as DXF's codes, Hangul as `\U+` escapes, a per cent sign as
+  one; a dimension's Ø, ° and ± were written doubled and came back as
+  `%c`.
+- With four lamps or more, some went dark across parts of the view, and a
+  lamp with an IES profile hid the two after it: the light cull read the
+  lamps at the wrong stride.
+- The path tracer: an empty scene could hang the GPU; a face lying on the
+  studio floor flickered against it; a dolly or zoom threw the carried
+  picture away, leaving a moving view noisy; part-subsurface materials
+  came out too bright.
+- A sheet-metal flange away from the origin did not weld to its plate,
+  leaving the body open; a bend angle from a script or a file is kept
+  between flat and folded back.
+- The Triangulate modifier dropped sharp edges, creases and seams. A loop
+  cut of three or more slid to an end stacked its loops on one spot. A
+  voxel remesh with a tiny voxel size could stop the program.
+- Sketch tools: a quarter turn (Move/Turn/Scale) collapsed level and
+  upright lines; Break left dimensions on the wrong piece; Extend, Chamfer
+  and Fillet were pulled back by the line's own length dimension; a
+  fillet's lines did not follow when its radius was changed; a copy of
+  text was not turned or scaled.
+- A projected outline was thrown away and remade each time a sketch was
+  opened, taking the constraints and dimensions on it.
+- `draft.dimension_set` from a script made the dimension driven, so
+  nothing moved; `feature.set` naming only an amount turned a cut into a
+  join. A slide joint's default travel is 10 cm each way, not 3.14 m.
+- Pasting or importing objects left a boolean's cutter, a path, a
+  feature's sketch and the like pointing at the originals.
+- Renaming a bone lost its animation in NLA strips. A particle instance
+  turned or scaled did not update its particles.
+- Typing in the chat or any field while a sketch tool, the knife or
+  Measure was active also drove the tool.
+- In a sketch, a drag interrupted by a tool key or Delete could undo
+  everything drawn since on the next drag; after an undo, Delete could
+  remove the curve next to the one selected; a dragged point could snap to
+  the wrong curve.
+- Recover asked nothing before replacing the open document, and deleted
+  an autosave it had failed to read.
+- A request or an import arriving in the middle of a move or a drag was
+  silently undone by it.
+- A number typed into a field was an undo step for each keystroke.
+- The Adjust panel kept the first run's values when the same operation
+  ran twice. Clicking a pie menu's entry also clicked the view behind it.
+  The graph editor's keys stopped working after a middle-button pan.
+- The chat's box for another model's name could not be clicked into.
 
 ## [0.7.1] - 2026-11-07
 

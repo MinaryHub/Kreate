@@ -688,7 +688,11 @@ fn drag_float(ui: &mut Ui, desc: &PropertyDesc, value: &mut f64) -> bool {
     let mut drag = egui::DragValue::new(&mut shown)
         .speed(step)
         .suffix(display.suffix)
-        .max_decimals(display.decimals);
+        .max_decimals(display.decimals)
+        // Typed, it is the number once it is finished: taken a keystroke at
+        // a time, "12.5" was three steps to undo and the object jumped
+        // through 1 and 12 on the way.
+        .update_while_editing(false);
 
     // The soft range bounds the *drag*; typing is bound only by the hard range.
     // A slider that cannot be exceeded is a standing complaint about modelling
@@ -709,7 +713,9 @@ fn drag_float(ui: &mut Ui, desc: &PropertyDesc, value: &mut f64) -> bool {
 
 fn drag_int(ui: &mut Ui, desc: &PropertyDesc, value: &mut i64) -> bool {
     let mut n = *value;
-    let mut drag = egui::DragValue::new(&mut n).speed(desc.step.unwrap_or(1.0));
+    let mut drag = egui::DragValue::new(&mut n)
+        .speed(desc.step.unwrap_or(1.0))
+        .update_while_editing(false);
     if let (Some(lo), Some(hi)) = (desc.min.or(desc.soft_min), desc.max.or(desc.soft_max)) {
         drag = drag.range((lo as i64)..=(hi as i64));
     }

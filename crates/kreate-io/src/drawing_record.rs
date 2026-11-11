@@ -76,7 +76,7 @@ fn color_from(s: &str) -> ColorRef {
         "bylayer" => ColorRef::ByLayer,
         "byblock" => ColorRef::ByBlock,
         s if s.starts_with("aci ") => s[4..].parse().map(ColorRef::Index).unwrap_or_default(),
-        s if s.len() == 7 && s.starts_with('#') => {
+        s if s.len() == 7 && s.starts_with('#') && s.is_ascii() => {
             let h = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0);
             ColorRef::Rgb([h(1), h(3), h(5)])
         }

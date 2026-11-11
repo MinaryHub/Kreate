@@ -1410,10 +1410,12 @@ impl PathTracer {
         let mut order = top.order().to_vec();
         // An empty scene still binds: one node that nothing enters.
         if nodes.is_empty() {
+            // Far off, not inside out: the box test takes its corners in
+            // either order, and `[1, -1]` was the unit cube at the origin.
             nodes.push(GpuNode {
-                min: [1.0; 3],
+                min: [f32::MAX; 3],
                 first: 0,
-                max: [-1.0; 3],
+                max: [f32::MAX; 3],
                 count: 0,
             });
         }

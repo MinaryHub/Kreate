@@ -329,10 +329,19 @@ impl Operator for AddJoint {
                 "the joint needs an origin and an axis".into(),
             ));
         }
-        let (lower, upper) = (
-            params.lower.min(params.upper),
-            params.lower.max(params.upper),
-        );
+        // A slide's limits are metres. Left at the turn's default of half
+        // a turn each way they were 3.14 m of travel, and a motion check
+        // then stepped 17 cm at a time, over whatever was in the way.
+        let pi = std::f64::consts::PI;
+        let (lower, upper) = if kind == JointKind::Prismatic
+            && (params.lower + pi).abs() < 1e-9
+            && (params.upper - pi).abs() < 1e-9
+        {
+            (-0.1, 0.1)
+        } else {
+            (params.lower, params.upper)
+        };
+        let (lower, upper) = (lower.min(upper), lower.max(upper));
         let world = DTransform {
             translation: origin,
             rotation: DQuat::from_rotation_arc(DVec3::Z, axis.normalize()),

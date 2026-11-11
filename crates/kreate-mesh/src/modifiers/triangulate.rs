@@ -33,6 +33,10 @@ pub fn triangulate(input: &MeshData) -> MeshData {
     let edges = out.num_edges() as usize;
     *out.attributes_mut() = attributes;
     out.attributes_mut().resize_domain(Domain::Edge, edges);
+    // Every edge there was is still there, between the same two points:
+    // its sharpness, crease and seam go with it. Only the diagonals are new.
+    let same: Vec<u32> = (0..input.num_verts()).collect();
+    super::gather_edges_by_pair(&mut out, input, &same);
     out
 }
 

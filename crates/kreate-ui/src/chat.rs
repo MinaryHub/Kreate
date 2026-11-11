@@ -181,15 +181,19 @@ pub fn chat(
                 let other_id = ui.id().with("chat-model-other");
                 egui::ComboBox::from_id_salt("chat-model")
                     .width(140.0)
+                    // Open until a click outside: closing on any click, it
+                    // closed on the click into the box for another name.
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     // i18n-exempt: a model's name
                     .selected_text(current)
                     .show_ui(ui, |ui| {
                         for (index, name) in providers.models.iter().enumerate() {
                             // i18n-exempt: a model's name
-                            if ui.selectable_label(index == providers.model, shown(name)).clicked()
-                                && index != providers.model
-                            {
-                                queue.push(Command::ChatModel { index });
+                            if ui.selectable_label(index == providers.model, shown(name)).clicked() {
+                                if index != providers.model {
+                                    queue.push(Command::ChatModel { index });
+                                }
+                                ui.close();
                             }
                         }
                         if providers.other {

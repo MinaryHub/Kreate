@@ -1028,8 +1028,11 @@ fn control(
                         cell.size(),
                         egui::DragValue::new(&mut v)
                             .range(*min..=*max)
-                            .speed(((*max - *min) / 200.0) as f64)
+                            // By the range, within what a hand can aim: an
+                            // open-ended value moved ten thousand a pixel.
+                            .speed((((*max - *min) / 200.0) as f64).clamp(0.001, 0.1))
                             .max_decimals(3)
+                            .update_while_editing(false)
                             .prefix(prefix),
                     );
                     if response.changed() && v != *value {

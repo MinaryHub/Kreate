@@ -767,6 +767,8 @@ pub fn key(doc: &Document, features: &[Feature], body_world: DAffine3) -> u64 {
             }
             if let Some(o) = doc.object(id) {
                 o.sketch_lines.hash(&mut h);
+                // Which of its lines are construction: they bound no region.
+                format!("{:?}", o.sketch).hash(&mut h);
                 // A drawing is its own geometry, not a mesh's.
                 if let Some(d) = o.drawing.as_deref() {
                     format!("{d:?}").hash(&mut h);

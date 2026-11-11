@@ -11261,7 +11261,8 @@ fn draw_recent_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 .unwrap_or_default();
             let response = ui
                 .add_enabled(path.exists(), egui::Button::new(name))
-                .on_hover_text(path.display().to_string());
+                .on_hover_text(path.display().to_string())
+                .on_disabled_hover_text(path.display().to_string());
             if response.clicked() {
                 state.queue.push(Command::OpenPath(path));
                 ui.close();
@@ -11590,13 +11591,17 @@ fn draw_adjust_fields(
 
     // Reset the editable copy whenever the last operation changes, so the panel
     // always describes what is actually applied.
+    // By where it stands in the history as well as by what it is: the same
+    // operator run twice kept the first run's numbers, and touching a field
+    // sent them to the second.
+    let which = format!("{}@{}", entry.op_id, history.cursor() + history.evicted());
     let stale = state
         .adjust_params
         .as_ref()
-        .map(|(id, _)| id != &entry.op_id)
+        .map(|(id, _)| id != &which)
         .unwrap_or(true);
     if stale {
-        state.adjust_params = Some((entry.op_id.clone(), entry.params.clone()));
+        state.adjust_params = Some((which, entry.params.clone()));
     }
 
     let Some((_, params)) = state.adjust_params.as_mut() else {
@@ -13508,7 +13513,7 @@ fn draw_shape_keys(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::d
                 // i18n-exempt: a geometric glyph standing in for an icon
                 if ui
                     .small_button("\u{25C6}")
-                    .on_hover_text(state.catalog.get("op-anim-keyframe-insert-property"))
+                    .on_hover_text(state.catalog.get("op-anim-keyframe-insert"))
                     .clicked()
                 {
                     let mut p = PropertyMap::new();
@@ -14165,6 +14170,13 @@ const KIND_KEYS: &[&str] = &[
     "modifier-bevel",
     "modifier-boolean",
     "modifier-path-array",
+    "modifier-triangulate",
+    "modifier-weld",
+    "modifier-displace",
+    "modifier-simple-deform",
+    "modifier-screw",
+    "modifier-decimate",
+    "modifier-shrinkwrap",
 ];
 
 /// The built-in English catalog.
@@ -14882,13 +14894,27 @@ fn bar_button(ui: &mut Ui, icon: RibbonIcon, enabled: bool, tip: &str) -> egui::
 fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool, can_redo: bool) {
     let theme = kreate_ui::theme::from_ui(ui);
     ui.spacing_mut().item_spacing.x = 2.0;
-    if bar_button(ui, RibbonIcon::Save, true, &l.file_save).clicked() {
+    // Each with its key, as the menus show theirs.
+    let tip = |state: &ShellState, id: &str, label: &str| match state
+        .command_info
+        .get(id)
+        .map(|info| info.shortcut.as_str())
+    {
+        Some(keys) if !keys.is_empty() => format!("{label}  ({keys})"),
+        _ => label.to_string(),
+    };
+    let (save, undo, redo) = (
+        tip(state, "file.save", &l.file_save),
+        tip(state, "edit.undo", &l.undo),
+        tip(state, "edit.redo", &l.redo),
+    );
+    if bar_button(ui, RibbonIcon::Save, true, &save).clicked() {
         state.queue.push(Command::SaveDocument);
     }
-    if bar_button(ui, RibbonIcon::Undo, can_undo, &l.undo).clicked() {
+    if bar_button(ui, RibbonIcon::Undo, can_undo, &undo).clicked() {
         state.queue.push(Command::Undo);
     }
-    if bar_button(ui, RibbonIcon::Redo, can_redo, &l.redo).clicked() {
+    if bar_button(ui, RibbonIcon::Redo, can_redo, &redo).clicked() {
         state.queue.push(Command::Redo);
     }
     ui.add_space(10.0);

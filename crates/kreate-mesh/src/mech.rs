@@ -1512,7 +1512,7 @@ pub struct SheetMetal {
 impl SheetMetal {
     /// The length of sheet a bend takes up, along the neutral line.
     pub fn bend_allowance(&self) -> f32 {
-        self.angle * (self.radius + self.k_factor * self.thickness)
+        bend_angle(self.angle) * (self.radius + self.k_factor * self.thickness)
     }
 
     /// The blank's size: the base and each flange unrolled.
@@ -1541,15 +1541,16 @@ pub fn sheet_metal(p: &SheetMetal) -> MeshData {
             (Vec2::new(u, t), Vec2::new(u, 0.0)),
         ]
     } else {
-        let steps = 2 + (p.angle / (PI / 16.0)).ceil() as usize;
+        let angle = bend_angle(p.angle);
+        let steps = 2 + (angle / (PI / 16.0)).ceil() as usize;
         let at = |radius: f32, phi: f32| Vec2::new(radius * phi.sin(), t + r - radius * phi.cos());
         let mut s: Vec<(Vec2, Vec2)> = (0..=steps)
             .map(|i| {
-                let phi = p.angle * i as f32 / steps as f32;
+                let phi = angle * i as f32 / steps as f32;
                 (at(r, phi), at(r + t, phi))
             })
             .collect();
-        let d = Vec2::new(p.angle.cos(), p.angle.sin()) * p.height;
+        let d = Vec2::new(angle.cos(), angle.sin()) * p.height;
         let (i, o) = *s.last().expect("a bend");
         if p.height > 0.0 {
             s.push((i + d, o + d));
@@ -1751,7 +1752,18 @@ pub fn flangeable_edges(outline: &[Vec2], min_length: f32) -> Vec<usize> {
 impl Plate {
     /// The length of sheet a flange's bend takes up, along the neutral line.
     pub fn bend_allowance(&self, angle: f32) -> f32 {
-        angle * (self.radius + self.k_factor * self.thickness)
+        bend_angle(angle) * (self.radius + self.k_factor * self.thickness)
+    }
+}
+
+/// A bend's angle as it can be made: from flat to folded right back. One
+/// from a file or a script is not trusted — a huge one asked for memory by
+/// the terabyte, a negative one bent the flange into the plate.
+fn bend_angle(angle: f32) -> f32 {
+    if angle.is_finite() {
+        angle.clamp(0.0, std::f32::consts::PI)
+    } else {
+        0.0
     }
 }
 
@@ -1791,12 +1803,8 @@ pub fn plate(p: &Plate) -> MeshData {
         let along2 = (b - a) / span;
         // Out of an anticlockwise outline: to the right of its way.
         let out2 = Vec2::new(along2.y, -along2.x);
-        let mid = (a + b) * 0.5;
-        let (mid, out, along) = (
-            Vec3::new(mid.x, mid.y, 0.0),
-            Vec3::new(out2.x, out2.y, 0.0),
-            Vec3::new(along2.x, along2.y, 0.0),
-        );
+        let out = Vec3::new(out2.x, out2.y, 0.0);
+        let angle = bend_angle(f.angle);
         let section: Vec<(Vec2, Vec2)> = if p.flat {
             let u = p.bend_allowance(f.angle) + f.height;
             vec![
@@ -1804,24 +1812,28 @@ pub fn plate(p: &Plate) -> MeshData {
                 (Vec2::new(u, t), Vec2::new(u, 0.0)),
             ]
         } else {
-            let steps = 2 + (f.angle / (PI / 16.0)).ceil() as usize;
+            let steps = 2 + (angle / (PI / 16.0)).ceil() as usize;
             let at =
                 |radius: f32, phi: f32| Vec2::new(radius * phi.sin(), t + r - radius * phi.cos());
             let mut s: Vec<(Vec2, Vec2)> = (0..=steps)
                 .map(|i| {
-                    let phi = f.angle * i as f32 / steps as f32;
+                    let phi = angle * i as f32 / steps as f32;
                     (at(r, phi), at(r + t, phi))
                 })
                 .collect();
-            let d = Vec2::new(f.angle.cos(), f.angle.sin()) * f.height;
+            let d = Vec2::new(angle.cos(), angle.sin()) * f.height;
             let (i, o) = *s.last().expect("a bend");
             if f.height > 0.0 {
                 s.push((i + d, o + d));
             }
             s
         };
-        let place = |q: Vec2, s: f32| mid + out * q.x + Vec3::Z * q.y + along * s;
-        let ends = [-span * 0.5, span * 0.5];
+        // From the outline's own two points, not from the edge's middle
+        // and half its length: worked out again, a root point came a bit
+        // of rounding off the plate's away from the origin, missed its
+        // weld, and left the body open.
+        let place = |q: Vec2, end: Vec3| end + out * q.x + Vec3::Z * q.y;
+        let ends = [Vec3::new(a.x, a.y, 0.0), Vec3::new(b.x, b.y, 0.0)];
         let mut add = |q: Vec3| {
             positions.push(q);
             positions.len() as u32 - 1
@@ -2049,6 +2061,46 @@ mod tests {
             "{} against {flat}",
             area * 0.0015
         );
+    }
+
+    /// A flanged plate is one closed solid wherever it lies and whichever
+    /// way it is turned: away from the origin the flange's root, worked out
+    /// from the edge's middle, came a rounding off the plate's own points
+    /// and did not weld. And a bend's angle is kept to what can be bent.
+    #[test]
+    fn a_flange_welds_to_its_plate_away_from_the_origin() {
+        let turn = Vec2::from_angle(17f32.to_radians());
+        for at in [
+            Vec2::new(1.0, 0.3),
+            Vec2::new(2.0, 1.0),
+            Vec2::new(0.5, 0.2),
+        ] {
+            let outline: Vec<Vec2> = [
+                Vec2::new(0.0, 0.0),
+                Vec2::new(0.1, 0.0),
+                Vec2::new(0.1, 0.04),
+                Vec2::new(0.0, 0.04),
+            ]
+            .iter()
+            .map(|q| at + turn.rotate(*q))
+            .collect();
+            for angle in [std::f32::consts::FRAC_PI_2, 1e12, -1.0, f32::NAN] {
+                let p = Plate {
+                    outline: outline.clone(),
+                    holes: Vec::new(),
+                    thickness: 0.0015,
+                    radius: 0.0015,
+                    k_factor: 0.44,
+                    flanges: vec![Flange {
+                        edge: 0,
+                        angle,
+                        height: 0.015,
+                    }],
+                    flat: false,
+                };
+                solid(&plate(&p));
+            }
+        }
     }
 
     fn m6() -> MetricSize {

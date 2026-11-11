@@ -997,7 +997,9 @@ fn pt_carried(at: vec4<f32>, normal: vec3<f32>) -> vec4<f32> {
     }
     // The same surface: as far from the last eye within a little of the
     // distance, and facing the same way.
-    let was_from_last = was.xyz - pt.prev_eye.xyz;
+    // Kept from the last eye already (`first_at`): taking the eye's move
+    // off again failed every pixel of a view that dollied.
+    let was_from_last = was.xyz;
     let d = length(from_last);
     if (abs(length(was_from_last) - d) > 0.02 * d + 1e-3 || dot(normalize(was_normal), normalize(normal)) < 0.9) {
         return vec4<f32>(0.0);
@@ -1130,7 +1132,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (pt.ground.y > 0.0 && !floor_tried && bounce == 0u && crossings == 0u && !met_surface) {
             floor_tried = true;
             let tg = select(-1.0, (pt.ground.x - origin.z) / dir.z, dir.z < -1e-6);
-            if (tg > 0.0 && (hit.t < 0.0 || tg < hit.t)) {
+            // A face lying on the floor is in front of it: without the
+            // margin the two took turns, sample by sample.
+            if (tg > 0.0 && (hit.t < 0.0 || tg < hit.t - 1e-4 * max(1.0, tg))) {
                 let g = origin + dir * tg;
                 let back = backdrop_at(ndc.y);
                 // The lamps, by how much each gives here, and how much of
@@ -1170,7 +1174,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
                 let shade = mix(1.0, seen, 0.8);
                 let c = max(-dir.z, 0.0);
-                let f = pt.ground.z * (1.0 + 4.0 * pow(1.0 - c, 5.0));
+                let f = pt.ground.z * (1.0 + 4.0 * pow(clamp(1.0 - c, 0.0, 1.0), 5.0));
                 radiance += throughput * back * shade * (1.0 - f);
                 // The floor is the first surface, for the denoiser: plain,
                 // facing up.
@@ -1550,6 +1554,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             throughput /= 1.0 - p_below;
             s.diffuse_weight = 1.0 - clamp(s.subsurface, 0.0, 1.0);
+            // What is left is the surface's own colour: the share that went
+            // below carried the medium's.
+            s.subsurface = 0.0;
         }
 
         // Aim at a glowing triangle, or at a lamp: one of the two, its share

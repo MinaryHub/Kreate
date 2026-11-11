@@ -862,6 +862,52 @@ impl Operator for Set {
     fn label() -> &'static str {
         "Edit Feature"
     }
+    /// What the feature is now, so a line that names one thing changes that
+    /// thing: `feature.set(body=…, index=1, amount=0.02)` made a cut a join
+    /// and a symmetric extrude one-sided, from the defaults of what it did
+    /// not say.
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        use crate::property::PropertyValue;
+        let name = match given.get("body") {
+            Some(PropertyValue::Text(s)) => s.clone(),
+            _ => return None,
+        };
+        let index = match given.get("index") {
+            Some(PropertyValue::Int(i)) => u32::try_from(*i).ok()?,
+            _ => 0,
+        };
+        let body = body_named(doc, &name).filter(|_| !name.trim().is_empty())?;
+        let f = doc.object(body)?.features.get(index as usize)?;
+        let (amount, symmetric) = match &f.shape {
+            Shape::Extrude {
+                distance,
+                symmetric,
+            } => (*distance, *symmetric),
+            Shape::Revolve { angle, .. } => (*angle, false),
+            Shape::Round { radius, .. } => (*radius, false),
+            Shape::Shell { thickness, .. } => (*thickness, false),
+            Shape::Pattern { count, .. } | Shape::Circular { count, .. } => {
+                (f64::from(*count), false)
+            }
+            Shape::Sweep {
+                scale_end, caps, ..
+            } => (*scale_end, *caps),
+            Shape::SheetMetal { height, flat, .. } => (*height, *flat),
+            Shape::Mirror { .. } | Shape::Loft { .. } => (0.0, false),
+        };
+        Some(SetParams {
+            body: name,
+            index,
+            amount,
+            symmetric,
+            operation: u32::from(f.operation == Operation::Cut),
+            seeds: Vec::new(),
+        })
+    }
     fn execute(
         params: &Self::Params,
         doc: &mut DocMut<'_>,

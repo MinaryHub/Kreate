@@ -713,10 +713,10 @@ impl Geometry {
                 *s = None;
             }
         }
-        g.lines
-            .retain(|l| !moving.contains(&l[0]) && !moving.contains(&l[1]));
-        g.rounds
-            .retain(|(c, ring, _)| !moving.contains(c) && !ring.iter().any(|v| moving.contains(v)));
+        // The lines and rounds stay, numbered as they were: with no place
+        // on screen for their points they are passed over anyway, and taken
+        // out, every line after them answered to the number of another —
+        // a dragged end snapped onto the wrong curve.
         g
     }
 
@@ -2747,8 +2747,13 @@ mod tests {
         let g = geometry().without(&[1, 2]);
         // Point 1 is under the pointer but moving: not caught.
         assert_eq!(g.point_near(DVec2::new(101.0, 1.0), 10.0), None);
-        // The lines on the moving points went; the others stay.
-        assert!(g.lines.iter().all(|l| !l.contains(&1) && !l.contains(&2)));
+        // The lines on the moving points are not caught either, wherever
+        // the pointer is — and every line keeps its number, which is what
+        // names the curve it belongs to.
+        assert_eq!(g.lines, geometry().lines);
+        let caught = g.line_near(DVec2::new(101.0, 1.0), 1e9).expect("a line");
+        let ends = g.lines[caught as usize];
+        assert!(!ends.contains(&1) && !ends.contains(&2), "{ends:?}");
         assert!(g.lines.contains(&[3, 0]));
         assert_eq!(g.point_near(DVec2::new(1.0, 1.0), 10.0), Some(0));
     }

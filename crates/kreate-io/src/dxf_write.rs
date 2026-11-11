@@ -425,7 +425,8 @@ impl Writer {
         self.start("TEXT", layer, e);
         self.point(10, shape.at);
         self.length(40, height);
-        self.pair(1, &escape(&text));
+        // Its codes are DXF's already; only what is not ASCII is left to do.
+        self.pair(1, &coded(&text));
         if shape.angle != 0.0 {
             self.pair(50, &num(shape.angle.to_degrees()));
         }
@@ -434,9 +435,31 @@ impl Writer {
     }
 }
 
-/// `%` is DXF's escape: `%%` writes one.
+/// Text as an R12 file carries it. `%` is DXF's escape, so one of the
+/// user's is written `%%%`; the rest as [`coded`].
 fn escape(s: &str) -> String {
-    s.replace('%', "%%")
+    coded(&s.replace('%', "%%%"))
+}
+
+/// Text that may already hold DXF's own codes, in ASCII: R12 has no UTF-8,
+/// and a reader takes other bytes for its code page's. Degrees, diameter
+/// and plus-minus as `%%d`, `%%c`, `%%p`, anything else as `\U+XXXX`,
+/// which is what `dxf_read` reads back.
+fn coded(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            c if c.is_ascii() => out.push(c),
+            '°' => out.push_str("%%d"),
+            'Ø' | '⌀' => out.push_str("%%c"),
+            '±' => out.push_str("%%p"),
+            c if (c as u32) <= 0xFFFF => {
+                let _ = write!(out, "\\U+{:04X}", c as u32);
+            }
+            _ => out.push('?'),
+        }
+    }
+    out
 }
 
 /// What a dimension says: its own text, or its value in the file's unit
@@ -449,7 +472,8 @@ pub(crate) fn dimension_text(d: &Dimension, metres_per_unit: f64) -> String {
         s.trim_end_matches('0').trim_end_matches('.').to_string()
     };
     let mut text = match &d.text {
-        Some(t) if !t.trim().is_empty() => t.clone(),
+        // The user's own words: a percent of theirs is not a code.
+        Some(t) if !t.trim().is_empty() => t.replace('%', "%%%"),
         _ => match d.kind {
             DimKind::Angular => {
                 let s = format!("{:.2}", d.value.to_degrees());
@@ -703,7 +727,7 @@ mod tests {
         let d = drawing();
         let text = write(&d, 1e-3);
         assert!(text.contains("AC1009") && text.contains("$INSUNITS\n70\n4\n"));
-        assert!(text.contains("50%% PLATE"), "the per cent sign escaped");
+        assert!(text.contains("50%%% PLATE"), "the per cent sign escaped");
         let doc = crate::dxf_read::parse_dxf(&text, "back").expect("reads");
         let back = doc
             .objects()
@@ -759,6 +783,40 @@ mod tests {
         // The dimension's number, in millimetres.
         assert!(back.entities.iter().any(|e| matches!(&e.kind,
             EntityKind::Text(t) if t.content == "40")));
+        // And the note as it was written, its per cent sign one sign.
+        assert!(back.entities.iter().any(|e| matches!(&e.kind,
+            EntityKind::Text(t) if t.content == "50% PLATE")));
+    }
+
+    /// Text goes out in ASCII, which is all an R12 file holds, and comes
+    /// back the same: a degree, a diameter, Hangul. A dimension's own
+    /// codes are written once, not escaped again.
+    #[test]
+    fn text_that_is_not_ascii_goes_out_coded_and_comes_back() {
+        assert_eq!(escape("UP 90° R2"), "UP 90%%d R2");
+        assert_eq!(
+            escape("브래킷 Ø5 ±0.1 50%"),
+            "\\U+BE0C\\U+B798\\U+D0B7 %%c5 %%p0.1 50%%%"
+        );
+        assert_eq!(coded("%%c12"), "%%c12");
+        let mut d = Drawing::new();
+        d.add(EntityKind::Text(Text {
+            at: DVec2::ZERO,
+            height: 0.003,
+            rotation: 0.0,
+            content: "브래킷 90° 50%".into(),
+            align: TextAlign::Left,
+            font: String::new(),
+        }));
+        let text = write(&d, 1e-3);
+        assert!(text.is_ascii(), "an R12 file is ASCII");
+        let doc = crate::dxf_read::parse_dxf(&text, "back").expect("reads");
+        let back = doc
+            .objects()
+            .find_map(|(_, o)| o.drawing.as_deref())
+            .expect("a drawing");
+        assert!(back.entities.iter().any(|e| matches!(&e.kind,
+            EntityKind::Text(t) if t.content == "브래킷 90° 50%")));
     }
 
     #[test]

@@ -57,6 +57,10 @@ struct Splits {
     verts: Vec<VertId>,
 }
 
+/// The most loops one cut makes: a count from a script is not a reason to
+/// fill memory.
+const MAX_CUTS: u32 = 1000;
+
 /// Cuts `cuts` loops across the ring through `seed`.
 ///
 /// `position` is where the cut sits between the ring edges' endpoints, from
@@ -69,7 +73,7 @@ pub fn loop_cut(
     position: f32,
 ) -> Result<LoopCut, BmError> {
     let mut out = LoopCut::default();
-    let cuts = cuts.max(1) as usize;
+    let cuts = cuts.clamp(1, MAX_CUTS) as usize;
     if mesh.edge(seed).is_none() {
         return Ok(out);
     }
@@ -205,7 +209,10 @@ pub fn loop_cut(
         (Some(from), Some([first, _])) if from != first => 1.0 - position,
         _ => position,
     };
-    let shift = position - 0.5;
+    // Slid together, and no further than the outermost reaches the end:
+    // each held off the end on its own, several landed on one spot.
+    let room = 1.0 / (cuts + 1) as f32 - 0.001;
+    let shift = (position - 0.5).clamp(-room, room);
     let ts: Vec<f32> = (0..cuts)
         // Kept off the ends by a hair, not more: a cut typed at a distance
         // from an end lands there, however short the distance is beside the

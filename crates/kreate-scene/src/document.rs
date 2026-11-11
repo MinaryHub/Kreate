@@ -1704,7 +1704,15 @@ impl Document {
                         j.bone = new.to_string();
                     }
                 }
-                o.action
+                // Its action, and those its strips play: a walk pushed down
+                // to a strip named the bone as much as the action in hand.
+                let mut actions: Vec<ActionId> = o.action.into_iter().collect();
+                for strip in &o.nla {
+                    if !actions.contains(&strip.action) {
+                        actions.push(strip.action);
+                    }
+                }
+                actions
             };
             // Objects hanging from the bone keep hanging from it.
             let hanging: Vec<ObjectId> = self
@@ -1719,7 +1727,10 @@ impl Document {
                     child.parent_bone = Some(new.to_string());
                 }
             }
-            if let Some(action) = action.and_then(|a| self.action_mut(a)) {
+            for action in action {
+                let Some(action) = self.action_mut(action) else {
+                    continue;
+                };
                 for curve in &mut action.curves {
                     if let Some(rest) = curve.path.property.strip_prefix(old_prefix.as_str()) {
                         curve.path.property = format!("{new_prefix}{rest}").into();

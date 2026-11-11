@@ -337,8 +337,16 @@ pub struct Operand {
 
 impl PartialEq for Operand {
     fn eq(&self, other: &Self) -> bool {
+        // A drawing's lines are made into a mesh each time they are asked
+        // for, so by address they were never the same and the stack ran
+        // again every frame: those, having no faces, are compared by what
+        // they hold.
+        let same_mesh = Arc::ptr_eq(&self.mesh, &other.mesh)
+            || (self.mesh.num_faces() == 0
+                && other.mesh.num_faces() == 0
+                && self.mesh.positions() == other.mesh.positions());
         self.uid == other.uid
-            && Arc::ptr_eq(&self.mesh, &other.mesh)
+            && same_mesh
             && self.to_local == other.to_local
             && self.lines == other.lines
     }
@@ -596,9 +604,9 @@ struct SimEntry {
     /// hair at rest, which is the same at every frame.
     frame: Option<i64>,
     physics: crate::physics::ObjectPhysics,
-    /// The instance objects' meshes, by address: a changed one is new
-    /// particles.
-    instances: Vec<usize>,
+    /// The instance objects' meshes, by address, and how each is turned
+    /// and sized: a changed one is new particles.
+    instances: Vec<Option<(usize, kreate_math::DTransform)>>,
     /// Where each instance's slots were numbered from: a material slot
     /// added to the emitter or an instance moves them.
     bases: Vec<Option<usize>>,
@@ -782,9 +790,9 @@ impl ModifierCache {
         };
         let instances: Vec<Option<(Arc<MeshData>, kreate_math::DTransform)>> =
             physics.particles.iter().map(instance_of).collect();
-        let instance_keys: Vec<usize> = instances
+        let instance_keys: Vec<Option<(usize, kreate_math::DTransform)>> = instances
             .iter()
-            .map(|i| i.as_ref().map_or(0, |(m, _)| Arc::as_ptr(m) as usize))
+            .map(|i| i.as_ref().map(|(m, t)| (Arc::as_ptr(m) as usize, *t)))
             .collect();
         let cache_key = Arc::as_ptr(cache) as usize;
         let bases = doc.particle_slot_bases(id);

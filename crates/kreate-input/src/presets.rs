@@ -200,6 +200,14 @@ fn common() -> Vec<Binding> {
             .with_modifiers(Modifiers::ctrl()),
         key("edit.redo", "Y", Context::Global, Action::new("edit.redo"))
             .with_modifiers(Modifiers::ctrl()),
+        // And the other redo: half the programs a person comes from use it.
+        key(
+            "edit.redo_shift_z",
+            "Z",
+            Context::Global,
+            Action::new("edit.redo"),
+        )
+        .with_modifiers(Modifiers::ctrl_shift()),
         // The clock, on Blender's keys and everywhere — an animator plays from
         // whichever editor the pointer is over. Space plays and stops; the
         // arrows step a frame, or with Shift jump to either end of the range.

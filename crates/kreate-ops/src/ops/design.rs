@@ -225,8 +225,24 @@ impl Operator for Bind {
             }
             _ => {
                 let order = u64::from(params.index);
-                if !o.features.iter().any(|f| f.order == order) {
+                let Some(f) = o.features.iter().find(|f| f.order == order) else {
                     return Err(OpError::Failed("no such feature".into()));
+                };
+                // Those a parameter is applied to (`apply_parameters`): any
+                // other took the binding, showed it, and never followed it.
+                use kreate_scene::feature::Shape;
+                if !matches!(
+                    f.shape,
+                    Shape::Extrude { .. }
+                        | Shape::Revolve { .. }
+                        | Shape::Round { .. }
+                        | Shape::Shell { .. }
+                ) {
+                    return Err(OpError::Failed(
+                        "a parameter can drive an extrude's distance, a revolve's angle, \
+                         a fillet's radius or a shell's thickness; not this feature"
+                            .into(),
+                    ));
                 }
                 kreate_scene::design::Bound::FeatureAmount { body: uid, order }
             }

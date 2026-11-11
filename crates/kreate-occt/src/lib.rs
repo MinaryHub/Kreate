@@ -266,13 +266,13 @@ mod imp {
                 }
                 let k = &*m;
                 let positions = std::slice::from_raw_parts(k.positions, k.verts * 3)
-                    .chunks_exact(3)
-                    .map(|c| [c[0], c[1], c[2]])
-                    .collect();
+                    .as_chunks::<3>()
+                    .0
+                    .to_vec();
                 let triangles = std::slice::from_raw_parts(k.indices, k.tris * 3)
-                    .chunks_exact(3)
-                    .map(|c| [c[0], c[1], c[2]])
-                    .collect();
+                    .as_chunks::<3>()
+                    .0
+                    .to_vec();
                 let faces = std::slice::from_raw_parts(k.faces, k.tris).to_vec();
                 kocc_mesh_free(m);
                 Some(Mesh {

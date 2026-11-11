@@ -31,7 +31,7 @@
 //! queued when it wakes. A request that is never answered times out rather
 //! than holding a connection forever.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -159,14 +159,26 @@ pub fn start(info: &Path, wake: impl Fn() + Send + Sync + 'static) -> std::io::R
     })
 }
 
+/// The longest request line: a script of any size a person would send, and
+/// far from what would hurt.
+const MAX_LINE: u64 = 16 * 1024 * 1024;
+
 /// One connection, request after request until it closes.
 fn serve(stream: TcpStream, token: &str, tx: &Sender<Request>, wake: &(dyn Fn() + Send + Sync)) {
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let Ok(line) = line else { return };
+    let mut reader = BufReader::new(stream);
+    loop {
+        // No more than a request can be: read whole before the token is
+        // looked at, a line with no end was memory for anything on this
+        // computer to take, a web page posting to the port among them.
+        let mut line = String::new();
+        match (&mut reader).take(MAX_LINE + 1).read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(n) if n as u64 > MAX_LINE => return,
+            Ok(_) => {}
+        }
         if line.trim().is_empty() {
             continue;
         }

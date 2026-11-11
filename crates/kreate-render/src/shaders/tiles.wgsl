@@ -25,6 +25,10 @@ struct Light {
     cone: vec2<f32>,
     falloff: u32,
     flags: u32,
+    // Not read here, and here all the same: the buffer's stride is the
+    // whole light's, and without it every light after the first was read
+    // from the middle of another (see `lights.wgsl`).
+    profile: array<vec4<f32>, 8>,
 }
 
 struct TileParams {

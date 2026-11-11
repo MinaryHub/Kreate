@@ -1108,6 +1108,8 @@ struct App {
     solid_auto: Option<((u64, Vec<[u64; 2]>, u64, bool), (u32, String))>,
     /// A sketch drag's step, live while the button is down.
     sketch_drag_session: Option<kreate_ops::ModalSession>,
+    /// Requests and arrivals held back by a gesture: see `serve_arrivals`.
+    arrivals_waiting: bool,
     /// A point or handle of the active curve being dragged in the viewport.
     curve_drag: Option<CurveDrag>,
     /// The object Auto dynamic topology last said it would not cut.
@@ -1259,6 +1261,7 @@ impl App {
             driven_at: u64::MAX,
             sketch_snap_cache: None,
             sketch_drag_session: None,
+            arrivals_waiting: false,
             curve_drag: None,
             solid_auto: None,
             dyntopo_told: None,
@@ -1370,7 +1373,13 @@ impl App {
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
             Ok(other) => tracing::debug!(?other, op_id, "operator did not finish"),
-            Err(e) => println!("  {op_id}: {e}"),
+            Err(e) => {
+                println!("  {op_id}: {e}");
+                // In the status bar too: said only to a console nobody has
+                // open, a menu item that failed looked like a dead button.
+                let label = self.registry.get(op_id).map_or(op_id, |info| info.label);
+                self.status(&format!("{label}: {e}"));
+            }
         }
     }
 
@@ -5407,6 +5416,7 @@ impl App {
     /// after.
     fn drive_sketch_drag(&mut self, to: glam::DVec2) {
         let Some(drag) = self.sketching.drag.clone() else {
+            self.settle_sketch_drag();
             return;
         };
         let offset = to - drag.anchor;
@@ -5460,6 +5470,53 @@ impl App {
             },
         }
         self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// What changes the document from outside the window — the connector's
+    /// requests, assets and imports that have arrived — but not while a
+    /// gesture is live. A gesture holds the document as it was when it
+    /// began and puts that back on every move: an edit made under it was
+    /// undone by the next move, its step left in the history and the
+    /// assistant told it had worked. They wait for the gesture to end.
+    fn serve_arrivals(&mut self) {
+        let busy = self.gesture.is_some()
+            || self.uv_gesture.is_some()
+            || self.sketch_drag_session.is_some()
+            || self.curve_drag.is_some()
+            || self.paint_stroke.is_some()
+            || self.sculpt_stroke.is_some();
+        self.arrivals_waiting = busy;
+        if busy {
+            return;
+        }
+        self.serve_bridge();
+        self.serve_assets();
+        self.serve_imports();
+    }
+
+    /// Lets go of what is selected in a sketch, before the drawing changes
+    /// under it: the selection is kept by the lines' numbers, and an undo
+    /// renumbers them — Delete then took the curve next to the one picked.
+    fn forget_sketch_picks(&mut self) {
+        if self.op_ctx.mode == OpMode::Sketch {
+            self.settle_sketch_drag();
+            self.sketching.points.clear();
+            self.sketching.lines.clear();
+            self.sketching.picks.clear();
+        }
+    }
+
+    /// Ends a drag's step whose drag is gone — the tool changed, or Delete
+    /// pressed, with the button still down. What it moved stays, as the one
+    /// step it was. Left open, the next drag carried on from it: the drawing
+    /// went back to how it was before the old drag, and took everything
+    /// drawn since with it.
+    fn settle_sketch_drag(&mut self) {
+        if self.sketching.drag.is_none() {
+            if let Some(session) = self.sketch_drag_session.take() {
+                self.history.commit_modal(session);
+            }
+        }
     }
 
     /// Puts a drag back where it began: Esc or the right button.
@@ -6103,6 +6160,7 @@ impl App {
                                     entities.push(e.0);
                                 }
                             }
+                            self.settle_sketch_drag();
                             self.sketching.drag = Some(kreate::sketching::SketchDrag {
                                 points,
                                 anchor,
@@ -6837,6 +6895,11 @@ impl App {
             KeyCode::Backspace if drawing => {
                 if self.sketching.typed.pop().is_none() {
                     self.sketching.clicks.pop();
+                    // With the last click goes the end a tangent arc ran on
+                    // from: left, the next click still used it.
+                    if self.sketching.clicks.is_empty() {
+                        self.sketching.tangent = None;
+                    }
                     let segments = self.sketching.clicks.len().saturating_sub(1) as u32;
                     self.sketching.typed_segments.retain(|s| *s < segments);
                 }
@@ -8355,7 +8418,23 @@ impl App {
                 }
                 Command::ClearWorldImage => self.clear_world_image(),
                 Command::RecoverDocument { path } => {
+                    // Asked first, as every other way of opening is: this
+                    // replaces what is open.
+                    if !self.confirm_discarding_changes("unsaved-what-open") {
+                        continue;
+                    }
                     self.load_from(&path);
+                    // Only what was recovered is forgotten: an autosave that
+                    // could not be read was deleted all the same, and the
+                    // open document lost its file.
+                    if self
+                        .ui
+                        .status
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with("cannot"))
+                    {
+                        continue;
+                    }
                     // The recovered document deliberately keeps *no* path: it
                     // came from an autosave, and inheriting that path would make
                     // the next Ctrl+S write back into the autosave directory
@@ -9468,6 +9547,14 @@ impl App {
     /// the old caches shows the previous file's geometry — which reads as the
     /// open having silently failed.
     fn adopt(&mut self, document: Document) {
+        // What was under way was under way on the document that is going:
+        // a drag left live put the old document back on its next move.
+        self.cancel_gesture();
+        self.cancel_uv_gesture();
+        self.cancel_sketch_drag();
+        self.cancel_curve_drag();
+        self.sketch_drag_session = None;
+        self.sketching = Default::default();
         self.doc = document;
         // Local view named objects of the scene that went; in the new one the
         // same numbers are other objects, or none.
@@ -9586,6 +9673,7 @@ impl App {
     }
 
     fn undo(&mut self) {
+        self.forget_sketch_picks();
         if self.history.undo(&mut self.doc) {
             self.collab_after_undo();
             println!("  undo");
@@ -9596,6 +9684,7 @@ impl App {
     }
 
     fn redo(&mut self) {
+        self.forget_sketch_picks();
         match self
             .history
             .redo(&self.registry, &mut self.doc, &self.op_ctx)
@@ -10476,6 +10565,11 @@ impl App {
     /// arrive between frames.
     fn press_belongs_to_viewport(&self) -> bool {
         if !self.cursor_in_viewport() {
+            return false;
+        }
+        // A pie or the search is open over the view, and the click is its:
+        // picking a pie's entry also picked whatever lay under it.
+        if self.ui.overlay_open() {
             return false;
         }
         let Some((x, y)) = self.input.cursor else {
@@ -14213,7 +14307,12 @@ impl App {
                 _ => {}
             }
         }
-        if self.measure.is_some() {
+        // What is typed into a field — the chat, a panel's number, the
+        // search — is the field's: the tools below take digits, Enter,
+        // Backspace and Escape, and took them from there too. "make it 40
+        // wide" in the chat drew a line 40 long.
+        let typing = self.ui.egui_wants_keyboard || self.ui.ime_active || self.ui.overlay_open();
+        if self.measure.is_some() && !typing {
             match code {
                 KeyCode::Escape => {
                     self.end_measure("Measure cancelled");
@@ -14230,7 +14329,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.knife.is_some() {
+        if self.knife.is_some() && !typing {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
                     self.commit_knife();
@@ -14250,7 +14349,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.op_ctx.mode == OpMode::Sketch && self.sketch_key(code) {
+        if self.op_ctx.mode == OpMode::Sketch && !typing && self.sketch_key(code) {
             return;
         }
         if self.loop_cut_hover.is_some() && code == KeyCode::Escape {
@@ -15172,6 +15271,12 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::Digit3 => "Digit3",
         KeyCode::Digit4 => "Digit4",
         KeyCode::Digit5 => "Digit5",
+        KeyCode::Digit6 => "Digit6",
+        KeyCode::Digit7 => "Digit7",
+        KeyCode::Digit8 => "Digit8",
+        KeyCode::Digit9 => "Digit9",
+        KeyCode::Digit0 => "Digit0",
+        KeyCode::NumpadMultiply => "NumpadMultiply",
         KeyCode::Tab => "Tab",
         KeyCode::Delete => "Delete",
         KeyCode::Backspace => "Backspace",
@@ -15392,11 +15497,9 @@ impl ApplicationHandler for App {
 
     /// A connector request is waiting. See `kreate::bridge`.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        self.serve_bridge();
         self.serve_chat();
         self.serve_outbox();
-        self.serve_assets();
-        self.serve_imports();
+        self.serve_arrivals();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -16094,6 +16197,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.arrivals_waiting {
+            self.serve_arrivals();
+        }
         self.collab_tick();
         self.poll_bake();
         self.publish_imports();

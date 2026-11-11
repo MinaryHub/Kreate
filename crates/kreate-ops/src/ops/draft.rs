@@ -1035,13 +1035,26 @@ impl Operator for DraftDimension {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+#[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct DraftDimensionSetParams {
     /// The dimension's id.
     pub id: u32,
     pub value: f64,
     /// Whether it holds the geometry (driving) or only measures (driven).
     pub driving: bool,
+}
+
+impl Default for DraftDimensionSetParams {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            value: 0.0,
+            // As `draft.dimension` makes them: a script that sets a value
+            // and says no more means the geometry to follow. Left false,
+            // the dimension turned driven and read its old size back.
+            driving: true,
+        }
+    }
 }
 
 /// A dimension's new value, and the geometry following it.
@@ -1735,6 +1748,35 @@ impl Operator for DraftFillet {
             let arc = d.add_curve(f.arc);
             d.constraints.push(Constraint::Tangent(ia, arc));
             d.constraints.push(Constraint::Tangent(ib, arc));
+            // And each trimmed end on the arc's end it meets: tangency is
+            // to a line's whole length, and without this a radius changed
+            // afterwards left the lines ending where the old arc had been.
+            for curve in [ia, ib] {
+                edit_tools::drop_length_dimensions(d, curve);
+                let mut nearest: Option<(f64, Part, Part)> = None;
+                for end in [Part::Start, Part::End] {
+                    for arc_end in [Part::Start, Part::End] {
+                        let (Some(p), Some(q)) = (
+                            d.point_of(EntityRef::at(curve, end)),
+                            d.point_of(EntityRef::at(arc, arc_end)),
+                        ) else {
+                            continue;
+                        };
+                        let gap = p.distance(q);
+                        if nearest.is_none_or(|n| gap < n.0) {
+                            nearest = Some((gap, end, arc_end));
+                        }
+                    }
+                }
+                if let Some((gap, end, arc_end)) = nearest {
+                    if gap <= 1e-6 {
+                        d.constraints.push(Constraint::Coincident(
+                            EntityRef::at(curve, end),
+                            EntityRef::at(arc, arc_end),
+                        ));
+                    }
+                }
+            }
             // The radius stays a driving dimension, so the round can be
             // made larger or smaller afterwards as any other size is.
             d.add(EntityKind::Dimension(Dimension {
@@ -1994,6 +2036,15 @@ fn copy_moved(d: &mut Drawing, ids: &[EntityId], moves: &[glam::DAffine2]) -> Ve
                 EntityKind::Curve(c) => EntityKind::Curve(c.transformed(m)),
                 EntityKind::Text(mut t) => {
                     t.at = m.transform_point2(t.at);
+                    let (x, y) = (m.matrix2.x_axis, m.matrix2.y_axis);
+                    t.height *= x.perp_dot(y).abs().sqrt();
+                    // Mirrored, it reads the same way round, turned back.
+                    t.rotation = if x.perp_dot(y) < 0.0 {
+                        let along = m.matrix2 * DVec2::from_angle(t.rotation);
+                        along.to_angle() + std::f64::consts::PI
+                    } else {
+                        t.rotation + x.to_angle()
+                    };
                     EntityKind::Text(t)
                 }
                 EntityKind::Dimension(_) => continue,
