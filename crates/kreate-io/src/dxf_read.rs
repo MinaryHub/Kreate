@@ -347,7 +347,6 @@ impl Out<'_, '_> {
                 id
             }
         };
-        self.budget = self.budget.saturating_sub(1);
         self.drawing.add(kind);
         // The one just added, which is the last: looked up by its id it was
         // a walk of the whole drawing for every entity read.
@@ -372,9 +371,13 @@ impl Out<'_, '_> {
     fn entity(&mut self, r: &Record, outer: &Place, depth: usize) {
         // An entity facing down is drawn mirrored in X, which is what its
         // own coordinates mean seen from above.
+        // Every entity looked at is paid for, drawn or not: an array of an
+        // empty block, or of blocks of blocks, is work without one entity
+        // added.
         if self.budget == 0 {
             return;
         }
+        self.budget -= 1;
         let mirror = Place::new(DVec2::new(-1.0, 1.0), 0.0, DVec2::ZERO);
         let flip_place;
         let place = if r.flipped() {
@@ -635,6 +638,7 @@ impl Out<'_, '_> {
                         if self.budget == 0 {
                             return;
                         }
+                        self.budget -= 1;
                         let inner = Place::new(scale, rotation, xy(10, 20) + step);
                         let to_base = Place::new(DVec2::ONE, 0.0, -*base);
                         let place = to_base.within(&inner).within(place);
@@ -968,5 +972,18 @@ mod tests {
         assert!((p - want).length() < 1e-12, "{p:?} against {want:?}");
         assert!((want - DVec2::new(0.0, 1.0)).length() < 1e-12);
         assert!(both.mirrors() && both.uniform());
+    }
+    /// Arrays of arrays of a block with nothing in it: no entity is ever
+    /// added, and the work is bounded all the same.
+    #[test]
+    fn arrays_of_an_empty_block_end() {
+        let dxf = "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nA\n10\n0\n20\n0\n0\nENDBLK\n\
+                   0\nBLOCK\n2\nB\n10\n0\n20\n0\n\
+                   0\nINSERT\n2\nA\n10\n0\n20\n0\n70\n1000\n71\n1000\n0\nENDBLK\n0\nENDSEC\n\
+                   0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nB\n10\n0\n20\n0\n\
+                   70\n1000\n71\n1000\n0\nENDSEC\n0\nEOF\n";
+        let started = std::time::Instant::now();
+        assert!(parse_dxf(dxf, "empty").is_err(), "nothing was drawn");
+        assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
     }
 }
