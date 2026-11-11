@@ -19,7 +19,7 @@
 //! Americas, Japan).
 
 use kreate_geom2d::{Curve2D, DVec2};
-use kreate_math::DAffine3;
+use kreate_math::{DAffine3, DVec3};
 use kreate_mesh::MeshData;
 use kreate_scene::drawing::{ColorRef, Drawing, EntityKind, LayerId, Lineweight, Text, TextAlign};
 
@@ -223,6 +223,148 @@ const SMALL: f64 = 2.5;
 /// A view to place: which, its lines, their bounds, and its cell.
 type Placed<'a> = (View, &'a [Line2], DVec2, DVec2, (usize, usize));
 
+/// The most round things one view is given marks and sizes for, and the
+/// most places across or up it is given dimensions to: a sheet is to be
+/// read, and a plate of two hundred holes dimensioned each way is not.
+const MAX_ROUNDS: usize = 40;
+const MAX_PLACES: usize = 3;
+
+/// A round edge of a part, in the world: the rim of a hole, of a boss or of
+/// a shaft's end.
+struct Round {
+    centre: DVec3,
+    /// Square to its plane, of length one.
+    axis: DVec3,
+    radius: f64,
+}
+
+/// The round edges of the parts: closed runs of sharp or open edges, eight
+/// or more, lying in a plane at one distance from their middle. From the
+/// meshes, which is what a sheet is made from — so a hole is found whether
+/// a feature, a boolean or an import made it.
+fn round_edges(parts: &[(&MeshData, DAffine3)]) -> Vec<Round> {
+    use std::collections::BTreeMap;
+    let mut out: Vec<Round> = Vec::new();
+    for (mesh, place) in parts {
+        // Points that are one point, one number: a mesh built from pieces
+        // repeats them.
+        let mut ids: BTreeMap<[i64; 3], u32> = BTreeMap::new();
+        let mut points: Vec<DVec3> = Vec::new();
+        let welded: Vec<u32> = mesh
+            .positions()
+            .iter()
+            .map(|p| {
+                let w = place.transform_point3(p.as_dvec3());
+                let key = [w.x, w.y, w.z].map(|c| (c * 1e6).round() as i64);
+                *ids.entry(key).or_insert_with(|| {
+                    points.push(w);
+                    points.len() as u32 - 1
+                })
+            })
+            .collect();
+        // Each edge with the faces on it, by their normals.
+        let mut edges: BTreeMap<(u32, u32), Vec<DVec3>> = BTreeMap::new();
+        for f in 0..mesh.num_faces() {
+            let ring: Vec<u32> = mesh
+                .face_verts(f)
+                .iter()
+                .map(|v| welded[*v as usize])
+                .collect();
+            let mut normal = DVec3::ZERO;
+            for i in 0..ring.len() {
+                let (a, b) = (
+                    points[ring[i] as usize],
+                    points[ring[(i + 1) % ring.len()] as usize],
+                );
+                normal += a.cross(b);
+            }
+            let normal = normal.normalize_or_zero();
+            for i in 0..ring.len() {
+                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                if a != b {
+                    edges.entry((a.min(b), a.max(b))).or_default().push(normal);
+                }
+            }
+        }
+        // Sharp, or open: a rim's edges are; a cylinder's own facets, of
+        // eight sides or more, are not.
+        let mut next: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for ((a, b), normals) in &edges {
+            let sharp = match normals.as_slice() {
+                [_] => true,
+                [n, m] => n.dot(*m) < 0.5,
+                _ => false,
+            };
+            if sharp {
+                next.entry(*a).or_default().push(*b);
+                next.entry(*b).or_default().push(*a);
+            }
+        }
+        // Closed runs through points with just two such edges.
+        let mut used: std::collections::BTreeSet<u32> = Default::default();
+        for (&start, ways) in &next {
+            if ways.len() != 2 || used.contains(&start) {
+                continue;
+            }
+            let mut ring = vec![start];
+            let (mut before, mut at) = (start, ways[0]);
+            let closed = loop {
+                if at == start {
+                    break true;
+                }
+                let Some(w) = next.get(&at).filter(|w| w.len() == 2) else {
+                    break false;
+                };
+                if ring.len() > points.len() {
+                    break false;
+                }
+                ring.push(at);
+                let on = if w[0] == before { w[1] } else { w[0] };
+                before = at;
+                at = on;
+            };
+            used.extend(ring.iter().copied());
+            if !closed || ring.len() < 8 {
+                continue;
+            }
+            let centre =
+                ring.iter().map(|v| points[*v as usize]).sum::<DVec3>() / ring.len() as f64;
+            let radii: Vec<f64> = ring
+                .iter()
+                .map(|v| points[*v as usize].distance(centre))
+                .collect();
+            let radius = radii.iter().sum::<f64>() / radii.len() as f64;
+            let (least, most) = radii.iter().fold((f64::INFINITY, 0.0f64), |(lo, hi), r| {
+                (lo.min(*r), hi.max(*r))
+            });
+            if radius < 1e-6 || most - least > radius * 0.02 {
+                continue;
+            }
+            let mut axis = DVec3::ZERO;
+            for i in 0..ring.len() {
+                let (a, b) = (
+                    points[ring[i] as usize] - centre,
+                    points[ring[(i + 1) % ring.len()] as usize] - centre,
+                );
+                axis += a.cross(b);
+            }
+            let axis = axis.normalize_or_zero();
+            let flat = ring
+                .iter()
+                .all(|v| (points[*v as usize] - centre).dot(axis).abs() <= radius * 0.02);
+            if axis == DVec3::ZERO || !flat {
+                continue;
+            }
+            out.push(Round {
+                centre,
+                axis,
+                radius,
+            });
+        }
+    }
+    out
+}
+
 struct Layers {
     border: LayerId,
     visible: LayerId,
@@ -347,6 +489,7 @@ pub fn compose(parts: &[(&MeshData, DAffine3)], spec: &SheetSpec) -> Sheet {
     let left = x0 + ((area_w - grid_w) * 0.5).max(0.0);
     let top = y1 - ((area_h - grid_h) * 0.5).max(0.0);
     let mut boxes = Vec::new();
+    let rounds = round_edges(parts);
     let length = |metres: f64| {
         let v = metres / spec.metres_per_unit;
         let s = format!("{v:.2}");
@@ -408,6 +551,110 @@ pub fn compose(parts: &[(&MeshData, DAffine3)], spec: &SheetSpec) -> Sheet {
                 );
             }
             _ => {}
+        }
+        // What is round and seen end on in this view — a hole, a boss, a
+        // shaft: its centre marked, its diameter written once for all of
+        // that size, and where it is from the view's lower left corner.
+        let mut seen: Vec<(DVec2, f64)> = Vec::new();
+        for round in &rounds {
+            // End on: its axis is the way this view looks.
+            let along = DVec2::from(v.project(round.axis));
+            if along.length() > 0.02 {
+                continue;
+            }
+            let at = DVec2::from(v.project(round.centre));
+            if !seen
+                .iter()
+                .any(|(c, r)| c.distance(at) < 1e-5 && (r - round.radius).abs() < 1e-5)
+            {
+                seen.push((at, round.radius));
+            }
+        }
+        seen.truncate(MAX_ROUNDS);
+        let mut sizes: Vec<f64> = Vec::new();
+        for (at, radius) in &seen {
+            let centre = to_paper((*at).into());
+            let r = radius * 1e3 * scale;
+            let reach = r + 2.0;
+            pen.line(
+                layers.dim,
+                centre - DVec2::X * reach,
+                centre + DVec2::X * reach,
+            );
+            pen.line(
+                layers.dim,
+                centre - DVec2::Y * reach,
+                centre + DVec2::Y * reach,
+            );
+            if sizes.iter().any(|s| (s - radius).abs() < 1e-5) {
+                continue;
+            }
+            sizes.push(*radius);
+            let count = seen
+                .iter()
+                .filter(|(_, other)| (other - radius).abs() < 1e-5)
+                .count();
+            let diameter = format!("Ø{}", length(radius * 2.0));
+            let note = if count > 1 {
+                format!("{count}x {diameter}")
+            } else {
+                diameter
+            };
+            // A leader up and to the right from the rim, its note at the end.
+            let out = DVec2::new(
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            );
+            let (from, to) = (centre + out * r, centre + out * (r + 5.0));
+            pen.line(layers.dim, from, to);
+            pen.arrow(layers.dim, from, -out);
+            pen.text(
+                layers.dim,
+                to + DVec2::new(1.0, 0.0),
+                SMALL,
+                &note,
+                TextAlign::Left,
+            );
+        }
+        // Where they are: each distinct place across, and each up, from the
+        // corner — the nearest innermost. Not for what fills the view, a
+        // shaft seen end on, which is where the view is.
+        let fills = |at: DVec2, radius: f64| {
+            let mid = (lo + hi) * 0.5;
+            at.distance(mid) < 1e-5 && radius * 2.0 >= (hi.x - lo.x).min(hi.y - lo.y) * 0.98
+        };
+        let mut across: Vec<f64> = Vec::new();
+        let mut up: Vec<f64> = Vec::new();
+        for (at, radius) in seen.iter().filter(|(at, r)| !fills(*at, *r)) {
+            let _ = radius;
+            if !across.iter().any(|x| (x - at.x).abs() < 1e-5) {
+                across.push(at.x);
+            }
+            if !up.iter().any(|y| (y - at.y).abs() < 1e-5) {
+                up.push(at.y);
+            }
+        }
+        across.sort_by(f64::total_cmp);
+        up.sort_by(f64::total_cmp);
+        for (i, x) in across.iter().take(MAX_PLACES).enumerate() {
+            let to = to_paper([*x, hi.y]);
+            pen.dim_h(
+                layers.dim,
+                DVec2::new(bl.x, tr.y),
+                DVec2::new(to.x, tr.y),
+                4.0 + 4.5 * i as f64,
+                &length(x - lo.x),
+            );
+        }
+        for (i, y) in up.iter().take(MAX_PLACES).enumerate() {
+            let to = to_paper([hi.x, *y]);
+            pen.dim_v(
+                layers.dim,
+                DVec2::new(tr.x, bl.y),
+                DVec2::new(tr.x, to.y),
+                4.0 + 4.5 * i as f64,
+                &length(y - lo.y),
+            );
         }
     }
     if let Some((_, lines)) = &iso {
@@ -873,6 +1120,72 @@ mod tests {
         assert!(t.iter().any(|s| s == "브래킷"));
         assert!(t.iter().any(|s| s.starts_with(&scale_label(sheet.scale))));
         assert!(t.iter().any(|s| s == "AL6061"));
+    }
+
+    /// A plate with two posts standing on it: the top view marks each
+    /// post's centre, writes their diameter once for the two, and says
+    /// where they are from the corner; the front view, which sees them from
+    /// the side, writes no diameter.
+    #[test]
+    fn round_things_are_marked_sized_and_placed_where_they_are_seen_end_on() {
+        let plate = block(0.12, 0.06, 0.01);
+        let post = kreate_mesh::primitives::cylinder(0.005, 0.02, 32);
+        let stand = |x: f64, y: f64| DAffine3::from_translation(DVec3::new(x, y, 0.015));
+        let parts = [
+            (&plate.0, plate.1),
+            (&post, stand(-0.03, 0.0)),
+            (&post, stand(0.03, 0.01)),
+        ];
+        let rounds = round_edges(&parts);
+        // Each post's two rims; the plate, all corners, has none.
+        assert_eq!(rounds.len(), 4, "{}", rounds.len());
+        assert!(rounds
+            .iter()
+            .all(|r| (r.radius - 0.005).abs() < 1e-5 && r.axis.cross(DVec3::Z).length() < 1e-6));
+        let sheet = compose(&parts, &SheetSpec::default());
+        let t = texts(&sheet);
+        assert_eq!(
+            t.iter().filter(|s| s.contains('Ø')).collect::<Vec<_>>(),
+            ["2x Ø10"],
+            "{t:?}"
+        );
+        // From the plate's left edge at x = -60: 30 and 90 across; from its
+        // near edge at y = -30: 30 and 40 up.
+        for place in ["30", "90", "40"] {
+            assert!(t.iter().any(|s| s == place), "{place} not written: {t:?}");
+        }
+        let (lo, hi) = sheet.drawing.extents().expect("something drawn");
+        assert!(lo.x >= MARGIN_LEFT * MM - 1e-9 && lo.y >= MARGIN * MM - 1e-9);
+        assert!(hi.x <= (420.0 - MARGIN) * MM + 1e-9 && hi.y <= (297.0 - MARGIN) * MM + 1e-9);
+        // To look at: `KREATE_SHEET_OUT=sheet.pdf cargo test -p kreate-io round_things`.
+        if let Some(path) = std::env::var_os("KREATE_SHEET_OUT") {
+            let pdf = crate::pdf::write(&sheet.drawing, sheet.width_mm * MM, sheet.height_mm * MM);
+            std::fs::write(&path, pdf).expect("written");
+            // And its lines and words as plain text, for a script to draw.
+            let mut plain = String::new();
+            for e in &sheet.drawing.entities {
+                match &e.kind {
+                    EntityKind::Curve(Curve2D::Line { a, b }) => {
+                        plain += &format!(
+                            "L {} {} {} {}
+",
+                            a.x, a.y, b.x, b.y
+                        );
+                    }
+                    EntityKind::Text(t) => {
+                        plain += &format!(
+                            "T {} {} {} {} {}
+",
+                            t.at.x, t.at.y, t.height, t.rotation, t.content
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let mut txt = std::path::PathBuf::from(path);
+            txt.set_extension("txt");
+            std::fs::write(txt, plain).expect("written");
+        }
     }
 
     /// In third angle the top view is above the front and the right view

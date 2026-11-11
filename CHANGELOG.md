@@ -74,6 +74,9 @@ use; `scripts/release.sh` turns that section into the next release.
 - A feature can be suppressed and put back, and moved earlier or later
   among its body's, from its right-click menu in the timeline — with
   Delete there too. `feature.suppress` and `feature.move` for scripts.
+- Drawing sheets mark what is round and seen end on — holes, bosses,
+  shafts — with a centre mark, write its diameter once for all of one
+  size ("4x Ø5"), and say where each is from the view's corner.
 - An HDRI of your own as the environment (Render ▸ Environment ▸ Add
   HDRI…): it lights the part, is what its metal reflects and is what is
   behind it, in the preview and in renders, and stays in the list.
