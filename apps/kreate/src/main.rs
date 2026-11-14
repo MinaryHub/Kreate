@@ -816,6 +816,9 @@ struct App {
     assets: Option<kreate::assets::Library>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
+    /// Android took the window's surface away (another app, or the file
+    /// picker, came in front): nothing is drawn until it gives one back.
+    suspended: bool,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     fonts_warmed: bool,
@@ -1054,9 +1057,12 @@ struct App {
     sketch_face_pick: bool,
     /// Waiting for a click on a surface, or the floor, to put text there.
     text_place: bool,
-    /// Android: the finger that stands for the mouse's left button — the
-    /// first down, until it lifts. See `touch_as_mouse`.
-    touch_finger: Option<u64>,
+    /// Android: the fingers on the screen, as the mouse and the view's
+    /// navigation. See `kreate::touch`.
+    touches: kreate::touch::Touches,
+    /// Android: what asked for a file when the system's picker was opened
+    /// for it — asked again once the file has come. See `kreate::android`.
+    pending_pick: Option<Command>,
     /// The sketch the camera was last turned to face, so entering turns it
     /// once and leaves the user's own orbit alone after.
     sketch_faced: Option<kreate_scene::Uid>,
@@ -1214,6 +1220,7 @@ impl App {
             assets: None,
             window: None,
             gfx: None,
+            suspended: false,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             fonts_warmed: false,
@@ -1302,7 +1309,8 @@ impl App {
             chat_record: None,
             sketch_face_pick: false,
             text_place: false,
-            touch_finger: None,
+            touches: kreate::touch::Touches::new(),
+            pending_pick: None,
             sketch_faced: None,
             sketch_pinned: (0, Vec::new()),
             drawing_pinned: (u64::MAX, Vec::new()),
@@ -4802,6 +4810,96 @@ impl App {
         self.status(&message);
     }
 
+    /// A new surface on the window, as Android's resume needs: the one
+    /// made before was on a native window that is gone.
+    fn recreate_surface(&mut self) {
+        let (Some(window), Some(gfx)) = (self.window.clone(), self.gfx.as_mut()) else {
+            return;
+        };
+        let surface = match gfx.gpu.instance.create_surface(window.clone()) {
+            Ok(surface) => surface,
+            Err(e) => {
+                tracing::warn!(error = %e, "no surface on resume");
+                return;
+            }
+        };
+        let size = window.inner_size();
+        gfx.config.width = size.width.max(1);
+        gfx.config.height = size.height.max(1);
+        surface.configure(&gfx.gpu.device, &gfx.config);
+        gfx.surface = surface;
+        self.redraw.set(RedrawReason::UI);
+        window.request_redraw();
+    }
+
+    /// A finger, as the mouse events and the navigation it stands for.
+    fn touch(&mut self, event_loop: &ActiveEventLoop, id: WindowId, touch: &winit::event::Touch) {
+        use kreate::touch::{Out, Phase};
+        use winit::event::TouchPhase;
+        let phase = match touch.phase {
+            TouchPhase::Started => Phase::Down,
+            TouchPhase::Moved => Phase::Move,
+            TouchPhase::Ended | TouchPhase::Cancelled => Phase::Up,
+        };
+        let at = (touch.location.x, touch.location.y);
+        let device_id = touch.device_id;
+        let button = |state, button| WindowEvent::MouseInput {
+            device_id,
+            state,
+            button,
+        };
+        for out in self.touches.touch(touch.id, phase, at) {
+            match out {
+                Out::Pointer(x, y) => self.window_event(
+                    event_loop,
+                    id,
+                    WindowEvent::CursorMoved {
+                        device_id,
+                        position: winit::dpi::PhysicalPosition::new(x, y),
+                    },
+                ),
+                Out::Press => self.window_event(
+                    event_loop,
+                    id,
+                    button(ElementState::Pressed, MouseButton::Left),
+                ),
+                Out::Release => self.window_event(
+                    event_loop,
+                    id,
+                    button(ElementState::Released, MouseButton::Left),
+                ),
+                Out::RightClick => {
+                    self.window_event(
+                        event_loop,
+                        id,
+                        button(ElementState::Pressed, MouseButton::Right),
+                    );
+                    self.window_event(
+                        event_loop,
+                        id,
+                        button(ElementState::Released, MouseButton::Right),
+                    );
+                }
+                Out::Orbit(dx, dy) => {
+                    self.input.note_event();
+                    self.input.orbit_delta.0 += dx;
+                    self.input.orbit_delta.1 += dy;
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                }
+                Out::Pan(dx, dy) => {
+                    self.input.note_event();
+                    self.input.pan_delta.0 += dx;
+                    self.input.pan_delta.1 += dy;
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                }
+                Out::Zoom(z) => {
+                    self.apply_wheel(0.0, z * PINCH_NOTCHES);
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                }
+            }
+        }
+    }
+
     /// The 3D path's points made a curve object, when there are two.
     fn finish_path3d(&mut self) {
         let points = match self.measure.take() {
@@ -7943,7 +8041,16 @@ impl App {
 
     /// Applies the commands the panels queued this frame.
     fn drain_ui_commands(&mut self) {
+        // What opened Android's file picker, kept to be done again when the
+        // file comes (see `kreate::android`); checked once each is done.
+        let mut last: Option<Command> = None;
         for command in self.ui.queue.drain() {
+            if let Some(done) = last.take() {
+                if kreate::android::take_asked() {
+                    self.pending_pick = Some(done);
+                }
+            }
+            last = Some(command.clone());
             match command {
                 // A boolean from a menu or the ribbon is chosen in the
                 // viewport, as Fusion's Combine is; a script's runs as given.
@@ -8561,6 +8668,11 @@ impl App {
                     self.recoverable.retain(|r| r.path != path);
                     self.redraw.set(RedrawReason::UI);
                 }
+            }
+        }
+        if let Some(done) = last {
+            if kreate::android::take_asked() {
+                self.pending_pick = Some(done);
             }
         }
     }
@@ -13001,7 +13113,13 @@ impl App {
         // The single input gate. Scattered `if !typing` checks are how a rename
         // field ends up firing tool shortcuts again.
         self.ui.egui_wants_keyboard = self.egui_ctx.egui_wants_keyboard_input();
-        self.ui.ime_active = output.platform_output.ime.is_some();
+        let ime = output.platform_output.ime.is_some();
+        // Android's soft keyboard comes up for a text field and goes away
+        // after it.
+        if ime != self.ui.ime_active {
+            kreate::android::keyboard(ime);
+        }
+        self.ui.ime_active = ime;
 
         self.apply_keymap_edits();
         self.save_workspaces();
@@ -14601,6 +14719,18 @@ impl App {
     /// a camera move out of the undo stack while still letting it be rebound
     /// from the same table as an extrude.
     fn dispatch(&mut self, action: &Action) {
+        self.dispatch_action(action);
+        // An action that opened Android's file picker is done again when the
+        // file comes. See `kreate::android`.
+        if kreate::android::take_asked() {
+            self.pending_pick = Some(Command::Dispatch {
+                op_id: action.op_id.clone(),
+                params: action.params.clone(),
+            });
+        }
+    }
+
+    fn dispatch_action(&mut self, action: &Action) {
         match action.op_id.as_str() {
             // The three transforms start a gesture rather than running an
             // operator. The keymap still names the fixed-step operator ids, so a
@@ -15672,13 +15802,30 @@ impl ApplicationHandler for App {
 
     /// A connector request is waiting. See `kreate::bridge`.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        // A file Android's picker brought in: what asked for it, again.
+        if kreate::android::file_waiting() {
+            if let Some(command) = self.pending_pick.take() {
+                self.ui.queue.push(command);
+                self.redraw.set(RedrawReason::UI);
+            }
+        }
         self.serve_chat();
         self.serve_outbox();
         self.serve_arrivals();
     }
 
+    /// Android: the native window under the surface is gone.
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.suspended = true;
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
+            // Back from Android's suspension: a new native window, and a
+            // surface made on it; everything else was kept.
+            if std::mem::take(&mut self.suspended) {
+                self.recreate_surface();
+            }
             return;
         }
         // The icon in the title bar and the taskbar: a cube with a K on it,
@@ -15864,14 +16011,12 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Android sends a finger as touches alone, and the viewport and its
-        // tools listen to the mouse: the first finger down is the left
-        // button, pressed where it touches and dragged where it moves.
+        // Android sends fingers alone, and the viewport and its tools listen
+        // to the mouse: one finger is the left button, two turn and zoom the
+        // view, three move it. See `kreate::touch`.
         if cfg!(target_os = "android") {
             if let WindowEvent::Touch(touch) = &event {
-                for e in touch_as_mouse(&mut self.touch_finger, touch) {
-                    self.window_event(event_loop, _id, e);
-                }
+                self.touch(event_loop, _id, touch);
                 return;
             }
         }
@@ -16352,6 +16497,8 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // No surface to draw on while Android has the window away.
+            WindowEvent::RedrawRequested if self.suspended => {}
             WindowEvent::RedrawRequested => {
                 if std::mem::take(&mut self.stroke_moved) {
                     self.drive_strokes();
@@ -17109,6 +17256,15 @@ pub fn run(event_loop: EventLoop<()>, args: Vec<String>) {
 
     println!("{HELP}\n");
     let (doc, file) = load_document_and_file(path.as_deref());
+    // A file Android's picker brings in wakes the loop to take it.
+    if cfg!(target_os = "android") {
+        let proxy = std::sync::Mutex::new(event_loop.create_proxy());
+        kreate::android::set_waker(move |()| {
+            if let Ok(proxy) = proxy.lock() {
+                let _ = proxy.send_event(());
+            }
+        });
+    }
     let mut app = App::new(doc, &locale);
     app.file = file;
     // The connector's way in. A failure costs the connector and nothing else.
@@ -17166,34 +17322,6 @@ pub fn run(event_loop: EventLoop<()>, args: Vec<String>) {
         }
     }));
     event_loop.run_app(&mut app).expect("run");
-}
-
-/// A touch as the mouse events it stands for: the finger tracked in
-/// `finger` (the first down) moves the pointer and presses, drags and
-/// releases the left button; other fingers are let go.
-fn touch_as_mouse(finger: &mut Option<u64>, touch: &winit::event::Touch) -> Vec<WindowEvent> {
-    use winit::event::TouchPhase;
-    let moved = WindowEvent::CursorMoved {
-        device_id: touch.device_id,
-        position: touch.location,
-    };
-    let button = |state| WindowEvent::MouseInput {
-        device_id: touch.device_id,
-        state,
-        button: MouseButton::Left,
-    };
-    match touch.phase {
-        TouchPhase::Started if finger.is_none() => {
-            *finger = Some(touch.id);
-            vec![moved, button(ElementState::Pressed)]
-        }
-        TouchPhase::Moved if *finger == Some(touch.id) => vec![moved],
-        TouchPhase::Ended | TouchPhase::Cancelled if *finger == Some(touch.id) => {
-            *finger = None;
-            vec![moved, button(ElementState::Released)]
-        }
-        _ => Vec::new(),
-    }
 }
 
 /// Writes a crash report before the process unwinds.
@@ -19321,49 +19449,6 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         app.end_measure("");
         assert!(app.measure.is_none());
         assert!(app.ui.measure_preview.is_empty());
-    }
-
-    /// On Android a finger is the left button: the first down presses,
-    /// drags and releases it; a second finger meanwhile is let go.
-    #[test]
-    fn a_touch_stands_for_the_left_button() {
-        use winit::event::{Force, Touch, TouchPhase};
-        let touch = |id, phase, x| Touch {
-            device_id: winit::event::DeviceId::dummy(),
-            phase,
-            location: winit::dpi::PhysicalPosition::new(x, 10.0),
-            force: None::<Force>,
-            id,
-        };
-        let mut finger = None;
-        let down = touch_as_mouse(&mut finger, &touch(1, TouchPhase::Started, 5.0));
-        assert!(matches!(
-            down.as_slice(),
-            [
-                WindowEvent::CursorMoved { .. },
-                WindowEvent::MouseInput {
-                    state: ElementState::Pressed,
-                    button: MouseButton::Left,
-                    ..
-                }
-            ]
-        ));
-        assert!(touch_as_mouse(&mut finger, &touch(2, TouchPhase::Started, 9.0)).is_empty());
-        assert!(touch_as_mouse(&mut finger, &touch(2, TouchPhase::Ended, 9.0)).is_empty());
-        let moved = touch_as_mouse(&mut finger, &touch(1, TouchPhase::Moved, 7.0));
-        assert!(matches!(
-            moved.as_slice(),
-            [WindowEvent::CursorMoved { position, .. }] if position.x == 7.0
-        ));
-        let up = touch_as_mouse(&mut finger, &touch(1, TouchPhase::Ended, 8.0));
-        assert!(matches!(
-            up.last(),
-            Some(WindowEvent::MouseInput {
-                state: ElementState::Released,
-                ..
-            })
-        ));
-        assert_eq!(finger, None);
     }
 
     /// Add ▸ Curve ▸ 3D Path: points clicked in space, Enter makes them a

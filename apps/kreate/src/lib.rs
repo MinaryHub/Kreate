@@ -48,6 +48,7 @@ pub mod sketching;
 pub mod snap;
 pub mod splash;
 pub mod startup;
+pub mod touch;
 pub mod update;
 pub mod uvmodal;
 pub mod uvview;

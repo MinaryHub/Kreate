@@ -18,6 +18,11 @@ use; `scripts/release.sh` turns that section into the next release.
   are saved to and opened from the app's Documents folder, and finger
   gestures, a file picker and the on-screen keyboard are still to come.
   See apps/kreate-android/README.md.
+- On Android: two fingers turn and pinch-zoom the view, three move it, and
+  a two-finger tap is a right click; one finger taps and drags. Open
+  brings up the system's file picker, Save offers a copy where you like,
+  and the keyboard on screen comes up for a text field. Coming back from
+  another app no longer loses the picture.
 - 3D paths (Add ▸ Curve ▸ 3D Path), Fusion's 3D sketch: click points in
   space — they catch on corners, edges and faces — and Enter makes a curve
   object through them, straight or smooth, its corners bent to a radius
