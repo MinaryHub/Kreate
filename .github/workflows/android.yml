@@ -7,6 +7,8 @@ name: Android
 
 on:
   workflow_dispatch:
+  # A release builds the APK too, for its assets: see release.yml.
+  workflow_call:
   push:
     branches: [main, "claude/**"]
     paths:
