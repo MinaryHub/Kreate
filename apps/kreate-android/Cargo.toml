@@ -1,0 +1,55 @@
+# Kreate on Android: the application shell built as the shared library a
+# NativeActivity loads. The shell's own source is the desktop one
+# (`apps/kreate/src/main.rs`), taken in as a module; only how it starts
+# differs. Everything here is for Android alone: built for any other
+# target, the library is empty and costs nothing.
+[package]
+name = "kreate-android"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# The NativeActivity's `android.app.lib_name`: libkreate_android.so.
+name = "kreate_android"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[target.'cfg(target_os = "android")'.dependencies]
+kreate = { path = "../kreate" }
+kreate-math.workspace = true
+kreate-input.workspace = true
+kreate-mesh.workspace = true
+kreate-render.workspace = true
+kreate-scene.workspace = true
+kreate-geom2d.workspace = true
+kreate-ops.workspace = true
+kreate-reflect.workspace = true
+kreate-ui.workspace = true
+kreate-i18n.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+kreate-io.workspace = true
+kreate-collab.workspace = true
+kreate-shader.workspace = true
+glam.workspace = true
+wgpu.workspace = true
+# The NativeActivity glue: winit runs the app from `android_main`.
+winit = { workspace = true, features = ["android-native-activity"] }
+pollster.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+half = "2"
+openh264 = "0.9"
+mp4 = "0.14"
+bytes = "1"
+serde_json.workspace = true
+getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+flate2 = "1"
+base64 = "0.13"
+zip.workspace = true

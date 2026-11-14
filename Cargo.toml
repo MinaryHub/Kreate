@@ -19,6 +19,7 @@ members = [
     "crates/kreate-reflect",
     "crates/kreate-collab",
     "apps/kreate",
+    "apps/kreate-android",
     "apps/kreatec",
     "apps/kreate-mcp",
     "apps/kreate-relay",

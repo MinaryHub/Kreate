@@ -44,6 +44,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+// Android has neither crate; the stand-ins take the same calls.
+#[cfg(target_os = "android")]
+use kreate::android::{arboard, rfd};
+
 mod collab;
 mod connector;
 mod panels;
@@ -1050,6 +1054,9 @@ struct App {
     sketch_face_pick: bool,
     /// Waiting for a click on a surface, or the floor, to put text there.
     text_place: bool,
+    /// Android: the finger that stands for the mouse's left button — the
+    /// first down, until it lifts. See `touch_as_mouse`.
+    touch_finger: Option<u64>,
     /// The sketch the camera was last turned to face, so entering turns it
     /// once and leaves the user's own orbit alone after.
     sketch_faced: Option<kreate_scene::Uid>,
@@ -1295,6 +1302,7 @@ impl App {
             chat_record: None,
             sketch_face_pick: false,
             text_place: false,
+            touch_finger: None,
             sketch_faced: None,
             sketch_pinned: (0, Vec::new()),
             drawing_pinned: (u64::MAX, Vec::new()),
@@ -15856,6 +15864,17 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Android sends a finger as touches alone, and the viewport and its
+        // tools listen to the mouse: the first finger down is the left
+        // button, pressed where it touches and dragged where it moves.
+        if cfg!(target_os = "android") {
+            if let WindowEvent::Touch(touch) = &event {
+                for e in touch_as_mouse(&mut self.touch_finger, touch) {
+                    self.window_event(event_loop, _id, e);
+                }
+                return;
+            }
+        }
         // The interface sees every event, and says whether it needs a repaint.
         //
         // Its `consumed` flag is deliberately ignored. It reports
@@ -17039,21 +17058,6 @@ fn main() {
     // The interface is in English. `--lang ko` still switches it, for the
     // Korean catalogue that is kept and tested.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut locale = "en-US".to_string();
-    let mut path = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--lang" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    locale = v.clone();
-                }
-            }
-            other => path = Some(other.to_string()),
-        }
-        i += 1;
-    }
 
     // Before anything else, and before the window: this process may be the dump
     // writer for another one, in which case it must not open a window, load a
@@ -17080,9 +17084,31 @@ fn main() {
         kreate::crashreport::crash_on_purpose();
     }
 
+    run(EventLoop::new().expect("create event loop"), args);
+}
+
+/// The shell on `event_loop` until it is closed: the desktop's `main`
+/// once the command line is read, and Android's `android_main`
+/// (apps/kreate-android) with the activity's loop.
+pub fn run(event_loop: EventLoop<()>, args: Vec<String>) {
+    let mut path = None;
+    let mut locale = "en-US".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--lang" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    locale = v.clone();
+                }
+            }
+            other => path = Some(other.to_string()),
+        }
+        i += 1;
+    }
+
     println!("{HELP}\n");
     let (doc, file) = load_document_and_file(path.as_deref());
-    let event_loop = EventLoop::new().expect("create event loop");
     let mut app = App::new(doc, &locale);
     app.file = file;
     // The connector's way in. A failure costs the connector and nothing else.
@@ -17142,6 +17168,34 @@ fn main() {
     event_loop.run_app(&mut app).expect("run");
 }
 
+/// A touch as the mouse events it stands for: the finger tracked in
+/// `finger` (the first down) moves the pointer and presses, drags and
+/// releases the left button; other fingers are let go.
+fn touch_as_mouse(finger: &mut Option<u64>, touch: &winit::event::Touch) -> Vec<WindowEvent> {
+    use winit::event::TouchPhase;
+    let moved = WindowEvent::CursorMoved {
+        device_id: touch.device_id,
+        position: touch.location,
+    };
+    let button = |state| WindowEvent::MouseInput {
+        device_id: touch.device_id,
+        state,
+        button: MouseButton::Left,
+    };
+    match touch.phase {
+        TouchPhase::Started if finger.is_none() => {
+            *finger = Some(touch.id);
+            vec![moved, button(ElementState::Pressed)]
+        }
+        TouchPhase::Moved if *finger == Some(touch.id) => vec![moved],
+        TouchPhase::Ended | TouchPhase::Cancelled if *finger == Some(touch.id) => {
+            *finger = None;
+            vec![moved, button(ElementState::Released)]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Writes a crash report before the process unwinds.
 ///
 /// Tier one of the two §3.4 describes. This catches a Rust panic, which is the
@@ -17154,7 +17208,7 @@ fn main() {
 /// thinks to ask for. A backtrace alone rarely identifies a mesh bug; the
 /// sequence of operators that led to it usually does, which is why the ring
 /// buffer of recent operator ids is the most valuable field in the file.
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     let Some(dir) = docfile::autosave_root() else {
         return;
     };
@@ -19267,6 +19321,49 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         app.end_measure("");
         assert!(app.measure.is_none());
         assert!(app.ui.measure_preview.is_empty());
+    }
+
+    /// On Android a finger is the left button: the first down presses,
+    /// drags and releases it; a second finger meanwhile is let go.
+    #[test]
+    fn a_touch_stands_for_the_left_button() {
+        use winit::event::{Force, Touch, TouchPhase};
+        let touch = |id, phase, x| Touch {
+            device_id: winit::event::DeviceId::dummy(),
+            phase,
+            location: winit::dpi::PhysicalPosition::new(x, 10.0),
+            force: None::<Force>,
+            id,
+        };
+        let mut finger = None;
+        let down = touch_as_mouse(&mut finger, &touch(1, TouchPhase::Started, 5.0));
+        assert!(matches!(
+            down.as_slice(),
+            [
+                WindowEvent::CursorMoved { .. },
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                }
+            ]
+        ));
+        assert!(touch_as_mouse(&mut finger, &touch(2, TouchPhase::Started, 9.0)).is_empty());
+        assert!(touch_as_mouse(&mut finger, &touch(2, TouchPhase::Ended, 9.0)).is_empty());
+        let moved = touch_as_mouse(&mut finger, &touch(1, TouchPhase::Moved, 7.0));
+        assert!(matches!(
+            moved.as_slice(),
+            [WindowEvent::CursorMoved { position, .. }] if position.x == 7.0
+        ));
+        let up = touch_as_mouse(&mut finger, &touch(1, TouchPhase::Ended, 8.0));
+        assert!(matches!(
+            up.last(),
+            Some(WindowEvent::MouseInput {
+                state: ElementState::Released,
+                ..
+            })
+        ));
+        assert_eq!(finger, None);
     }
 
     /// Add ▸ Curve ▸ 3D Path: points clicked in space, Enter makes them a

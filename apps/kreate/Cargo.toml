@@ -24,7 +24,6 @@ egui-winit.workspace = true
 kreate-io.workspace = true
 kreate-collab.workspace = true
 kreate-shader.workspace = true
-rfd.workspace = true
 crash-handler.workspace = true
 minidumper.workspace = true
 glam.workspace = true
@@ -49,10 +48,15 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 flate2 = "1"
 # The chat panel's attachments: a picture or files on the system clipboard,
 # and pictures and PDFs sent as base64. See `attach`.
-arboard = "3.6"
 base64 = "0.13"
 # Unpacking an update's release zip. See `update`.
 zip.workspace = true
+
+# A file dialog and the clipboard: neither crate builds for Android, where
+# `kreate::android` stands in for them.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd.workspace = true
+arboard = "3.6"
 
 [target.'cfg(windows)'.build-dependencies]
 # The icon in the executable. See `build.rs`.
