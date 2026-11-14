@@ -208,6 +208,13 @@ pub enum Command {
     ChatRevertTurn {
         turn: usize,
     },
+    /// From the chat panel's key settings: keep this API key for the
+    /// assistant at `service` in the list the panel was given, or forget the
+    /// one kept when `key` is empty.
+    ChatApiKey {
+        service: usize,
+        key: String,
+    },
     /// From the chat panel: talk to another assistant — an index into the
     /// list the panel was given.
     ChatProvider {

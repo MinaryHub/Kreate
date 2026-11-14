@@ -110,6 +110,27 @@ pub struct ChatText {
     pub model_default: String,
     pub model_other: String,
     pub model_hint: String,
+    /// The API keys: the button that shows them, what is said of each — held
+    /// (`{tail}` its last characters) or not — the field, its buttons, the
+    /// link to where one is made, and the note under them.
+    pub keys: String,
+    pub key_held: String,
+    pub key_none: String,
+    pub key_placeholder: String,
+    pub key_save: String,
+    pub key_forget: String,
+    pub key_get: String,
+    pub key_note: String,
+}
+
+/// An assistant's API key as the panel shows it: never the key itself.
+pub struct ChatKey {
+    /// Whose key: "Claude (Anthropic)".
+    pub label: String,
+    /// The held key's last characters, when one is held.
+    pub held: Option<String>,
+    /// Where one is made.
+    pub console: String,
 }
 
 /// Draws the panel. `input` is what is being typed; Enter sends it and
@@ -135,6 +156,7 @@ pub fn chat(
     ui: &mut Ui,
     text: &ChatText,
     providers: &ChatProviders<'_>,
+    keys: &[ChatKey],
     account: &ChatAccount,
     messages: &[ChatMessage],
     attachments: &[ChatAttachment],
@@ -243,6 +265,14 @@ pub fn chat(
             if ui.add(egui::Button::new(&text.history).frame(false)).clicked() {
                 queue.push(Command::ChatHistory);
             }
+            let open_id = ui.id().with("chat-keys-open");
+            let open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(false);
+            if ui
+                .add(egui::Button::new(&text.keys).frame(false).selected(open))
+                .clicked()
+            {
+                ui.data_mut(|d| d.insert_temp(open_id, !open));
+            }
         };
         if ui.available_width() >= 190.0 {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), buttons);
@@ -252,6 +282,10 @@ pub fn chat(
         }
     });
     draw_account(ui, &theme, text, account, code, queue);
+    let open_id = ui.id().with("chat-keys-open");
+    if ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+        draw_keys(ui, &theme, text, keys, queue);
+    }
     ui.separator();
 
     // The input along the bottom, laid out first so the conversation
@@ -644,5 +678,70 @@ fn copy_menu(response: &egui::Response, text: &ChatText, message: &str) {
             ui.ctx().copy_text(message.to_string());
             ui.close();
         }
+    });
+}
+
+/// The API keys, one row each: whether one is held, a field to give one —
+/// hidden as it is typed — and the buttons to keep it or forget it.
+fn draw_keys(
+    ui: &mut Ui,
+    theme: &crate::theme::Theme,
+    text: &ChatText,
+    keys: &[ChatKey],
+    queue: &mut CommandQueue,
+) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        for (service, key) in keys.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&key.label).strong());
+                let said = match &key.held {
+                    Some(tail) => text.key_held.replace("{tail}", tail),
+                    None => text.key_none.clone(),
+                };
+                let colour = if key.held.is_some() {
+                    theme.accent
+                } else {
+                    theme.text_dim
+                };
+                ui.label(egui::RichText::new(said).color(colour));
+                ui.hyperlink_to(&text.key_get, &key.console);
+            });
+            let typed_id = ui.id().with(("chat-key", service));
+            let mut typed: String = ui.data_mut(|d| d.get_temp(typed_id)).unwrap_or_default();
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut typed)
+                        .password(true)
+                        .hint_text(&text.key_placeholder)
+                        .desired_width(220.0),
+                );
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let save = ui
+                    .add_enabled(!typed.trim().is_empty(), egui::Button::new(&text.key_save))
+                    .clicked();
+                if (save || entered) && !typed.trim().is_empty() {
+                    queue.push(Command::ChatApiKey {
+                        service,
+                        key: typed.trim().to_string(),
+                    });
+                    typed.clear();
+                }
+                if key.held.is_some() && ui.button(&text.key_forget).clicked() {
+                    queue.push(Command::ChatApiKey {
+                        service,
+                        key: String::new(),
+                    });
+                }
+            });
+            // Kept only while it is being typed, never past the save.
+            ui.data_mut(|d| d.insert_temp(typed_id, typed));
+            ui.add_space(4.0);
+        }
+        ui.label(
+            egui::RichText::new(&text.key_note)
+                .small()
+                .color(theme.text_dim),
+        );
     });
 }

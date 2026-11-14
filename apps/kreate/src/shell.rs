@@ -153,6 +153,10 @@ pub struct ShellState {
     /// Whether the chat's input box has the keyboard: Ctrl+V there is the
     /// application's to read, for a picture or files on the clipboard.
     pub chat_focused: bool,
+    /// The API keys held, by their last characters, in the order of
+    /// `crate::ai_keys::Service::ALL`; read again when one is kept or
+    /// forgotten (set to `None`), not every frame.
+    pub chat_key_tails: Option<Vec<Option<String>>>,
     pub chat_busy: bool,
     /// Which assistant the chat panel talks to: an index into
     /// `kreate::claude::Provider::ALL`.
@@ -867,6 +871,7 @@ impl Default for ShellState {
             asset_generating: false,
             chat_attachments: Vec::new(),
             chat_focused: false,
+            chat_key_tails: None,
             chat_busy: false,
             chat_provider: 0,
             chat_models: Vec::new(),
@@ -8837,7 +8842,37 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         model_hint: state
             .catalog
             .format("chat-model-hint", kreate_i18n::TextKind::Tooltip, &[]),
+        keys: state.catalog.get("chat-keys"),
+        key_held: state.catalog.format(
+            "chat-key-held",
+            kreate_i18n::TextKind::Ui,
+            &[("tail", "{tail}")],
+        ),
+        key_none: state.catalog.get("chat-key-none"),
+        key_placeholder: state.catalog.get("chat-key-placeholder"),
+        key_save: state.catalog.get("chat-key-save"),
+        key_forget: state.catalog.get("chat-key-forget"),
+        key_get: state.catalog.get("chat-key-get"),
+        key_note: state.catalog.get("chat-key-note"),
     };
+    let tails = state
+        .chat_key_tails
+        .get_or_insert_with(|| {
+            crate::ai_keys::Service::ALL
+                .iter()
+                .map(|s| crate::ai_keys::tail(*s))
+                .collect()
+        })
+        .clone();
+    let keys: Vec<kreate_ui::chat::ChatKey> = crate::ai_keys::Service::ALL
+        .iter()
+        .zip(tails)
+        .map(|(s, held)| kreate_ui::chat::ChatKey {
+            label: s.label().to_string(),
+            held,
+            console: s.console().to_string(),
+        })
+        .collect();
     let mut input = std::mem::take(&mut state.chat_input);
     let mut code = std::mem::take(&mut state.chat_code);
     let names: Vec<&str> = crate::claude::Provider::ALL
@@ -8857,6 +8892,7 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         ui,
         &text,
         &providers,
+        &keys,
         &state.chat_account,
         &state.chat_log,
         &state.chat_attachments,

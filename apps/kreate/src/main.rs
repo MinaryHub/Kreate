@@ -8095,6 +8095,25 @@ impl App {
                         chat.stop();
                     }
                 }
+                Command::ChatApiKey { service, key } => {
+                    let Some(which) = kreate::ai_keys::Service::ALL.get(service).copied() else {
+                        continue;
+                    };
+                    let said = match kreate::ai_keys::save(which, &key) {
+                        Ok(()) if key.is_empty() => self.ui.catalog.get("chat-key-forgotten"),
+                        Ok(()) => self.ui.catalog.get("chat-key-saved"),
+                        Err(why) => why,
+                    };
+                    self.status(&said);
+                    self.ui.chat_key_tails = None;
+                    // The assistant that takes this key answers to it now.
+                    if let Some(chat) = &self.chat {
+                        if chat.provider().service() == Some(which) {
+                            self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
+                            chat.check_account();
+                        }
+                    }
+                }
                 Command::ChatProvider { index } => {
                     let Some(provider) = kreate::claude::Provider::ALL.get(index).copied() else {
                         continue;
@@ -20039,6 +20058,32 @@ kreate.ops.object.add_primitive(size=2.0)" }),
             .constraints
             .iter()
             .any(|c| matches!(c, Constraint::Tangent(..))));
+    }
+
+    /// The chat panel's key settings: a key given is kept, said by its tail,
+    /// and forgotten again; the panel reads the keys afresh after each.
+    #[test]
+    fn an_api_key_is_kept_from_the_chat_panel_and_forgotten() {
+        use kreate::ai_keys::{self, Service};
+        let mut app = app();
+        let anthropic = Service::ALL
+            .iter()
+            .position(|s| *s == Service::Anthropic)
+            .unwrap();
+        app.ui.chat_key_tails = Some(vec![None; 3]);
+        app.ui.queue.push(kreate_ui::Command::ChatApiKey {
+            service: anthropic,
+            key: "sk-ant-test-0123456789-WXYZ".into(),
+        });
+        app.drain_ui_commands();
+        assert_eq!(ai_keys::tail(Service::Anthropic).as_deref(), Some("WXYZ"));
+        assert!(app.ui.chat_key_tails.is_none(), "read again");
+        app.ui.queue.push(kreate_ui::Command::ChatApiKey {
+            service: anthropic,
+            key: String::new(),
+        });
+        app.drain_ui_commands();
+        assert_eq!(ai_keys::key(Service::Anthropic), None);
     }
 
     /// F2 goes into the drawing and out again; in 2D what would turn the

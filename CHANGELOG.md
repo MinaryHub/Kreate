@@ -10,6 +10,16 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- API keys for the chat panel's assistants (API keys, beside History): an
+  Anthropic key for Claude, a Google one for Gemini, an OpenAI one for
+  ChatGPT. Each is kept only in Kreate's settings folder, readable by the
+  user alone, shown again only by its last four characters, and handed to
+  the assistant's program when it starts — ahead of any account it is
+  signed in to. A key saved for Gemini works too, where one put in the
+  Gemini CLI's own settings had been passed over for a Google sign-in.
+
 ## [0.9.0] - 2026-11-14
 
 ### Added

@@ -8,8 +8,9 @@
 //! connector client does — `kreate-mcp`, then the bridge, then the main thread
 //! — so everything it does is an operator and an undo step.
 //!
-//! Using the user's own tools means no API key in the preferences: whatever
-//! account each tool is signed in to is the one that answers.
+//! Using the user's own tools means whatever account each tool is signed in
+//! to is the one that answers — unless an API key is kept in the panel's key
+//! settings (`crate::ai_keys`), which the tool is then started with instead.
 //!
 //! # Keeping them to the document
 //!
@@ -83,6 +84,17 @@ impl Provider {
             Provider::Gemini => "Gemini",
             Provider::ChatGpt => "ChatGPT",
             Provider::Ollama => "Ollama",
+        }
+    }
+
+    /// The API key the assistant takes, kept in the panel's key settings;
+    /// none for Ollama, which runs here.
+    pub fn service(self) -> Option<crate::ai_keys::Service> {
+        match self {
+            Provider::Claude => Some(crate::ai_keys::Service::Anthropic),
+            Provider::Gemini => Some(crate::ai_keys::Service::Google),
+            Provider::ChatGpt => Some(crate::ai_keys::Service::OpenAi),
+            Provider::Ollama => None,
         }
     }
 
@@ -831,8 +843,11 @@ impl Chat {
                 if self.session.is_some() {
                     command.args(["--resume", "latest"]);
                 }
-                // Signed in with Google, unless an API key says otherwise.
-                if std::env::var_os("GEMINI_API_KEY").is_none() {
+                // Signed in with Google, unless an API key says otherwise:
+                // one in the environment, or one kept in Kreate's settings.
+                if std::env::var_os("GEMINI_API_KEY").is_none()
+                    && crate::ai_keys::key(crate::ai_keys::Service::Google).is_none()
+                {
                     command.env("GOOGLE_GENAI_USE_GCA", "true");
                 }
                 parse_gemini_line
@@ -880,6 +895,13 @@ impl Chat {
         };
         if let Some(dir) = &folder {
             command.current_dir(dir);
+        }
+        // An API key kept in the settings: in the variable the program reads,
+        // ahead of any account it is signed in to.
+        if let Some(service) = provider.service() {
+            for (name, value) in crate::ai_keys::environment(service) {
+                command.env(name, value);
+            }
         }
         let mut child = command
             .stdin(if stdin_turn.is_some() {
@@ -1092,6 +1114,15 @@ fn ask_account(provider: Provider) -> Account {
     let Some(tool) = find_cli(provider) else {
         return Account::Unavailable(provider.not_installed());
     };
+    // A key kept in the settings answers before any account.
+    if let Some(tail) = provider.service().and_then(crate::ai_keys::tail) {
+        return Account::SignedIn {
+            // i18n-exempt: the key's last characters
+            email: format!("API key …{tail}"),
+            organisation: None,
+            plan: None,
+        };
+    }
     match provider {
         Provider::Claude => {
             // Not logged in exits with 1 and still prints the answer, so the
