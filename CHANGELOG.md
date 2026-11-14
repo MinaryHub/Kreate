@@ -10,10 +10,14 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-11-11
-
 ### Added
 
+- An Android build, to try on a device: the Android workflow makes an APK
+  (64-bit ARM, Android 8 and up, debug-signed). It is the desktop program
+  with a mouse and keyboard in mind; one finger is the left button, files
+  are saved to and opened from the app's Documents folder, and finger
+  gestures, a file picker and the on-screen keyboard are still to come.
+  See apps/kreate-android/README.md.
 - 3D paths (Add ▸ Curve ▸ 3D Path), Fusion's 3D sketch: click points in
   space — they catch on corners, edges and faces — and Enter makes a curve
   object through them, straight or smooth, its corners bent to a radius
@@ -22,6 +26,10 @@ use; `scripts/release.sh` turns that section into the next release.
 - Conic curves in a sketch (exact: an ellipse's arc, a parabola or a
   hyperbola's by rho), and Text on Path: letters along a curve as outlines
   to extrude or cut, round a closed curve outside it and centred on top.
+
+## [0.8.0] - 2026-11-11
+
+### Added
 
 - More ways to draw in a sketch, as Fusion has them: a 3-point (turned)
   rectangle, a polygon around a circle or by one edge, an ellipse, an arc

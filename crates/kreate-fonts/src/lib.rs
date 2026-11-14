@@ -58,6 +58,9 @@ fn font_dirs() -> Vec<PathBuf> {
         if let Some(h) = env("HOME") {
             dirs.push(h.join("Library").join("Fonts"));
         }
+    } else if cfg!(target_os = "android") {
+        dirs.push("/system/fonts".into());
+        dirs.push("/product/fonts".into());
     } else {
         dirs.push("/usr/share/fonts".into());
         dirs.push("/usr/local/share/fonts".into());

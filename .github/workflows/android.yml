@@ -1,0 +1,78 @@
+name: Android
+
+# Kreate for Android as an APK to install by hand: the shell built by
+# cargo-ndk as libkreate_android.so, wrapped by Gradle in a NativeActivity
+# (apps/kreate-android). Signed with a debug key — for trying on a device,
+# not for a store. The APK is the run's artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "apps/kreate-android/**"
+      - ".github/workflows/android.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  apk:
+    name: APK (arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # The runner has the SDK and an NDK already; the newest NDK builds the
+      # library, for Android 8 (API 26) and up, 64-bit ARM — every phone
+      # and tablet of the last years.
+      - name: Library
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk -t arm64-v8a --platform 26 --link-libcxx-shared \
+            -o apps/kreate-android/gradle/app/src/main/jniLibs \
+            build --release -p kreate-android
+          ls -l apps/kreate-android/gradle/app/src/main/jniLibs/arm64-v8a
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: APK
+        working-directory: apps/kreate-android/gradle
+        run: |
+          export KREATE_VERSION_CODE="${{ github.run_number }}"
+          export KREATE_VERSION_NAME="$(awk '/^\[workspace.package\]/{p=1; next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/, "", $3); print $3; exit}' ../../../Cargo.toml)"
+          gradle --no-daemon assembleRelease
+          mkdir -p ../../../dist
+          cp app/build/outputs/apk/release/app-release.apk "../../../dist/kreate-$KREATE_VERSION_NAME-android-arm64.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kreate-android-arm64
+          path: dist/*.apk
+          if-no-files-found: error

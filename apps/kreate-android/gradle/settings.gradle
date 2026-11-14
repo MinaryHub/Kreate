@@ -1,0 +1,18 @@
+// The APK around libkreate_android.so: a NativeActivity and nothing else.
+// The library is built by cargo-ndk into app/src/main/jniLibs first; see
+// .github/workflows/android.yml.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "Kreate"
+include ":app"

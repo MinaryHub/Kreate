@@ -6,6 +6,7 @@
 //! interface and the viewport is precisely where a defect would otherwise be
 //! invisible to everything except a human looking at the screen.
 
+pub mod android;
 pub mod appcall;
 pub mod assets;
 pub mod attach;

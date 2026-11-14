@@ -1,0 +1,34 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.minaryhub.kreate"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.minaryhub.kreate"
+        // Vulkan, which the renderer draws with, is there from Android 7;
+        // 8 is where the GPUs worth drawing on are.
+        minSdk 26
+        targetSdk 34
+        versionCode((System.getenv("KREATE_VERSION_CODE") ?: "1") as int)
+        versionName(System.getenv("KREATE_VERSION_NAME") ?: "0.0.0")
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Signed with the debug key until there is a release key: an
+            // APK to install by hand, not one for a store.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            // The library is loaded from the APK as it is, not unpacked.
+            useLegacyPackaging false
+        }
+    }
+}
