@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-15
+
 ### Added
 
 - Help ▸ Check for Updates looks for a newer release now, rather than only
@@ -876,7 +878,8 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.12.0
 [0.11.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.11.0
 [0.10.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.10.0
 [0.9.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.9.0
