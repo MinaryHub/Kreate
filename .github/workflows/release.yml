@@ -173,9 +173,17 @@ jobs:
             kreate-${{ matrix.name }}.tar.gz
             kreate-${{ matrix.name }}.zip
 
+  # The Android APK, built as the Android workflow builds it, for the same
+  # release.
+  android:
+    name: Android APK
+    needs: [verify]
+    if: ${{ !failure() && !cancelled() }}
+    uses: ./.github/workflows/android.yml
+
   publish:
     name: GitHub release
-    needs: [build]
+    needs: [build, android]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -198,3 +206,4 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.apk

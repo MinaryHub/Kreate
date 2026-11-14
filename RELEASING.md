@@ -47,8 +47,9 @@ nothing; the push above does.
 
 The tag starts the **Build binaries** workflow, which checks that the tag and
 `Cargo.toml` agree, builds Kreate for Linux, macOS (Apple silicon and Intel)
-and Windows, and publishes a GitHub release with the binaries and that
-version's changelog section as its notes.
+and Windows, and the Android APK (the Android workflow, called from it), and
+publishes a GitHub release with them and that version's changelog section as
+its notes.
 
 ## Updates
 
