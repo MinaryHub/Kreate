@@ -12,6 +12,9 @@
 //!   pinch, about their middle. Two fingers tapped together and lifted
 //!   without moving are a right click, where the first one touched.
 //! - **Three fingers** (or more) move the view.
+//! - **A long press** — one finger held still for half a second, then
+//!   lifted — is a right click where it is: the menus a mouse's right
+//!   button opens.
 //!
 //! Once a one-finger drag has started, more fingers are let go: the drag is
 //! the tool's, and turning the view under it would move what it is
@@ -19,6 +22,9 @@
 
 /// How far a finger moves, in pixels, before it is a drag and not a tap.
 pub const SLOP: f64 = 12.0;
+
+/// How long a finger is held still before lifting it is a right click.
+pub const LONG_PRESS: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A finger, as the window reports it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,6 +62,7 @@ enum Mode {
         id: u64,
         start: (f64, f64),
         pressed: bool,
+        since: std::time::Instant,
     },
     /// Two fingers or more: a gesture. `moved` once any went past the slop;
     /// `most` the most fingers down at once; `first` where the first one
@@ -104,14 +111,25 @@ impl Touches {
 
     /// One finger's event, and what it stands for.
     pub fn touch(&mut self, id: u64, phase: Phase, at: (f64, f64)) -> Vec<Out> {
+        self.touch_at(id, phase, at, std::time::Instant::now())
+    }
+
+    /// [`Touches::touch`] at a given moment: what a long press is measured by.
+    pub fn touch_at(
+        &mut self,
+        id: u64,
+        phase: Phase,
+        at: (f64, f64),
+        now: std::time::Instant,
+    ) -> Vec<Out> {
         match phase {
-            Phase::Down => self.down(id, at),
+            Phase::Down => self.down(id, at, now),
             Phase::Move => self.moved(id, at),
-            Phase::Up => self.up(id, at),
+            Phase::Up => self.up(id, at, now),
         }
     }
 
-    fn down(&mut self, id: u64, at: (f64, f64)) -> Vec<Out> {
+    fn down(&mut self, id: u64, at: (f64, f64), now: std::time::Instant) -> Vec<Out> {
         self.fingers.retain(|f| f.0 != id);
         self.fingers.push((id, at));
         match self.mode.clone() {
@@ -120,6 +138,7 @@ impl Touches {
                     id,
                     start: at,
                     pressed: false,
+                    since: now,
                 };
                 vec![Out::Pointer(at.0, at.1)]
             }
@@ -163,6 +182,7 @@ impl Touches {
                 id: one,
                 start,
                 pressed,
+                ..
             } if *one == id => {
                 let far = ((at.0 - start.0).powi(2) + (at.1 - start.1).powi(2)).sqrt() > SLOP;
                 if *pressed {
@@ -205,7 +225,7 @@ impl Touches {
         }
     }
 
-    fn up(&mut self, id: u64, at: (f64, f64)) -> Vec<Out> {
+    fn up(&mut self, id: u64, at: (f64, f64), now: std::time::Instant) -> Vec<Out> {
         if !self.fingers.iter().any(|f| f.0 == id) {
             return Vec::new();
         }
@@ -215,10 +235,14 @@ impl Touches {
                 id: one,
                 start,
                 pressed,
+                since,
             } if one == id => {
                 self.mode = Mode::Idle;
                 if pressed {
                     vec![Out::Pointer(at.0, at.1), Out::Release]
+                } else if now.duration_since(since) >= LONG_PRESS {
+                    // Held still: the menu a right click opens.
+                    vec![Out::Pointer(start.0, start.1), Out::RightClick]
                 } else {
                     // A tap: a click where it landed.
                     vec![Out::Pointer(start.0, start.1), Out::Press, Out::Release]
@@ -323,6 +347,31 @@ mod tests {
         assert_eq!(
             t.touch(4, Phase::Down, (5.0, 5.0)),
             vec![Out::Pointer(5.0, 5.0)]
+        );
+    }
+
+    /// Held still and lifted, a finger is a right click; held and moved, a
+    /// drag as ever; a quick tap a click.
+    #[test]
+    fn a_long_press_is_a_right_click() {
+        let t0 = std::time::Instant::now();
+        let later = t0 + LONG_PRESS + std::time::Duration::from_millis(50);
+        let mut t = Touches::new();
+        t.touch_at(1, Phase::Down, (10.0, 10.0), t0);
+        assert_eq!(
+            t.touch_at(1, Phase::Up, (11.0, 10.0), later),
+            vec![Out::Pointer(10.0, 10.0), Out::RightClick]
+        );
+        t.touch_at(2, Phase::Down, (10.0, 10.0), t0);
+        assert_eq!(
+            t.touch_at(2, Phase::Up, (10.0, 10.0), t0 + LONG_PRESS / 4),
+            vec![Out::Pointer(10.0, 10.0), Out::Press, Out::Release]
+        );
+        t.touch_at(3, Phase::Down, (0.0, 0.0), t0);
+        t.touch_at(3, Phase::Move, (40.0, 0.0), t0);
+        assert_eq!(
+            t.touch_at(3, Phase::Up, (40.0, 0.0), later),
+            vec![Out::Pointer(40.0, 0.0), Out::Release]
         );
     }
 

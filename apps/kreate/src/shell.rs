@@ -170,6 +170,14 @@ pub struct ShellState {
     /// the viewport moves, turns or scales what is selected, and a tap still
     /// selects.
     pub phone_tool: Option<PhoneTool>,
+    /// The last pointer was a finger, not a mouse: controls a finger's
+    /// size, boundaries wider to take hold of, picking more forgiving. A
+    /// mouse moved puts it back.
+    pub touch: bool,
+    /// The viewport alone, every other area of the workspace put away until
+    /// it is asked back: a tablet held upright has no width for the panels
+    /// beside it.
+    pub viewport_only: bool,
     pub chat_busy: bool,
     /// Which assistant the chat panel talks to: an index into
     /// `kreate::claude::Provider::ALL`.
@@ -894,6 +902,8 @@ impl Default for ShellState {
             layout_force: None,
             phone_sheet: None,
             phone_tool: None,
+            touch: false,
+            viewport_only: false,
             chat_busy: false,
             chat_provider: 0,
             chat_models: Vec::new(),
@@ -2582,6 +2592,11 @@ pub fn draw(
     // access the command queue needs.
     let mut modifier_rows = modifier_rows(doc, registry, &state.catalog);
 
+    // A finger on the desktop's layout — a tablet's: the same arrangement,
+    // at a finger's size.
+    if state.touch {
+        finger_sized(ui);
+    }
     // A phone's screen: its own arrangement, the same editors in it.
     let narrow = ui.ctx().content_rect().width() < PHONE_WIDTH;
     state.phone = state
@@ -2767,7 +2782,22 @@ pub fn draw(
         .frame(egui::Frame::NONE.fill(gaps))
         .show(ui, |ui| {
             let screen = ui.available_rect_before_wrap();
-            let layout = state.screen().layout(screen);
+            let mut layout = state.screen().layout(screen);
+            // Panels put away: the viewport over all of it, nothing to drag.
+            if state.viewport_only {
+                if let Some(view) = layout
+                    .areas
+                    .iter()
+                    .find(|a| a.editor == kreate_ui::EditorId::VIEWPORT)
+                    .cloned()
+                {
+                    layout.areas = vec![kreate_ui::AreaRect {
+                        rect: screen,
+                        ..view
+                    }];
+                    layout.handles.clear();
+                }
+            }
             screen_areas = layout.areas.clone();
             drag_handles(ui, state, &layout);
 
@@ -10483,8 +10513,19 @@ fn slug(name: &str) -> String {
 /// Lets the pointer move the boundaries between areas.
 fn drag_handles(ui: &mut Ui, state: &mut ShellState, layout: &kreate_ui::Layout) {
     for handle in &layout.handles {
+        // A finger needs more than the four points a pointer does: taken
+        // hold of across the seam's width and a little either side of it.
+        let rect = if state.touch {
+            if handle.axis == kreate_ui::Axis::Vertical {
+                handle.rect.expand2(egui::vec2(10.0, 0.0))
+            } else {
+                handle.rect.expand2(egui::vec2(0.0, 10.0))
+            }
+        } else {
+            handle.rect
+        };
         let response = ui.interact(
-            handle.rect,
+            rect,
             ui.id().with(("split", handle.id.0)),
             egui::Sense::drag(),
         );
@@ -15506,6 +15547,21 @@ fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool,
     }
     if bar_button(ui, RibbonIcon::Redo, can_redo, &redo).clicked() {
         state.queue.push(Command::Redo);
+    }
+    ui.add_space(6.0);
+    // The panels put away, and back: the viewport alone, for a tablet held
+    // upright, or whenever the scene wants the room.
+    let panels = state.catalog.get(if state.viewport_only {
+        "panels-show"
+    } else {
+        "panels-hide"
+    });
+    if ui
+        .add(egui::Button::new(panels).selected(state.viewport_only))
+        .on_hover_text(state.catalog.get("panels-hint"))
+        .clicked()
+    {
+        state.viewport_only = !state.viewport_only;
     }
     ui.add_space(10.0);
     // The document, as a tab: its name, and a dot while it has changes no

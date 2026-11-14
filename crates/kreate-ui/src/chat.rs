@@ -279,7 +279,24 @@ pub fn chat(
                 ui.data_mut(|d| d.insert_temp(open_id, !open));
             }
         };
-        if ui.available_width() >= 190.0 {
+        // As wide as their words, measured, not guessed: a fixed figure was
+        // outgrown when API keys joined them, and the buttons were drawn over
+        // the model's name.
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
+        let needed: f32 = [&text.new_chat, &text.export, &text.history, &text.keys]
+            .iter()
+            .map(|label| {
+                ui.fonts_mut(|f| f.layout_no_wrap((*label).clone(), font.clone(), egui::Color32::WHITE))
+                    .size()
+                    .x
+                    + pad
+            })
+            .sum();
+        // What is left of the row after the pickers: a wrapping row reports
+        // its whole width as available.
+        let room = ui.max_rect().max.x - ui.cursor().min.x;
+        if room >= needed {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), buttons);
         } else {
             ui.end_row();

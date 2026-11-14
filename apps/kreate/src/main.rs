@@ -1164,6 +1164,9 @@ struct App {
     /// The gesture was begun by a finger dragged with the phone's transform
     /// tool in hand: it ends when the finger lifts.
     touch_gesture: bool,
+    /// Fingers are being turned into mouse events: what arrives meanwhile is
+    /// not a mouse, and does not take the interface back to a mouse's size.
+    from_touch: bool,
     /// The last title pushed to the window, so it is only set when it changes.
     ///
     /// Setting a window title is a system call that can repaint the frame, and
@@ -1252,6 +1255,7 @@ impl App {
             xray: false,
             drag_select: None,
             touch_gesture: false,
+            from_touch: false,
             motion: kreate_render::CameraMotion::new(kreate::startup::starting_camera()),
             last_frame: None,
             keymap: Keymap::default(),
@@ -4847,6 +4851,12 @@ impl App {
         };
         let at = (touch.location.x, touch.location.y);
         let device_id = touch.device_id;
+        // A finger: the interface at a finger's size from here on.
+        if !self.ui.touch {
+            self.ui.touch = true;
+            self.redraw.set(RedrawReason::UI);
+        }
+        self.from_touch = true;
         let button = |state, button| WindowEvent::MouseInput {
             device_id,
             state,
@@ -4902,6 +4912,7 @@ impl App {
                 }
             }
         }
+        self.from_touch = false;
     }
 
     /// The 3D path's points made a curve object, when there are two.
@@ -11869,6 +11880,15 @@ impl App {
     /// Runs even when the interface claimed the release — over a panel, a menu,
     /// the navigation gizmo — because a button that went down has to come up. It
     /// not doing so was what made navigation stick on and then appear broken.
+    /// A real mouse moved or pressed — not a finger turned into one — and the
+    /// interface goes back to a mouse's size.
+    fn mouse_seen(&mut self) {
+        if !self.from_touch && self.ui.touch {
+            self.ui.touch = false;
+            self.redraw.set(RedrawReason::UI);
+        }
+    }
+
     /// With the phone's transform tool in hand, a selection drag that has
     /// moved becomes the transform instead: what is selected follows the
     /// finger, and lifting it confirms (see `end_mouse_drag`). A tap never
@@ -13574,7 +13594,8 @@ impl App {
         // A tolerance chosen in pixels is a tolerance chosen for one screen
         // density; without this, picking on a high-density display is a third as
         // forgiving as it was designed to be.
-        gfx.viewport.pick_scale = pixels_per_point;
+        // And a finger is wider than a pointer: elements within its reach.
+        gfx.viewport.pick_scale = pixels_per_point * if self.ui.touch { 2.5 } else { 1.0 };
 
         // What the overlays should show as already selected. The bitset comes
         // from the *previous* frame's reduction: the dispatch needs the id
@@ -16138,6 +16159,7 @@ impl ApplicationHandler for App {
             // stayed held, and from then on the view turned whenever the pointer
             // moved with nothing pressed.
             WindowEvent::MouseInput { state, button, .. } => {
+                self.mouse_seen();
                 let pressed = state == ElementState::Pressed;
                 let slot = match button {
                     MouseButton::Left => Some(0),
@@ -16400,6 +16422,7 @@ impl ApplicationHandler for App {
                 };
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_seen();
                 self.track_drag_select();
                 let p = (position.x, position.y);
                 if let Some(prev) = self.input.cursor {
@@ -20130,6 +20153,20 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         });
         app.drain_ui_commands();
         assert_eq!(ai_keys::key(Service::Anthropic), None);
+    }
+
+    /// A finger sizes the interface for itself; what the fingers are turned
+    /// into does not undo that, and a real mouse does.
+    #[test]
+    fn a_mouse_takes_the_interface_back_from_a_finger() {
+        let mut app = app();
+        app.ui.touch = true;
+        app.from_touch = true;
+        app.mouse_seen();
+        assert!(app.ui.touch, "a finger's own pointer events");
+        app.from_touch = false;
+        app.mouse_seen();
+        assert!(!app.ui.touch, "a mouse");
     }
 
     /// On a phone, with a transform tool in hand, a drag that has moved past

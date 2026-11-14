@@ -10,8 +10,22 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- A tablet keeps the desktop's layout, at a finger's size: once a finger
+  touches the screen, controls grow to a finger's height, the seams
+  between areas take a finger's width, and picking vertices and edges
+  reaches as far again and a half; a mouse moved brings the desktop's
+  sizes back. A finger held still for half a second and lifted is a right
+  click. Hide Panels, beside undo and redo, puts every area but the
+  viewport away until it is pressed again — for a tablet held upright, or
+  whenever the scene wants the room.
+
 ### Fixed
 
+- The chat panel's buttons (New Chat, Export, History, API keys) were
+  drawn over the model's name when the panel was narrow; they go under
+  the pickers when they do not fit beside them.
 - Signing Gemini in from the chat panel ended "Authentication cancelled by
   user": the Gemini CLI signs in with Google only where it can ask, so Sign
   In now opens it in Terminal to choose Login with Google, and the panel
