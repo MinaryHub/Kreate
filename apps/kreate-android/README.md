@@ -22,17 +22,27 @@ cargo ndk -t arm64-v8a --platform 26 --link-libcxx-shared \
 cd apps/kreate-android/gradle && gradle assembleRelease
 ```
 
-## What works, and what does not yet
+## Using it
 
 - It draws with Vulkan (Android 8 and up, 64-bit ARM).
-- A mouse and keyboard work as on the desktop: a tablet with them attached,
-  or Samsung DeX, is the way to use it now.
-- One finger is the left mouse button. Orbiting, panning and zooming with
-  fingers, and a keyboard on screen, are not there yet.
-- There is no file dialog. Files are saved to the app's `Documents` folder
-  (`Android/data/com.minaryhub.kreate/files/Documents`, visible over USB
-  and in the Files app), and Open opens the newest file of the kind asked
-  for there — put a file in that folder to open it. File ▸ Open Recent
-  works as usual.
-- A question that would be a dialog (save before closing?) is answered yes.
-- The clipboard is empty, and the exact (OCCT) kernel is not built in.
+- **Fingers**:
+  - one finger is the left mouse button: a tap clicks, a drag drags;
+  - two fingers turn the view as they move and zoom as they pinch;
+  - two fingers tapped together are a right click;
+  - three fingers move the view.
+- A mouse and keyboard work as on the desktop.
+- **Files**:
+  - Open brings up the system's file picker. The file chosen is copied
+    into the app's `Documents` folder and opened.
+  - Save writes into `Documents`, then the system's save screen offers to
+    put a copy anywhere (Downloads, a cloud drive…).
+  - File ▸ Open Recent works as usual.
+- **Typing**: the keyboard on screen comes up when a text field is
+  focused.
+
+## Not yet
+
+- Typing in Korean (or with any input method that composes letters):
+  NativeActivity hands the program keys, not composed text.
+- The clipboard (it is empty), and the exact (OCCT) kernel.
+- A layout made for a phone's screen: it is the desktop's.

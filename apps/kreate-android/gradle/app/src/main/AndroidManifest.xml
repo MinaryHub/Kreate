@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Kreate as a NativeActivity: the whole program is libkreate_android.so. -->
+<!-- Kreate as a NativeActivity: the program is libkreate_android.so; KreateActivity
+     adds only the system's file picker. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- The renderer needs Vulkan; a device without it is not offered the app. -->
@@ -9,10 +10,10 @@
     <application
         android:label="Kreate"
         android:icon="@mipmap/ic_launcher"
-        android:hasCode="false"
+        android:hasCode="true"
         android:extractNativeLibs="false">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".KreateActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|smallestScreenSize"
             android:windowSoftInputMode="adjustResize">
