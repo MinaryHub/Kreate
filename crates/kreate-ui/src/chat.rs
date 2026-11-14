@@ -53,9 +53,12 @@ pub enum ChatAccount {
         detail: String,
     },
     SignedOut,
-    /// Signing in: the page's address once the CLI has said it.
+    /// Signing in: the page's address once the CLI has said it; or in a
+    /// terminal the assistant's program was opened in, where there is no
+    /// code to paste here.
     SigningIn {
         url: Option<String>,
+        terminal: bool,
     },
     /// Claude Code cannot be used: why.
     Unavailable(String),
@@ -94,6 +97,8 @@ pub struct ChatText {
     pub sign_out: String,
     /// Shown while the browser is open for signing in.
     pub signing_in: String,
+    /// What signing in says when it happens in a terminal.
+    pub signing_in_terminal: String,
     pub open_sign_in: String,
     pub code_hint: String,
     pub code_submit: String,
@@ -537,14 +542,22 @@ fn draw_account(
                 });
             });
         }
-        ChatAccount::SigningIn { url } => {
+        ChatAccount::SigningIn { url, terminal } => {
+            let said = if *terminal {
+                &text.signing_in_terminal
+            } else {
+                &text.signing_in
+            };
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&text.signing_in).color(theme.text_dim))
-                        .wrap(),
-                );
+                ui.add(egui::Label::new(egui::RichText::new(said).color(theme.text_dim)).wrap());
             });
+            if *terminal {
+                if ui.button(&text.cancel).clicked() {
+                    queue.push(Command::ChatSignInCancel);
+                }
+                return;
+            }
             if let Some(url) = url {
                 ui.hyperlink_to(&text.open_sign_in, url);
             }

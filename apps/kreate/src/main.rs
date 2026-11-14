@@ -8153,10 +8153,14 @@ impl App {
                 }
                 Command::ChatSignIn => {
                     if let Some(chat) = &mut self.chat {
+                        // Gemini signs in in Terminal: nothing to paste here.
+                        let terminal = chat.provider() == kreate::claude::Provider::Gemini;
                         match chat.sign_in() {
                             Ok(()) => {
-                                self.ui.chat_account =
-                                    kreate_ui::chat::ChatAccount::SigningIn { url: None }
+                                self.ui.chat_account = kreate_ui::chat::ChatAccount::SigningIn {
+                                    url: None,
+                                    terminal,
+                                }
                             }
                             Err(e) => {
                                 self.ui.chat_account = kreate_ui::chat::ChatAccount::Unavailable(e)

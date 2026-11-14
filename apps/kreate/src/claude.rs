@@ -689,7 +689,9 @@ impl Chat {
                     if halt.load(std::sync::atomic::Ordering::Relaxed) {
                         return Some(Some("cancelled".to_string()));
                     }
-                    if creds.is_file() {
+                    // Signed in with Google, or given a key at its /auth.
+                    if creds.is_file() || gemini_auth_type().is_some_and(|k| k != "oauth-personal")
+                    {
                         return Some(None);
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -916,6 +918,7 @@ impl Chat {
                 // one in the environment, or one kept in Kreate's settings.
                 if std::env::var_os("GEMINI_API_KEY").is_none()
                     && crate::ai_keys::key(crate::ai_keys::Service::Google).is_none()
+                    && gemini_auth_type().is_none()
                 {
                     command.env("GOOGLE_GENAI_USE_GCA", "true");
                 }
@@ -1247,6 +1250,19 @@ fn gemini_account() -> Account {
             plan: None,
         };
     }
+    // A key given to the CLI itself (its /auth, kept in the system's
+    // keychain), or Vertex AI: the CLI answers with it, and needs no Google
+    // sign-in from here.
+    if let Some(kind) = gemini_auth_type().filter(|k| k != "oauth-personal") {
+        return Account::SignedIn {
+            email: match kind.as_str() {
+                "gemini-api-key" => "Gemini CLI's API key".into(),
+                other => format!("Gemini CLI: {other}"),
+            },
+            organisation: None,
+            plan: None,
+        };
+    }
     let Some(dir) = gemini_home() else {
         return Account::SignedOut;
     };
@@ -1262,6 +1278,18 @@ fn gemini_account() -> Account {
         organisation: None,
         plan: None,
     }
+}
+
+/// How the Gemini CLI was told to sign in, in its settings: `gemini-api-key`,
+/// `vertex-ai`, `oauth-personal` for Google — none when it was never told.
+fn gemini_auth_type() -> Option<String> {
+    let text = std::fs::read_to_string(gemini_home()?.join("settings.json")).ok()?;
+    let settings: Value = serde_json::from_str(&text).ok()?;
+    settings
+        .pointer("/security/auth/selectedType")
+        .or_else(|| settings.get("selectedAuthType"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Where the Gemini CLI keeps its settings and credentials.

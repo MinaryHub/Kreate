@@ -382,8 +382,10 @@ impl App {
                     continue;
                 }
                 Event::SignInUrl(url) => {
-                    self.ui.chat_account =
-                        kreate_ui::chat::ChatAccount::SigningIn { url: Some(url) };
+                    self.ui.chat_account = kreate_ui::chat::ChatAccount::SigningIn {
+                        url: Some(url),
+                        terminal: false,
+                    };
                     continue;
                 }
                 Event::SignedIn(None) => {

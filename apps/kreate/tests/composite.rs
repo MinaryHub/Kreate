@@ -2081,6 +2081,7 @@ fn shot_claude_sign_in() {
             "claude-signing-in-ko",
             ChatAccount::SigningIn {
                 url: Some("https://claude.com/cai/oauth/authorize".into()),
+                terminal: false,
             },
         ),
     ] {

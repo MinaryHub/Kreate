@@ -1141,6 +1141,7 @@ chat-signed-out = Not signed in.
 chat-sign-in = Sign In
 chat-sign-out = Sign Out
 chat-signing-in = Finish signing in in the browser that opened.
+chat-signing-in-terminal = Finish signing in in the Terminal window that opened — choose Login with Google, or give it an API key — then close it.
 chat-open-sign-in = Open the sign-in page
 chat-code-hint = Paste the code here if the page shows one
 chat-code-submit = Submit

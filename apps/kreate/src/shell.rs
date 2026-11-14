@@ -8876,6 +8876,7 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         sign_in: l.chat_sign_in.clone(),
         sign_out: l.chat_sign_out.clone(),
         signing_in: l.chat_signing_in.clone(),
+        signing_in_terminal: state.catalog.get("chat-signing-in-terminal"),
         open_sign_in: l.chat_open_sign_in.clone(),
         code_hint: l.chat_code_hint.clone(),
         code_submit: l.chat_code_submit.clone(),

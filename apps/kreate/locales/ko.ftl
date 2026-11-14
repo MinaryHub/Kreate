@@ -1156,6 +1156,7 @@ chat-signed-out = 로그인되어 있지 않습니다.
 chat-sign-in = 로그인
 chat-sign-out = 로그아웃
 chat-signing-in = 열린 브라우저에서 로그인을 마치세요.
+chat-signing-in-terminal = 열린 터미널 창에서 로그인을 마친 뒤 창을 닫으세요. Login with Google을 고르거나 API 키를 넣으면 됩니다.
 chat-open-sign-in = 로그인 페이지 열기
 chat-code-hint = 페이지에 코드가 나오면 여기에 붙여 넣으세요
 chat-code-submit = 확인

@@ -17,6 +17,12 @@ use; `scripts/release.sh` turns that section into the next release.
   In now opens it in Terminal to choose Login with Google, and the panel
   takes up the account once its credentials are saved. Off a Mac it says
   to do the same in a terminal, or to save a Gemini API key.
+- A Gemini CLI given an API key at its own /auth (kept in the keychain)
+  was sent to a Google sign-in from Kreate anyway, and the panel waited
+  for one that would never come. The CLI's own choice of how to sign in
+  now stands, and the panel names it signed in; signing in in Terminal
+  ends when the CLI is given a key there too, and says so instead of
+  asking for a code to paste.
 
 ## [0.11.0] - 2026-11-14
 
