@@ -10,6 +10,14 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Fixed
+
+- Signing Gemini in from the chat panel ended "Authentication cancelled by
+  user": the Gemini CLI signs in with Google only where it can ask, so Sign
+  In now opens it in Terminal to choose Login with Google, and the panel
+  takes up the account once its credentials are saved. Off a Mac it says
+  to do the same in a terminal, or to save a Gemini API key.
+
 ## [0.11.0] - 2026-11-14
 
 ### Added

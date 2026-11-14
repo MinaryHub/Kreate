@@ -407,8 +407,12 @@ struct Preparing {
 
 /// A `claude auth login` in progress.
 struct SignIn {
-    child: Child,
+    /// The tool signing in, when Kreate runs it; none when it runs in a
+    /// terminal of its own (Gemini's), watched for its credentials instead.
+    child: Option<Child>,
     input: Option<ChildStdin>,
+    /// Tells the watcher of a terminal's sign-in to give up.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct Turn {
@@ -595,26 +599,19 @@ impl Chat {
             return Err("Ollama runs on this computer and needs no sign-in.".into());
         }
         let tool = find_cli(provider).ok_or_else(|| provider.not_installed())?;
-        let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
+        // The Gemini CLI signs in only where it can ask: in a terminal.
+        if provider == Provider::Gemini {
+            return self.sign_in_gemini(&tool);
+        }
         let mut command = quiet_command(tool);
         match provider {
-            // Turned away above: there is nothing to sign in to.
-            Provider::Ollama => {}
+            // Turned away above: nothing to sign in to, or signed in apart.
+            Provider::Ollama | Provider::Gemini => {}
             Provider::Claude => {
                 command.args(["auth", "login"]);
             }
             Provider::ChatGpt => {
                 command.arg("login");
-            }
-            Provider::Gemini => {
-                // The Gemini CLI signs in on first use; a message that needs
-                // no tools is the shortest first use.
-                command
-                    .args(["-p", "Reply with the single word OK."])
-                    .env("GOOGLE_GENAI_USE_GCA", "true");
-                if skip_trust {
-                    command.arg("--skip-trust");
-                }
             }
         }
         if let Some(dir) = provider.folder() {
@@ -639,7 +636,74 @@ impl Chat {
             let _ = tx.send(Event::SignedIn(Some(said)));
             wake();
         });
-        self.sign_in = Some(SignIn { child, input });
+        self.sign_in = Some(SignIn {
+            child: Some(child),
+            input,
+            stop: Arc::default(),
+        });
+        Ok(())
+    }
+
+    /// Gemini's sign-in. The CLI will not sign in with Google when it is run
+    /// for one message — "manual authorization is required but the current
+    /// session is non-interactive" — so on a Mac it is opened in Terminal,
+    /// to choose Login with Google there, and Kreate watches for the
+    /// credentials it then saves. Elsewhere, what to do is said.
+    fn sign_in_gemini(&mut self, tool: &Path) -> Result<(), String> {
+        let advice = "Gemini signs in only in a terminal: run `gemini` and choose Login \
+                      with Google — or save a Gemini API key under API keys.";
+        if !cfg!(target_os = "macos") {
+            return Err(advice.into());
+        }
+        let dir = Provider::Gemini
+            .folder()
+            .ok_or("no settings folder to run Gemini in")?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = tool_path(tool).unwrap_or_default();
+        let script = gemini_sign_in_script(&path, &dir, tool);
+        let file = dir.join("sign-in.command");
+        std::fs::write(&file, script).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| e.to_string())?;
+        }
+        Command::new("open")
+            .arg(&file)
+            .status()
+            .map_err(|e| format!("cannot open Terminal: {e}"))?;
+        let creds = gemini_home()
+            .map(|h| h.join("oauth_creds.json"))
+            .ok_or(advice)?;
+        let stop: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let (tx, wake, halt) = (
+            self.side.0.clone(),
+            Arc::clone(&self.wake),
+            Arc::clone(&stop),
+        );
+        std::thread::spawn(move || {
+            // Fifteen minutes to sign in, looked at once a second.
+            let said = (0..900)
+                .find_map(|_| {
+                    if halt.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Some(Some("cancelled".to_string()));
+                    }
+                    if creds.is_file() {
+                        return Some(None);
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    None
+                })
+                .unwrap_or_else(|| Some("no sign-in came back from Terminal".into()));
+            let _ = tx.send(Event::SignedIn(said));
+            wake();
+        });
+        self.sign_in = Some(SignIn {
+            child: None,
+            input: None,
+            stop,
+        });
         Ok(())
     }
 
@@ -654,7 +718,12 @@ impl Chat {
     /// Gives up on a sign-in.
     pub fn cancel_sign_in(&mut self) {
         if let Some(sign_in) = &mut self.sign_in {
-            let _ = sign_in.child.kill();
+            if let Some(child) = sign_in.child.as_mut() {
+                let _ = child.kill();
+            }
+            sign_in
+                .stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1022,11 +1091,15 @@ impl Chat {
             if let Event::SignedIn(said) = event {
                 // The process's word on how it went is its exit status; what it
                 // printed is the reason, when it failed.
-                let ok = self
-                    .sign_in
-                    .take()
-                    .and_then(|mut s| s.child.wait().ok())
-                    .is_some_and(|status| status.success());
+                let ok = match self.sign_in.take() {
+                    Some(SignIn {
+                        child: Some(mut child),
+                        ..
+                    }) => child.wait().is_ok_and(|status| status.success()),
+                    // Watched from a terminal: its word is whether it failed.
+                    Some(SignIn { child: None, .. }) => said.is_none(),
+                    None => false,
+                };
                 out.push(Event::SignedIn(if ok {
                     None
                 } else {
@@ -1660,6 +1733,24 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     command
 }
 
+/// The script Terminal runs for Gemini's sign-in: the tool, in Kreate's
+/// folder for it, with the PATH Kreate would give it. Every path quoted for
+/// the shell, whatever is in it.
+fn gemini_sign_in_script(path: &std::ffi::OsStr, dir: &Path, tool: &Path) -> String {
+    let quote = |p: &std::ffi::OsStr| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
+    format!(
+        "#!/bin/sh\n\
+         export PATH={}\n\
+         export GEMINI_CLI_TRUST_WORKSPACE=true\n\
+         cd {}\n\
+         echo 'Kreate: choose \"Login with Google\", finish in the browser, then close this window.'\n\
+         {}\n",
+        quote(path),
+        quote(dir.as_os_str()),
+        quote(tool.as_os_str()),
+    )
+}
+
 /// The PATH a tool at `program` is started with: its folder, then the
 /// folders it would have from a shell, then the one Kreate was given.
 fn tool_path(program: &Path) -> Option<std::ffi::OsString> {
@@ -1794,6 +1885,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// The sign-in script survives paths with spaces and quotes in them:
+    /// the shell reads each back as it was.
+    #[test]
+    fn the_gemini_sign_in_script_quotes_its_paths() {
+        let dir = Path::new("/Users/a b/Library/Application Support/kreate/agents/gemini");
+        let tool = Path::new("/opt/it's/bin/gemini");
+        let script =
+            gemini_sign_in_script(std::ffi::OsStr::new("/opt/it's/bin:/usr/bin"), dir, tool);
+        assert!(script.starts_with("#!/bin/sh\n"));
+        if cfg!(unix) {
+            // The shell parses it, and `cd` and the tool get their whole paths.
+            let checked = std::process::Command::new("sh")
+                .arg("-n")
+                .arg("-c")
+                .arg(&script)
+                .status()
+                .unwrap();
+            assert!(checked.success(), "{script}");
+            let said = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(script.replace("cd ", "printf '%s\\n' ").replace(
+                    "'/opt/it'\\''s/bin/gemini'\n",
+                    "printf '%s\\n' '/opt/it'\\''s/bin/gemini'\n",
+                ))
+                .output()
+                .unwrap();
+            let out = String::from_utf8_lossy(&said.stdout);
+            assert!(
+                out.contains("/Users/a b/Library/Application Support/kreate/agents/gemini"),
+                "{out}"
+            );
+            assert!(out.contains("/opt/it's/bin/gemini"), "{out}");
+        }
+    }
 
     /// A tool is started with its own folder first on its PATH: the Gemini
     /// CLI's `#!/usr/bin/env node` finds the `node` beside it even when
