@@ -1640,8 +1640,17 @@ fn result_text(content: Option<&Value>) -> String {
 /// an assistant's sign-in flashed a black window over Kreate as it opened.
 /// Their input and output are pipes; nothing is lost by hiding it.
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let program = program.as_ref();
     #[allow(unused_mut)]
     let mut command = Command::new(program);
+    // The program's own folder first on its PATH, then where package managers
+    // put things. The Gemini CLI, and Codex installed by npm, are scripts that
+    // start with `#!/usr/bin/env node`; Kreate started from Finder or the Dock
+    // has only the system's folders on its PATH, and `node` — beside the
+    // script, in /opt/homebrew/bin or an nvm folder — was not found.
+    if let Some(path) = tool_path(Path::new(program)) {
+        command.env("PATH", path);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1649,6 +1658,32 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+/// The PATH a tool at `program` is started with: its folder, then the
+/// folders it would have from a shell, then the one Kreate was given.
+fn tool_path(program: &Path) -> Option<std::ffi::OsString> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = program.parent().filter(|d| !d.as_os_str().is_empty()) {
+        dirs.push(dir.to_path_buf());
+    }
+    if cfg!(unix) {
+        dirs.extend(
+            ["/opt/homebrew/bin", "/usr/local/bin"]
+                .iter()
+                .map(PathBuf::from),
+        );
+    }
+    if let Some(given) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&given));
+    }
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        if !seen.contains(&d) {
+            seen.push(d);
+        }
+    }
+    std::env::join_paths(seen).ok()
 }
 
 /// Whether this Gemini CLI takes `--skip-trust`.
@@ -1759,6 +1794,26 @@ mod tests {
     }
 
     use super::*;
+
+    /// A tool is started with its own folder first on its PATH: the Gemini
+    /// CLI's `#!/usr/bin/env node` finds the `node` beside it even when
+    /// Kreate was started with only the system's folders.
+    #[test]
+    fn a_tool_finds_what_sits_beside_it() {
+        let command = quiet_command("/opt/tools/bin/gemini");
+        let path = command
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v)
+            .expect("a PATH");
+        let dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(dirs[0], PathBuf::from("/opt/tools/bin"));
+        if cfg!(unix) {
+            assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
+        }
+        let unique: std::collections::HashSet<_> = dirs.iter().collect();
+        assert_eq!(unique.len(), dirs.len(), "each folder once");
+    }
 
     #[test]
     fn skip_trust_goes_only_to_a_gemini_whose_help_lists_it() {
