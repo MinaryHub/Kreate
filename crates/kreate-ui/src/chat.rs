@@ -105,6 +105,11 @@ pub struct ChatText {
     pub copy: String,
     /// The row a run of tool calls folds under; `{count}` is how many.
     pub tools: String,
+    /// The model list's entry for the assistant's own default, the box that
+    /// takes another model's name, and what hovering the list says.
+    pub model_default: String,
+    pub model_other: String,
+    pub model_hint: String,
 }
 
 /// Draws the panel. `input` is what is being typed; Enter sends it and
@@ -113,10 +118,13 @@ pub struct ChatText {
 pub struct ChatProviders<'a> {
     pub names: &'a [&'a str],
     pub current: usize,
-    /// The models the assistant can answer with, when it is one that has a
-    /// choice (Ollama); empty otherwise.
+    /// The models the assistant can answer with; empty when there is no
+    /// choice. An empty name is the assistant's own default.
     pub models: &'a [String],
     pub model: usize,
+    /// Whether a model the list does not have can be typed: the assistants
+    /// whose program takes any name (not Ollama, which has what it has).
+    pub other: bool,
 }
 
 /// The panel itself. `attachments` go with the next message. Returns whether the input box has
@@ -156,25 +164,62 @@ pub fn chat(
                     }
                 });
             if !providers.models.is_empty() {
-                let current = providers
-                    .models
-                    .get(providers.model)
-                    .map(String::as_str)
-                    .unwrap_or("");
+                let shown = |name: &str| {
+                    if name.is_empty() {
+                        text.model_default.clone()
+                    } else {
+                        name.to_string()
+                    }
+                };
+                let current = shown(
+                    providers
+                        .models
+                        .get(providers.model)
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                );
+                let other_id = ui.id().with("chat-model-other");
                 egui::ComboBox::from_id_salt("chat-model")
                     .width(140.0)
+                    // Open until a click outside: closing on any click, it
+                    // closed on the click into the box for another name.
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     // i18n-exempt: a model's name
                     .selected_text(current)
                     .show_ui(ui, |ui| {
                         for (index, name) in providers.models.iter().enumerate() {
                             // i18n-exempt: a model's name
-                            if ui.selectable_label(index == providers.model, name).clicked()
-                                && index != providers.model
-                            {
-                                queue.push(Command::ChatModel { index });
+                            if ui.selectable_label(index == providers.model, shown(name)).clicked() {
+                                if index != providers.model {
+                                    queue.push(Command::ChatModel { index });
+                                }
+                                ui.close();
                             }
                         }
-                    });
+                        if providers.other {
+                            ui.separator();
+                            let mut typed: String =
+                                ui.data_mut(|d| d.get_temp(other_id)).unwrap_or_default();
+                            let field = ui.add(
+                                egui::TextEdit::singleline(&mut typed)
+                                    .hint_text(&text.model_other)
+                                    .desired_width(160.0),
+                            );
+                            if field.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                && !typed.trim().is_empty()
+                            {
+                                queue.push(Command::ChatModelName {
+                                    name: typed.trim().to_string(),
+                                });
+                                typed.clear();
+                                ui.close();
+                            }
+                            ui.data_mut(|d| d.insert_temp(other_id, typed));
+                        }
+                    })
+                    .response
+                    .on_hover_text(&text.model_hint);
             }
         });
         // To the right when they fit beside the assistant, else on a row

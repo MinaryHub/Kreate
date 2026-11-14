@@ -66,8 +66,15 @@ pub fn solidify(input: &MeshData, params: &SolidifyParams) -> MeshData {
 
     let inner = |v: u32| v + n as u32;
     let mut faces: Vec<Vec<u32>> = Vec::with_capacity(input.num_faces() as usize * 2);
+    // Where each face and corner of the result came from, so the sheet's
+    // UVs, materials and shading go onto both skins and the rim: built bare,
+    // a two-material, mapped sheet came out grey, unmapped and faceted.
+    let mut face_order: Vec<u32> = Vec::with_capacity(input.num_faces() as usize * 2);
+    let mut corner_order: Vec<u32> = Vec::with_capacity(input.num_corners() as usize * 2);
     for f in 0..input.num_faces() {
         faces.push(input.face_verts(f).to_vec());
+        face_order.push(f);
+        corner_order.extend(input.face_corner_range(f).map(|c| c as u32));
     }
     for f in 0..input.num_faces() {
         faces.push(
@@ -78,6 +85,8 @@ pub fn solidify(input: &MeshData, params: &SolidifyParams) -> MeshData {
                 .map(|v| inner(*v))
                 .collect(),
         );
+        face_order.push(f);
+        corner_order.extend(input.face_corner_range(f).rev().map(|c| c as u32));
     }
     // The rim: every edge on exactly one face, walked the way that face walks
     // it, gets a quad back across to the inner shell.
@@ -91,14 +100,24 @@ pub fn solidify(input: &MeshData, params: &SolidifyParams) -> MeshData {
     }
     for f in 0..input.num_faces() {
         let ring = input.face_verts(f);
+        let first = input.face_corner_range(f).start as u32;
         for i in 0..ring.len() {
-            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let next = (i + 1) % ring.len();
+            let (a, b) = (ring[i], ring[next]);
             if uses.get(&(a.min(b), a.max(b))) == Some(&1) {
                 faces.push(vec![b, a, inner(a), inner(b)]);
+                // The rim takes after the face whose edge it closes.
+                face_order.push(f);
+                let (ca, cb) = (first + i as u32, first + next as u32);
+                corner_order.extend([cb, ca, ca, cb]);
             }
         }
     }
-    MeshData::from_faces(out_positions, &faces)
+    let mut out = MeshData::from_faces(out_positions, &faces);
+    let point_order: Vec<u32> = (0..n as u32).chain(0..n as u32).collect();
+    super::carry_attributes(&mut out, input, &point_order, &corner_order, &face_order);
+    super::gather_edges_by_pair(&mut out, input, &point_order);
+    out
 }
 
 #[cfg(test)]

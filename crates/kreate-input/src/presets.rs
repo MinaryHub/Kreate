@@ -200,6 +200,14 @@ fn common() -> Vec<Binding> {
             .with_modifiers(Modifiers::ctrl()),
         key("edit.redo", "Y", Context::Global, Action::new("edit.redo"))
             .with_modifiers(Modifiers::ctrl()),
+        // And the other redo: half the programs a person comes from use it.
+        key(
+            "edit.redo_shift_z",
+            "Z",
+            Context::Global,
+            Action::new("edit.redo"),
+        )
+        .with_modifiers(Modifiers::ctrl_shift()),
         // The clock, on Blender's keys and everywhere — an animator plays from
         // whichever editor the pointer is over. Space plays and stops; the
         // arrows step a frame, or with Shift jump to either end of the range.
@@ -723,12 +731,27 @@ fn common() -> Vec<Binding> {
             Context::Timeline,
             Action::new("marker.remove"),
         ),
-        // X takes what is selected out of the sketch.
+        // As in Fusion: Delete takes what is selected out of the sketch, and
+        // X makes it construction — or ordinary again.
         key(
-            "sketch.delete_x",
-            "X",
+            "sketch.delete",
+            "Delete",
             Context::Sketch,
             Action::new("app.sketch_delete"),
+        ),
+        // A Mac's delete key is Backspace. While drawing, the tools take it
+        // first, to take back the last point.
+        key(
+            "sketch.delete_back",
+            "Backspace",
+            Context::Sketch,
+            Action::new("app.sketch_delete"),
+        ),
+        key(
+            "sketch.construction",
+            "X",
+            Context::Sketch,
+            Action::new("app.sketch_construction"),
         ),
         // Blender's F and Shift+F: the brush's size and strength, set by
         // moving the pointer, in every brush mode.
@@ -1133,6 +1156,12 @@ fn common() -> Vec<Binding> {
             Context::ObjectMode,
             Action::new("object.delete"),
         ),
+        key(
+            "object.delete_key",
+            "Delete",
+            Context::ObjectMode,
+            Action::new("object.delete"),
+        ),
         // Copy and paste on the keys every application puts them on. Both are
         // the application's rather than operators — `edit.`, like undo: copy
         // edits nothing, and paste has to be given the clipboard's text before
@@ -1214,11 +1243,11 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             Action::new("mesh.subdivide").with("iterations", PropertyValue::Int(1)),
         )
-        // Moved off the bare `S` when Scale took it. `Shift+S` rather than
-        // somewhere else entirely: the muscle memory for subdivide is already on
-        // this key, and a modifier is a smaller thing to relearn than a new
-        // letter.
-        .with_modifiers(Modifiers::shift()),
+        // Moved off the bare `S` when Scale took it, and off `Shift+S`
+        // since: that is the snap pie everywhere, and held here it could not
+        // be opened in edit mode — which is where the cursor is most often
+        // put on what is selected. Still on S, a modifier along.
+        .with_modifiers(Modifiers::alt()),
         key(
             "mesh.loop_cut",
             "R",
@@ -1229,6 +1258,12 @@ fn common() -> Vec<Binding> {
         key(
             "mesh.delete",
             "X",
+            Context::EditMesh,
+            Action::new("mesh.delete"),
+        ),
+        key(
+            "mesh.delete_key",
+            "Delete",
             Context::EditMesh,
             Action::new("mesh.delete"),
         ),
@@ -1293,7 +1328,9 @@ fn common() -> Vec<Binding> {
             Context::EditMesh,
             enum_param(Action::new("mesh.normals"), "action", 0),
         )
-        .with_modifiers(Modifiers::ctrl()),
+        // Not Ctrl+N: that is New File, everywhere, and in edit mode it
+        // quietly recalculated normals instead.
+        .with_modifiers(Modifiers::alt()),
         key(
             "mesh.normals_flip",
             "N",

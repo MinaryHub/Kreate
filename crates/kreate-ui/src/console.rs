@@ -43,6 +43,9 @@ pub struct ConsoleText {
     pub same_error: String,
 }
 
+/// How many lines the console keeps to bring back.
+const HISTORY: usize = 50;
+
 /// Draws the console. `input` is what is being typed; Enter sends it.
 pub fn console(
     ui: &mut Ui,
@@ -108,13 +111,41 @@ pub fn console(
                 .hint_text(&text.placeholder)
                 .desired_width(f32::INFINITY),
         );
+        // The lines run before, and which of them the arrows have reached:
+        // Up and Down bring them back, as a shell's do.
+        let history_id = ui.id().with("console-history");
+        let (mut lines, mut at): (Vec<String>, usize) =
+            ui.data_mut(|d| d.get_temp(history_id)).unwrap_or_default();
+        if response.has_focus() && !lines.is_empty() {
+            let (up, down) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                )
+            });
+            if up {
+                at = at.saturating_sub(1);
+                *input = lines[at].clone();
+            } else if down && at < lines.len() {
+                at += 1;
+                *input = lines.get(at).cloned().unwrap_or_default();
+            }
+        }
         let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if entered && !input.trim().is_empty() {
+            if lines.last().map(String::as_str) != Some(input.as_str()) {
+                lines.push(input.clone());
+                if lines.len() > HISTORY {
+                    lines.remove(0);
+                }
+            }
+            at = lines.len();
             queue.push(Command::RunScript {
                 source: std::mem::take(input),
             });
             // Keep typing: the next line goes where the last one went.
             response.request_focus();
         }
+        ui.data_mut(|d| d.insert_temp(history_id, (lines, at)));
     });
 }

@@ -235,7 +235,12 @@ fn an_emergency_save_writes_somewhere_other_than_the_users_file() {
             written, users_file,
             "the emergency save went over the user's file"
         );
-        assert!(written.ends_with("quit.kreate"), "{}", written.display());
+        let name = written.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name == "quit.kreate" || name.starts_with("crash-"),
+            "{}",
+            written.display()
+        );
     }
     assert_eq!(
         std::fs::read(&users_file).expect("read"),

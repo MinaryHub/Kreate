@@ -48,7 +48,9 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: vec2
             continue;
         }
         if (node.count == 0u) {
-            if (top < 46) {
+            // A child is never the root: a link to node 0 is the empty
+            // scene's placeholder, and following it would not end.
+            if (node.first != 0u && top < 46) {
                 stack[top] = node.first;
                 stack[top + 1] = node.first + 1u;
                 top += 2;
@@ -74,7 +76,7 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: vec2
                     continue;
                 }
                 if (mesh_node.count == 0u) {
-                    if (depth < 46) {
+                    if (mesh_node.first != 0u && depth < 46) {
                         inner[depth] = mesh_node.first;
                         inner[depth + 1] = mesh_node.first + 1u;
                         depth += 2;

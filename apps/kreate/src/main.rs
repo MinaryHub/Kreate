@@ -839,7 +839,7 @@ struct App {
     /// *document*, and `kreate-render` does not see one.
     environment: Option<kreate::environment::EnvironmentKey>,
     /// Whether the viewports hold the studio's room as their environment.
-    studio_environment: Option<kreate_render::studio::Preset>,
+    studio_environment: Option<StudioKey>,
     /// Whether the scene's own sky must be rebuilt, the studio having held
     /// the environment in the meantime.
     environment_stale: bool,
@@ -1111,6 +1111,8 @@ struct App {
     solid_auto: Option<((u64, Vec<[u64; 2]>, u64, bool), (u32, String))>,
     /// A sketch drag's step, live while the button is down.
     sketch_drag_session: Option<kreate_ops::ModalSession>,
+    /// Requests and arrivals held back by a gesture: see `serve_arrivals`.
+    arrivals_waiting: bool,
     /// A point or handle of the active curve being dragged in the viewport.
     curve_drag: Option<CurveDrag>,
     /// The object Auto dynamic topology last said it would not cut.
@@ -1166,6 +1168,11 @@ impl App {
         app.ui.studio_preset = kreate::prefs::viewport_path()
             .map(|p| kreate::prefs::load_room(&p))
             .unwrap_or_default();
+        if let Some(p) = kreate::prefs::environments_path() {
+            let (files, chosen) = kreate::prefs::load_environments(&p);
+            app.ui.environment_files = files;
+            app.ui.environment_file = chosen;
+        }
         app.ui.trace_when_still =
             kreate::prefs::viewport_path().is_none_or(|p| kreate::prefs::load_trace_when_still(&p));
         app.ui.appearance = kreate::prefs::interface_path()
@@ -1262,6 +1269,7 @@ impl App {
             driven_at: u64::MAX,
             sketch_snap_cache: None,
             sketch_drag_session: None,
+            arrivals_waiting: false,
             curve_drag: None,
             solid_auto: None,
             dyntopo_told: None,
@@ -1373,7 +1381,13 @@ impl App {
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
             }
             Ok(other) => tracing::debug!(?other, op_id, "operator did not finish"),
-            Err(e) => println!("  {op_id}: {e}"),
+            Err(e) => {
+                println!("  {op_id}: {e}");
+                // In the status bar too: said only to a console nobody has
+                // open, a menu item that failed looked like a dead button.
+                let label = self.registry.get(op_id).map_or(op_id, |info| info.label);
+                self.status(&format!("{label}: {e}"));
+            }
         }
     }
 
@@ -5388,6 +5402,13 @@ impl App {
         }
         // Last, a point along one of the sketch's lines.
         if matches!(mode, Mode::Element | Mode::Edge) {
+            // In a drawing, onto the curve itself and not the chord drawing
+            // it: exactly on, so the drawing holds the point there.
+            if let (Some(d), Some(line)) = (self.active_drawing(), g.line_near(at, REACH)) {
+                if let Some(c) = g.entity_of_line(line).and_then(|e| d.curve(e)) {
+                    return Some(c.closest(on_plane).1);
+                }
+            }
             return g.on_line(at, on_plane, REACH);
         }
         None
@@ -5443,6 +5464,7 @@ impl App {
     /// after.
     fn drive_sketch_drag(&mut self, to: glam::DVec2) {
         let Some(drag) = self.sketching.drag.clone() else {
+            self.settle_sketch_drag();
             return;
         };
         let offset = to - drag.anchor;
@@ -5498,6 +5520,53 @@ impl App {
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
+    /// What changes the document from outside the window — the connector's
+    /// requests, assets and imports that have arrived — but not while a
+    /// gesture is live. A gesture holds the document as it was when it
+    /// began and puts that back on every move: an edit made under it was
+    /// undone by the next move, its step left in the history and the
+    /// assistant told it had worked. They wait for the gesture to end.
+    fn serve_arrivals(&mut self) {
+        let busy = self.gesture.is_some()
+            || self.uv_gesture.is_some()
+            || self.sketch_drag_session.is_some()
+            || self.curve_drag.is_some()
+            || self.paint_stroke.is_some()
+            || self.sculpt_stroke.is_some();
+        self.arrivals_waiting = busy;
+        if busy {
+            return;
+        }
+        self.serve_bridge();
+        self.serve_assets();
+        self.serve_imports();
+    }
+
+    /// Lets go of what is selected in a sketch, before the drawing changes
+    /// under it: the selection is kept by the lines' numbers, and an undo
+    /// renumbers them — Delete then took the curve next to the one picked.
+    fn forget_sketch_picks(&mut self) {
+        if self.op_ctx.mode == OpMode::Sketch {
+            self.settle_sketch_drag();
+            self.sketching.points.clear();
+            self.sketching.lines.clear();
+            self.sketching.picks.clear();
+        }
+    }
+
+    /// Ends a drag's step whose drag is gone — the tool changed, or Delete
+    /// pressed, with the button still down. What it moved stays, as the one
+    /// step it was. Left open, the next drag carried on from it: the drawing
+    /// went back to how it was before the old drag, and took everything
+    /// drawn since with it.
+    fn settle_sketch_drag(&mut self) {
+        if self.sketching.drag.is_none() {
+            if let Some(session) = self.sketch_drag_session.take() {
+                self.history.commit_modal(session);
+            }
+        }
+    }
+
     /// Puts a drag back where it began: Esc or the right button.
     fn cancel_sketch_drag(&mut self) -> bool {
         if self.sketching.drag.take().is_none() {
@@ -5518,6 +5587,7 @@ impl App {
     /// A line tool's points so far, run as one stroke.
     fn commit_sketch_line(&mut self, closed: bool) {
         let clicks = std::mem::take(&mut self.sketching.clicks);
+        let typed = std::mem::take(&mut self.sketching.typed_segments);
         if clicks.len() >= 2 && self.active_drawing().is_some() {
             self.run_op_with(
                 "draft.line",
@@ -5529,6 +5599,7 @@ impl App {
                         ),
                     ),
                     ("closed", PropertyValue::Bool(closed)),
+                    ("dimensions", PropertyValue::Ints(typed)),
                 ],
             );
         } else if clicks.len() >= 2 {
@@ -5834,7 +5905,11 @@ impl App {
                         }
                     }
                     // Drawn in drawings, which every sketch now is.
-                    Tool::Circle2 | Tool::Circle3 | Tool::ArcCentre => {
+                    Tool::Circle2
+                    | Tool::Circle3
+                    | Tool::ArcCentre
+                    | Tool::RectangleCentre
+                    | Tool::TangentArc => {
                         self.status("this tool draws in a drawing: F2 to open one");
                     }
                     Tool::Rectangle | Tool::Circle | Tool::Arc | Tool::Polygon | Tool::Slot => {
@@ -6020,6 +6095,48 @@ impl App {
                         let extend = self.input.shift_down;
                         let g = self.sketch_geometry().unwrap_or_default();
                         let lines_of = |pick: Pick| g.lines_of(pick);
+                        let at = self.sketch_cursor();
+                        let now = std::time::Instant::now();
+                        let double =
+                            self.sketching
+                                .last_press
+                                .zip(at)
+                                .is_some_and(|((t, p), a)| {
+                                    now.duration_since(t).as_millis() < 400 && p.distance(a) < 6.0
+                                });
+                        self.sketching.last_press = at.map(|a| (now, a));
+                        // Ctrl (Cmd on a Mac) takes what is clicked back out.
+                        if self.input.ctrl_down || self.input.command_down {
+                            match pick {
+                                Some(Pick::Point(v)) => self.sketching.points.retain(|p| *p != v),
+                                Some(other) => {
+                                    let ls = lines_of(other);
+                                    self.sketching.lines.retain(|l| !ls.contains(l));
+                                }
+                                None => {}
+                            }
+                            self.redraw.set(RedrawReason::UI);
+                            return true;
+                        }
+                        // A double-click on a curve of a drawing: all of the
+                        // chain it is joined into, as Fusion selects one.
+                        if let (true, Some(e)) = (double, pick.and_then(|k| g.entity_of(k))) {
+                            let chain = g.chain_of(e);
+                            if !extend {
+                                self.sketching.points.clear();
+                                self.sketching.lines.clear();
+                            }
+                            for l in 0..g.lines.len() as u32 {
+                                if g.entity_of_line(l).is_some_and(|x| chain.contains(&x))
+                                    && !self.sketching.lines.contains(&l)
+                                {
+                                    self.sketching.lines.push(l);
+                                }
+                            }
+                            self.sketching.drag = None;
+                            self.redraw.set(RedrawReason::UI);
+                            return true;
+                        }
                         // Taking hold of what is already selected drags all
                         // of it; anything else is selected first (Shift adds).
                         let held = match pick {
@@ -6093,6 +6210,7 @@ impl App {
                                     entities.push(e.0);
                                 }
                             }
+                            self.settle_sketch_drag();
                             self.sketching.drag = Some(kreate::sketching::SketchDrag {
                                 points,
                                 anchor,
@@ -6194,9 +6312,25 @@ impl App {
             // Offset: the selected curves, as far as the click is from the
             // first of them, to its side — or as typed.
             Tool::Offset => {
-                let ids = g.entities_in(&[], &self.sketching.lines);
-                if let Some(first) = ids.first().and_then(|i| d.curve(EntityId(*i))) {
-                    let (_, near) = first.closest(p);
+                // What is selected; else the chain clicked, as Fusion takes
+                // it — then the next click says how far.
+                let mut ids = g.entities_in(&[], &self.sketching.lines);
+                if ids.is_empty() {
+                    if let Some(e) = pick.and_then(|k| g.entity_of(k)) {
+                        let chain = g.chain_of(e);
+                        self.sketching.lines = (0..g.lines.len() as u32)
+                            .filter(|l| g.entity_of_line(*l).is_some_and(|x| chain.contains(&x)))
+                            .collect();
+                    }
+                    return;
+                }
+                ids.retain(|i| d.curve(EntityId(*i)).is_some());
+                let nearest = ids
+                    .iter()
+                    .filter_map(|i| d.curve(EntityId(*i)))
+                    .map(|c| c.closest(p).1)
+                    .min_by(|a, b| a.distance(p).total_cmp(&b.distance(p)));
+                if let Some(near) = nearest {
                     let distance = typed.first().map(|t| t.abs()).unwrap_or(near.distance(p));
                     if distance > 1e-9 {
                         // One step for them all: the panel's distance after
@@ -6269,7 +6403,51 @@ impl App {
                     ],
                 );
             }
+            // The tangent arc: first the end it runs on from, then where it
+            // ends.
+            Tool::TangentArc => match self.sketching.tangent {
+                None => {
+                    let end = match pick {
+                        Some(Pick::Point(v)) => g
+                            .map
+                            .as_ref()
+                            .map(|m| m.refs[v as usize].clone())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .find(|r| {
+                                matches!(r.part, Part::Start | Part::End)
+                                    && d.curve(r.entity).is_some()
+                            }),
+                        _ => None,
+                    };
+                    let Some(r) = end else {
+                        self.status(&self.ui.catalog.get("sketch-prompt-tangent-start"));
+                        return;
+                    };
+                    let (Some(c), Some(at)) = (d.curve(r.entity), d.point_of(r)) else {
+                        return;
+                    };
+                    let (lo, hi) = c.domain();
+                    let along = if r.part == Part::Start {
+                        -c.derivative(lo)
+                    } else {
+                        c.derivative(hi)
+                    };
+                    self.sketching.tangent = Some((r, at, along.normalize_or_zero()));
+                    self.sketching.clicks.push((at, 0));
+                }
+                Some((_, start, along)) => {
+                    // From the end, along it: joined there and held tangent
+                    // by the operator.
+                    self.run_op_with(
+                        "draft.tangent_arc",
+                        &[("start", v3(start)), ("dir", v3(along)), ("end", v3(p))],
+                    );
+                    self.sketch_tool_done();
+                }
+            },
             Tool::Rectangle
+            | Tool::RectangleCentre
             | Tool::Circle
             | Tool::Circle2
             | Tool::Circle3
@@ -6430,6 +6608,17 @@ impl App {
                                 ("start", v3(c[1])),
                                 ("end", v3(c[2])),
                                 ("width", PropertyValue::Float(w)),
+                            ],
+                        );
+                        self.sketch_tool_done();
+                    }
+                    (Tool::RectangleCentre, 2) => {
+                        self.run_op_with(
+                            "draft.rectangle",
+                            &[
+                                ("a", v3(c[0])),
+                                ("b", v3(c[1])),
+                                ("centred", PropertyValue::Bool(true)),
                             ],
                         );
                         self.sketch_tool_done();
@@ -6788,6 +6977,13 @@ impl App {
             KeyCode::Backspace if drawing => {
                 if self.sketching.typed.pop().is_none() {
                     self.sketching.clicks.pop();
+                    // With the last click goes the end a tangent arc ran on
+                    // from: left, the next click still used it.
+                    if self.sketching.clicks.is_empty() {
+                        self.sketching.tangent = None;
+                    }
+                    let segments = self.sketching.clicks.len().saturating_sub(1) as u32;
+                    self.sketching.typed_segments.retain(|s| *s < segments);
                 }
                 self.redraw.set(RedrawReason::UI);
                 true
@@ -6804,9 +7000,20 @@ impl App {
                 );
                 let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
                 match (tool, lengths.as_slice()) {
-                    (Tool::Line, [length, ..]) => {
-                        let next = kreate::sketching::along(last, toward, *length);
+                    // A length, and with it an angle in degrees from the
+                    // drawing's X, as Fusion's two fields take them: the
+                    // length stays as the segment's dimension.
+                    (Tool::Line, [length, rest @ ..]) => {
+                        let next = match rest.first() {
+                            Some(angle) => {
+                                let a = (angle / unit).to_radians();
+                                last + glam::DVec2::new(a.cos(), a.sin()) * length.abs()
+                            }
+                            None => kreate::sketching::along(last, toward, *length),
+                        };
                         self.sketching.clicks.push((next, 0));
+                        let segment = self.sketching.clicks.len() as u32 - 2;
+                        self.sketching.typed_segments.push(segment);
                         self.sketching.typed.clear();
                     }
                     (Tool::Line, []) => self.commit_sketch_line(false),
@@ -6814,7 +7021,14 @@ impl App {
                     (Tool::Rectangle, [w, h, ..]) if self.active_drawing().is_some() => {
                         let first = self.sketching.clicks[0];
                         let far = kreate::sketching::corner(first.0, toward, *w, *h);
-                        self.run_op_with("draft.rectangle", &[("a", v3(first.0)), ("b", v3(far))]);
+                        self.run_op_with(
+                            "draft.rectangle",
+                            &[
+                                ("a", v3(first.0)),
+                                ("b", v3(far)),
+                                ("dimensioned", PropertyValue::Bool(true)),
+                            ],
+                        );
                         self.sketch_tool_done();
                     }
                     (Tool::Circle, [d, ..]) if self.active_drawing().is_some() => {
@@ -6824,6 +7038,7 @@ impl App {
                             &[
                                 ("centre", v3(first.0)),
                                 ("radius", PropertyValue::Float(d.abs() * 0.5)),
+                                ("dimensioned", PropertyValue::Bool(true)),
                             ],
                         );
                         self.sketch_tool_done();
@@ -7773,7 +7988,13 @@ impl App {
                         chat.set_provider(provider);
                     }
                     self.ui.chat_provider = index;
-                    self.ui.chat_models.clear();
+                    // A program's own list now; Ollama's when it answers.
+                    self.ui.chat_models = self
+                        .chat
+                        .as_ref()
+                        .map(|c| c.model_names())
+                        .unwrap_or_default();
+                    self.ui.chat_model = self.chat.as_ref().map_or(0, |c| c.model_index());
                     self.ui.chat_log.clear();
                     self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
                     self.ui.chat_busy = false;
@@ -7781,7 +8002,15 @@ impl App {
                 Command::ChatModel { index } => {
                     if let Some(chat) = &mut self.chat {
                         chat.set_model(index);
-                        self.ui.chat_model = chat.model().unwrap_or(0);
+                        self.ui.chat_models = chat.model_names();
+                        self.ui.chat_model = chat.model_index();
+                    }
+                }
+                Command::ChatModelName { name } => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.set_model_name(&name);
+                        self.ui.chat_models = chat.model_names();
+                        self.ui.chat_model = chat.model_index();
                     }
                 }
                 Command::ChatSignIn => {
@@ -7920,8 +8149,21 @@ impl App {
                     }
                 }
                 Command::MoveObjectToCollection { object, collection } => {
-                    let uid = shell::object_from_key(&self.doc, object)
-                        .and_then(|id| self.doc.object_uid(id));
+                    let id = shell::object_from_key(&self.doc, object);
+                    let uid = id.and_then(|id| self.doc.object_uid(id));
+                    // A child dropped on the scene's own row comes off its
+                    // parent: there was a way to hang one object on another
+                    // in the outliner and none to take it down again.
+                    let child = id
+                        .and_then(|id| self.doc.object(id))
+                        .is_some_and(|o| o.parent.is_some());
+                    if let (true, true, Some(uid)) = (collection.is_empty(), child, uid) {
+                        let mut params = PropertyMap::new();
+                        params.set("child", PropertyValue::Text(uid.raw().to_string()));
+                        params.set("parent", PropertyValue::Text(String::new()));
+                        self.run_op("object.parent_one", params);
+                        continue;
+                    }
                     if let Some(uid) = uid {
                         let mut params = PropertyMap::new();
                         params.set("uid", PropertyValue::Text(uid.raw().to_string()));
@@ -8253,6 +8495,16 @@ impl App {
                 }
                 Command::ExportSheet { pdf } => self.export_sheet(pdf),
                 Command::PickWorldImage => self.pick_world_image(),
+                Command::EnvironmentAdd => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("HDRI", &["hdr", "exr"])
+                        .set_title("Environment")
+                        .pick_file()
+                    {
+                        shell::choose_environment_file(&mut self.ui, Some(path));
+                        self.redraw.set(RedrawReason::SETTINGS);
+                    }
+                }
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
                 Command::PickLightProfile => self.pick_light_profile(),
@@ -8271,7 +8523,23 @@ impl App {
                 }
                 Command::ClearWorldImage => self.clear_world_image(),
                 Command::RecoverDocument { path } => {
+                    // Asked first, as every other way of opening is: this
+                    // replaces what is open.
+                    if !self.confirm_discarding_changes("unsaved-what-open") {
+                        continue;
+                    }
                     self.load_from(&path);
+                    // Only what was recovered is forgotten: an autosave that
+                    // could not be read was deleted all the same, and the
+                    // open document lost its file.
+                    if self
+                        .ui
+                        .status
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with("cannot"))
+                    {
+                        continue;
+                    }
                     // The recovered document deliberately keeps *no* path: it
                     // came from an autosave, and inheriting that path would make
                     // the next Ctrl+S write back into the autosave directory
@@ -9384,6 +9652,14 @@ impl App {
     /// the old caches shows the previous file's geometry — which reads as the
     /// open having silently failed.
     fn adopt(&mut self, document: Document) {
+        // What was under way was under way on the document that is going:
+        // a drag left live put the old document back on its next move.
+        self.cancel_gesture();
+        self.cancel_uv_gesture();
+        self.cancel_sketch_drag();
+        self.cancel_curve_drag();
+        self.sketch_drag_session = None;
+        self.sketching = Default::default();
         self.doc = document;
         // Local view named objects of the scene that went; in the new one the
         // same numbers are other objects, or none.
@@ -9502,6 +9778,7 @@ impl App {
     }
 
     fn undo(&mut self) {
+        self.forget_sketch_picks();
         if self.history.undo(&mut self.doc) {
             self.collab_after_undo();
             println!("  undo");
@@ -9512,6 +9789,7 @@ impl App {
     }
 
     fn redo(&mut self) {
+        self.forget_sketch_picks();
         match self
             .history
             .redo(&self.registry, &mut self.doc, &self.op_ctx)
@@ -10307,12 +10585,13 @@ impl App {
                 changed = true;
                 let target =
                     ViewportTarget::new(&gfx.gpu.device, &mut gfx.egui_renderer, size.0, size.1);
-                let viewport = Viewport::new(
+                let mut viewport = Viewport::new(
                     &gfx.gpu.device,
                     ViewportTarget::FORMAT,
                     target.size.0,
                     target.size.1,
                 );
+                viewport.path_trace_allowed = gfx.gpu.info.can_path_trace();
                 ExtraView {
                     viewport,
                     target,
@@ -10392,6 +10671,11 @@ impl App {
     /// arrive between frames.
     fn press_belongs_to_viewport(&self) -> bool {
         if !self.cursor_in_viewport() {
+            return false;
+        }
+        // A pie or the search is open over the view, and the click is its:
+        // picking a pie's entry also picked whatever lay under it.
+        if self.ui.overlay_open() {
             return false;
         }
         let Some((x, y)) = self.input.cursor else {
@@ -13152,12 +13436,23 @@ impl App {
             v.viewport.path_trace_when_still = self.ui.trace_when_still;
         }
         let room = self.ui.studio_preset;
+        // The room in use: one of the program's, or a picture of the user's.
+        let studio = match &self.ui.environment_file {
+            Some(file) => StudioKey::File(file.clone()),
+            None => StudioKey::Room(room),
+        };
+        let custom = matches!(studio, StudioKey::File(_));
         let preview = match gfx.viewport.shading {
+            kreate_render::ShadingMode::Material if custom => Some(scenelights::file_environment()),
             kreate_render::ShadingMode::Material => {
                 Some(scenelights::material_preview_in(self.camera.rotation, room))
             }
             kreate_render::ShadingMode::Rendered if scenelights::uses_studio(&self.doc) => {
-                Some(scenelights::rendered_studio_in(&self.doc, room))
+                Some(if custom {
+                    scenelights::file_environment()
+                } else {
+                    scenelights::rendered_studio_in(&self.doc, room)
+                })
             }
             _ => None,
         };
@@ -13182,35 +13477,56 @@ impl App {
                 // one in use: six faces and their mips are not a frame's cost.
                 self.environment = None;
                 let (device, queue) = (&gfx.gpu.device, &gfx.gpu.queue);
-                let upload = self.studio_environment != Some(room);
-                let pixels = (upload || fresh).then(|| kreate_render::studio::equirect_of(room));
-                gfx.viewport.set_world(preview.world);
-                if upload {
-                    if let Some(pixels) = &pixels {
-                        gfx.viewport.set_environment(
-                            device,
-                            queue,
+                let upload = self.studio_environment.as_ref() != Some(&studio);
+                // Its picture, with its size: the room's own, or the file's
+                // — read once, when it comes into use.
+                let pixels: Option<(u32, u32, Vec<u8>)> = if upload || fresh {
+                    match &studio {
+                        StudioKey::Room(room) => Some((
                             kreate_render::studio::WIDTH,
                             kreate_render::studio::HEIGHT,
-                            pixels,
-                        );
+                            kreate_render::studio::equirect_of(*room),
+                        )),
+                        StudioKey::File(file) => {
+                            match kreate_io::load_image_file(file, kreate_scene::ColorSpace::Srgb) {
+                                Ok(image) => Some((
+                                    image.width(),
+                                    image.height(),
+                                    kreate::environment::pixels_of(&image),
+                                )),
+                                Err(e) => {
+                                    // Gone, or not a picture: back to the
+                                    // room, and said.
+                                    self.ui.status =
+                                        Some(format!("cannot read {}: {e}", file.display()));
+                                    self.ui.environment_file = None;
+                                    None
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
+                gfx.viewport.set_world(preview.world);
+                if upload {
+                    if let Some((width, height, pixels)) = &pixels {
+                        gfx.viewport
+                            .set_environment(device, queue, *width, *height, pixels);
                     }
                 }
                 for v in gfx.extra.values_mut() {
                     v.viewport.set_world(preview.world);
                     if upload || v.fresh {
-                        if let Some(pixels) = &pixels {
-                            v.viewport.set_environment(
-                                device,
-                                queue,
-                                kreate_render::studio::WIDTH,
-                                kreate_render::studio::HEIGHT,
-                                pixels,
-                            );
+                        if let Some((width, height, pixels)) = &pixels {
+                            v.viewport
+                                .set_environment(device, queue, *width, *height, pixels);
                         }
                     }
                 }
-                self.studio_environment = Some(room);
+                if !upload || pixels.is_some() {
+                    self.studio_environment = Some(studio);
+                }
             } else {
                 // Out of the studio: its room goes, and the scene's own sky
                 // is rebuilt below as if it had never been there.
@@ -14129,7 +14445,12 @@ impl App {
                 _ => {}
             }
         }
-        if self.measure.is_some() {
+        // What is typed into a field — the chat, a panel's number, the
+        // search — is the field's: the tools below take digits, Enter,
+        // Backspace and Escape, and took them from there too. "make it 40
+        // wide" in the chat drew a line 40 long.
+        let typing = self.ui.egui_wants_keyboard || self.ui.ime_active || self.ui.overlay_open();
+        if self.measure.is_some() && !typing {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space
                     if self.measure.as_ref().is_some_and(|t| t.path) =>
@@ -14152,7 +14473,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.knife.is_some() {
+        if self.knife.is_some() && !typing {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
                     self.commit_knife();
@@ -14172,7 +14493,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.op_ctx.mode == OpMode::Sketch && self.sketch_key(code) {
+        if self.op_ctx.mode == OpMode::Sketch && !typing && self.sketch_key(code) {
             return;
         }
         if self.loop_cut_hover.is_some() && code == KeyCode::Escape {
@@ -14188,7 +14509,13 @@ impl App {
             // is nothing to cancel — so it does nothing, as in Blender. It used
             // to quit, which is what a Blender user's hand does after every
             // transform: a session lost to the key that means "never mind".
-            KeyCode::Escape => return,
+            KeyCode::Escape => {
+                // And a binding waiting for its key stops waiting.
+                if self.ui.capturing.take().is_some() {
+                    self.redraw.set(RedrawReason::UI);
+                }
+                return;
+            }
             // Quit on the key every application quits on.
             KeyCode::KeyQ
                 if self.input.ctrl_down && !self.input.shift_down && !self.input.alt_down =>
@@ -14207,6 +14534,22 @@ impl App {
         // command. Checked before the keymap gate, because the gate is exactly
         // what capturing turns off.
         if let Some(id) = self.ui.capturing.clone() {
+            // A modifier going down is the start of a chord, not the key:
+            // taken as "a key with no name", Ctrl on the way to Ctrl+E ended
+            // the capture with nothing bound.
+            if matches!(
+                code,
+                KeyCode::ControlLeft
+                    | KeyCode::ControlRight
+                    | KeyCode::ShiftLeft
+                    | KeyCode::ShiftRight
+                    | KeyCode::AltLeft
+                    | KeyCode::AltRight
+                    | KeyCode::SuperLeft
+                    | KeyCode::SuperRight
+            ) {
+                return;
+            }
             if let Some(name) = key_name(code) {
                 let change = kreate_ui::keymap_editor::capture(
                     self.key_overrides.get(&id),
@@ -15095,7 +15438,15 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::Digit3 => "Digit3",
         KeyCode::Digit4 => "Digit4",
         KeyCode::Digit5 => "Digit5",
+        KeyCode::Digit6 => "Digit6",
+        KeyCode::Digit7 => "Digit7",
+        KeyCode::Digit8 => "Digit8",
+        KeyCode::Digit9 => "Digit9",
+        KeyCode::Digit0 => "Digit0",
+        KeyCode::NumpadMultiply => "NumpadMultiply",
         KeyCode::Tab => "Tab",
+        KeyCode::Delete => "Delete",
+        KeyCode::Backspace => "Backspace",
         KeyCode::Backquote => "Backquote",
         KeyCode::Space => "Space",
         KeyCode::ArrowLeft => "ArrowLeft",
@@ -15313,11 +15664,9 @@ impl ApplicationHandler for App {
 
     /// A connector request is waiting. See `kreate::bridge`.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        self.serve_bridge();
         self.serve_chat();
         self.serve_outbox();
-        self.serve_assets();
-        self.serve_imports();
+        self.serve_arrivals();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -15432,6 +15781,7 @@ impl ApplicationHandler for App {
                 target.size.0,
                 target.size.1,
             );
+            viewport.path_trace_allowed = gpu.info.can_path_trace();
             // A moving view smoothed as a still one is: see
             // `Viewport::temporal_aa`.
             viewport.temporal_aa = true;
@@ -16019,6 +16369,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.arrivals_waiting {
+            self.serve_arrivals();
+        }
         self.collab_tick();
         self.poll_bake();
         self.publish_imports();
@@ -16742,6 +17095,8 @@ fn main() {
     // Asked once at start, off the main thread: the panel shows who it will
     // talk as before anything is typed.
     chat.check_account();
+    app.ui.chat_models = chat.model_names();
+    app.ui.chat_model = chat.model_index();
     app.chat = Some(chat);
     app.restore_chat();
     let outbox_proxy = std::sync::Mutex::new(event_loop.create_proxy());
@@ -19447,6 +19802,63 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         assert!(view.lines.len() >= 5);
     }
 
+    /// Typed lengths stay as dimensions, and a tangent arc runs on from a
+    /// line's end held tangent to it.
+    #[test]
+    fn typed_lengths_are_dimensioned_and_an_arc_runs_on_tangent() {
+        use kreate::sketching::{Pick, Tool};
+        use kreate_scene::drawing::{Constraint, EntityId, EntityKind, EntityRef, Part};
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        app.update_ui_state_for_test();
+        let unit = app.doc.design.length_unit.metres();
+        app.sketching.take(Tool::Line);
+        app.sketching.clicks = vec![(glam::DVec2::ZERO, 0)];
+        app.sketching.hover = Some((glam::DVec2::new(1.0, 0.0), 0));
+        app.sketching.typed = "40".into();
+        assert!(app.sketch_key(KeyCode::Enter));
+        assert!(
+            app.sketch_key(KeyCode::Enter),
+            "an empty Enter ends the line"
+        );
+        let d = app.active_drawing().unwrap();
+        let dims: Vec<f64> = d
+            .entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Dimension(x) => Some(x.value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dims.len(), 1);
+        assert!((dims[0] - 40.0 * unit).abs() < 1e-12, "{dims:?}");
+        // The tangent arc: the line's far end, then where it goes.
+        let end = EntityRef::at(EntityId(1), Part::End);
+        let g = app.sketch_geometry().unwrap();
+        let v = (0..g.points.len() as u32)
+            .find(|v| g.map.as_ref().unwrap().refs[*v as usize].contains(&end))
+            .unwrap();
+        app.sketching.take(Tool::TangentArc);
+        let tip = 40.0 * unit;
+        app.drawing_click(
+            Tool::TangentArc,
+            glam::DVec2::new(tip, 0.0),
+            Some(Pick::Point(v)),
+        );
+        assert!(app.sketching.tangent.is_some());
+        app.drawing_click(
+            Tool::TangentArc,
+            glam::DVec2::new(tip + 10.0 * unit, 10.0 * unit),
+            None,
+        );
+        let d = app.active_drawing().unwrap();
+        assert!(d
+            .constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::Tangent(..))));
+    }
+
     /// F2 goes into the drawing and out again; in 2D what would turn the
     /// view pans it, and Ctrl+F2 is what renames.
     #[test]
@@ -19877,4 +20289,12 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         let own = app.build_own_snap_world();
         assert_eq!(own.verts.len(), 16);
     }
+}
+
+/// Which studio the views are lit by: one of the program's rooms, or an
+/// HDRI file of the user's.
+#[derive(Clone, Debug, PartialEq)]
+enum StudioKey {
+    Room(kreate_render::studio::Preset),
+    File(std::path::PathBuf),
 }

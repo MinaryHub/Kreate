@@ -268,6 +268,34 @@ fn relate_new(d: &mut Drawing, first: u32) {
     d.constraints.extend(add);
 }
 
+/// A driving dimension on what was just drawn, as a typed number makes one
+/// in Fusion: its value what the geometry measures, its text off to the
+/// side at `at`.
+fn add_dimension(d: &mut Drawing, kind: DimKind, refs: Vec<EntityRef>, at: DVec2) {
+    let mut dim = Dimension {
+        kind,
+        refs,
+        text_at: at,
+        style: String::new(),
+        driving: true,
+        value: 0.0,
+        text: None,
+        tolerance: None,
+    };
+    let now =
+        kreate_scene::drawing_solve::measure(&dim, &|r| d.point_of(r), &|id| d.curve(id).cloned());
+    if let Some(now) = now {
+        dim.value = now.abs();
+        d.add(EntityKind::Dimension(dim));
+    }
+}
+
+/// Where a line's dimension is written: beside its middle, a fifth of its
+/// length off to its left.
+fn beside(a: DVec2, b: DVec2) -> DVec2 {
+    (a + b) * 0.5 + (b - a).perp() * 0.2
+}
+
 /// Whether anything holds an entity: a constraint or a driving dimension.
 fn held(d: &Drawing, id: EntityId) -> bool {
     d.constraints.iter().any(|c| c.entities().contains(&id))
@@ -417,6 +445,10 @@ pub struct DraftLineParams {
     pub points: Vec<f64>,
     /// Back from the last to the first.
     pub closed: bool,
+    /// The segments, by their place, whose length was typed: each gets a
+    /// driving dimension, as a typed length does in Fusion.
+    #[param(hidden)]
+    pub dimensions: Vec<u32>,
 }
 
 /// Lines from point to point, each one's end held to the next one's start,
@@ -450,7 +482,18 @@ impl Operator for DraftLine {
             return Err(OpError::Failed("a line needs two points".into()));
         }
         draw(doc, |d| {
-            chain(d, &pts, params.closed);
+            let ids = chain(d, &pts, params.closed);
+            for k in &params.dimensions {
+                if let Some(id) = ids.get(*k as usize) {
+                    let (a, b) = (pts[*k as usize], pts[(*k as usize + 1) % pts.len()]);
+                    add_dimension(
+                        d,
+                        DimKind::Aligned,
+                        vec![EntityRef::whole(*id)],
+                        beside(a, b),
+                    );
+                }
+            }
             Ok(())
         })
     }
@@ -491,6 +534,9 @@ pub struct DraftRectangleParams {
     pub b: [f64; 3],
     /// `a` is the centre and `b` a corner, instead of two corners.
     pub centred: bool,
+    /// Its width and height dimensioned, as typed ones are.
+    #[param(hidden)]
+    pub dimensioned: bool,
 }
 
 /// Four lines, square: two level, two upright, their corners held.
@@ -526,7 +572,19 @@ impl Operator for DraftRectangle {
         }
         let corners = [a, DVec2::new(b.x, a.y), b, DVec2::new(a.x, b.y)];
         draw(doc, |d| {
-            chain(d, &corners, true);
+            let sides = chain(d, &corners, true);
+            if params.dimensioned {
+                // The width on the first side, the height on the second.
+                for k in 0..2 {
+                    let (p, q) = (corners[k], corners[k + 1]);
+                    add_dimension(
+                        d,
+                        DimKind::Aligned,
+                        vec![EntityRef::whole(sides[k])],
+                        beside(p, q),
+                    );
+                }
+            }
             Ok(())
         })
     }
@@ -538,6 +596,9 @@ pub struct DraftCircleParams {
     pub centre: [f64; 3],
     #[param(unit = "length", min = 0.0)]
     pub radius: f64,
+    /// Its diameter dimensioned, as a typed one is.
+    #[param(hidden)]
+    pub dimensioned: bool,
 }
 
 pub struct DraftCircle;
@@ -562,10 +623,15 @@ impl Operator for DraftCircle {
             return Err(OpError::Failed("a circle needs a radius".into()));
         }
         draw(doc, |d| {
-            d.add_curve(Curve2D::Circle {
-                c: xy(params.centre),
+            let c = xy(params.centre);
+            let id = d.add_curve(Curve2D::Circle {
+                c,
                 r: params.radius,
             });
+            if params.dimensioned {
+                let at = c + DVec2::new(1.0, 1.0).normalize() * params.radius * 1.4;
+                add_dimension(d, DimKind::Diameter, vec![EntityRef::whole(id)], at);
+            }
             Ok(())
         })
     }
@@ -969,13 +1035,26 @@ impl Operator for DraftDimension {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+#[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct DraftDimensionSetParams {
     /// The dimension's id.
     pub id: u32,
     pub value: f64,
     /// Whether it holds the geometry (driving) or only measures (driven).
     pub driving: bool,
+}
+
+impl Default for DraftDimensionSetParams {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            value: 0.0,
+            // As `draft.dimension` makes them: a script that sets a value
+            // and says no more means the geometry to follow. Left false,
+            // the dimension turned driven and read its old size back.
+            driving: true,
+        }
+    }
 }
 
 /// A dimension's new value, and the geometry following it.
@@ -1402,33 +1481,197 @@ impl Operator for DraftOffset {
             params.ids.clone()
         };
         edit(doc, |d| {
-            for id in &ids {
-                let curve = d
-                    .curve(EntityId(*id))
-                    .cloned()
-                    .ok_or_else(|| OpError::Failed(format!("{id} is not a curve")))?;
-                // Left of travel or right: whichever is nearer the point —
-                // and the other, for a distance given negative.
-                let tol = params.distance.abs() * 1e-3;
-                let left = curve.offset(params.distance.abs(), tol);
-                let right = curve.offset(-params.distance.abs(), tol);
-                let near = |c: &Option<Curve2D>| {
-                    c.as_ref()
-                        .map_or(f64::MAX, |c| c.closest(toward).1.distance(toward))
-                };
-                let toward_left = near(&left) <= near(&right);
-                let chosen = if toward_left == (params.distance > 0.0) {
-                    left
-                } else {
-                    right
-                };
-                let made =
-                    chosen.ok_or_else(|| OpError::Failed("nothing is left that far in".into()))?;
-                d.add_curve(made);
-            }
+            offset_chains(d, &ids, params.distance, toward)?;
             Ok(())
         })
     }
+}
+
+/// The curves `ids` offset `distance` toward `toward`, as Fusion offsets:
+/// curves joined end to end are one chain, offset to one side together, and
+/// the copies meet at their corners again — lines where they cross, other
+/// curves trimmed where they cross or joined round the old corner by an arc.
+/// A negative distance goes to the other side. The new curves' ids.
+fn offset_chains(
+    d: &mut Drawing,
+    ids: &[u32],
+    distance: f64,
+    toward: DVec2,
+) -> Result<Vec<EntityId>, OpError> {
+    let mut curves: Vec<(EntityId, Curve2D)> = Vec::new();
+    for id in ids {
+        let c = d
+            .curve(EntityId(*id))
+            .cloned()
+            .ok_or_else(|| OpError::Failed(format!("{id} is not a curve")))?;
+        curves.push((EntityId(*id), c));
+    }
+    let mut made = Vec::new();
+    for (chain, closed) in chains(curves) {
+        made.extend(offset_chain(d, &chain, closed, distance, toward)?);
+    }
+    Ok(made)
+}
+
+/// Curves sorted into chains: each run end to start, turned round where it
+/// was drawn the other way, and whether it closes on itself.
+fn chains(mut left: Vec<(EntityId, Curve2D)>) -> Vec<(Vec<Curve2D>, bool)> {
+    let same = |a: DVec2, b: DVec2| a.distance(b) <= 1e-9 * a.length().max(1.0);
+    let mut out = Vec::new();
+    while !left.is_empty() {
+        let (_, first) = left.remove(0);
+        let mut chain = vec![first];
+        // On forward from the end, then back from the start.
+        loop {
+            let end = chain.last().unwrap().end();
+            let Some(k) = left
+                .iter()
+                .position(|(_, c)| same(c.start(), end) || same(c.end(), end))
+            else {
+                break;
+            };
+            let (_, c) = left.remove(k);
+            chain.push(if same(c.start(), end) {
+                c
+            } else {
+                c.reversed()
+            });
+        }
+        loop {
+            let start = chain[0].start();
+            let Some(k) = left
+                .iter()
+                .position(|(_, c)| same(c.start(), start) || same(c.end(), start))
+            else {
+                break;
+            };
+            let (_, c) = left.remove(k);
+            chain.insert(
+                0,
+                if same(c.end(), start) {
+                    c
+                } else {
+                    c.reversed()
+                },
+            );
+        }
+        let closed = chain.len() > 1 && same(chain[0].start(), chain.last().unwrap().end())
+            || chain.len() == 1 && chain[0].is_closed();
+        out.push((chain, closed));
+    }
+    out
+}
+
+fn offset_chain(
+    d: &mut Drawing,
+    chain: &[Curve2D],
+    closed: bool,
+    distance: f64,
+    toward: DVec2,
+) -> Result<Vec<EntityId>, OpError> {
+    let tol = distance.abs() * 1e-3;
+    let side = |s: f64| -> Option<Vec<Curve2D>> {
+        chain
+            .iter()
+            .map(|c| c.offset(s * distance.abs(), tol))
+            .collect()
+    };
+    let near = |set: &Option<Vec<Curve2D>>| {
+        set.as_ref().map_or(f64::MAX, |set| {
+            set.iter()
+                .map(|c| c.closest(toward).1.distance(toward))
+                .fold(f64::MAX, f64::min)
+        })
+    };
+    let (left, right) = (side(1.0), side(-1.0));
+    let toward_left = near(&left) <= near(&right);
+    let (pieces, sign) = if toward_left == (distance > 0.0) {
+        (left, 1.0)
+    } else {
+        (right, -1.0)
+    };
+    let Some(mut pieces) = pieces else {
+        return Err(OpError::Failed("nothing is left that far in".into()));
+    };
+    let n = pieces.len();
+    let joints = if closed { n } else { n.saturating_sub(1) };
+    let mut extra: Vec<(usize, Curve2D)> = Vec::new();
+    for k in 0..joints {
+        let j = (k + 1) % n;
+        if n < 2 {
+            break;
+        }
+        let corner = chain[k].end();
+        let (a, b) = (pieces[k].clone(), pieces[j].clone());
+        if a.end().distance(b.start()) <= 1e-9 * corner.length().max(1.0) {
+            continue;
+        }
+        if let (Curve2D::Line { a: a0, b: a1 }, Curve2D::Line { a: b0, b: b1 }) = (&a, &b) {
+            // Two lines: each runs on, or stops short, to where they cross.
+            let (u, v) = (*a1 - *a0, *b1 - *b0);
+            let den = u.perp_dot(v);
+            if den.abs() > 1e-15 {
+                let t = (*b0 - *a0).perp_dot(v) / den;
+                let x = *a0 + u * t;
+                pieces[k] = Curve2D::Line { a: *a0, b: x };
+                pieces[j] = Curve2D::Line { a: x, b: *b1 };
+                continue;
+            }
+        }
+        // Crossing near the corner: both cut back to it.
+        let hit = kreate_geom2d::intersect(&a, &b)
+            .into_iter()
+            .filter_map(|h| match h {
+                kreate_geom2d::Intersection::Point { p, ta, tb } => Some((p, ta, tb)),
+                _ => None,
+            })
+            .min_by(|x, y| x.0.distance(corner).total_cmp(&y.0.distance(corner)));
+        if let Some((_, ta, tb)) = hit {
+            pieces[k] = a.sub(a.domain().0, ta);
+            pieces[j] = b.sub(tb, b.domain().1);
+            continue;
+        }
+        // Apart: round the old corner, the offset of a sharp point.
+        let (s, e) = (a.end() - corner, b.start() - corner);
+        let mut sweep = s.perp_dot(e).atan2(s.dot(e));
+        // The arc goes round the outside of the corner, the side offset to.
+        if sweep.signum() != sign && sweep != 0.0 {
+            sweep -= sign * std::f64::consts::TAU;
+        }
+        extra.push((
+            k,
+            Curve2D::Arc {
+                c: corner,
+                r: distance.abs(),
+                start: s.to_angle(),
+                sweep,
+            },
+        ));
+    }
+    // In chain order, the corner arcs after the piece they follow.
+    let mut ordered: Vec<Curve2D> = Vec::new();
+    for (k, p) in pieces.into_iter().enumerate() {
+        ordered.push(p);
+        ordered.extend(
+            extra
+                .iter()
+                .filter(|(i, _)| *i == k)
+                .map(|(_, c)| c.clone()),
+        );
+    }
+    let ids: Vec<EntityId> = ordered.iter().map(|c| d.add_curve(c.clone())).collect();
+    let m = ids.len();
+    let links = if closed { m } else { m.saturating_sub(1) };
+    for k in 0..links {
+        if m < 2 {
+            break;
+        }
+        d.constraints.push(Constraint::Coincident(
+            EntityRef::at(ids[k], Part::End),
+            EntityRef::at(ids[(k + 1) % m], Part::Start),
+        ));
+    }
+    Ok(ids)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
@@ -1505,6 +1748,35 @@ impl Operator for DraftFillet {
             let arc = d.add_curve(f.arc);
             d.constraints.push(Constraint::Tangent(ia, arc));
             d.constraints.push(Constraint::Tangent(ib, arc));
+            // And each trimmed end on the arc's end it meets: tangency is
+            // to a line's whole length, and without this a radius changed
+            // afterwards left the lines ending where the old arc had been.
+            for curve in [ia, ib] {
+                edit_tools::drop_length_dimensions(d, curve);
+                let mut nearest: Option<(f64, Part, Part)> = None;
+                for end in [Part::Start, Part::End] {
+                    for arc_end in [Part::Start, Part::End] {
+                        let (Some(p), Some(q)) = (
+                            d.point_of(EntityRef::at(curve, end)),
+                            d.point_of(EntityRef::at(arc, arc_end)),
+                        ) else {
+                            continue;
+                        };
+                        let gap = p.distance(q);
+                        if nearest.is_none_or(|n| gap < n.0) {
+                            nearest = Some((gap, end, arc_end));
+                        }
+                    }
+                }
+                if let Some((gap, end, arc_end)) = nearest {
+                    if gap <= 1e-6 {
+                        d.constraints.push(Constraint::Coincident(
+                            EntityRef::at(curve, end),
+                            EntityRef::at(arc, arc_end),
+                        ));
+                    }
+                }
+            }
             // The radius stays a driving dimension, so the round can be
             // made larger or smaller afterwards as any other size is.
             d.add(EntityKind::Dimension(Dimension {
@@ -1764,6 +2036,15 @@ fn copy_moved(d: &mut Drawing, ids: &[EntityId], moves: &[glam::DAffine2]) -> Ve
                 EntityKind::Curve(c) => EntityKind::Curve(c.transformed(m)),
                 EntityKind::Text(mut t) => {
                     t.at = m.transform_point2(t.at);
+                    let (x, y) = (m.matrix2.x_axis, m.matrix2.y_axis);
+                    t.height *= x.perp_dot(y).abs().sqrt();
+                    // Mirrored, it reads the same way round, turned back.
+                    t.rotation = if x.perp_dot(y) < 0.0 {
+                        let along = m.matrix2 * DVec2::from_angle(t.rotation);
+                        along.to_angle() + std::f64::consts::PI
+                    } else {
+                        t.rotation + x.to_angle()
+                    };
                     EntityKind::Text(t)
                 }
                 EntityKind::Dimension(_) => continue,
@@ -2021,6 +2302,128 @@ mod tests {
             let id = active_drawing(&self.doc).expect("a drawing");
             self.doc.object(id).unwrap().drawing.as_deref().unwrap()
         }
+    }
+
+    fn has(d: &Drawing, f: impl Fn(&Constraint) -> bool) -> bool {
+        d.constraints.iter().any(f)
+    }
+
+    fn dims(d: &Drawing) -> Vec<(DimKind, f64)> {
+        d.entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Dimension(x) => Some((x.kind, x.value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Drawn onto a line's middle, a point is its midpoint; onto the rest
+    /// of it, on it; onto a circle, on the circle.
+    #[test]
+    fn a_point_drawn_onto_a_curve_is_held_on_it() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.line(points=[0, 0, 0.04, 0])").unwrap();
+        b.run("draft.circle(centre=(0.1, 0, 0), radius=0.01)")
+            .unwrap();
+        b.run("draft.line(points=[0.02, 0, 0.02, 0.03])").unwrap();
+        b.run("draft.line(points=[0.03, 0, 0.03, 0.03])").unwrap();
+        b.run("draft.line(points=[0.11, 0, 0.11, 0.03])").unwrap();
+        let d = b.drawing();
+        assert!(has(
+            d,
+            |c| matches!(c, Constraint::Midpoint(r, l) if r.entity == EntityId(3) && *l == EntityId(1))
+        ));
+        assert!(has(
+            d,
+            |c| matches!(c, Constraint::PointOn(r, l) if r.entity == EntityId(4) && *l == EntityId(1))
+        ));
+        assert!(has(
+            d,
+            |c| matches!(c, Constraint::PointOn(r, l) if r.entity == EntityId(5) && *l == EntityId(2))
+        ));
+        // Held so: the base line dragged up, the uprights' feet come along.
+        b.run("draft.drag(at=\"1.end\", to=(0.04, 0.01, 0))")
+            .unwrap();
+        let d = b.drawing();
+        let foot = d.point_of(EntityRef::at(EntityId(3), Part::Start)).unwrap();
+        let mid = d.point_of(EntityRef::at(EntityId(1), Part::Mid)).unwrap();
+        assert!(foot.distance(mid) < 1e-7, "{foot} {mid}");
+    }
+
+    /// Typed values stay as dimensions: a line's length, a rectangle's
+    /// width and height, a circle's diameter.
+    #[test]
+    fn typed_values_become_driving_dimensions() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.line(points=[0, 0, 0.03, 0, 0.03, 0.02], dimensions=[1])")
+            .unwrap();
+        b.run("draft.rectangle(a=(0.1, 0, 0), b=(0.14, 0.02, 0), dimensioned=true)")
+            .unwrap();
+        b.run("draft.circle(centre=(0.2, 0, 0), radius=0.005, dimensioned=true)")
+            .unwrap();
+        let got = dims(b.drawing());
+        let want = [
+            (DimKind::Aligned, 0.02),
+            (DimKind::Aligned, 0.04),
+            (DimKind::Aligned, 0.02),
+            (DimKind::Diameter, 0.01),
+        ];
+        assert_eq!(got.len(), 4, "{got:?}");
+        for ((k, v), (wk, wv)) in got.iter().zip(want) {
+            assert_eq!(*k, wk);
+            assert!((v - wv).abs() < 1e-12, "{got:?}");
+        }
+    }
+
+    /// A rectangle's sides offset together: four lines meeting at their
+    /// corners, one region, as large as it should be either way.
+    #[test]
+    fn a_loop_offsets_with_its_corners_joined() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.rectangle(a=(0, 0, 0), b=(0.04, 0.02, 0))")
+            .unwrap();
+        b.run("draft.offset(ids=[1, 2, 3, 4], distance=0.005, toward=(0.02, 0.01, 0))")
+            .unwrap();
+        b.run("draft.offset(ids=[1, 2, 3, 4], distance=0.005, toward=(0.02, -0.01, 0))")
+            .unwrap();
+        let d = b.drawing();
+        let a = areas(d);
+        // Inside 0.03 × 0.01, the original 0.04 × 0.02, outside 0.05 × 0.03
+        // with its corners square: three nested rings.
+        assert_eq!(a.len(), 3, "{a:?}");
+        assert!((a[0] - 0.0003).abs() < 1e-12, "{a:?}");
+        assert!((a[1] - (0.0008 - 0.0003)).abs() < 1e-12, "{a:?}");
+        assert!((a[2] - (0.0015 - 0.0008)).abs() < 1e-12, "{a:?}");
+        let joins = d
+            .constraints
+            .iter()
+            .filter(|c| matches!(c, Constraint::Coincident(x, _) if x.entity.0 > 4))
+            .count();
+        assert_eq!(joins, 8, "each copy's four corners held");
+    }
+
+    /// An open L offset outward meets at a square corner; a line and an arc
+    /// apart are joined round the corner.
+    #[test]
+    fn an_open_chain_offsets_as_one() {
+        let mut b = Bench::new();
+        b.run("draft.new()").unwrap();
+        b.run("draft.line(points=[0, 0, 0.04, 0, 0.04, 0.03])")
+            .unwrap();
+        b.run("draft.offset(ids=[2, 1], distance=0.005, toward=(0.05, -0.01, 0))")
+            .unwrap();
+        let d = b.drawing();
+        let corner = d.point_of(EntityRef::at(EntityId(3), Part::End)).unwrap();
+        let other = d.point_of(EntityRef::at(EntityId(4), Part::Start)).unwrap();
+        assert!(
+            corner.distance(DVec2::new(0.045, -0.005)) < 1e-12,
+            "{corner}"
+        );
+        assert!(corner.distance(other) < 1e-12);
     }
 
     fn areas(d: &Drawing) -> Vec<f64> {

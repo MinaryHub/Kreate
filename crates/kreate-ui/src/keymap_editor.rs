@@ -276,6 +276,10 @@ pub fn capture(existing: Option<&Override>, key: &str, modifiers: Modifiers) -> 
     let mut change = existing.cloned().unwrap_or_default();
     change.input = Some(Input::Key(key.to_string()));
     change.modifiers = Some(modifiers);
+    // A key is pressed. Captured onto a drag or a wheel binding it kept
+    // that event, and "a key, dragged" is something nothing ever is: the
+    // binding was dead until it was reset.
+    change.event = Some(EventKind::Press);
     change
 }
 
@@ -357,7 +361,9 @@ mod tests {
         };
         let change = capture(Some(&existing), "Q", Modifiers::NONE);
         assert_eq!(change.disabled, Some(true));
-        assert_eq!(change.event, Some(EventKind::Drag));
+        // But not the event: a key is pressed, and "Q, dragged" is a
+        // binding nothing can ever trigger.
+        assert_eq!(change.event, Some(EventKind::Press));
         assert_eq!(change.input, Some(Input::key("Q")));
     }
 

@@ -157,6 +157,25 @@ fn free_end(d: &mut Drawing, id: EntityId, part: Part) {
         .map(|e| e.id)
         .collect();
     d.remove(&dims);
+    drop_length_dimensions(d, id);
+}
+
+/// The dimensions of an entity's own length, which an end of it moving has
+/// made untrue: left driving, they pulled the curve straight back to the
+/// length it had (a typed line extended, a dimensioned rectangle's corner
+/// cut). A radius or a diameter is still the curve's and stays.
+pub(super) fn drop_length_dimensions(d: &mut Drawing, id: EntityId) {
+    let dims: Vec<EntityId> = d
+        .entities
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, EntityKind::Dimension(x)
+                if matches!(x.kind, DimKind::Aligned | DimKind::Horizontal | DimKind::Vertical | DimKind::ArcLength)
+                    && x.refs.iter().any(|r| r.entity == id && r.part == Part::Whole))
+        })
+        .map(|e| e.id)
+        .collect();
+    d.remove(&dims);
 }
 
 // --- extend -------------------------------------------------------------------
@@ -403,6 +422,18 @@ impl Operator for DraftBreak {
                     _ => {}
                 }
             }
+            // A dimension to the old end measures to it still.
+            for e in &mut d.entities {
+                if let EntityKind::Dimension(x) = &mut e.kind {
+                    x.refs.iter_mut().for_each(move_end);
+                }
+            }
+            // The curve's middle, or it as a mirror line, meant the whole
+            // of it: on the first piece alone they would pull things about.
+            d.constraints.retain(|c| {
+                !matches!(c, Constraint::Midpoint(_, e) | Constraint::Symmetric(_, _, e)
+                    if *e == target)
+            });
             // The pieces joined end to start.
             for w in ids.windows(2) {
                 d.constraints.push(Constraint::Coincident(
@@ -670,14 +701,45 @@ impl Operator for DraftTransform {
                     }
                 }
             }
-            // Level and upright do not survive a turn.
-            if params.angle.rem_euclid(std::f64::consts::FRAC_PI_2).abs() > 1e-9 {
+            // Level and upright do not survive a turn: a quarter turn makes
+            // each the other, a half turn leaves them, anything else ends
+            // them. (A quarter turn was taken for no turn, and a level line
+            // turned upright was pulled flat to a point.)
+            let quarters = (params.angle / std::f64::consts::FRAC_PI_2).round();
+            let exact = (params.angle - quarters * std::f64::consts::FRAC_PI_2).abs() <= 1e-9;
+            let odd = (quarters as i64).rem_euclid(2) == 1;
+            let moved =
+                |a: &EntityRef, b: &Option<EntityRef>| inside(a) || b.as_ref().is_some_and(inside);
+            if !exact {
                 d.constraints.retain(|c| match c {
-                    Constraint::Horizontal(a, b) | Constraint::Vertical(a, b) => {
-                        !inside(a) && !b.as_ref().is_some_and(inside)
-                    }
+                    Constraint::Horizontal(a, b) | Constraint::Vertical(a, b) => !moved(a, b),
                     _ => true,
                 });
+            } else if odd {
+                for c in &mut d.constraints {
+                    *c = match c {
+                        Constraint::Horizontal(a, b) if moved(a, b) => Constraint::Vertical(*a, *b),
+                        Constraint::Vertical(a, b) if moved(a, b) => Constraint::Horizontal(*a, *b),
+                        _ => continue,
+                    };
+                }
+            }
+            // A dimension along X or Y measures the other way after a
+            // quarter turn, and neither after any other.
+            if !exact || odd {
+                for e in &mut d.entities {
+                    if let EntityKind::Dimension(x) = &mut e.kind {
+                        if !x.refs.iter().all(inside) {
+                            continue;
+                        }
+                        x.kind = match (x.kind, exact) {
+                            (DimKind::Horizontal, true) => DimKind::Vertical,
+                            (DimKind::Vertical, true) => DimKind::Horizontal,
+                            (DimKind::Horizontal | DimKind::Vertical, false) => DimKind::Aligned,
+                            (k, _) => k,
+                        };
+                    }
+                }
             }
             for id in &ids {
                 if let Some(e) = d.entity_mut(*id) {

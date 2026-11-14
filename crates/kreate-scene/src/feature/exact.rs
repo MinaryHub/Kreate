@@ -427,6 +427,7 @@ mod tests {
                 seeds: vec![[0.03, 0.01]],
                 operation: Operation::Join,
                 order: 1,
+                suppressed: false,
             },
             Feature {
                 shape: Shape::Pattern {
@@ -437,6 +438,7 @@ mod tests {
                 seeds: Vec::new(),
                 operation: Operation::Join,
                 order: 2,
+                suppressed: false,
             },
         ];
         let solid = body_solid(&doc, &features, DAffine3::IDENTITY).expect("built exactly");
@@ -475,6 +477,7 @@ mod tests {
             seeds: Vec::new(),
             operation: Operation::Join,
             order: 1,
+            suppressed: false,
         }];
         assert!(body_solid(&doc, &features, DAffine3::IDENTITY).is_none());
     }

@@ -84,6 +84,19 @@ fn studio(yaw: f32, room: Room) -> Preview {
     }
 }
 
+/// A picture of the user's own as the room: it lights the part, is what its
+/// metal reflects, and is what is seen behind it — no lamp beside it, no
+/// backdrop over it, and not turned with the view.
+pub fn file_environment() -> Preview {
+    Preview {
+        world: [0.5, 0.5, 0.52],
+        lights: Vec::new(),
+        exposure: 0.0,
+        yaw: 0.0,
+        backdrop: None,
+    }
+}
+
 /// The preview light for a view turned by `view`: the studio turns with it
 /// about up, as Blender's preview light does, so the key is always over the
 /// viewer's left shoulder and the side being looked at is lit.

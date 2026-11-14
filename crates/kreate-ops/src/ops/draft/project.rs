@@ -13,7 +13,7 @@
 //! meshes: a round hole projects as the many sides its mesh has. With the
 //! exact kernel that will be a circle (design/brep-kernel.md, P4).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use kreate_geom2d::{Curve2D, DVec2};
 use kreate_math::{DAffine3, Vec3};
@@ -129,7 +129,11 @@ fn outline(mesh: &MeshData) -> Vec<Curve2D> {
         }
         n.normalize_or_zero()
     };
-    let mut faces_of: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    // In order, here and below: the curves are numbered as they come out,
+    // and a hash map's order is another each time — the same part gave
+    // "another" outline on every look, which threw away what was held to
+    // the projection, and a redo numbered its lines differently.
+    let mut faces_of: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
     for f in 0..mesh.num_faces() {
         let ring = mesh.face_verts(f);
         for i in 0..ring.len() {
@@ -185,7 +189,7 @@ fn join_straight(
     key: &impl Fn(DVec2) -> (i64, i64),
 ) -> Vec<Curve2D> {
     loop {
-        let mut at: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        let mut at: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
         for (i, s) in segments.iter().enumerate() {
             at.entry(key(s[0])).or_default().push(i);
             at.entry(key(s[1])).or_default().push(i);
@@ -224,6 +228,13 @@ fn join_straight(
             break;
         }
     }
+    // One way round and in one order, whatever order they were joined in.
+    for s in &mut segments {
+        if key(s[1]) < key(s[0]) {
+            s.swap(0, 1);
+        }
+    }
+    segments.sort_by_key(|s| (key(s[0]), key(s[1])));
     segments
         .into_iter()
         .map(|[a, b]| Curve2D::Line { a, b })

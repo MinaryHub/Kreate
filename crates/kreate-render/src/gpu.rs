@@ -50,6 +50,15 @@ pub struct AdapterSummary {
 }
 
 impl AdapterSummary {
+    /// Whether the path tracer can be used on this adapter. Not on
+    /// Windows' software one (WARP, what a virtual machine or a remote
+    /// desktop without a GPU has): it does not get through building the
+    /// tracer's shader — hours, and gigabytes — and asked to, the program
+    /// stood still. The raster passes run there as anywhere.
+    pub fn can_path_trace(&self) -> bool {
+        !(self.backend == "Dx12" && self.device_type == "Cpu")
+    }
+
     fn from_info(info: &wgpu::AdapterInfo) -> Self {
         Self {
             name: info.name.clone(),

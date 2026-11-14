@@ -310,6 +310,10 @@ pub struct ShellState {
     /// The room the lit views and renders show a part in when the scene
     /// brings no light of its own. See `prefs::load_room`.
     pub studio_preset: kreate_render::studio::Preset,
+    /// HDRI files the user has added as environments, and the one in use
+    /// in place of `studio_preset` when one is.
+    pub environment_files: Vec<std::path::PathBuf>,
+    pub environment_file: Option<std::path::PathBuf>,
     /// Whether the rendered view traces whenever it is still.
     pub trace_when_still: bool,
     /// The open document's name, `*` in front while it has unsaved changes:
@@ -333,6 +337,10 @@ pub struct ShellState {
     /// interface, is what sees the key event — the panel only says which binding
     /// is listening.
     pub capturing: Option<kreate_input::BindingId>,
+    /// Whether the keymap editor was drawn this frame: a binding left
+    /// listening after its panel has gone takes the next key pressed
+    /// anywhere, and every shortcut is off until then.
+    pub keymap_editor_shown: bool,
     /// F3's search: open or not, what is typed, what was run from it lately.
     pub palette: kreate_ui::command_palette::PaletteState,
     /// The pie menu that is open, if one is.
@@ -725,7 +733,7 @@ impl ShellState {
             } else if kind == kreate_ui::EditorId::NLA {
                 over(self.nla_views.get(&id).and_then(|s| s.rect))
             } else if kind == kreate_ui::EditorId::GRAPH {
-                over(self.graph_views.get(&id).and_then(|s| s.rect))
+                over(self.graph_views.get(&id).and_then(|s| s.area.or(s.rect)))
             } else {
                 false
             }
@@ -906,6 +914,8 @@ impl Default for ShellState {
             resolution_scale: 1.0,
             punchy: true,
             studio_preset: Default::default(),
+            environment_files: Vec::new(),
+            environment_file: None,
             trace_when_still: true,
             document_title: "untitled".into(),
             adjust_open: false,
@@ -913,6 +923,7 @@ impl Default for ShellState {
             adjust_seen: None,
             appearance: kreate_ui::Appearance::Dark,
             capturing: None,
+            keymap_editor_shown: false,
             palette: Default::default(),
             pie: Default::default(),
             keymap_edits: Vec::new(),
@@ -2508,6 +2519,11 @@ pub fn draw(
     // rather than by each drawer, so an overlay that stops being drawn stops
     // blocking the pointer on the very next frame.
     state.viewport_blockers.clear();
+    // The keymap editor was not drawn last frame: its panel is gone, and a
+    // binding it left listening is let go.
+    if !std::mem::take(&mut state.keymap_editor_shown) {
+        state.capturing = None;
+    }
     // A gesture lasts as long as the pointer is down. Ended here, at the top of
     // the frame, so that a panel changing a value knows whether it is
     // continuing one — see `send_edit`.
@@ -3841,6 +3857,7 @@ fn draw_area(
                         &mut edits,
                     );
                     state.keymap_edits = edits;
+                    state.keymap_editor_shown = true;
                 }
                 // An area naming an editor this build does not have. Said out
                 // loud, with the id it wants, because the likeliest cause is a
@@ -4785,11 +4802,13 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "select",
                         "line",
                         "rectangle",
+                        "rectangle_centre",
                         "circle",
                         "circle_2pt",
                         "circle_3pt",
                         "arc",
                         "arc_centre",
+                        "arc_tangent",
                         "spline",
                         "polygon",
                         "slot",
@@ -4864,6 +4883,8 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "equal",
                         "tangent",
                         "concentric",
+                        "midpoint",
+                        "symmetric",
                         "fixed",
                     ],
                 )
@@ -8449,16 +8470,71 @@ fn draw_render_tab(
                 .catalog
                 .get(&format!("render-environment-{}", p.name()))
         };
-        let mut chosen = state.studio_preset;
+        // A room of the program's, or a picture of the user's own.
+        let file_name = |f: &std::path::Path| {
+            f.file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+        let shown = match &state.environment_file {
+            Some(f) => file_name(f),
+            None => name(state.studio_preset),
+        };
+        let mut room = None;
+        let mut file = None;
+        let mut add = false;
         egui::ComboBox::from_id_salt("render-environment")
-            .selected_text(name(chosen))
+            .selected_text(shown)
             .show_ui(ui, |ui| {
                 for p in Preset::ALL {
-                    ui.selectable_value(&mut chosen, p, name(p));
+                    let on = state.environment_file.is_none() && state.studio_preset == p;
+                    if ui.selectable_label(on, name(p)).clicked() {
+                        room = Some(p);
+                    }
+                }
+                if !state.environment_files.is_empty() {
+                    ui.separator();
+                }
+                for f in &state.environment_files {
+                    let on = state.environment_file.as_ref() == Some(f);
+                    // i18n-exempt: the user's own file's name
+                    if ui
+                        .selectable_label(on, file_name(f))
+                        .on_hover_text(f.display().to_string())
+                        .clicked()
+                    {
+                        file = Some(f.clone());
+                    }
+                }
+                ui.separator();
+                if ui
+                    .button(state.catalog.get("render-environment-add"))
+                    .on_hover_text(state.catalog.get("render-environment-add-desc"))
+                    .clicked()
+                {
+                    add = true;
+                    ui.close();
                 }
             });
-        if chosen != state.studio_preset {
-            choose_environment(state, chosen);
+        if let Some(room) = room {
+            choose_environment(state, room);
+        }
+        if let Some(file) = file {
+            choose_environment_file(state, Some(file));
+        }
+        if add {
+            state.queue.push(Command::EnvironmentAdd);
+        }
+        // The one in use, when it is the user's own, can be taken off the list.
+        if state.environment_file.is_some()
+            && ui
+                .small_button("✕")
+                .on_hover_text(state.catalog.get("render-environment-remove"))
+                .clicked()
+        {
+            let gone = state.environment_file.take();
+            state.environment_files.retain(|f| Some(f) != gone.as_ref());
+            choose_environment_file(state, None);
         }
     });
     // The quality in one choice: samples, bounces and the denoiser together.
@@ -8752,6 +8828,15 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
             kreate_i18n::TextKind::Ui,
             &[("count", "{count}")],
         ),
+        model_default: state
+            .catalog
+            .format("chat-model-default", kreate_i18n::TextKind::Ui, &[]),
+        model_other: state
+            .catalog
+            .format("chat-model-other", kreate_i18n::TextKind::Ui, &[]),
+        model_hint: state
+            .catalog
+            .format("chat-model-hint", kreate_i18n::TextKind::Tooltip, &[]),
     };
     let mut input = std::mem::take(&mut state.chat_input);
     let mut code = std::mem::take(&mut state.chat_code);
@@ -8764,6 +8849,9 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         current: state.chat_provider,
         models: &state.chat_models,
         model: state.chat_model,
+        other: crate::claude::Provider::ALL
+            .get(state.chat_provider)
+            .is_some_and(|p| *p != crate::claude::Provider::Ollama),
     };
     state.chat_focused = kreate_ui::chat::chat(
         ui,
@@ -9666,6 +9754,9 @@ fn draw_geometry_editor(
         open_image: String::new(),
     };
     let mut editor = state.node_views.remove(&area).unwrap_or_default();
+    editor.showing(graph_key(("geometry", doc.selection.active)));
+    // No duplicate, group or clipboard for these yet.
+    editor.plain = true;
     let mut asked = false;
     let edits = kreate_ui::node_editor(ui, view.as_ref(), &mut editor, &text, &mut asked);
     state.node_views.insert(area, editor);
@@ -9725,6 +9816,15 @@ fn draw_geometry_editor(
     }
 }
 
+/// A number for the graph a node editor is showing, from what names it.
+fn graph_key(of: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    of.hash(&mut h);
+    // Never zero, which is "nothing shown yet".
+    h.finish() | 1
+}
+
 /// The shader editor, for the material the Material tab is showing.
 ///
 /// Same slot as the tab: the active object's, the row selected there. One
@@ -9761,6 +9861,8 @@ fn draw_shader_editor(
         open_image: l.node_open_image.clone(),
     };
     let mut editor = state.node_views.remove(&area).unwrap_or_default();
+    editor.showing(graph_key(("shader", doc.selection.active, slot)));
+    editor.plain = false;
     let mut asked = false;
     let edits = kreate_ui::node_editor(ui, view.as_ref(), &mut editor, &text, &mut asked);
     state.node_views.insert(area, editor);
@@ -11257,7 +11359,8 @@ fn draw_recent_menu(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                 .unwrap_or_default();
             let response = ui
                 .add_enabled(path.exists(), egui::Button::new(name))
-                .on_hover_text(path.display().to_string());
+                .on_hover_text(path.display().to_string())
+                .on_disabled_hover_text(path.display().to_string());
             if response.clicked() {
                 state.queue.push(Command::OpenPath(path));
                 ui.close();
@@ -11586,13 +11689,17 @@ fn draw_adjust_fields(
 
     // Reset the editable copy whenever the last operation changes, so the panel
     // always describes what is actually applied.
+    // By where it stands in the history as well as by what it is: the same
+    // operator run twice kept the first run's numbers, and touching a field
+    // sent them to the second.
+    let which = format!("{}@{}", entry.op_id, history.cursor() + history.evicted());
     let stale = state
         .adjust_params
         .as_ref()
-        .map(|(id, _)| id != &entry.op_id)
+        .map(|(id, _)| id != &which)
         .unwrap_or(true);
     if stale {
-        state.adjust_params = Some((entry.op_id.clone(), entry.params.clone()));
+        state.adjust_params = Some((which, entry.params.clone()));
     }
 
     let Some((_, params)) = state.adjust_params.as_mut() else {
@@ -11869,6 +11976,7 @@ fn draw_object_tab(
     });
     draw_arch_panel(ui, state, registry, active);
     draw_follow_path_panel(ui, state, doc, registry, l, active);
+    draw_mate_panel(ui, state, doc, registry, l, active);
     draw_robot_panel(ui, state, doc, object);
     draw_physical_panel(ui, state, doc, registry);
     draw_mesh_check_panel(ui, state, doc, object);
@@ -13033,6 +13141,65 @@ fn draw_follow_path_panel(
     }
 }
 
+/// The active part's mate: what it is against, the gap between the two
+/// faces and how far it is turned about their normal, each to change —
+/// the part is put again by them — and a button to take the mate off.
+fn draw_mate_panel(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    l: &Labels,
+    object: &kreate_scene::document::Object,
+) {
+    let Some(mate) = &object.mate else {
+        return;
+    };
+    let Some(info) = registry.get("object.mate_set") else {
+        return;
+    };
+    let against = doc
+        .object_by_uid(mate.target)
+        .and_then(|id| doc.object(id))
+        .map(|o| o.name.clone());
+    let mut params = PropertyMap::new();
+    params.set("offset", kreate_reflect::PropertyValue::Float(mate.offset));
+    params.set("angle", kreate_reflect::PropertyValue::Float(mate.angle));
+    let title = state.catalog.get("panel-mate");
+    let remove = state.catalog.get("mate-remove");
+    let (_, closed) = kreate_ui::panel::section_closable(ui, &title, true, &remove, |ui| {
+        if let Some(against) = &against {
+            ui.horizontal(|ui| {
+                ui.label(state.catalog.get("mate-against"));
+                // i18n-exempt: an object's name is the user's own text
+                ui.label(against);
+            });
+        }
+        let text = field_menu_text(&state.catalog);
+        let out = kreate_ui::property_editor_full(
+            ui,
+            &state.catalog,
+            info.id,
+            info.schema,
+            &mut params,
+            |name| matches!(name, "offset" | "angle"),
+            |_| None,
+            &l.key_property,
+            |_| None,
+            &text,
+        );
+        if out.changed {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "object.mate_set", params.clone(), dragging);
+        }
+    });
+    if closed {
+        let mut p = PropertyMap::new();
+        p.set("remove", kreate_reflect::PropertyValue::Bool(true));
+        state.queue.run("object.mate_set", p);
+    }
+}
+
 /// The named parameters: each its name, its expression to edit, and what
 /// it comes to; a row to add one; a button to take one away.
 fn draw_parameters(ui: &mut Ui, state: &mut ShellState, doc: &Document, l: &Labels) {
@@ -13058,9 +13225,12 @@ fn draw_parameters(ui: &mut Ui, state: &mut ShellState, doc: &Document, l: &Labe
                 let field = ui.add(egui::TextEdit::singleline(buffer).desired_width(110.0));
                 let done = field.lost_focus()
                     || (field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                // Escape is "never mind": it left the field, and leaving
+                // the field kept what had been typed.
+                let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if done {
                     let typed = buffer.trim().to_string();
-                    if !typed.is_empty() && typed != p.expression {
+                    if !escaped && !typed.is_empty() && typed != p.expression {
                         let mut m = PropertyMap::new();
                         m.set("name", V::Text(p.name.clone()));
                         m.set("expression", V::Text(typed));
@@ -13504,7 +13674,7 @@ fn draw_shape_keys(ui: &mut Ui, state: &mut ShellState, object: &kreate_scene::d
                 // i18n-exempt: a geometric glyph standing in for an icon
                 if ui
                     .small_button("\u{25C6}")
-                    .on_hover_text(state.catalog.get("op-anim-keyframe-insert-property"))
+                    .on_hover_text(state.catalog.get("op-anim-keyframe-insert"))
                     .clicked()
                 {
                     let mut p = PropertyMap::new();
@@ -14146,7 +14316,21 @@ fn toggle_key(
 /// Draws the modifier stack for the active object.
 fn draw_modifier_stack(ui: &mut Ui, state: &mut ShellState, rows: &mut [kreate_ui::ModifierRow]) {
     let text = kreate_ui::modifier_stack::ModifierText::resolve(&state.catalog, KIND_KEYS);
-    kreate_ui::modifier_stack(ui, &text, &state.catalog, rows, &mut state.queue);
+    // Into a queue of its own, so a parameter's change goes the way every
+    // other panel's does: a slider dragged is one step that follows the
+    // pointer. Straight onto the queue it was a step a frame, and Ctrl+Z
+    // after a drag took back a hair of it.
+    let mut asked = kreate_ui::CommandQueue::new();
+    kreate_ui::modifier_stack(ui, &text, &state.catalog, rows, &mut asked);
+    let dragging = ui.ctx().input(|i| i.pointer.any_down());
+    for command in asked.drain() {
+        match command {
+            Command::RunOperator { op_id, params } if op_id.starts_with("object.modifier_set") => {
+                send_edit(state, &op_id, params, dragging);
+            }
+            other => state.queue.push(other),
+        }
+    }
 }
 
 /// Translation keys for the addable modifier kinds, in the order the add
@@ -14161,6 +14345,13 @@ const KIND_KEYS: &[&str] = &[
     "modifier-bevel",
     "modifier-boolean",
     "modifier-path-array",
+    "modifier-triangulate",
+    "modifier-weld",
+    "modifier-displace",
+    "modifier-simple-deform",
+    "modifier-screw",
+    "modifier-decimate",
+    "modifier-shrinkwrap",
 ];
 
 /// The built-in English catalog.
@@ -14878,13 +15069,27 @@ fn bar_button(ui: &mut Ui, icon: RibbonIcon, enabled: bool, tip: &str) -> egui::
 fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool, can_redo: bool) {
     let theme = kreate_ui::theme::from_ui(ui);
     ui.spacing_mut().item_spacing.x = 2.0;
-    if bar_button(ui, RibbonIcon::Save, true, &l.file_save).clicked() {
+    // Each with its key, as the menus show theirs.
+    let tip = |state: &ShellState, id: &str, label: &str| match state
+        .command_info
+        .get(id)
+        .map(|info| info.shortcut.as_str())
+    {
+        Some(keys) if !keys.is_empty() => format!("{label}  ({keys})"),
+        _ => label.to_string(),
+    };
+    let (save, undo, redo) = (
+        tip(state, "file.save", &l.file_save),
+        tip(state, "edit.undo", &l.undo),
+        tip(state, "edit.redo", &l.redo),
+    );
+    if bar_button(ui, RibbonIcon::Save, true, &save).clicked() {
         state.queue.push(Command::SaveDocument);
     }
-    if bar_button(ui, RibbonIcon::Undo, can_undo, &l.undo).clicked() {
+    if bar_button(ui, RibbonIcon::Undo, can_undo, &undo).clicked() {
         state.queue.push(Command::Undo);
     }
-    if bar_button(ui, RibbonIcon::Redo, can_redo, &l.redo).clicked() {
+    if bar_button(ui, RibbonIcon::Redo, can_redo, &redo).clicked() {
         state.queue.push(Command::Redo);
     }
     ui.add_space(10.0);
@@ -15249,11 +15454,15 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 47] = [
+const SKETCH_TOOLS: [&str; 51] = [
     "select",
     "pattern",
     "line",
     "rectangle",
+    "rectangle_centre",
+    "arc_tangent",
+    "midpoint",
+    "symmetric",
     "circle",
     "circle_2pt",
     "circle_3pt",
@@ -15534,6 +15743,10 @@ pub struct FeatureRow {
     pub amount: f64,
     pub symmetric: bool,
     pub cut: bool,
+    /// Left out of its body for now.
+    pub suppressed: bool,
+    /// How many features its body has, for moving it among them.
+    pub count: u32,
     /// What holds its amount to the parameters, when something does.
     pub expression: Option<String>,
 }
@@ -15822,12 +16035,30 @@ fn draw_sketches(
             egui::pos2(b.x as f32, b.y as f32),
         );
         painter.rect_filled(rect, 0.0, theme.accent.gamma_multiply(0.08));
-        painter.rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(1.0, theme.accent),
-            egui::StrokeKind::Inside,
-        );
+        if b.x < a.x {
+            // Right to left, a crossing box: dashed, as CAD draws one.
+            let c = [
+                rect.left_top(),
+                rect.right_top(),
+                rect.right_bottom(),
+                rect.left_bottom(),
+            ];
+            for k in 0..4 {
+                painter.add(egui::Shape::dashed_line(
+                    &[c[k], c[(k + 1) % 4]],
+                    egui::Stroke::new(1.0, theme.accent),
+                    5.0,
+                    3.0,
+                ));
+            }
+        } else {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(1.0, theme.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
     draw_tool_badge(ui, state, &view, inner);
     // A drawing tool's pointer is a cross, so a click is plainly a point.
@@ -15982,7 +16213,10 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
                     if ui.button(&cancel).clicked() {
                         done = Some(false);
                     }
-                    if ui.add_enabled(picked, egui::Button::new(&ok)).clicked() {
+                    let enter = picked
+                        && !ui.ctx().egui_wants_keyboard_input()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.add_enabled(picked, egui::Button::new(&ok)).clicked() || enter {
                         done = Some(true);
                     }
                 });
@@ -16222,7 +16456,23 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                         done = Some(false);
                     }
                     let ready = !view.seeds.is_empty() && (!revolve || view.axis.is_some());
-                    if ui.add_enabled(ready, egui::Button::new(&ok)).clicked() {
+                    let why = if view.seeds.is_empty() {
+                        state.catalog.get("feature-profile-pick")
+                    } else {
+                        state.catalog.get("feature-axis-pick")
+                    };
+                    // Enter is OK: a distance typed and Enter pressed is the
+                    // whole of it, with no trip to the button. Not while a
+                    // field elsewhere is being typed into.
+                    let enter = ready
+                        && !ui.ctx().egui_wants_keyboard_input()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui
+                        .add_enabled(ready, egui::Button::new(&ok))
+                        .on_disabled_hover_text(why)
+                        .clicked()
+                        || enter
+                    {
                         done = Some(true);
                     }
                 });
@@ -16297,14 +16547,73 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                         } else {
                             "⬆"
                         };
-                        let colour = if row.cut { theme.info } else { theme.text };
+                        let colour = if row.suppressed {
+                            theme.text_faint
+                        } else if row.cut {
+                            theme.info
+                        } else {
+                            theme.text
+                        };
                         // i18n-exempt: a symbol and the user's own names
                         let text = if row.is_sketch {
                             format!("{icon}  {}", row.label)
                         } else {
                             format!("{icon}  {}  · {}", row.label, row.body)
                         };
-                        let r = ui.selectable_label(false, egui::RichText::new(text).color(colour));
+                        let mut text = egui::RichText::new(text).color(colour);
+                        if row.suppressed {
+                            text = text.strikethrough();
+                        }
+                        let r = ui.selectable_label(false, text);
+                        // A feature's own menu: leave it out or put it back,
+                        // move it among its body's, or take it away.
+                        if !row.is_sketch {
+                            let row = row.clone();
+                            r.context_menu(|ui| {
+                                use kreate_reflect::PropertyValue as V;
+                                let named = |row: &FeatureRow| {
+                                    let mut p = PropertyMap::new();
+                                    p.set("body", V::Text(row.body.clone()));
+                                    p.set("index", V::Int(row.index as i64));
+                                    p
+                                };
+                                let suppress = state.catalog.get(if row.suppressed {
+                                    "feature-unsuppress"
+                                } else {
+                                    "feature-suppress"
+                                });
+                                if ui.button(suppress).clicked() {
+                                    let mut p = named(&row);
+                                    p.set("suppressed", V::Bool(!row.suppressed));
+                                    state.queue.run("feature.suppress", p);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                let mut moved = |ui: &mut Ui, key: &str, to: Option<u32>| {
+                                    let label = state.catalog.get(key);
+                                    if ui
+                                        .add_enabled(to.is_some(), egui::Button::new(label))
+                                        .clicked()
+                                    {
+                                        let mut p = named(&row);
+                                        p.set("to", V::Int(i64::from(to.unwrap_or(0))));
+                                        state.queue.run("feature.move", p);
+                                        ui.close();
+                                    }
+                                };
+                                moved(ui, "feature-move-earlier", row.index.checked_sub(1));
+                                moved(
+                                    ui,
+                                    "feature-move-later",
+                                    Some(row.index + 1).filter(|to| *to < row.count),
+                                );
+                                ui.separator();
+                                if ui.button(state.catalog.get("feature-delete")).clicked() {
+                                    state.queue.run("feature.remove", named(&row));
+                                    ui.close();
+                                }
+                            });
+                        }
                         if r.double_clicked() {
                             if row.is_sketch {
                                 state.queue.push(Command::EditSketch(row.label.clone()));
@@ -16417,10 +16726,19 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                     ui.end_row();
                 });
             ui.horizontal(|ui| {
-                if ui.button(&cancel).clicked() {
+                // Enter is OK and Escape is Cancel, unless a field is being
+                // typed into, when they are the field's.
+                let typing = ui.ctx().egui_wants_keyboard_input();
+                let (enter, escape) = ui.input(|i| {
+                    (
+                        !typing && i.key_pressed(egui::Key::Enter),
+                        !typing && i.key_pressed(egui::Key::Escape),
+                    )
+                });
+                if ui.button(&cancel).clicked() || escape {
                     keep = false;
                 }
-                if ui.button(&ok).clicked() {
+                if ui.button(&ok).clicked() || enter {
                     use kreate_reflect::PropertyValue as V;
                     let mut p = PropertyMap::new();
                     p.set("body", V::Text(edit.row.body.clone()));
@@ -18333,6 +18651,10 @@ mod ribbon {
 /// tab's choice, and the connector's.
 pub fn choose_environment(state: &mut ShellState, room: kreate_render::studio::Preset) {
     state.studio_preset = room;
+    // A room chosen is in place of a file.
+    if state.environment_file.is_some() {
+        choose_environment_file(state, None);
+    }
     if let Some(path) = crate::prefs::viewport_path() {
         let _ = crate::prefs::save_viewport(
             &path,
@@ -18340,6 +18662,25 @@ pub fn choose_environment(state: &mut ShellState, room: kreate_render::studio::P
             state.punchy,
             state.trace_when_still,
             room,
+        );
+    }
+}
+
+/// Uses one of the user's own HDRI files as the environment, or with `None`
+/// goes back to the room chosen; adds a file not on the list yet, and
+/// remembers both for the next session.
+pub fn choose_environment_file(state: &mut ShellState, file: Option<std::path::PathBuf>) {
+    if let Some(f) = &file {
+        if !state.environment_files.contains(f) {
+            state.environment_files.push(f.clone());
+        }
+    }
+    state.environment_file = file;
+    if let Some(path) = crate::prefs::environments_path() {
+        let _ = crate::prefs::save_environments(
+            &path,
+            &state.environment_files,
+            state.environment_file.as_deref(),
         );
     }
 }

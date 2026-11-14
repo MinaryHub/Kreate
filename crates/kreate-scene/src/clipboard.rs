@@ -290,6 +290,46 @@ impl Document {
                         .unwrap_or(crate::Uid::NONE);
                 }
             }
+            // Everything else that names another object: a cutter, a path,
+            // the sketch a body is built from. Left as they were, a pasted
+            // plate was still cut by the original's cutter, and a body
+            // imported with its sketch came in empty, or built from whatever
+            // held the sketch's old number here.
+            let re = |u: crate::Uid| uids.get(&u).copied().unwrap_or(crate::Uid::NONE);
+            for m in &mut copy.modifiers {
+                match &mut m.kind {
+                    crate::modifier::ModifierKind::Boolean(b) => b.operand = re(b.operand),
+                    crate::modifier::ModifierKind::Shrinkwrap(s) => s.target = re(s.target),
+                    crate::modifier::ModifierKind::PathArray(p) => p.path = re(p.path),
+                    _ => {}
+                }
+            }
+            for f in &mut copy.features {
+                f.sketch = re(f.sketch);
+                match &mut f.shape {
+                    crate::feature::Shape::Sweep { path, .. } => *path = re(*path),
+                    crate::feature::Shape::Loft { sections } => {
+                        sections.iter_mut().for_each(|s| *s = re(*s));
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(p) = &mut copy.path {
+                p.curve = re(p.curve);
+            }
+            // A mate without the part it is against is no mate.
+            copy.mate = copy.mate.and_then(|mut m| {
+                m.target = *uids.get(&m.target)?;
+                Some(m)
+            });
+            for s in &mut copy.physics.particles {
+                s.instance = s.instance.and_then(|u| uids.get(&u).copied());
+            }
+            if let Some(d) = copy.drawing.as_deref_mut() {
+                for p in &mut d.projections {
+                    p.source = re(p.source);
+                }
+            }
         }
     }
 
@@ -426,6 +466,58 @@ mod tests {
             doc.object(pasted[0]).unwrap().mesh(),
             doc.object(a).unwrap().mesh()
         );
+    }
+
+    /// A plate copied with its cutter is cut by the copy of the cutter, not
+    /// by the original; copied without it, by nothing rather than by
+    /// whatever holds the cutter's number where it lands.
+    #[test]
+    fn a_pasted_boolean_is_cut_by_the_pasted_cutter() {
+        use crate::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
+        use kreate_mesh::modifiers::BooleanOp;
+        let mut doc = Document::new();
+        let plate = cube(&mut doc, "Plate");
+        let cutter = cube(&mut doc, "Cutter");
+        let cutter_uid = doc.object(cutter).unwrap().uid;
+        doc.object_mut(plate)
+            .unwrap()
+            .modifiers
+            .push(ModifierInstance::new(ModifierKind::Boolean(
+                BooleanModifier {
+                    operand: cutter_uid,
+                    op: BooleanOp::Difference,
+                },
+            )));
+        let operand_of = |doc: &Document, id| match &doc.object(id).unwrap().modifiers[0].kind {
+            ModifierKind::Boolean(b) => b.operand,
+            other => panic!("{other:?}"),
+        };
+
+        let both = doc.extract_objects(&[plate, cutter]);
+        let pasted = doc.merge_from(&both);
+        let new_plate = *pasted
+            .iter()
+            .find(|id| doc.object(**id).unwrap().name.starts_with("Plate"))
+            .unwrap();
+        let new_cutter = *pasted
+            .iter()
+            .find(|id| doc.object(**id).unwrap().name.starts_with("Cutter"))
+            .unwrap();
+        assert_eq!(
+            operand_of(&doc, new_plate),
+            doc.object(new_cutter).unwrap().uid,
+            "the copy's cutter"
+        );
+        assert_eq!(
+            operand_of(&doc, plate),
+            cutter_uid,
+            "the original untouched"
+        );
+
+        let alone = doc.extract_objects(&[plate]);
+        let mut elsewhere = Document::new();
+        let landed = elsewhere.merge_from(&alone);
+        assert_eq!(operand_of(&elsewhere, landed[0]), crate::Uid::NONE);
     }
 
     #[test]

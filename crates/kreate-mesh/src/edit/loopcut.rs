@@ -57,6 +57,10 @@ struct Splits {
     verts: Vec<VertId>,
 }
 
+/// The most loops one cut makes: a count from a script is not a reason to
+/// fill memory.
+const MAX_CUTS: u32 = 1000;
+
 /// Cuts `cuts` loops across the ring through `seed`.
 ///
 /// `position` is where the cut sits between the ring edges' endpoints, from
@@ -69,7 +73,7 @@ pub fn loop_cut(
     position: f32,
 ) -> Result<LoopCut, BmError> {
     let mut out = LoopCut::default();
-    let cuts = cuts.max(1) as usize;
+    let cuts = cuts.clamp(1, MAX_CUTS) as usize;
     if mesh.edge(seed).is_none() {
         return Ok(out);
     }
@@ -205,7 +209,12 @@ pub fn loop_cut(
         (Some(from), Some([first, _])) if from != first => 1.0 - position,
         _ => position,
     };
-    let shift = position - 0.5;
+    // Slid together, and no further than the outermost reaches the end:
+    // each held off the end on its own, several landed on one spot.
+    // Never below nothing: at the most cuts there is no room at all, and
+    // a range the wrong way round is a panic.
+    let room = (1.0 / (cuts + 1) as f32 - 0.001).max(0.0);
+    let shift = (position - 0.5).clamp(-room, room);
     let ts: Vec<f32> = (0..cuts)
         // Kept off the ends by a hair, not more: a cut typed at a distance
         // from an end lands there, however short the distance is beside the
@@ -556,6 +565,19 @@ mod tests {
         m.assert_valid();
         crate::edit::carried::assert_kept(&m, &out.faces);
         crate::edit::carried::assert_uv_follows_position(&m);
+    }
+
+    /// As many cuts as there can be, and more asked for, slid to an end:
+    /// done, not a panic over a range the wrong way round, and no two on
+    /// one spot short of the limit.
+    #[test]
+    fn the_most_cuts_slid_to_an_end_are_still_cut() {
+        for (cuts, position) in [(u32::MAX, 1.0), (MAX_CUTS, 0.0), (3, 1.0)] {
+            let mut m = BMesh::from_mesh_data(&primitives::grid(4.0, 2, 2));
+            let seed = edge_along_x(&m, 0.0);
+            loop_cut(&mut m, seed, cuts, position).unwrap();
+            assert!(m.validate().is_empty(), "{cuts} at {position}");
+        }
     }
 
     #[test]

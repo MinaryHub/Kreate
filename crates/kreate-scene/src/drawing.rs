@@ -358,8 +358,11 @@ impl Drawing {
     /// drawing already holds — a file whose counter is behind its own ids
     /// would otherwise hand an id out twice.
     pub fn set_counters(&mut self, entity: u32, layer: u32) {
-        let top_entity = self.entities.iter().map(|e| e.id.0 + 1).max().unwrap_or(1);
-        let top_layer = self.layers.iter().map(|l| l.id.0 + 1).max().unwrap_or(1);
+        let top = |ids: &mut dyn Iterator<Item = u32>| {
+            ids.map(|id| id.saturating_add(1)).max().unwrap_or(1)
+        };
+        let top_entity = top(&mut self.entities.iter().map(|e| e.id.0));
+        let top_layer = top(&mut self.layers.iter().map(|l| l.id.0));
         self.next_entity = entity.max(top_entity);
         self.next_layer = layer.max(top_layer);
     }

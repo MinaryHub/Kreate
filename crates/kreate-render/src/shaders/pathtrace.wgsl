@@ -997,7 +997,9 @@ fn pt_carried(at: vec4<f32>, normal: vec3<f32>) -> vec4<f32> {
     }
     // The same surface: as far from the last eye within a little of the
     // distance, and facing the same way.
-    let was_from_last = was.xyz - pt.prev_eye.xyz;
+    // Kept from the last eye already (`first_at`): taking the eye's move
+    // off again failed every pixel of a view that dollied.
+    let was_from_last = was.xyz;
     let d = length(from_last);
     if (abs(length(was_from_last) - d) > 0.02 * d + 1e-3 || dot(normalize(was_normal), normalize(normal)) < 0.9) {
         return vec4<f32>(0.0);
@@ -1104,6 +1106,13 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // once it was met, the backdrop it stands for — what a reflection off it
     // that finds nothing shows.
     var floor_tried = false;
+    // Whether this is still the camera's own line of sight: gone only
+    // through what lets it through — a cut-away, a pane of glass — and not
+    // yet turned by anything. What it sees then is the floor and the
+    // backdrop, as with nothing in the way: they had been only for a ray
+    // that met nothing at all, and a glass on the studio floor stood on
+    // the raw environment with no shadow under it.
+    var sight = true;
     var floor_back = vec3<f32>(-1.0);
     // What the medium the path is travelling through takes per metre: the
     // inside of a tinted glass, from the face it entered by until the face it
@@ -1127,10 +1136,12 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // keeps the light off, and a faint mirror of what is above. Only the
         // camera's ray meets it — it is a backdrop, not a thing in the room,
         // and the light the scene's surfaces get is the room's as before.
-        if (pt.ground.y > 0.0 && !floor_tried && bounce == 0u && crossings == 0u && !met_surface) {
+        if (pt.ground.y > 0.0 && !floor_tried && bounce == 0u && sight) {
             floor_tried = true;
             let tg = select(-1.0, (pt.ground.x - origin.z) / dir.z, dir.z < -1e-6);
-            if (tg > 0.0 && (hit.t < 0.0 || tg < hit.t)) {
+            // A face lying on the floor is in front of it: without the
+            // margin the two took turns, sample by sample.
+            if (tg > 0.0 && (hit.t < 0.0 || tg < hit.t - 1e-4 * max(1.0, tg))) {
                 let g = origin + dir * tg;
                 let back = backdrop_at(ndc.y);
                 // The lamps, by how much each gives here, and how much of
@@ -1170,14 +1181,17 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
                 let shade = mix(1.0, seen, 0.8);
                 let c = max(-dir.z, 0.0);
-                let f = pt.ground.z * (1.0 + 4.0 * pow(1.0 - c, 5.0));
+                let f = pt.ground.z * (1.0 + 4.0 * pow(clamp(1.0 - c, 0.0, 1.0), 5.0));
                 radiance += throughput * back * shade * (1.0 - f);
                 // The floor is the first surface, for the denoiser: plain,
-                // facing up.
-                met_surface = true;
-                first_albedo = vec3<f32>(1.0);
-                first_at = vec4<f32>(g - pt.eye.xyz, 1.0);
-                first_normal = vec3<f32>(0.0, 0.0, 1.0);
+                // facing up — unless glass was, in front of it.
+                if (!met_surface) {
+                    met_surface = true;
+                    first_albedo = vec3<f32>(1.0);
+                    first_at = vec4<f32>(g - pt.eye.xyz, 1.0);
+                    first_normal = vec3<f32>(0.0, 0.0, 1.0);
+                }
+                sight = false;
                 throughput *= f;
                 floor_back = back;
                 origin = g;
@@ -1279,7 +1293,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             // The camera's ray into nothing, with a backdrop: the backdrop,
             // as the rasterised view shows it.
-            if (shading.backdrop.w > 0.0 && bounce == 0u && crossings == 0u && !met_surface) {
+            if (shading.backdrop.w > 0.0 && bounce == 0u && sight) {
                 radiance += throughput * backdrop_at(ndc.y);
                 break;
             }
@@ -1360,6 +1374,8 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 origin = p;
                 skip = vec2<u32>(hit.instance, hit.triangle);
                 crossings += 1u;
+                // The floor again, from here on.
+                floor_tried = false;
                 continue;
             }
             // A normal map's tilt, in the frame the UVs give the triangle:
@@ -1509,11 +1525,16 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 // the far side.
                 origin = p;
                 skip = vec2<u32>(hit.instance, hit.triangle);
+                // Still the line of sight, bent: the floor again from here.
+                floor_tried = false;
             } else {
                 if (dot(next, geometric) <= 0.0) {
                     break;
                 }
                 origin = start;
+                // Turned back by the glass: a reflection, not what is seen
+                // through it.
+                sight = false;
             }
             dir = normalize(next);
             crossings += 1u;
@@ -1550,6 +1571,9 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
             throughput /= 1.0 - p_below;
             s.diffuse_weight = 1.0 - clamp(s.subsurface, 0.0, 1.0);
+            // What is left is the surface's own colour: the share that went
+            // below carried the medium's.
+            s.subsurface = 0.0;
         }
 
         // Aim at a glowing triangle, or at a lamp: one of the two, its share

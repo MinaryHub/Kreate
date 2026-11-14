@@ -376,9 +376,9 @@ impl App {
                     };
                     continue;
                 }
-                Event::Models(models) => {
-                    self.ui.chat_models = models.into_iter().map(|m| m.name).collect();
-                    self.ui.chat_model = chat.model().unwrap_or(0);
+                Event::Models(_) => {
+                    self.ui.chat_models = chat.model_names();
+                    self.ui.chat_model = chat.model_index();
                     continue;
                 }
                 Event::SignInUrl(url) => {

@@ -102,7 +102,7 @@ impl PartialOrd for Candidate {
 /// folding on itself.
 pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
     let ratio = params.ratio.clamp(0.0, 1.0);
-    if input.is_empty() || ratio >= 1.0 {
+    if input.is_empty() || !ratio.is_finite() || ratio >= 1.0 {
         return input.clone();
     }
     let tri = input.triangulate();

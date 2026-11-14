@@ -114,7 +114,6 @@ enum Drag {
         from: Pos2,
     },
     Scrub,
-    Pan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,6 +127,8 @@ enum Menu {
 #[derive(Clone, Debug, Default)]
 pub struct GraphState {
     pub rect: Option<Rect>,
+    /// The whole editor on screen, its channel list with the plot.
+    pub area: Option<Rect>,
     /// Curves hidden from the plot, by target: the channel list's eyes.
     /// Hidden is a view setting, as in Blender — the curve still plays.
     hidden: std::collections::BTreeSet<String>,
@@ -359,6 +360,10 @@ pub fn graph_editor(
             graph_plot(ui, &shown, state, text)
         })
         .inner;
+    // The whole editor, its list of channels with it: with only the plot,
+    // a key pressed over the list was the view's behind — X there deleted
+    // the object.
+    state.area = state.rect.map(|_| full);
     out.extend(edits);
     out
 }
@@ -409,7 +414,6 @@ fn graph_plot(
         let df = -(d.x / l.plot.width()) as f64 * (f1 - f0);
         let dv = (d.y / l.plot.height()) as f64 * (v1 - v0);
         viewed = (f0 + df, f1 + df, v0 + dv, v1 + dv);
-        state.drag = Drag::Pan;
     }
     state.view = Some(viewed);
     let layout = Layout::new(rect, viewed);

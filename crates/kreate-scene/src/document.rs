@@ -137,6 +137,29 @@ impl Linkage {
     }
 }
 
+/// A part put face to face against another, as it was put: the two faces,
+/// each by a point on it and the way it looks, in its own part's space — so
+/// they stay the faces they were however the parts are moved — with the gap
+/// between them and how far the part is turned about the faces' normal.
+/// Fusion's planar joint, kept, where `object.mate` alone only placed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mate {
+    /// The part it is against, by identity.
+    pub target: Uid,
+    /// A point on this part's face and the face's outward normal, in this
+    /// part's own space.
+    pub from: DVec3,
+    pub from_normal: DVec3,
+    /// The same for the other part's face, in that part's space.
+    pub to: DVec3,
+    pub to_normal: DVec3,
+    /// The gap left between the faces, in metres.
+    pub offset: f64,
+    /// How far it is turned about the normal from where it was put, in
+    /// radians.
+    pub angle: f64,
+}
+
 /// One object.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Object {
@@ -240,6 +263,9 @@ pub struct Object {
     /// Carried along a curve object as the clock runs. See
     /// [`crate::curve::FollowPath`].
     pub path: Option<crate::curve::FollowPath>,
+    /// The mate that puts it against another part, kept so its gap and its
+    /// turn can be changed after: see [`Mate`].
+    pub mate: Option<Mate>,
     /// The script line that made its mesh — `object.add_door(width=0.9, …)`
     /// — kept so its parameters can be changed after (the Properties
     /// editor's Architecture panel), which makes the mesh again. Where it
@@ -283,6 +309,7 @@ impl Object {
             robot: None,
             curve: None,
             path: None,
+            mate: None,
             generator: None,
         }
     }
@@ -1271,8 +1298,13 @@ impl Document {
             }
         }
 
+        // A parent scaled to nothing on an axis has no inverse — not a
+        // finite one — and that went into the file as numbers no reader
+        // takes. The child then simply rides on it.
         let parent_inverse = match parent {
-            Some(p) => self.world_transform(p).inverse(),
+            Some(p) => Some(self.world_transform(p).inverse())
+                .filter(|m| m.is_finite())
+                .unwrap_or(DAffine3::IDENTITY),
             None => DAffine3::IDENTITY,
         };
         let was_root = self.objects[id].parent.is_none();
@@ -1704,7 +1736,15 @@ impl Document {
                         j.bone = new.to_string();
                     }
                 }
-                o.action
+                // Its action, and those its strips play: a walk pushed down
+                // to a strip named the bone as much as the action in hand.
+                let mut actions: Vec<ActionId> = o.action.into_iter().collect();
+                for strip in &o.nla {
+                    if !actions.contains(&strip.action) {
+                        actions.push(strip.action);
+                    }
+                }
+                actions
             };
             // Objects hanging from the bone keep hanging from it.
             let hanging: Vec<ObjectId> = self
@@ -1719,7 +1759,10 @@ impl Document {
                     child.parent_bone = Some(new.to_string());
                 }
             }
-            if let Some(action) = action.and_then(|a| self.action_mut(a)) {
+            for action in action {
+                let Some(action) = self.action_mut(action) else {
+                    continue;
+                };
                 for curve in &mut action.curves {
                     if let Some(rest) = curve.path.property.strip_prefix(old_prefix.as_str()) {
                         curve.path.property = format!("{new_prefix}{rest}").into();
@@ -2023,6 +2066,55 @@ impl Document {
             let before = o.transform;
             let pose_before = o.pose.clone();
             let shapes_before = o.shape_keys.clone();
+            // What the strips key starts each frame from the channel's own
+            // rest — not moved, not turned, not scaled, a shape at nothing —
+            // as in Blender. Started from where the last frame left it, a
+            // strip that adds flew the object away as it played, and one of
+            // part influence crept on with every frame; the same frame
+            // asked for twice gave two poses.
+            {
+                let mut euler = crate::animation::to_euler(o.transform.rotation);
+                let mut turned = false;
+                for (strip, played) in &strips {
+                    if strip.action_frame(frame).is_none() || strip.influence <= 0.0 {
+                        continue;
+                    }
+                    for curve in &played.curves {
+                        let property = curve.path.property.as_ref();
+                        if let Some((bone, channel)) = crate::animation::parse_bone_path(property) {
+                            let rest = &mut o.pose.entry(bone).transform;
+                            match channel {
+                                "location" => rest.translation = DVec3::ZERO,
+                                "scale" => rest.scale = DVec3::ONE,
+                                _ => rest.rotation = kreate_math::DQuat::IDENTITY,
+                            }
+                            continue;
+                        }
+                        if let Some(key) = crate::animation::parse_shape_path(property) {
+                            if let Some(k) = o.shape_keys.iter_mut().find(|k| k.name == key) {
+                                k.value = 0.0;
+                            }
+                            continue;
+                        }
+                        let Some(i) = curve.path.index.map(|i| i as usize).filter(|i| *i <= 2)
+                        else {
+                            continue;
+                        };
+                        match property {
+                            "location" => o.transform.translation[i] = 0.0,
+                            "scale" => o.transform.scale[i] = 1.0,
+                            "rotation_euler" => {
+                                euler[i] = 0.0;
+                                turned = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if turned {
+                    o.transform.rotation = crate::animation::from_euler(euler);
+                }
+            }
             for (strip, played) in &strips {
                 let Some(local) = strip.action_frame(frame) else {
                     continue;

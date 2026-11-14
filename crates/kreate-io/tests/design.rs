@@ -169,6 +169,7 @@ fn sketch_lines_and_a_bodys_features_are_saved() {
             seeds: vec![[0.5, 0.5]],
             operation: Operation::Join,
             order: 1,
+            suppressed: false,
         },
         Feature {
             shape: Shape::Revolve {
@@ -179,6 +180,7 @@ fn sketch_lines_and_a_bodys_features_are_saved() {
             seeds: vec![[0.25, 0.75]],
             operation: Operation::Cut,
             order: 2,
+            suppressed: false,
         },
     ];
     let original = body.features.clone();
@@ -261,6 +263,7 @@ fn a_newer_builds_feature_is_kept_and_written_back() {
         seeds: vec![[0.0, 0.0]],
         operation: Operation::Join,
         order,
+        suppressed: false,
     };
     body.features = vec![known(1), known(3)];
     body.foreign_features = vec![

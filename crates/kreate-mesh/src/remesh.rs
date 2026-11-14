@@ -198,11 +198,15 @@ pub fn voxel_remesh(mesh: &MeshData, voxel: f32) -> Result<MeshData, RemeshError
     // the grid's edge.
     let origin = lo - Vec3::splat(2.0 * h);
     let extent = (hi - lo) + Vec3::splat(4.0 * h);
-    let dims = [extent.x, extent.y, extent.z].map(|e| (e / h).ceil() as usize + 1);
-    let points = dims.iter().product::<usize>();
-    if points > MAX_POINTS {
-        return Err(RemeshError::TooFine(points));
+    // Counted in floating point first: a voxel far too small made counts
+    // that overflowed, and passed the limit as zero.
+    let cells = [extent.x, extent.y, extent.z].map(|e| (e / h).ceil() as f64 + 1.0);
+    let total = cells[0] * cells[1] * cells[2];
+    if total.is_nan() || total > MAX_POINTS as f64 {
+        return Err(RemeshError::TooFine(total.min(usize::MAX as f64) as usize));
     }
+    let dims = cells.map(|c| c as usize);
+    let points = dims.iter().product::<usize>();
     let band = 2.0 * h;
     let mut field = Field {
         origin,

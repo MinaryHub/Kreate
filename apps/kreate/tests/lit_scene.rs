@@ -20,15 +20,26 @@ use kreate_scene::Document;
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Whether the path tracer can be asked for a picture here. Not on
+    /// Windows' software adapter (WARP), which is what a CI runner has: it
+    /// does not get through compiling the tracer's shader — hours, and
+    /// gigabytes — where lavapipe and every real GPU take seconds.
+    tracer: bool,
 }
 
 fn gpu() -> Option<Gpu> {
-    let opts = GpuOptions::default();
+    // `KREATE_TEST_ADAPTER` names the adapter to test on: "Microsoft Basic
+    // Render Driver" is how to see here what the Windows runner sees.
+    let opts = GpuOptions {
+        adapter_name: std::env::var("KREATE_TEST_ADAPTER").ok(),
+        ..GpuOptions::default()
+    };
     let instance = kreate_render::Gpu::create_instance(&opts);
     let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)).ok()?;
     Some(Gpu {
         device: gpu.device.clone(),
         queue: gpu.queue.clone(),
+        tracer: gpu.info.can_path_trace(),
     })
 }
 
@@ -1344,10 +1355,11 @@ fn one_object_can_wear_two_materials_at_once() {
         distance: 4.0,
         ..Camera::default()
     };
-    for (frame, how) in [
-        (shoot_from(&gpu, &doc, camera), "drawn"),
-        (shoot_traced(&gpu, &doc, camera), "traced"),
-    ] {
+    let mut frames = vec![(shoot_from(&gpu, &doc, camera), "drawn")];
+    if gpu.tracer {
+        frames.push((shoot_traced(&gpu, &doc, camera), "traced"));
+    }
+    for (frame, how) in frames {
         let reddish = frame.iter().filter(|p| p[0] > p[2] + 0.05).count();
         let bluish = frame.iter().filter(|p| p[2] > p[0] + 0.05).count();
         assert!(
@@ -1584,6 +1596,10 @@ fn the_path_tracer_draws_the_documents_own_materials() {
         eprintln!("no GPU adapter; skipping");
         return;
     };
+    if !gpu.tracer {
+        eprintln!("a software adapter that cannot build the tracer; skipping");
+        return;
+    }
     let mut doc = Document::new();
     kreate::startup::sample_scene(&mut doc);
     for id in doc
@@ -1794,10 +1810,10 @@ fn an_image_is_the_right_way_up_on_its_uvs() {
 /// without the threshold, the whole plane.
 #[test]
 fn a_cut_out_material_is_cut_where_its_picture_is_clear() {
-    if gpu().is_none() {
+    let Some(tracer) = gpu().map(|g| g.tracer) else {
         eprintln!("no GPU adapter; skipping");
         return;
-    }
+    };
     let shoot = |clip: Option<f32>, traced: bool| {
         let image_id = std::cell::Cell::new(None);
         a_plane_shot(
@@ -1835,6 +1851,9 @@ fn a_cut_out_material_is_cut_where_its_picture_is_clear() {
     };
     let reddish = |f: &[[f32; 4]]| f.iter().filter(|p| p[0] > p[2] + 0.1).count();
     for traced in [false, true] {
+        if traced && !tracer {
+            continue;
+        }
         let (whole, cut) = (
             reddish(&shoot(None, traced)),
             reddish(&shoot(Some(0.5), traced)),

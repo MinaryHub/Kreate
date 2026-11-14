@@ -108,6 +108,54 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), std::io::Error> {
 }
 
 /// The viewport preferences' file: `resolution_scale = 0.5`.
+/// The file the user's own environments are kept in.
+pub fn environments_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("environments.txt"))
+}
+
+/// The HDRI files the user has added as environments, and the one in use
+/// when one is: a line each, the one in use marked with a `*` before it.
+pub fn load_environments(path: &Path) -> (Vec<PathBuf>, Option<PathBuf>) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut files = Vec::new();
+    let mut chosen = None;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (marked, name) = match line.strip_prefix('*') {
+            Some(rest) => (true, rest.trim()),
+            None => (false, line),
+        };
+        let file = PathBuf::from(name);
+        if files.contains(&file) {
+            continue;
+        }
+        if marked {
+            chosen = Some(file.clone());
+        }
+        files.push(file);
+    }
+    (files, chosen)
+}
+
+/// Remembers them.
+pub fn save_environments(
+    path: &Path,
+    files: &[PathBuf],
+    chosen: Option<&Path>,
+) -> Result<(), std::io::Error> {
+    let text: String = files
+        .iter()
+        .map(|f| {
+            let mark = if Some(f.as_path()) == chosen {
+                "* "
+            } else {
+                ""
+            };
+            format!("{mark}{}\n", f.display())
+        })
+        .collect();
+    write_atomic(path, &text)
+}
+
 pub fn viewport_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("viewport.txt"))
 }

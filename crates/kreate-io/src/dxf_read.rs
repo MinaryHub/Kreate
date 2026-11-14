@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use kreate_geom2d::{Curve2D, DVec2, Spline};
 use kreate_scene::document::{Object, ObjectData};
-use kreate_scene::drawing::{ColorRef, Drawing, EntityKind, LayerId, Text, TextAlign};
+use kreate_scene::drawing::{ColorRef, Drawing, EntityKind, LayerId, LinetypeRef, Text, TextAlign};
 use kreate_scene::Document;
 
 /// Reads a DXF into a document holding one drawing, named `name`, lying in
@@ -51,7 +51,7 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
 
     let mut drawing = Drawing::new();
     let mut layers: HashMap<String, LayerId> = HashMap::new();
-    for (lname, color, on) in &file.layers {
+    for (lname, color, on, linetype, frozen) in &file.layers {
         let id = if lname == "0" {
             LayerId(0)
         } else {
@@ -62,6 +62,8 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
                 layer.color = ColorRef::Index(*c);
             }
             layer.on = *on;
+            layer.linetype = linetype.clone();
+            layer.frozen = *frozen;
         }
         layers.insert(lname.clone(), id);
     }
@@ -70,6 +72,7 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
         layers: &mut layers,
         scale: file.metres_per_unit(),
         blocks: &file.blocks,
+        budget: MAX_ENTITIES,
     };
     for record in &file.entities {
         out.entity(record, &Place::identity(), 0);
@@ -178,7 +181,9 @@ fn records<'a>(pairs: &[(i32, &'a str)]) -> Vec<Record<'a>> {
 struct DxfFile<'a> {
     insunits: i64,
     /// Name, colour, shown.
-    layers: Vec<(String, Option<u8>, bool)>,
+    /// Each layer's name, colour, whether it is on, its linetype (empty
+    /// for continuous) and whether it is frozen.
+    layers: Vec<(String, Option<u8>, bool, String, bool)>,
     /// Name to base point and entities.
     blocks: HashMap<String, (DVec2, Vec<Record<'a>>)>,
     entities: Vec<Record<'a>>,
@@ -208,7 +213,22 @@ impl<'a> DxfFile<'a> {
             let index = u8::try_from(color.unsigned_abs())
                 .ok()
                 .filter(|c| (1..=255).contains(c));
-            self.layers.push((name.to_string(), index, color >= 0));
+            // The linetype and the frozen bit, which the writer writes: read
+            // back without them, a hidden-line layer came in continuous and a
+            // flat pattern's bend lines could not be told from its cuts.
+            let linetype = r
+                .get(6)
+                .map(str::trim)
+                .filter(|l| !l.eq_ignore_ascii_case("CONTINUOUS") && !l.is_empty())
+                .unwrap_or("")
+                .to_string();
+            self.layers.push((
+                name.to_string(),
+                index,
+                color >= 0,
+                linetype,
+                r.i(70) & 1 != 0,
+            ));
         }
     }
 
@@ -257,34 +277,49 @@ impl<'a> DxfFile<'a> {
 /// after the scale.
 #[derive(Clone, Copy, Debug)]
 struct Place {
-    scale: DVec2,
-    rotation: f64,
+    /// Where the block's X and Y go: a product of scales and turns, kept
+    /// whole — a turned block inside a mirrored one is not a scale and a
+    /// turn added up.
+    x: DVec2,
+    y: DVec2,
     offset: DVec2,
 }
 
 impl Place {
     fn identity() -> Place {
+        Place::new(DVec2::ONE, 0.0, DVec2::ZERO)
+    }
+    /// Scaled, then turned, then moved.
+    fn new(scale: DVec2, rotation: f64, offset: DVec2) -> Place {
+        let (sin, cos) = rotation.sin_cos();
         Place {
-            scale: DVec2::ONE,
-            rotation: 0.0,
-            offset: DVec2::ZERO,
+            x: DVec2::new(cos, sin) * scale.x,
+            y: DVec2::new(-sin, cos) * scale.y,
+            offset,
         }
     }
     fn point(&self, p: DVec2) -> DVec2 {
-        let s = p * self.scale;
-        let (sin, cos) = self.rotation.sin_cos();
-        DVec2::new(s.x * cos - s.y * sin, s.x * sin + s.y * cos) + self.offset
+        self.x * p.x + self.y * p.y + self.offset
+    }
+    /// How much it scales along the block's X, and its Y.
+    fn scale_x(&self) -> f64 {
+        self.x.length()
+    }
+    fn scale_y(&self) -> f64 {
+        self.y.length()
     }
     fn vector(&self, v: DVec2) -> DVec2 {
         self.point(v) - self.point(DVec2::ZERO)
     }
     /// Whether the place mirrors: arcs then run the other way.
     fn mirrors(&self) -> bool {
-        self.scale.x * self.scale.y < 0.0
+        self.x.perp_dot(self.y) < 0.0
     }
     /// Whether it scales the same both ways, so a circle stays a circle.
     fn uniform(&self) -> bool {
-        (self.scale.x.abs() - self.scale.y.abs()).abs() <= 1e-9 * self.scale.x.abs().max(1.0)
+        let (sx, sy) = (self.scale_x(), self.scale_y());
+        let tol = 1e-9 * sx.max(1.0);
+        (sx - sy).abs() <= tol && self.x.dot(self.y).abs() <= tol * sx.max(1.0)
     }
     /// An angle in the block, as the drawing sees it.
     fn angle(&self, a: f64) -> f64 {
@@ -294,8 +329,8 @@ impl Place {
     /// This place, inside `outer`.
     fn within(&self, outer: &Place) -> Place {
         Place {
-            scale: self.scale * outer.scale,
-            rotation: self.rotation + outer.rotation,
+            x: outer.vector(self.x),
+            y: outer.vector(self.y),
             offset: outer.point(self.offset),
         }
     }
@@ -306,7 +341,15 @@ struct Out<'d, 'a> {
     layers: &'d mut HashMap<String, LayerId>,
     scale: f64,
     blocks: &'d HashMap<String, (DVec2, Vec<Record<'a>>)>,
+    /// How many more entities the drawing takes: blocks of blocks multiply,
+    /// and a file can ask for more than there is memory for.
+    budget: usize,
 }
+
+/// The most rows or columns an INSERT's array is read to.
+const MAX_ARRAY: i64 = 1000;
+/// The most entities one file makes.
+const MAX_ENTITIES: usize = 2_000_000;
 
 /// Blocks inside blocks go this deep and no deeper: a block that inserts
 /// itself would otherwise never end.
@@ -323,12 +366,24 @@ impl Out<'_, '_> {
                 id
             }
         };
-        let id = self.drawing.add(kind);
-        if let Some(e) = self.drawing.entity_mut(id) {
+        self.drawing.add(kind);
+        // The one just added, which is the last: looked up by its id it was
+        // a walk of the whole drawing for every entity read.
+        if let Some(e) = self.drawing.entities.last_mut() {
             e.layer = layer;
             let c = r.i(62);
             if (1..=255).contains(&c) {
                 e.color = ColorRef::Index(c as u8);
+            }
+            // Its own linetype, where it has one that is not its layer's.
+            if let Some(name) = r.get(6).map(str::trim) {
+                if !name.is_empty() && !name.eq_ignore_ascii_case("BYLAYER") {
+                    e.linetype = if name.eq_ignore_ascii_case("BYBLOCK") {
+                        LinetypeRef::ByBlock
+                    } else {
+                        LinetypeRef::Named(name.to_string())
+                    };
+                }
             }
         }
     }
@@ -345,11 +400,14 @@ impl Out<'_, '_> {
     fn entity(&mut self, r: &Record, outer: &Place, depth: usize) {
         // An entity facing down is drawn mirrored in X, which is what its
         // own coordinates mean seen from above.
-        let mirror = Place {
-            scale: DVec2::new(-1.0, 1.0),
-            rotation: 0.0,
-            offset: DVec2::ZERO,
-        };
+        // Every entity looked at is paid for, drawn or not: an array of an
+        // empty block, or of blocks of blocks, is work without one entity
+        // added.
+        if self.budget == 0 {
+            return;
+        }
+        self.budget -= 1;
+        let mirror = Place::new(DVec2::new(-1.0, 1.0), 0.0, DVec2::ZERO);
         let flip_place;
         let place = if r.flipped() {
             flip_place = mirror.within(outer);
@@ -388,7 +446,7 @@ impl Out<'_, '_> {
                     }
                 }
                 if place.uniform() {
-                    let rr = radius * place.scale.x.abs() * self.scale;
+                    let rr = radius * place.scale_x() * self.scale;
                     let cc = self.at(place, c);
                     if r.kind == "CIRCLE" {
                         self.curve(r, Curve2D::Circle { c: cc, r: rr });
@@ -559,7 +617,7 @@ impl Out<'_, '_> {
                 if content.trim().is_empty() {
                     return;
                 }
-                let height = r.f(40).unwrap_or(2.5) * place.scale.y.abs() * self.scale;
+                let height = r.f(40).unwrap_or(2.5) * place.scale_y() * self.scale;
                 // TEXT aligned other than left is placed by its second point.
                 let halign = r.i(72);
                 let at = if r.kind == "TEXT" && halign != 0 && r.get(11).is_some() {
@@ -594,7 +652,9 @@ impl Out<'_, '_> {
                 };
                 let scale = DVec2::new(r.f(41).unwrap_or(1.0), r.f(42).unwrap_or(1.0));
                 let rotation = r.f0(50).to_radians();
-                let (cols, rows) = (r.i(70).max(1), r.i(71).max(1));
+                // The file's counts, within reason: two numbers in a small
+                // file would otherwise keep the import busy for ever.
+                let (cols, rows) = (r.i(70).clamp(1, MAX_ARRAY), r.i(71).clamp(1, MAX_ARRAY));
                 let (dx, dy) = (r.f0(44), r.f0(45));
                 for row in 0..rows {
                     for col in 0..cols {
@@ -604,16 +664,12 @@ impl Out<'_, '_> {
                         let step = DVec2::new(col as f64 * dx, row as f64 * dy);
                         let step =
                             DVec2::new(step.x * cos - step.y * sin, step.x * sin + step.y * cos);
-                        let inner = Place {
-                            scale,
-                            rotation,
-                            offset: xy(10, 20) + step,
-                        };
-                        let to_base = Place {
-                            scale: DVec2::ONE,
-                            rotation: 0.0,
-                            offset: -*base,
-                        };
+                        if self.budget == 0 {
+                            return;
+                        }
+                        self.budget -= 1;
+                        let inner = Place::new(scale, rotation, xy(10, 20) + step);
+                        let to_base = Place::new(DVec2::ONE, 0.0, -*base);
                         let place = to_base.within(&inner).within(place);
                         for item in items.clone().iter() {
                             self.entity(item, &place, depth + 1);
@@ -696,18 +752,24 @@ fn unescape(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while !rest.is_empty() {
-        if let Some(hex) = rest.strip_prefix("\\U+").filter(|h| h.len() >= 4) {
-            if let Some(c) = u32::from_str_radix(&hex[..4], 16)
+        // By bytes: a slice by count would land inside a Hangul, or inside
+        // the replacement character a code-page file's text arrives as.
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 7
+            && bytes.starts_with(b"\\U+")
+            && bytes[3..7].iter().all(u8::is_ascii_hexdigit)
+        {
+            if let Some(c) = u32::from_str_radix(&rest[3..7], 16)
                 .ok()
                 .and_then(char::from_u32)
             {
                 out.push(c);
-                rest = &hex[4..];
+                rest = &rest[7..];
                 continue;
             }
         }
-        if rest.len() >= 3 && rest[..2].eq_ignore_ascii_case("%%") {
-            let sym = match rest.as_bytes()[2].to_ascii_lowercase() {
+        if bytes.len() >= 3 && bytes[0] == b'%' && bytes[1] == b'%' && bytes[2].is_ascii() {
+            let sym = match bytes[2].to_ascii_lowercase() {
                 b'c' => Some('Ø'),
                 b'd' => Some('°'),
                 b'p' => Some('±'),
@@ -898,5 +960,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(curves(drawing(&doc)).len(), MAX_NESTING);
+    }
+    /// Text with characters of several bytes is read, not sliced through:
+    /// Hangul, and the replacement character a code-page file's letters
+    /// arrive as, each beside a `%%` or a `\U+`.
+    #[test]
+    fn escapes_beside_wide_characters_do_not_split_them() {
+        assert_eq!(unescape("도면 %%c5"), "도면 Ø5");
+        assert_eq!(unescape("%도%면"), "%도%면");
+        assert_eq!(unescape("\u{fffd}\u{fffd}%%"), "\u{fffd}\u{fffd}%%");
+        assert_eq!(unescape("\\U+12가"), "\\U+12가");
+        assert_eq!(unescape("\\U+AC00%%%"), "가%");
+    }
+
+    /// An INSERT's array is read to a bound: counts in the billions are a
+    /// file to refuse, not to work through.
+    #[test]
+    fn an_absurd_block_array_ends() {
+        let dxf = "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB\n10\n0\n20\n0\n\
+                   0\nLINE\n10\n0\n20\n0\n11\n1\n21\n0\n0\nENDBLK\n0\nENDSEC\n\
+                   0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nB\n10\n0\n20\n0\n\
+                   70\n2000000000\n71\n2000000000\n44\n1\n45\n1\n0\nENDSEC\n0\nEOF\n";
+        let doc = parse_dxf(dxf, "big").expect("reads");
+        let drawing = doc
+            .objects()
+            .find_map(|(_, o)| o.drawing.as_deref())
+            .expect("a drawing");
+        assert!(drawing.entities.len() <= (MAX_ARRAY * MAX_ARRAY) as usize);
+    }
+
+    /// A turned block inside a mirrored one: the point lands where the two
+    /// placings, one after the other, put it.
+    #[test]
+    fn a_turned_place_inside_a_mirrored_one_composes() {
+        let inner = Place::new(DVec2::ONE, std::f64::consts::FRAC_PI_2, DVec2::ZERO);
+        let outer = Place::new(DVec2::new(-1.0, 1.0), 0.0, DVec2::ZERO);
+        let both = inner.within(&outer);
+        let p = both.point(DVec2::new(1.0, 0.0));
+        let want = outer.point(inner.point(DVec2::new(1.0, 0.0)));
+        assert!((p - want).length() < 1e-12, "{p:?} against {want:?}");
+        assert!((want - DVec2::new(0.0, 1.0)).length() < 1e-12);
+        assert!(both.mirrors() && both.uniform());
+    }
+    /// Arrays of arrays of a block with nothing in it: no entity is ever
+    /// added, and the work is bounded all the same.
+    #[test]
+    fn arrays_of_an_empty_block_end() {
+        let dxf = "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nA\n10\n0\n20\n0\n0\nENDBLK\n\
+                   0\nBLOCK\n2\nB\n10\n0\n20\n0\n\
+                   0\nINSERT\n2\nA\n10\n0\n20\n0\n70\n1000\n71\n1000\n0\nENDBLK\n0\nENDSEC\n\
+                   0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nB\n10\n0\n20\n0\n\
+                   70\n1000\n71\n1000\n0\nENDSEC\n0\nEOF\n";
+        let started = std::time::Instant::now();
+        assert!(parse_dxf(dxf, "empty").is_err(), "nothing was drawn");
+        assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
     }
 }

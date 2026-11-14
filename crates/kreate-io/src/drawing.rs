@@ -44,7 +44,7 @@ impl View {
     }
 
     /// A world point on the page.
-    fn project(self, p: DVec3) -> [f64; 2] {
+    pub(crate) fn project(self, p: DVec3) -> [f64; 2] {
         match self {
             View::Top => [p.x, p.y],
             View::Front => [p.x, p.z],

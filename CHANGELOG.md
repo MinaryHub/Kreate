@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-11
+
 ### Added
 
 - 3D paths (Add ▸ Curve ▸ 3D Path), Fusion's 3D sketch: click points in
@@ -42,12 +44,149 @@ use; `scripts/release.sh` turns that section into the next release.
   arc it leaves — shown by the pointer, held as a constraint (Ctrl draws
   free); an end landing on a curve is held on it, at a line's middle to
   it. A while drawing lines makes the next segment a tangent arc.
+- Typed values stay as dimensions: a line's typed length, a rectangle's
+  width and height, and a circle's diameter. A line takes a second typed
+  value as its angle, in degrees.
+- Sketch tools: Center Rectangle, Tangent Arc on its own (from the end of a
+  line or arc), and the Midpoint and Symmetry constraints.
+- Offset takes a chain whole: curves joined end to end are offset to one
+  side together and meet at their corners again, lines where they cross
+  and curves round the corner. With nothing selected, the first click takes
+  the chain under it.
+- Selecting in a sketch: a double-click takes the chain a curve is joined
+  into; Ctrl-click (Cmd-click on a Mac) takes something back out; a box
+  drawn right to left is a crossing box, dashed, taking what it touches.
+- The AI chat picks its model: beside the assistant, a list of the models
+  its program takes (Claude's Opus, Sonnet and Haiku; Gemini's and
+  ChatGPT's), its own default first, and a box at the bottom for any
+  other model name. Remembered for each assistant.
 
 ### Changed
 
 - A constraint that says what is already held is refused, and a driving
   dimension of what is already held goes in as a driven one, instead of
   over-constraining the sketch.
+- In a sketch, Delete (and a Mac's delete key) removes what is selected,
+  and X makes it construction, as in Fusion; X had deleted. Delete also
+  removes objects and mesh elements, beside X.
+- A sketch no longer marks every corner where two ends meet.
+- Ctrl+Shift+Z redoes, beside Ctrl+Y.
+- Add Modifier lists every modifier: Triangulate, Weld, Displace, Simple
+  Deform, Screw, Decimate and Shrinkwrap were missing from the panel.
+- An operation that fails says why in the status bar; it had said so only
+  to the console.
+- The Save, Undo and Redo buttons show their keys.
+- In the Extrude, Revolve, Pattern and Edit Feature dialogs Enter is OK
+  (and Escape cancels Edit Feature); a greyed OK says what it is waiting
+  for.
+- A child dragged onto the outliner's Scene Collection row comes off its
+  parent.
+- The console brings back the lines run before, with Up and Down.
+- A feature can be suppressed and put back, and moved earlier or later
+  among its body's, from its right-click menu in the timeline — with
+  Delete there too. `feature.suppress` and `feature.move` for scripts.
+- A part mated to another (Align Faces) keeps its mate: the Object tab's
+  Mate panel changes the gap between the two faces and turns the part
+  about their normal, the faces staying together, or takes the mate off.
+  `object.mate_set` for scripts. Saved with the document.
+- Drawing sheets mark what is round and seen end on — holes, bosses,
+  shafts — with a centre mark, write its diameter once for all of one
+  size ("4x Ø5"), and say where each is from the view's corner.
+- An HDRI of your own as the environment (Render ▸ Environment ▸ Add
+  HDRI…): it lights the part, is what its metal reflects and is what is
+  behind it, in the preview and in renders, and stays in the list.
+- In edit mode Subdivide is Alt+S and Recalculate Normals is Alt+N: on
+  Shift+S and Ctrl+N they hid the snap pie and New File there.
+- NLA strips play from rest each frame, as in Blender: a strip that adds,
+  with nothing under it, adds to no movement rather than to the last
+  frame's.
+
+### Fixed
+
+- The Delete key did nothing anywhere: no binding on it could be reached,
+  the timeline's included.
+- Importing a DXF whose text held Hangul, or any letters from a code-page
+  file, stopped the program. A DXF with an absurd block array no longer
+  hangs the import, a large one reads in a fraction of the time, and a
+  turned block inside a mirrored one lands where it should.
+- DXF export writes text an R12 reader can read: degrees, diameter and
+  plus-minus as DXF's codes, Hangul as `\U+` escapes, a per cent sign as
+  one; a dimension's Ø, ° and ± were written doubled and came back as
+  `%c`.
+- With four lamps or more, some went dark across parts of the view, and a
+  lamp with an IES profile hid the two after it: the light cull read the
+  lamps at the wrong stride.
+- The path tracer: an empty scene could hang the GPU; a face lying on the
+  studio floor flickered against it; a dolly or zoom threw the carried
+  picture away, leaving a moving view noisy; part-subsurface materials
+  came out too bright.
+- A sheet-metal flange away from the origin did not weld to its plate,
+  leaving the body open; a bend angle from a script or a file is kept
+  between flat and folded back.
+- The Triangulate modifier dropped sharp edges, creases and seams. A loop
+  cut of three or more slid to an end stacked its loops on one spot. A
+  voxel remesh with a tiny voxel size could stop the program.
+- Sketch tools: a quarter turn (Move/Turn/Scale) collapsed level and
+  upright lines; Break left dimensions on the wrong piece; Extend, Chamfer
+  and Fillet were pulled back by the line's own length dimension; a
+  fillet's lines did not follow when its radius was changed; a copy of
+  text was not turned or scaled.
+- A projected outline was thrown away and remade each time a sketch was
+  opened, taking the constraints and dimensions on it.
+- `draft.dimension_set` from a script made the dimension driven, so
+  nothing moved; `feature.set` naming only an amount turned a cut into a
+  join. A slide joint's default travel is 10 cm each way, not 3.14 m.
+- Pasting or importing objects left a boolean's cutter, a path, a
+  feature's sketch and the like pointing at the originals.
+- Renaming a bone lost its animation in NLA strips. A particle instance
+  turned or scaled did not update its particles.
+- Typing in the chat or any field while a sketch tool, the knife or
+  Measure was active also drove the tool.
+- In a sketch, a drag interrupted by a tool key or Delete could undo
+  everything drawn since on the next drag; after an undo, Delete could
+  remove the curve next to the one selected; a dragged point could snap to
+  the wrong curve.
+- Recover asked nothing before replacing the open document, and deleted
+  an autosave it had failed to read.
+- A request or an import arriving in the middle of a move or a drag was
+  silently undone by it.
+- A number typed into a field was an undo step for each keystroke.
+- The Adjust panel kept the first run's values when the same operation
+  ran twice. Clicking a pie menu's entry also clicked the view behind it.
+  The graph editor's keys stopped working after a middle-button pan.
+- The chat's box for another model's name could not be clicked into.
+- NLA: an Add, Subtract or Multiply strip built on the last frame's
+  result, so the object flew off as it played, and a strip of part
+  influence crept; the same frame asked for twice gave two poses.
+- Where there is only Windows' software renderer (a virtual machine, a
+  remote desktop without a GPU) asking for path tracing stopped the
+  program; the rendered view stays rasterised there.
+- A long text file or video transcript attached to a Claude chat message
+  kept the assistant from starting.
+- What was saved in a crash was never offered back at the next start.
+- The keymap editor could not take a key with Ctrl, Shift or Alt; a key
+  captured onto a mouse binding killed it; a binding left listening when
+  its panel closed took the next key pressed anywhere. Escape stops it
+  listening.
+- The Solidify modifier dropped UVs, materials and smooth shading.
+- A DXF's layer linetypes and frozen layers were lost on import.
+- In a render, the studio floor and backdrop were missing behind glass
+  and cut-out materials: a glass on the floor stood on the bare
+  environment with no shadow under it.
+- The node editors kept one graph's selection when another was shown, so
+  X removed nodes of a material nobody had touched. In Geometry Nodes,
+  Shift+D, Ctrl+G, Alt+G and copy and paste emptied the selection and did
+  nothing; they are off there until those exist.
+- A drawing entity written by a newer Kreate stayed unread for good once
+  an older one had saved the file.
+- A small part's measured inertia was written to URDF as zero, and a
+  mirrored part left out of its link's mass.
+- A document holding a number that is not finite saved as a file that
+  would not open; the save is refused instead and says why. Parenting to
+  an object scaled to nothing no longer makes one.
+- Dragging a modifier's value was an undo step for every frame. Escape in
+  a driver's or a parameter's expression kept what was typed. X over the
+  graph editor's channel list deleted the object.
 
 ## [0.7.1] - 2026-11-07
 
@@ -658,7 +797,8 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.8.0
 [0.7.1]: https://github.com/MinaryHub/Kreate/releases/tag/v0.7.1
 [0.7.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.7.0
 [0.5.3]: https://github.com/MinaryHub/Kreate/releases/tag/v0.5.3

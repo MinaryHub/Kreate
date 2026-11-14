@@ -21,6 +21,8 @@ pub enum Tool {
     Select,
     Line,
     Rectangle,
+    /// A rectangle from its centre out to a corner.
+    RectangleCentre,
     Circle,
     /// A circle by the two ends of a diameter.
     Circle2,
@@ -30,6 +32,9 @@ pub enum Tool {
     /// An arc about a centre: the centre, where it starts (its radius),
     /// where it ends, anticlockwise.
     ArcCentre,
+    /// An arc on from the end of a line or curve, tangent to it: the end,
+    /// then where it ends.
+    TangentArc,
     Point,
     /// A smooth curve through the points clicked: Fusion's fit-point spline.
     Spline,
@@ -105,11 +110,13 @@ impl Tool {
             "select" => Tool::Select,
             "line" => Tool::Line,
             "rectangle" => Tool::Rectangle,
+            "rectangle_centre" => Tool::RectangleCentre,
             "circle" => Tool::Circle,
             "circle_2pt" => Tool::Circle2,
             "circle_3pt" => Tool::Circle3,
             "arc" => Tool::Arc,
             "arc_centre" => Tool::ArcCentre,
+            "arc_tangent" => Tool::TangentArc,
             "point" => Tool::Point,
             "spline" => Tool::Spline,
             "polygon" => Tool::Polygon,
@@ -149,6 +156,8 @@ impl Tool {
             "tangent" => Tool::Constrain("tangent"),
             "concentric" => Tool::Constrain("concentric"),
             "fixed" => Tool::Constrain("fixed"),
+            "midpoint" => Tool::Constrain("midpoint"),
+            "symmetric" => Tool::Constrain("symmetric"),
             _ => return None,
         })
     }
@@ -158,11 +167,13 @@ impl Tool {
             Tool::Select => "select",
             Tool::Line => "line",
             Tool::Rectangle => "rectangle",
+            Tool::RectangleCentre => "rectangle_centre",
             Tool::Circle => "circle",
             Tool::Circle2 => "circle_2pt",
             Tool::Circle3 => "circle_3pt",
             Tool::Arc => "arc",
             Tool::ArcCentre => "arc_centre",
+            Tool::TangentArc => "arc_tangent",
             Tool::Point => "point",
             Tool::Spline => "spline",
             Tool::Polygon => "polygon",
@@ -203,6 +214,8 @@ impl Tool {
             self,
             Tool::Line
                 | Tool::Rectangle
+                | Tool::RectangleCentre
+                | Tool::TangentArc
                 | Tool::Circle
                 | Tool::Circle2
                 | Tool::Circle3
@@ -577,6 +590,34 @@ impl Geometry {
         }
     }
 
+    /// The curves joined end to end with entity `e`, itself among them: what
+    /// a double-click selects, and what an offset takes when nothing is
+    /// selected — Fusion's chain.
+    pub fn chain_of(&self, e: EntityId) -> Vec<EntityId> {
+        let Some(map) = &self.map else {
+            return Vec::new();
+        };
+        let mut chain = vec![e];
+        let mut k = 0;
+        while k < chain.len() {
+            let here = chain[k];
+            for refs in &map.refs {
+                let ends =
+                    |r: &EntityRef| matches!(r.part, Part::Start | Part::End | Part::Vertex(_));
+                if !refs.iter().any(|r| r.entity == here && ends(r)) {
+                    continue;
+                }
+                for r in refs.iter().filter(|r| ends(r)) {
+                    if !chain.contains(&r.entity) {
+                        chain.push(r.entity);
+                    }
+                }
+            }
+            k += 1;
+        }
+        chain
+    }
+
     /// A drawing's entities among selected points and lines: each line's
     /// curve, and the lone points.
     pub fn entities_in(&self, points: &[u32], lines: &[u32]) -> Vec<u32> {
@@ -682,10 +723,10 @@ impl Geometry {
                 *s = None;
             }
         }
-        g.lines
-            .retain(|l| !moving.contains(&l[0]) && !moving.contains(&l[1]));
-        g.rounds
-            .retain(|(c, ring, _)| !moving.contains(c) && !ring.iter().any(|v| moving.contains(v)));
+        // The lines and rounds stay, numbered as they were: with no place
+        // on screen for their points they are passed over anyway, and taken
+        // out, every line after them answered to the number of another —
+        // a dragged end snapped onto the wrong curve.
         g
     }
 
@@ -890,6 +931,13 @@ pub fn drawing_constraint_for(
         }
         ("equal", [a, b]) if curve(a) && curve(b) => ("equal", vec![whole(*a)?, whole(*b)?]),
         ("tangent", [a, b]) if curve(a) && curve(b) => ("tangent", vec![whole(*a)?, whole(*b)?]),
+        ("midpoint", [Point(p), l @ Line(_)] | [l @ Line(_), Point(p)]) => {
+            ("midpoint", vec![point(*p)?, whole(*l)?])
+        }
+        ("symmetric", [Point(a), Point(b), l @ Line(_)]) => {
+            ("symmetric", vec![point(*a)?, point(*b)?, whole(*l)?])
+        }
+        ("midpoint", [_]) | ("symmetric", [Point(_)] | [Point(_), Point(_)]) => return Ok(None),
         (_, []) => return Ok(None),
         (
             "coincident" | "concentric" | "parallel" | "perpendicular" | "collinear" | "equal"
@@ -1091,6 +1139,14 @@ pub struct SketchUi {
     /// The line tool's next segment is a tangent arc on from the last one
     /// (A while drawing), as Fusion's drag from a line's end draws.
     pub arc_next: bool,
+    /// The tangent arc's start: the end it runs on from, where that is, and
+    /// the way it leaves.
+    pub tangent: Option<(EntityRef, DVec2, DVec2)>,
+    /// The line tool's segments whose length was typed: each is dimensioned.
+    pub typed_segments: Vec<u32>,
+    /// When and where the select tool was last pressed, on screen: a second
+    /// press soon after, at the same place, is a double-click.
+    pub last_press: Option<(std::time::Instant, DVec2)>,
 }
 
 impl SketchUi {
@@ -1394,6 +1450,8 @@ pub fn feature_rows(
                 amount,
                 symmetric,
                 cut: f.operation == kreate_scene::feature::Operation::Cut,
+                suppressed: f.suppressed,
+                count: o.features.len() as u32,
                 expression: doc
                     .design
                     .binding(&kreate_scene::design::Bound::FeatureAmount {
@@ -1427,6 +1485,8 @@ pub fn feature_rows(
             amount: 0.0,
             symmetric: false,
             cut: false,
+            suppressed: false,
+            count: 0,
             expression: None,
         });
     }
@@ -1750,6 +1810,26 @@ fn overlay(
                 pts.push(pts[0]);
                 view.preview.push(polyline(pts));
             }
+            (Tool::RectangleCentre, [c]) => {
+                let a = *c * 2.0 - h;
+                view.preview.push(polyline(vec![
+                    a,
+                    DVec2::new(h.x, a.y),
+                    h,
+                    DVec2::new(a.x, h.y),
+                    a,
+                ]));
+            }
+            (Tool::TangentArc, _) => {
+                if let Some((_, start, along)) = ui.tangent {
+                    if let Some(arc) =
+                        kreate_ops::ops::draft::edit_tools::tangent_arc(start, along, h)
+                    {
+                        let tol = start.distance(h).max(1e-6) * 1e-3;
+                        view.preview.push(polyline(arc.tessellate(tol)));
+                    }
+                }
+            }
             (Tool::Circle2, [a]) => view
                 .preview
                 .push(circle((*a + h) * 0.5, a.distance(h) * 0.5)),
@@ -1879,6 +1959,10 @@ fn overlay(
         (Tool::Line, _) => "sketch-prompt-line-next",
         (Tool::Rectangle, 0) => "sketch-prompt-corner",
         (Tool::Rectangle, _) => "sketch-prompt-rectangle-far",
+        (Tool::RectangleCentre, 0) => "sketch-prompt-centre",
+        (Tool::RectangleCentre, _) => "sketch-prompt-rectangle-far",
+        (Tool::TangentArc, _) if ui.tangent.is_none() => "sketch-prompt-tangent-start",
+        (Tool::TangentArc, _) => "sketch-prompt-arc-end",
         (Tool::Circle, 0) => "sketch-prompt-centre",
         (Tool::Circle, _) => "sketch-prompt-diameter",
         (Tool::Circle2, 0) => "sketch-prompt-circle2-first",
@@ -2038,7 +2122,9 @@ pub fn drawing_view(
     };
     for c in &d.constraints {
         match c {
-            C::Coincident(a, _) => mark(at(*a), "∘"),
+            // Ends held together are plainly one corner: a mark on every
+            // one is clutter, and Fusion draws none.
+            C::Coincident(..) => {}
             C::Horizontal(a, None) => mark(mid(a.entity), "H"),
             C::Vertical(a, None) => mark(mid(a.entity), "V"),
             C::Horizontal(a, Some(_)) => mark(at(*a), "H"),
@@ -2173,8 +2259,11 @@ pub fn revolve_shape(axis: [u32; 2]) -> kreate_scene::feature::Shape {
 }
 
 /// What a drag-box from `a` to `b` on screen takes: the points inside it,
-/// and every line with both ends inside — a circle or an arc whole.
+/// and every line with both ends inside — a circle or an arc whole. Drawn
+/// right to left it is a crossing box, as in Fusion and AutoCAD: a line it
+/// touches at all is taken, and in a drawing the whole curve with it.
 pub fn in_band(g: &Geometry, a: DVec2, b: DVec2) -> (Vec<u32>, Vec<u32>) {
+    let crossing_box = b.x < a.x;
     let (lo, hi) = (a.min(b), a.max(b));
     let inside = |v: u32| {
         g.screen
@@ -2198,17 +2287,47 @@ pub fn in_band(g: &Geometry, a: DVec2, b: DVec2) -> (Vec<u32>, Vec<u32>) {
                 .is_none_or(|m| !m.refs[*v as usize].is_empty())
         })
         .collect();
+    let corners = [lo, DVec2::new(hi.x, lo.y), hi, DVec2::new(lo.x, hi.y)];
+    let touches = |p: u32, q: u32| {
+        if inside(p) || inside(q) {
+            return true;
+        }
+        let (Some(Some(sp)), Some(Some(sq))) = (
+            g.screen.get(p as usize).copied(),
+            g.screen.get(q as usize).copied(),
+        ) else {
+            return false;
+        };
+        (0..4).any(|k| crossing(sp, sq, corners[k], corners[(k + 1) % 4]).is_some())
+    };
     let mut lines: Vec<u32> = g
         .lines
         .iter()
         .enumerate()
-        .filter(|(_, [p, q])| inside(*p) && inside(*q))
+        .filter(|(_, [p, q])| {
+            if crossing_box {
+                touches(*p, *q)
+            } else {
+                inside(*p) && inside(*q)
+            }
+        })
         .map(|(i, _)| i as u32)
         .collect();
-    // In a drawing a curve is taken whole or not at all.
+    // In a drawing a curve is taken whole or not at all: whole inside a
+    // window, touched by a crossing box.
     if g.map.is_some() {
         let all = lines.clone();
-        lines.retain(|l| g.lines_of(Pick::Line(*l)).iter().all(|k| all.contains(k)));
+        if crossing_box {
+            for l in &all {
+                for k in g.lines_of(Pick::Line(*l)) {
+                    if !lines.contains(&k) {
+                        lines.push(k);
+                    }
+                }
+            }
+        } else {
+            lines.retain(|l| g.lines_of(Pick::Line(*l)).iter().all(|k| all.contains(k)));
+        }
     }
     (points, lines)
 }
@@ -2468,6 +2587,34 @@ mod tests {
         assert_eq!(g.entities_in(&[1], &[0]), vec![1]);
     }
 
+    /// The rectangle's four sides are one chain; the circle is its own.
+    /// A box drawn right to left takes what it touches, left to right only
+    /// what it holds.
+    #[test]
+    fn a_chain_and_a_crossing_box_take_whole_curves() {
+        let d = drawn();
+        let g = Geometry::from_drawing(&d, 1e-3, |p| Some(p * 100.0));
+        let mut chain = g.chain_of(EntityId(2));
+        chain.sort();
+        assert_eq!(chain, (1..=4).map(EntityId).collect::<Vec<_>>());
+        assert_eq!(g.chain_of(EntityId(5)), vec![EntityId(5)]);
+        // A box over the rectangle's right side only: the window holds
+        // nothing whole, the crossing box takes that side.
+        let (a, b) = (DVec2::new(150.0, -50.0), DVec2::new(250.0, 150.0));
+        let (_, window) = in_band(&g, a, b);
+        assert!(window
+            .iter()
+            .all(|l| g.entity_of_line(*l) == Some(EntityId(2))));
+        let (_, crossing) = in_band(&g, b, a);
+        let mut taken: Vec<EntityId> = crossing
+            .iter()
+            .filter_map(|l| g.entity_of_line(*l))
+            .collect();
+        taken.sort();
+        taken.dedup();
+        assert_eq!(taken, vec![EntityId(1), EntityId(2), EntityId(3)]);
+    }
+
     /// The drawing's points keep their numbers when it moves: a drag finds
     /// the point it took hold of on every step.
     #[test]
@@ -2618,8 +2765,13 @@ mod tests {
         let g = geometry().without(&[1, 2]);
         // Point 1 is under the pointer but moving: not caught.
         assert_eq!(g.point_near(DVec2::new(101.0, 1.0), 10.0), None);
-        // The lines on the moving points went; the others stay.
-        assert!(g.lines.iter().all(|l| !l.contains(&1) && !l.contains(&2)));
+        // The lines on the moving points are not caught either, wherever
+        // the pointer is — and every line keeps its number, which is what
+        // names the curve it belongs to.
+        assert_eq!(g.lines, geometry().lines);
+        let caught = g.line_near(DVec2::new(101.0, 1.0), 1e9).expect("a line");
+        let ends = g.lines[caught as usize];
+        assert!(!ends.contains(&1) && !ends.contains(&2), "{ends:?}");
         assert!(g.lines.contains(&[3, 0]));
         assert_eq!(g.point_near(DVec2::new(1.0, 1.0), 10.0), Some(0));
     }

@@ -13,6 +13,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<DensitySet>();
     registry.register::<SectionSet>();
     registry.register::<Mate>();
+    registry.register::<MateSet>();
     registry.register::<MeasureAdd>();
     registry.register::<MeasureRemove>();
     registry.register::<ParameterSet>();
@@ -225,8 +226,24 @@ impl Operator for Bind {
             }
             _ => {
                 let order = u64::from(params.index);
-                if !o.features.iter().any(|f| f.order == order) {
+                let Some(f) = o.features.iter().find(|f| f.order == order) else {
                     return Err(OpError::Failed("no such feature".into()));
+                };
+                // Those a parameter is applied to (`apply_parameters`): any
+                // other took the binding, showed it, and never followed it.
+                use kreate_scene::feature::Shape;
+                if !matches!(
+                    f.shape,
+                    Shape::Extrude { .. }
+                        | Shape::Revolve { .. }
+                        | Shape::Round { .. }
+                        | Shape::Shell { .. }
+                ) {
+                    return Err(OpError::Failed(
+                        "a parameter can drive an extrude's distance, a revolve's angle, \
+                         a fillet's radius or a shell's thickness; not this feature"
+                            .into(),
+                    ));
                 }
                 kreate_scene::design::Bound::FeatureAmount { body: uid, order }
             }
@@ -377,15 +394,166 @@ impl Operator for Mate {
             .ok()
             .and_then(|raw| d.object_by_uid(kreate_scene::Uid::from_raw(raw)))
             .filter(|t| *t != id);
+        // The mate itself, to keep: each face in its own part's space,
+        // where it stays the face it is whatever is moved after.
+        let kept = target.and_then(|target| {
+            let (own, other) = (
+                (motion * d.world_transform(id)).inverse(),
+                d.world_transform(target).inverse(),
+            );
+            let mate = kreate_scene::document::Mate {
+                target: d.object_uid(target)?,
+                from: own.transform_point3(to),
+                from_normal: own.transform_vector3(-nt).normalize_or_zero(),
+                to: other.transform_point3(to - nt * params.offset),
+                to_normal: other.transform_vector3(nt).normalize_or_zero(),
+                offset: params.offset,
+                angle: 0.0,
+            };
+            (mate.from.is_finite() && mate.to.is_finite()).then_some(mate)
+        });
         let d = doc.document_mut();
         let o = d.object_mut(id).expect("found");
         o.transform.translation = translation;
         o.transform.rotation = rotation.normalize();
         o.transform.scale = scale;
+        o.mate = None;
         if let Some(target) = target {
             // Where it now sits, kept: parenting does not move it. A part
             // that would end up its own ancestor stays unattached.
-            let _ = d.set_parent(id, Some(target));
+            if d.set_parent(id, Some(target)).is_ok() {
+                d.object_mut(id).expect("found").mate = kept;
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct MateSetParams {
+    /// The mated part, by its uid; empty for the active object.
+    pub uid: String,
+    /// The gap between the two faces.
+    #[param(unit = "length", soft_min = -0.1, soft_max = 0.1)]
+    pub offset: f64,
+    /// How far the part is turned about the faces' normal from where it
+    /// was put.
+    #[param(unit = "angle")]
+    pub angle: f64,
+    /// Take the mate off; the part stays where it is, and attached.
+    pub remove: bool,
+}
+
+/// The part's mate, for the operator's parameters to start from.
+fn mated(doc: &Document, uid: &str) -> Option<kreate_scene::document::ObjectId> {
+    let id = match uid.trim().parse::<u64>() {
+        Ok(raw) => doc.object_by_uid(kreate_scene::Uid::from_raw(raw))?,
+        Err(_) => doc.selection.active?,
+    };
+    doc.object(id)?.mate.map(|_| id)
+}
+
+/// Changes a mate's gap or its turn, the part put again by it: the two
+/// faces stay face to face. Fusion's Edit Joint, for a planar one.
+pub struct MateSet;
+
+impl Operator for MateSet {
+    type Params = MateSetParams;
+    fn id() -> &'static str {
+        "object.mate_set"
+    }
+    fn label() -> &'static str {
+        "Edit Mate"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+    /// What the mate is now: a line that gives only the gap keeps the turn.
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        let uid = match given.get("uid") {
+            Some(crate::property::PropertyValue::Text(s)) => s.clone(),
+            _ => String::new(),
+        };
+        let mate = doc.object(mated(doc, &uid)?)?.mate?;
+        Some(MateSetParams {
+            uid,
+            offset: mate.offset,
+            angle: mate.angle,
+            remove: false,
+        })
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let id =
+            mated(d, &params.uid).ok_or_else(|| OpError::Failed("this part has no mate".into()))?;
+        let mate = d.object(id).and_then(|o| o.mate).expect("mated");
+        if params.remove {
+            doc.document_mut().object_mut(id).expect("found").mate = None;
+            return Ok(OpResult::Finished);
+        }
+        if !params.offset.is_finite() || !params.angle.is_finite() {
+            return Err(OpError::Failed("not a number".into()));
+        }
+        let Some(target) = d.object_by_uid(mate.target) else {
+            return Err(OpError::Failed(
+                "the part it was mated to is gone; remove the mate".into(),
+            ));
+        };
+        // The faces as they are in the world now.
+        let (own, other) = (d.world_transform(id), d.world_transform(target));
+        let (from, nf) = (
+            own.transform_point3(mate.from),
+            own.transform_vector3(mate.from_normal).normalize_or_zero(),
+        );
+        let (to, nt) = (
+            other.transform_point3(mate.to),
+            other.transform_vector3(mate.to_normal).normalize_or_zero(),
+        );
+        if nf == DVec3::ZERO || nt == DVec3::ZERO {
+            return Err(OpError::Failed("a face needs a direction".into()));
+        }
+        // Face to face again if something turned it away, then about the
+        // normal by what the angle has changed by, then to the gap.
+        let face = kreate_math::DQuat::from_rotation_arc(nf, -nt);
+        let spin = kreate_math::DQuat::from_axis_angle(nt, params.angle - mate.angle);
+        let motion = kreate_math::DAffine3::from_translation(to + nt * params.offset)
+            * kreate_math::DAffine3::from_quat(spin * face)
+            * kreate_math::DAffine3::from_translation(-from);
+        let object = d.object(id).expect("found");
+        let above = own * object.transform.to_affine().inverse();
+        let local = above.inverse() * motion * above * object.transform.to_affine();
+        let (scale, rotation, translation) = local.to_scale_rotation_translation();
+        if !translation.is_finite() || !rotation.is_finite() {
+            return Err(OpError::Failed(
+                "the parts cannot be put together that way".into(),
+            ));
+        }
+        let o = doc.document_mut().object_mut(id).expect("found");
+        let before = (o.transform, o.mate);
+        o.transform.translation = translation;
+        o.transform.rotation = rotation.normalize();
+        o.transform.scale = scale;
+        if let Some(m) = &mut o.mate {
+            m.offset = params.offset;
+            m.angle = params.angle;
+        }
+        // To within rounding: the same values again put it where it is.
+        let same = o.mate == before.1
+            && o.transform
+                .translation
+                .abs_diff_eq(before.0.translation, 1e-12)
+            && o.transform.rotation.abs_diff_eq(before.0.rotation, 1e-12);
+        if same {
+            o.transform = before.0;
+            return Ok(OpResult::Cancelled);
         }
         Ok(OpResult::Finished)
     }
@@ -890,6 +1058,126 @@ mod tests {
             (face - DVec3::new(0.0, 0.0, -1.0)).length() < 1e-9,
             "{face}"
         );
+    }
+
+    /// Mated to a part, the mate is kept: its gap changed lifts the part
+    /// off the face by that much, its turn spins it about the faces'
+    /// normal with the faces still together, and both hold after the other
+    /// part has been moved and turned. Removed, the part stays put.
+    #[test]
+    fn a_mate_is_kept_and_its_gap_and_turn_changed() {
+        use kreate_scene::document::{Object, ObjectData};
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(2.0));
+        let a = doc.add_object(Object::new("A", ObjectData::Mesh(mesh)));
+        let b = doc.add_object(Object::new("B", ObjectData::Mesh(mesh)));
+        doc.object_mut(a).unwrap().transform.translation = DVec3::new(5.0, 3.0, 0.0);
+        let uid = |doc: &Document, id| doc.object_uid(id).unwrap().raw().to_string();
+        let mut history = History::new();
+        let ctx = Context::default();
+        let mut p = PropertyMap::new();
+        // A's +X face onto B's top (B is 2 across, at the origin), off its
+        // middle so a turn shows.
+        p.set("uid", PropertyValue::Text(uid(&doc, a)));
+        p.set("target", PropertyValue::Text(uid(&doc, b)));
+        p.set("from", PropertyValue::Vec3([6.0, 3.5, 0.0]));
+        p.set("from_normal", PropertyValue::Vec3([1.0, 0.0, 0.0]));
+        p.set("to", PropertyValue::Vec3([0.0, 0.0, 1.0]));
+        p.set("to_normal", PropertyValue::Vec3([0.0, 0.0, 1.0]));
+        history
+            .dispatch(&registry, &mut doc, &ctx, "object.mate", &p)
+            .unwrap();
+        let mate = doc.object(a).unwrap().mate.expect("kept");
+        assert_eq!(mate.target, doc.object_uid(b).unwrap());
+        assert_eq!(doc.object(a).unwrap().parent, Some(b));
+        // The mated point of A, in the world.
+        let point = |doc: &Document| doc.world_transform(a).transform_point3(mate.from);
+        assert!((point(&doc) - DVec3::new(0.0, 0.0, 1.0)).length() < 1e-9);
+
+        let set =
+            |doc: &mut Document, history: &mut History, pairs: &[(&'static str, PropertyValue)]| {
+                let mut p = PropertyMap::new();
+                p.set("uid", PropertyValue::Text(uid(doc, a)));
+                for (k, v) in pairs {
+                    p.set(k, v.clone());
+                }
+                history.dispatch(&registry, doc, &ctx, "object.mate_set", &p)
+            };
+        // A gap of a half: the point is that far off B's top, the face
+        // still looking down at it.
+        set(
+            &mut doc,
+            &mut history,
+            &[("offset", PropertyValue::Float(0.5))],
+        )
+        .unwrap();
+        assert!(
+            (point(&doc) - DVec3::new(0.0, 0.0, 1.5)).length() < 1e-9,
+            "{}",
+            point(&doc)
+        );
+        let down = doc.world_transform(a).transform_vector3(mate.from_normal);
+        assert!((down - DVec3::NEG_Z).length() < 1e-9, "{down}");
+        // B moved and turned: A goes with it, and a quarter turn of the
+        // mate then spins A about the faces' normal, the mated point where
+        // it was and the gap as it was.
+        let t = &mut doc.object_mut(b).unwrap().transform;
+        t.translation = DVec3::new(1.0, -2.0, 0.5);
+        t.rotation = kreate_math::DQuat::from_rotation_y(0.7);
+        let (before, centre) = (
+            point(&doc),
+            doc.world_transform(a).transform_point3(DVec3::ZERO),
+        );
+        set(
+            &mut doc,
+            &mut history,
+            // Both, as the panel sends them; a script's line that names
+            // one keeps the other (`current`).
+            &[
+                ("offset", PropertyValue::Float(0.5)),
+                ("angle", PropertyValue::Float(std::f64::consts::FRAC_PI_2)),
+            ],
+        )
+        .unwrap();
+        let kept = doc.object(a).unwrap().mate.unwrap();
+        assert_eq!(
+            (kept.offset, kept.angle),
+            (0.5, std::f64::consts::FRAC_PI_2)
+        );
+        assert!(
+            (point(&doc) - before).length() < 1e-9,
+            "the mated point stays"
+        );
+        let moved = doc.world_transform(a).transform_point3(DVec3::ZERO);
+        assert!((moved - centre).length() > 0.1, "the part turned about it");
+        let normal = doc.world_transform(b).transform_vector3(DVec3::Z);
+        let facing = doc.world_transform(a).transform_vector3(mate.from_normal);
+        assert!((facing + normal).length() < 1e-9, "still face to face");
+        // The same again changes nothing.
+        assert_eq!(
+            set(
+                &mut doc,
+                &mut history,
+                &[
+                    ("offset", PropertyValue::Float(0.5)),
+                    ("angle", PropertyValue::Float(std::f64::consts::FRAC_PI_2)),
+                ],
+            ),
+            Ok(OpResult::Cancelled)
+        );
+        // Removed: no mate, the part where it is, still attached.
+        let place = doc.world_transform(a);
+        set(
+            &mut doc,
+            &mut history,
+            &[("remove", PropertyValue::Bool(true))],
+        )
+        .unwrap();
+        assert!(doc.object(a).unwrap().mate.is_none());
+        assert!(doc.world_transform(a).abs_diff_eq(place, 1e-12));
+        assert!(set(&mut doc, &mut history, &[]).is_err(), "no mate to edit");
     }
 
     #[test]

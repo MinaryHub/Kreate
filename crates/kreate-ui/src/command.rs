@@ -120,6 +120,10 @@ pub enum Command {
     /// application opens the file and adds the datablock; the link is made by
     /// `world.set_image`, which is where the undo step belongs.
     PickWorldImage,
+    /// From the Render tab: pick an HDRI file to add to the environments
+    /// and use. A command for the same reason: the dialog is the
+    /// application's to open.
+    EnvironmentAdd,
     /// Put the world's background back to a colour.
     ClearWorldImage,
     /// Ask for an image file and put it in one of the active material's
@@ -213,6 +217,11 @@ pub enum Command {
     /// an index into the list the panel was given.
     ChatModel {
         index: usize,
+    },
+    /// From the chat panel: answer with the model named — one typed, which
+    /// the list did not have.
+    ChatModelName {
+        name: String,
     },
     /// From the Claude panel: sign Claude Code in, in the browser.
     ChatSignIn,
