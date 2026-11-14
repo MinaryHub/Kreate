@@ -10,6 +10,23 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- A phone's layout, on Android below 600 points across (or anywhere with
+  `KREATE_LAYOUT=phone`): the viewport whole; a bar with the mode, undo,
+  redo, search and every menu; along the bottom Add, Move, Rotate, Scale
+  and Delete, and tabs that raise the scene, the properties, the material
+  or the assistant in a sheet. With Move, Rotate or Scale in hand, a
+  finger dragged across the view transforms what is selected, and lifting
+  it confirms; a tap still selects. Controls are a finger's size.
+
+### Fixed
+
+- Gemini (and Codex installed by npm) in the chat panel said "env: node:
+  No such file or directory" when Kreate was started from Finder or the
+  Dock: the assistant's program now starts with its own folder, and where
+  package managers install, on its PATH.
+
 ## [0.10.0] - 2026-11-14
 
 ### Added

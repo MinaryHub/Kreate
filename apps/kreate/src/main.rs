@@ -1161,6 +1161,9 @@ struct App {
     /// reason, so that `X` means "constrain to X" rather than "delete" for as
     /// long as a transform is running.
     gesture: Option<(kreate::modal::Gesture, kreate_ops::ModalSession)>,
+    /// The gesture was begun by a finger dragged with the phone's transform
+    /// tool in hand: it ends when the finger lifts.
+    touch_gesture: bool,
     /// The last title pushed to the window, so it is only set when it changes.
     ///
     /// Setting a window title is a system call that can repaint the frame, and
@@ -1248,6 +1251,7 @@ impl App {
             hover: None,
             xray: false,
             drag_select: None,
+            touch_gesture: false,
             motion: kreate_render::CameraMotion::new(kreate::startup::starting_camera()),
             last_frame: None,
             keymap: Keymap::default(),
@@ -11861,7 +11865,44 @@ impl App {
     /// Runs even when the interface claimed the release — over a panel, a menu,
     /// the navigation gizmo — because a button that went down has to come up. It
     /// not doing so was what made navigation stick on and then appear broken.
+    /// With the phone's transform tool in hand, a selection drag that has
+    /// moved becomes the transform instead: what is selected follows the
+    /// finger, and lifting it confirms (see `end_mouse_drag`). A tap never
+    /// moves far enough, and still selects.
+    fn phone_drag_transform(&mut self) {
+        let Some(kind) = self.phone_drag_kind() else {
+            return;
+        };
+        self.drag_select = None;
+        self.begin_gesture(kind);
+        self.touch_gesture = self.gesture.is_some();
+    }
+
+    /// The transform a drag now in progress is to become, on a phone with a
+    /// transform tool in hand: once it has moved past a tap, with something
+    /// selected and nothing else under way.
+    fn phone_drag_kind(&self) -> Option<kreate::modal::Kind> {
+        let tool = self.ui.phone_tool.filter(|_| self.ui.phone)?;
+        if self.gesture.is_some()
+            || self.doc.selection.objects.is_empty()
+            || !self.drag_select.as_ref().is_some_and(|d| d.moved)
+        {
+            return None;
+        }
+        Some(match tool {
+            kreate::shell::PhoneTool::Move => kreate::modal::Kind::Move,
+            kreate::shell::PhoneTool::Rotate => kreate::modal::Kind::Rotate,
+            kreate::shell::PhoneTool::Scale => kreate::modal::Kind::Scale,
+        })
+    }
+
     fn end_mouse_drag(&mut self, slot: usize) {
+        // A finger's transform: done when the finger lifts.
+        if slot == 0 && std::mem::take(&mut self.touch_gesture) && self.gesture.is_some() {
+            self.drag_ops[0] = None;
+            self.confirm_gesture();
+            return;
+        }
         // A stroke ends where the button comes up: one step to undo — with
         // the last movement in it, which waits for a frame otherwise.
         if slot == 0 && std::mem::take(&mut self.stroke_moved) {
@@ -16361,6 +16402,7 @@ impl ApplicationHandler for App {
                     self.apply_drag_motion((p.0 - prev.0, p.1 - prev.1));
                 }
                 self.input.cursor = Some(p);
+                self.phone_drag_transform();
                 // After the cursor is recorded, because the gesture reads it
                 // from there rather than from the event — one source of truth
                 // for where the pointer is.
@@ -20084,6 +20126,41 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         });
         app.drain_ui_commands();
         assert_eq!(ai_keys::key(Service::Anthropic), None);
+    }
+
+    /// On a phone, with a transform tool in hand, a drag that has moved past
+    /// a tap becomes that transform; a tap, no tool, nothing selected, or a
+    /// desktop's screen leave it a selection.
+    #[test]
+    fn a_finger_drag_becomes_the_phone_tools_transform() {
+        use kreate::shell::PhoneTool;
+        let mut app = app();
+        let cube = app
+            .doc
+            .add_mesh_object("Cube", kreate_mesh::primitives::cube(1.0));
+        let drag = |app: &mut App, moved: bool| {
+            app.drag_select = Some(DragSelect {
+                origin: (400.0, 300.0),
+                current: (440.0, 300.0),
+                moved,
+                extend: false,
+                deselect: false,
+                lasso: None,
+            });
+        };
+        app.ui.phone = true;
+        drag(&mut app, true);
+        assert_eq!(app.phone_drag_kind(), None, "no tool in hand");
+        app.ui.phone_tool = Some(PhoneTool::Rotate);
+        assert_eq!(app.phone_drag_kind(), None, "nothing selected");
+        app.doc.selection.add(cube);
+        app.doc.selection.active = Some(cube);
+        assert_eq!(app.phone_drag_kind(), Some(kreate::modal::Kind::Rotate));
+        drag(&mut app, false);
+        assert_eq!(app.phone_drag_kind(), None, "a tap selects");
+        drag(&mut app, true);
+        app.ui.phone = false;
+        assert_eq!(app.phone_drag_kind(), None, "not on a phone's screen");
     }
 
     /// F2 goes into the drawing and out again; in 2D what would turn the

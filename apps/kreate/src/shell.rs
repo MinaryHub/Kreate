@@ -157,6 +157,19 @@ pub struct ShellState {
     /// `crate::ai_keys::Service::ALL`; read again when one is kept or
     /// forgotten (set to `None`), not every frame.
     pub chat_key_tails: Option<Vec<Option<String>>>,
+    /// Laid out for a phone this frame: one viewport, a bar along the top,
+    /// tools and tabs along the bottom, and panels in a sheet that rises
+    /// from it. See [`draw_phone`].
+    pub phone: bool,
+    /// The layout asked for, whatever the screen: `KREATE_LAYOUT=phone` or
+    /// `desktop`. Otherwise a phone's is used on Android below 600 points.
+    pub layout_force: Option<bool>,
+    /// The panel the phone's sheet shows, when it is up.
+    pub phone_sheet: Option<PhoneSheet>,
+    /// The phone's transform tool: with one in hand, a finger dragged across
+    /// the viewport moves, turns or scales what is selected, and a tap still
+    /// selects.
+    pub phone_tool: Option<PhoneTool>,
     pub chat_busy: bool,
     /// Which assistant the chat panel talks to: an index into
     /// `kreate::claude::Provider::ALL`.
@@ -568,6 +581,11 @@ impl ShellState {
     pub fn with_catalog(catalog: Catalog) -> Self {
         Self {
             catalog,
+            layout_force: match std::env::var("KREATE_LAYOUT").as_deref() {
+                Ok("phone") => Some(true),
+                Ok("desktop") => Some(false),
+                _ => None,
+            },
             ..Self::default()
         }
     }
@@ -872,6 +890,10 @@ impl Default for ShellState {
             chat_attachments: Vec::new(),
             chat_focused: false,
             chat_key_tails: None,
+            phone: false,
+            layout_force: None,
+            phone_sheet: None,
+            phone_tool: None,
             chat_busy: false,
             chat_provider: 0,
             chat_models: Vec::new(),
@@ -2560,6 +2582,36 @@ pub fn draw(
     // access the command queue needs.
     let mut modifier_rows = modifier_rows(doc, registry, &state.catalog);
 
+    // A phone's screen: its own arrangement, the same editors in it.
+    let narrow = ui.ctx().content_rect().width() < PHONE_WIDTH;
+    state.phone = state
+        .layout_force
+        .unwrap_or(cfg!(target_os = "android") && narrow);
+    if state.phone {
+        let rect = draw_phone(
+            ui,
+            state,
+            doc,
+            registry,
+            history,
+            keymap,
+            preset,
+            overrides,
+            mode,
+            viewport_texture,
+            &l,
+            &selected,
+            active,
+            &mut modifier_rows,
+        );
+        state.apply_area_edits();
+        draw_help_windows(ui.ctx(), state, &l);
+        draw_object_pick(ui.ctx(), state, doc, &l);
+        draw_search(ui, state, &l, history, mode);
+        draw_pie(ui, state, &l, doc, mode);
+        return rect;
+    }
+
     // **The top bar is the application's, not the viewport's.** Blender's
     // rule, and the reason this row got short: what you can *do to a scene*
     // — add, select, transform, change mode, change shading — belongs to the
@@ -3320,7 +3372,13 @@ fn draw_area(
     // for a plain sub-`Ui` left every area transparent — which composited as
     // pure black, because nothing else paints there either. The pixel test
     // caught it at (1002, 240).
-    let header_height = theme.row_height + 6.0;
+    // On a phone the area's header gives way: what it held is in the
+    // phone's own bars, and the screen has no room for a second row of it.
+    let header_height = if state.phone {
+        0.0
+    } else {
+        theme.row_height + 6.0
+    };
     let header = egui::Rect::from_min_size(
         area.rect.min,
         egui::vec2(area.rect.width(), header_height.min(area.rect.height())),
@@ -3339,7 +3397,8 @@ fn draw_area(
     // off into a window that follows the pointer and docks where it is let
     // go. Sensed before the header's own widgets, so they still take their
     // clicks; the viewport stays, and so does the last area.
-    let can_tear = !state.is_floating(area.id)
+    let can_tear = !state.phone
+        && !state.is_floating(area.id)
         && area.editor != kreate_ui::EditorId::VIEWPORT
         && state.screen().area_count() > 1;
     if can_tear {
@@ -3380,7 +3439,9 @@ fn draw_area(
             .id_salt(("area-header", area.id.0)),
         |ui| {
             ui.set_clip_rect(header);
-            draw_area_header(ui, state, area, l, mode);
+            if !state.phone {
+                draw_area_header(ui, state, area, l, mode);
+            }
         },
     );
 
@@ -15102,6 +15163,323 @@ fn bar_button(ui: &mut Ui, icon: RibbonIcon, enabled: bool, tip: &str) -> egui::
 
 /// What the application bar carries after the menus: save, undo and redo
 /// as buttons, the open document, and the command search.
+/// Below this width, in points (Android's density-independent pixels), a
+/// screen is a phone's: Android's own line between a compact window and a
+/// medium one.
+pub const PHONE_WIDTH: f32 = 600.0;
+
+/// What the phone's sheet shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneSheet {
+    /// The outliner: what is in the scene.
+    Scene,
+    Properties,
+    /// The properties at their material tab.
+    Material,
+    /// The assistant.
+    Assistant,
+}
+
+impl PhoneSheet {
+    pub const ALL: [PhoneSheet; 4] = [
+        PhoneSheet::Scene,
+        PhoneSheet::Properties,
+        PhoneSheet::Material,
+        PhoneSheet::Assistant,
+    ];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            PhoneSheet::Scene => "phone-scene",
+            PhoneSheet::Properties => "phone-properties",
+            PhoneSheet::Material => "phone-material",
+            PhoneSheet::Assistant => "phone-assistant",
+        }
+    }
+
+    fn editor(self) -> kreate_ui::EditorId {
+        match self {
+            PhoneSheet::Scene => kreate_ui::EditorId::OUTLINER,
+            PhoneSheet::Properties | PhoneSheet::Material => kreate_ui::EditorId::PROPERTIES,
+            PhoneSheet::Assistant => kreate_ui::EditorId::CLAUDE,
+        }
+    }
+}
+
+/// The phone's transform tools: what a finger dragged across the viewport
+/// does to what is selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneTool {
+    Move,
+    Rotate,
+    Scale,
+}
+
+impl PhoneTool {
+    pub const ALL: [PhoneTool; 3] = [PhoneTool::Move, PhoneTool::Rotate, PhoneTool::Scale];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            PhoneTool::Move => "phone-move",
+            PhoneTool::Rotate => "phone-rotate",
+            PhoneTool::Scale => "phone-scale",
+        }
+    }
+}
+
+/// The sheet's area: not one of the workspace's, so nothing of the
+/// desktop's layout is disturbed by it.
+const PHONE_SHEET_AREA: kreate_ui::AreaId = kreate_ui::AreaId(u32::MAX - 7);
+
+/// Room for a finger: controls as tall as Android asks of a touch target,
+/// less the frame around them, and spaced so one is not hit for another.
+fn finger_sized(ui: &mut Ui) {
+    let spacing = ui.spacing_mut();
+    spacing.interact_size.y = 40.0;
+    spacing.button_padding = egui::vec2(12.0, 8.0);
+    spacing.item_spacing = egui::vec2(8.0, 8.0);
+}
+
+/// A phone's screen: the viewport whole, a bar over it — the mode, undo and
+/// redo, search, and every menu under ⋮ — and along the bottom the tools to
+/// add, move, turn, scale and delete, and the tabs that raise a sheet with
+/// the scene, the properties, the material or the assistant in it. What a
+/// phone is for here: looking at a model, changing it a little, and asking
+/// the assistant for the rest. The editors are the desktop's own.
+#[allow(clippy::too_many_arguments)]
+fn draw_phone(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    registry: &OperatorRegistry,
+    history: &History,
+    keymap: &kreate_input::Keymap,
+    preset: kreate_input::Preset,
+    overrides: &std::collections::BTreeMap<kreate_input::BindingId, kreate_input::Override>,
+    mode: kreate_ops::operator::Mode,
+    viewport_texture: Option<ViewportImage>,
+    l: &Labels,
+    selected: &[u32],
+    active: Option<u32>,
+    modifier_rows: &mut [kreate_ui::ModifierRow],
+) -> egui::Rect {
+    use kreate_ops::operator::Mode;
+    let theme = kreate_ui::theme::from_ui(ui);
+    state.history_steps = history.entries().iter().map(|e| e.label.clone()).collect();
+    state.history_at = history.cursor();
+
+    // The bar: the mode on the left; undo, redo, search and the menus on
+    // the right.
+    Panel::top("phone-bar").show(ui, |ui| {
+        finger_sized(ui);
+        ui.horizontal(|ui| {
+            let has = kreate_ops::mode::Has::of(doc);
+            let name = |kind: Mode| state.catalog.format(kind.label_key(), TextKind::Ui, &[]);
+            let current = name(mode);
+            let offered: Vec<Mode> = Mode::ALL
+                .iter()
+                .copied()
+                .filter(|k| *k == mode || (k.offered(has) && k.can_enter(has)))
+                .collect();
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt("phone-mode")
+                // i18n-exempt: a translated mode name
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for kind in &offered {
+                        if ui.selectable_label(*kind == mode, name(*kind)).clicked() && *kind != mode {
+                            chosen = Some(*kind);
+                        }
+                    }
+                });
+            if let Some(kind) = chosen {
+                state.queue.push(Command::SetMode(kind.tag().to_string()));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Words, not ⋮: the interface's font has no such glyph.
+                ui.menu_button(state.catalog.get("phone-more"), |ui| {
+                    finger_sized(ui);
+                    let menus = searchable_menus(
+                        &state.catalog,
+                        mode,
+                        state.select_mode,
+                        history.can_undo(),
+                        history.can_redo(),
+                    );
+                    for menu in menus {
+                        ui.menu_button(&menu.label, |ui| {
+                            finger_sized(ui);
+                            draw_nodes(ui, state, l, &menu.nodes);
+                        });
+                    }
+                });
+                if bar_button(ui, RibbonIcon::Search, true, &state.catalog.get("search-commands"))
+                    .clicked()
+                {
+                    state.palette.open();
+                }
+                if bar_button(ui, RibbonIcon::Redo, history.can_redo(), &l.redo).clicked() {
+                    state.queue.push(Command::Redo);
+                }
+                if bar_button(ui, RibbonIcon::Undo, history.can_undo(), &l.undo).clicked() {
+                    state.queue.push(Command::Undo);
+                }
+            });
+        });
+    });
+
+    // The tabs along the very bottom: each raises its sheet, and lowers it
+    // again when it is already up.
+    Panel::bottom("phone-tabs").show(ui, |ui| {
+        finger_sized(ui);
+        ui.columns(PhoneSheet::ALL.len(), |columns| {
+            for (column, sheet) in columns.iter_mut().zip(PhoneSheet::ALL) {
+                finger_sized(column);
+                let open = state.phone_sheet == Some(sheet);
+                let label = state.catalog.get(sheet.label_key());
+                let button = egui::Button::new(label)
+                    .selected(open)
+                    .min_size(egui::vec2(column.available_width(), 40.0));
+                if column.add(button).clicked() {
+                    state.phone_sheet = (!open).then_some(sheet);
+                }
+            }
+        });
+    });
+
+    // The tools over the tabs: what adds, the three a finger transforms
+    // with, and delete — in object mode. Other modes keep their menus here.
+    Panel::bottom("phone-tools").show(ui, |ui| {
+        finger_sized(ui);
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let menus = viewport_menus(l, mode, state.select_mode);
+                if mode.acts_on() == kreate_ops::mode::ActsOn::Objects {
+                    if let Some(add) = menus.iter().find(|m| m.label == l.add_menu) {
+                        ui.menu_button(&add.label, |ui| {
+                            finger_sized(ui);
+                            draw_nodes(ui, state, l, &add.nodes);
+                        });
+                    }
+                    for tool in PhoneTool::ALL {
+                        let on = state.phone_tool == Some(tool);
+                        let label = state.catalog.get(tool.label_key());
+                        if ui.add(egui::Button::new(label).selected(on)).clicked() {
+                            state.phone_tool = (!on).then_some(tool);
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            !doc.selection.objects.is_empty(),
+                            egui::Button::new(state.catalog.get("phone-delete")),
+                        )
+                        .clicked()
+                    {
+                        state.queue.run("object.delete", PropertyMap::new());
+                    }
+                } else {
+                    for menu in &menus {
+                        ui.menu_button(&menu.label, |ui| {
+                            finger_sized(ui);
+                            draw_nodes(ui, state, l, &menu.nodes);
+                        });
+                    }
+                }
+            });
+        });
+    });
+
+    // The sheet, over the bottom half: its panel, a title and a close.
+    let screen_height = ui.ctx().content_rect().height();
+    if let Some(sheet) = state.phone_sheet {
+        Panel::bottom("phone-sheet")
+            .resizable(true)
+            .default_size(screen_height * 0.45)
+            .min_size(screen_height * 0.2)
+            .max_size(screen_height * 0.85)
+            .show(ui, |ui| {
+                finger_sized(ui);
+                ui.horizontal(|ui| {
+                    // The grip: Android's sign that a sheet is dragged.
+                    let (grip, _) =
+                        ui.allocate_exact_size(egui::vec2(36.0, 4.0), egui::Sense::hover());
+                    ui.painter().rect_filled(grip, 2.0, theme.border_strong);
+                    ui.strong(state.catalog.get(sheet.label_key()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(state.catalog.get("phone-close")).clicked() {
+                            state.phone_sheet = None;
+                        }
+                    });
+                });
+                if sheet == PhoneSheet::Material {
+                    state.set_properties_tab(PHONE_SHEET_AREA, PropertiesTab::Material);
+                }
+                let rect = ui.available_rect_before_wrap();
+                let area = kreate_ui::AreaRect {
+                    id: PHONE_SHEET_AREA,
+                    editor: sheet.editor(),
+                    rect,
+                };
+                draw_area(
+                    ui,
+                    state,
+                    &area,
+                    l,
+                    registry,
+                    history,
+                    keymap,
+                    preset,
+                    overrides,
+                    doc,
+                    selected,
+                    active,
+                    modifier_rows,
+                    None,
+                    mode,
+                );
+            });
+    }
+
+    // The viewport: everything left.
+    let mut viewport_rect = egui::Rect::ZERO;
+    let view_id = state
+        .screen()
+        .areas()
+        .into_iter()
+        .find(|(_, editor)| *editor == kreate_ui::EditorId::VIEWPORT)
+        .map(|(id, _)| id)
+        .unwrap_or(kreate_ui::AreaId(u32::MAX - 8));
+    state.primary_viewport = Some(view_id);
+    state.extra_views.clear();
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(theme.base))
+        .show(ui, |ui| {
+            let area = kreate_ui::AreaRect {
+                id: view_id,
+                editor: kreate_ui::EditorId::VIEWPORT,
+                rect: ui.available_rect_before_wrap(),
+            };
+            viewport_rect = draw_area(
+                ui,
+                state,
+                &area,
+                l,
+                registry,
+                history,
+                keymap,
+                preset,
+                overrides,
+                doc,
+                selected,
+                active,
+                modifier_rows,
+                viewport_texture,
+                mode,
+            );
+        });
+    viewport_rect
+}
+
 fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool, can_redo: bool) {
     let theme = kreate_ui::theme::from_ui(ui);
     ui.spacing_mut().item_spacing.x = 2.0;
