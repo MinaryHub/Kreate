@@ -2299,6 +2299,18 @@ render-preparing = Preparing the renderer…
 render-time-left = about { $seconds } s left
 
 # The updater, in the status bar: a release downloaded for the next start.
+help-updates = Check for Updates
+op-help-updates = Check for Updates
+op-help-updates-desc = Looks for a newer release of Kreate now, and downloads it to be used the next time Kreate starts.
+update-running = This is Kreate { $version }.
+update-checking = Looking for a newer release…
+update-waiting = Kreate { $version } is already downloaded and will be used the next time Kreate starts.
+update-latest = This is the latest release.
+update-none = There is no release for this computer yet.
+update-failed = Could not look for a newer release: { $reason }
+update-dev-build = This copy runs from a build folder and does not update itself; build the new one instead.
+update-store = This copy is from the Microsoft Store, which updates it.
+update-off = Updates are turned off here (KREATE_NO_UPDATE).
 update-downloaded = Kreate { $version } is downloaded and will be used the next time Kreate starts
 
 # The welcome card over the empty document at the first start, and Help's Welcome.

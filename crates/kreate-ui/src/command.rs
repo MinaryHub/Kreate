@@ -260,6 +260,8 @@ pub enum Command {
     OpenContact,
     /// Help ▸ About Kreate.
     OpenAbout,
+    /// Help ▸ Check for Updates: look for a newer release now.
+    CheckUpdates,
     /// Help ▸ Welcome: the first start's card, shown again.
     OpenWelcome,
     /// The welcome card closed, and not shown at the next start.

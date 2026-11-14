@@ -195,6 +195,9 @@ pub struct ShellState {
     pub collab: kreate_ui::collab::CollabForm,
     pub collab_view: Option<kreate_ui::collab::CollabView>,
     pub about_open: bool,
+    /// What Help ▸ Check for Updates came to, shown in a window of its own
+    /// until closed: `None` closed, an empty string while it looks.
+    pub update_check: Option<String>,
     /// The welcome card over the viewport: the first start's, and Help ▸
     /// Welcome's after.
     pub welcome_open: bool,
@@ -914,6 +917,7 @@ impl Default for ShellState {
             collab: Default::default(),
             collab_view: None,
             about_open: false,
+            update_check: None,
             welcome_open: false,
             render_result: None,
             render_progress: None,
@@ -1912,6 +1916,7 @@ struct Labels {
     help_donate: String,
     file_collab: String,
     help_about: String,
+    help_updates: String,
     help_welcome: String,
     contact_title: String,
     contact_intro: String,
@@ -2335,6 +2340,7 @@ impl Labels {
             help_donate: t("help-donate"),
             file_collab: t("menu-file-collab"),
             help_about: t("help-about"),
+            help_updates: t("help-updates"),
             help_welcome: t("help-welcome"),
             contact_title: t("contact-title"),
             contact_intro: t("contact-intro"),
@@ -4706,6 +4712,11 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                     "help.welcome",
                     &l.help_welcome,
                     Run::Command(Command::OpenWelcome),
+                ),
+                entry(
+                    "help.updates",
+                    &l.help_updates,
+                    Run::Command(Command::CheckUpdates),
                 ),
                 entry(
                     "help.about",
@@ -7543,10 +7554,52 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
     ) {
         state.queue.push(Command::Donate);
     }
+    draw_update_check(ctx, state, l);
     draw_render_result(ctx, state, l);
     draw_render_progress(ctx, state);
     draw_fits(ctx, state, l);
     draw_sheet(ctx, state);
+}
+
+/// Help ▸ Check for Updates: the version running, and what the look for a
+/// newer one came to — a spinner while it looks.
+fn draw_update_check(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
+    let Some(said) = state.update_check.clone() else {
+        return;
+    };
+    let mut open = true;
+    let mut close = false;
+    egui::Window::new(&l.help_updates)
+        .id(egui::Id::new("update-check"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_max_width(360.0);
+            ui.label(
+                state
+                    .catalog
+                    .get_args("update-running", &[("version", crate::version::VERSION)]),
+            );
+            ui.add_space(6.0);
+            if said.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(state.catalog.get("update-checking"));
+                });
+            } else {
+                // i18n-exempt: composed from translated templates
+                ui.add(egui::Label::new(&said).wrap());
+            }
+            ui.add_space(6.0);
+            if ui.button(&l.contact_close).clicked() {
+                close = true;
+            }
+        });
+    if !open || close {
+        state.update_check = None;
+    }
 }
 
 /// The words of the fit calculator, from the Mechanical menu's catalog.

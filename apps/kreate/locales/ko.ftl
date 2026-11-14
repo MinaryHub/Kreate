@@ -2305,6 +2305,18 @@ render-preparing = 렌더러 준비 중…
 render-time-left = 약 { $seconds }초 남음
 
 # The updater, in the status bar: a release downloaded for the next start.
+help-updates = 업데이트 확인
+op-help-updates = 업데이트 확인
+op-help-updates-desc = 지금 새 Kreate 릴리스를 찾아, 있으면 받아 두었다가 다음에 Kreate를 시작할 때 적용합니다.
+update-running = 지금 버전은 Kreate { $version }입니다.
+update-checking = 새 릴리스를 찾는 중…
+update-waiting = Kreate { $version }을(를) 이미 받아 두었습니다. 다음에 Kreate를 시작하면 적용됩니다.
+update-latest = 최신 버전을 쓰고 있습니다.
+update-none = 이 컴퓨터용 릴리스가 아직 없습니다.
+update-failed = 새 릴리스를 찾지 못했습니다: { $reason }
+update-dev-build = 빌드 폴더에서 실행한 개발용 사본이라 스스로 업데이트하지 않습니다. 새로 빌드하세요.
+update-store = Microsoft Store에서 설치한 사본이라 스토어가 업데이트합니다.
+update-off = 이 컴퓨터에서는 업데이트가 꺼져 있습니다(KREATE_NO_UPDATE).
 update-downloaded = Kreate { $version } 버전을 내려받았습니다. 다음에 Kreate를 시작하면 적용됩니다
 
 # 처음 시작할 때 빈 문서 위에 뜨는 환영 카드, 그리고 도움말 메뉴의 시작 안내.

@@ -12,6 +12,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Help ▸ Check for Updates looks for a newer release now, rather than only
+  when Kreate starts, and says what it found: the latest is running; a
+  newer one, downloaded and used at the next start (or already waiting);
+  or why this copy does not update itself — a build folder's, the
+  Microsoft Store's, or turned off.
 - A tablet keeps the desktop's layout, at a finger's size: once a finger
   touches the screen, controls grow to a finger's height, the seams
   between areas take a finger's width, and picking vertices and edges

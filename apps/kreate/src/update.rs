@@ -216,16 +216,38 @@ fn exe_file_name() -> String {
 /// Looks for a newer release and, if there is one, downloads and stages it.
 /// The staged version, or `None` when there was nothing new.
 pub fn fetch_and_stage(root: &Path, repo: &str, current: &str) -> Result<Option<String>, String> {
+    Ok(match look_and_stage(root, repo, current)? {
+        Found::Staged(version) => Some(version),
+        _ => None,
+    })
+}
+
+/// What a look for a release found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// A newer one, downloaded now and used at the next start.
+    Staged(String),
+    /// A newer one, downloaded before and waiting for the next start.
+    Waiting(String),
+    /// Nothing newer: the latest release is this one, or older.
+    Latest(String),
+    /// No release this platform can use.
+    Nothing,
+}
+
+/// [`fetch_and_stage`], saying what it found.
+pub fn look_and_stage(root: &Path, repo: &str, current: &str) -> Result<Found, String> {
     let api = format!("https://api.github.com/repos/{repo}/releases/latest");
     let body = curl(&["-H", "Accept: application/vnd.github+json", &api])?;
     let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     let Some(release) = pick_release(&json, &asset_name()) else {
-        return Ok(None);
+        return Ok(Found::Nothing);
     };
-    if !is_newer(&release.version, current)
-        || staged(root).is_some_and(|(v, _)| v == release.version)
-    {
-        return Ok(None);
+    if !is_newer(&release.version, current) {
+        return Ok(Found::Latest(release.version));
+    }
+    if staged(root).is_some_and(|(v, _)| v == release.version) {
+        return Ok(Found::Waiting(release.version));
     }
     let dir = root.join(&release.version);
     let _ = std::fs::remove_dir_all(&dir);
@@ -241,7 +263,69 @@ pub fn fetch_and_stage(root: &Path, repo: &str, current: &str) -> Result<Option<
     let _ = std::fs::remove_file(&zip_path);
     crate::prefs::write_atomic(&root.join("staged.txt"), &release.version)
         .map_err(|e| e.to_string())?;
-    Ok(Some(release.version))
+    Ok(Found::Staged(release.version))
+}
+
+/// Why this copy does not update itself, as a catalog key: a developer's
+/// build, the Microsoft Store's, or turned off by `KREATE_NO_UPDATE`. `None`
+/// when it does.
+pub fn why_not(exe: &Path) -> Option<&'static str> {
+    if enabled(exe) {
+        return None;
+    }
+    Some(
+        if std::env::var_os("KREATE_NO_UPDATE").is_some_and(|v| v != "0") {
+            "update-off"
+        } else if packaged(exe) {
+            "update-store"
+        } else {
+            "update-dev-build"
+        },
+    )
+}
+
+/// What a check asked for by hand came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Checked {
+    Found(Found),
+    /// This copy does not update itself: why, as a catalog key.
+    Off(&'static str),
+    Failed(String),
+}
+
+/// A check for a release asked for now — Help ▸ Check for Updates — on its
+/// own thread: downloaded and staged when there is one, as at a start. What
+/// it came to arrives in the slot, and `wake` is called.
+pub fn check_now(wake: impl FnOnce() + Send + 'static) -> Arc<Mutex<Option<Checked>>> {
+    let slot = Arc::new(Mutex::new(None));
+    let exe = std::env::current_exe().unwrap_or_default();
+    let out = slot.clone();
+    let answer = move |checked: Checked| {
+        if let Ok(mut s) = out.lock() {
+            *s = Some(checked);
+        }
+        wake();
+    };
+    if let Some(why) = why_not(&exe) {
+        answer(Checked::Off(why));
+        return slot;
+    }
+    let Some(root) = update_root() else {
+        answer(Checked::Failed("no folder to download into".into()));
+        return slot;
+    };
+    std::thread::Builder::new()
+        .name("update-check".into())
+        .spawn(move || {
+            answer(
+                match look_and_stage(&root, &repo(), crate::version::VERSION) {
+                    Ok(found) => Checked::Found(found),
+                    Err(e) => Checked::Failed(e),
+                },
+            )
+        })
+        .ok();
+    slot
 }
 
 /// Starts the look for a release on its own thread. What it holds becomes
@@ -460,6 +544,31 @@ pub fn apply_staged_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A copy run from a build folder says so when asked to update; an
+    /// installed one is asked of the network.
+    #[test]
+    fn a_build_folders_copy_says_why_it_does_not_update() {
+        if std::env::var_os("KREATE_NO_UPDATE").is_some()
+            || std::env::var_os("KREATE_UPDATE").is_some()
+        {
+            return;
+        }
+        assert_eq!(
+            why_not(Path::new("/src/kreate/target/debug/kreate")),
+            Some("update-dev-build")
+        );
+        assert_eq!(
+            why_not(Path::new("/Applications/Kreate.app/Contents/MacOS/kreate")),
+            None
+        );
+        assert_eq!(
+            why_not(Path::new(
+                r"C:\Program Files\WindowsApps\minary.Kreate\kreate.exe"
+            )),
+            Some("update-store")
+        );
+    }
     use std::io::Write;
 
     /// The whole way, against the real releases: an older version finds the

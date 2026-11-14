@@ -785,6 +785,8 @@ struct App {
     /// The release the update check downloaded, once it has; said in the
     /// status bar, then forgotten. See `kreate::update`.
     update_ready: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    /// A check asked for from the Help menu, while it looks.
+    update_check: Option<Arc<std::sync::Mutex<Option<kreate::update::Checked>>>>,
     /// The Claude panel's conversation. See `kreate::claude`.
     chat: Option<kreate::claude::Chat>,
     /// Whether the last chat entry is a reply still streaming in.
@@ -1212,6 +1214,7 @@ impl App {
         Self {
             bridge: None,
             update_ready: None,
+            update_check: None,
             chat: None,
             chat_streaming: false,
             chat_turns: Vec::new(),
@@ -8209,6 +8212,17 @@ impl App {
                 Command::CollabJoin { name, address, key } => self.collab_join(name, address, key),
                 Command::CollabLeave => self.collab_leave(),
                 Command::OpenAbout => self.ui.about_open = true,
+                Command::CheckUpdates => {
+                    self.ui.update_check = Some(String::new());
+                    // Woken as an import wakes it: any work done off the
+                    // main thread.
+                    let wake = self.import_wake.clone();
+                    self.update_check = Some(kreate::update::check_now(move || {
+                        if let Some(wake) = wake {
+                            wake();
+                        }
+                    }));
+                }
                 Command::OpenWelcome => self.ui.welcome_open = true,
                 Command::CloseWelcome => self.close_welcome(),
                 Command::OpenSample => self.open_sample(),
@@ -16641,6 +16655,15 @@ impl ApplicationHandler for App {
             self.status(&text);
             self.redraw.set(RedrawReason::UI);
         }
+        let checked = self
+            .update_check
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().and_then(|mut v| v.take()));
+        if let Some(checked) = checked {
+            self.update_check = None;
+            self.ui.update_check = Some(update_said(&self.ui.catalog, &checked));
+            self.redraw.set(RedrawReason::UI);
+        }
         // While the user is dragging, stay on Poll so motion is continuous;
         // otherwise Wait, so an idle window costs nothing — or until the
         // interface asked to be drawn again.
@@ -17410,6 +17433,21 @@ pub fn run(event_loop: EventLoop<()>, args: Vec<String>) {
         }
     }));
     event_loop.run_app(&mut app).expect("run");
+}
+
+/// What a check for updates came to, in words.
+fn update_said(catalog: &kreate_i18n::Catalog, checked: &kreate::update::Checked) -> String {
+    use kreate::update::{Checked, Found};
+    match checked {
+        Checked::Found(Found::Staged(v)) => {
+            catalog.get_args("update-downloaded", &[("version", v)])
+        }
+        Checked::Found(Found::Waiting(v)) => catalog.get_args("update-waiting", &[("version", v)]),
+        Checked::Found(Found::Latest(_)) => catalog.get("update-latest"),
+        Checked::Found(Found::Nothing) => catalog.get("update-none"),
+        Checked::Off(key) => catalog.get(key),
+        Checked::Failed(why) => catalog.get_args("update-failed", &[("reason", why)]),
+    }
 }
 
 /// Writes a crash report before the process unwinds.
@@ -20153,6 +20191,30 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         });
         app.drain_ui_commands();
         assert_eq!(ai_keys::key(Service::Anthropic), None);
+    }
+
+    /// Every answer a check for updates can give is said in words, the
+    /// versions in them.
+    #[test]
+    fn a_check_for_updates_says_what_it_found() {
+        use kreate::update::{Checked, Found};
+        let app = app();
+        let c = &app.ui.catalog;
+        for (checked, has) in [
+            (Checked::Found(Found::Staged("9.9.9".into())), "9.9.9"),
+            (Checked::Found(Found::Waiting("9.9.8".into())), "9.9.8"),
+            (Checked::Found(Found::Latest("0.1.0".into())), ""),
+            (Checked::Found(Found::Nothing), ""),
+            (Checked::Off("update-dev-build"), ""),
+            (Checked::Failed("offline".into()), "offline"),
+        ] {
+            let said = update_said(c, &checked);
+            assert!(
+                !said.is_empty() && !said.starts_with("update-"),
+                "{checked:?}: {said}"
+            );
+            assert!(said.contains(has), "{checked:?}: {said}");
+        }
     }
 
     /// A finger sizes the interface for itself; what the fingers are turned
