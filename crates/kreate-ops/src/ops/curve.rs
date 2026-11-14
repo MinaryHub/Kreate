@@ -789,7 +789,9 @@ impl Operator for Path3d {
     ) -> Result<OpResult, OpError> {
         let mut points: Vec<DVec3> = params
             .points
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| DVec3::new(c[0], c[1], c[2]))
             .collect();
         points.dedup_by(|a, b| a.distance(*b) < 1e-9);

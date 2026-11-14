@@ -12,7 +12,6 @@ kreate-math.workspace = true
 kreate-fonts.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
-smallvec.workspace = true
 ahash.workspace = true
 thiserror.workspace = true
 rayon.workspace = true

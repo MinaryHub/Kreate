@@ -245,9 +245,16 @@ impl Default for AddWallParams {
 
 element!(
     /// A wall: a straight run, standing on the floor.
-    AddWall, AddWallParams, "object.add_wall", "Add Wall",
+    AddWall,
+    AddWallParams,
+    "object.add_wall",
+    "Add Wall",
     |p| {
-        sizes(&[("length", p.length), ("height", p.height), ("thickness", p.thickness)])?;
+        sizes(&[
+            ("length", p.length),
+            ("height", p.height),
+            ("thickness", p.thickness),
+        ])?;
         let m = arch::wall(p.length as f32, p.height as f32, p.thickness as f32);
         made("Wall", m, vec![("Wall", painted)])
     }
@@ -308,9 +315,17 @@ impl Default for AddDoorParams {
 element!(
     /// A door in its frame: a panelled leaf with a lever each side. Cut the
     /// wall's opening with a boolean, the opening's size `width` × `height`.
-    AddDoor, AddDoorParams, "object.add_door", "Add Door",
+    AddDoor,
+    AddDoorParams,
+    "object.add_door",
+    "Add Door",
     |p| {
-        sizes(&[("width", p.width), ("height", p.height), ("depth", p.depth), ("frame", p.frame)])?;
+        sizes(&[
+            ("width", p.width),
+            ("height", p.height),
+            ("depth", p.depth),
+            ("frame", p.frame),
+        ])?;
         let m = arch::door(&arch::Door {
             width: p.width as f32,
             height: p.height as f32,
@@ -392,9 +407,17 @@ impl Default for AddWindowParams {
 
 element!(
     /// A window: a frame divided into panes of glass, on a sill.
-    AddWindow, AddWindowParams, "object.add_window", "Add Window",
+    AddWindow,
+    AddWindowParams,
+    "object.add_window",
+    "Add Window",
     |p| {
-        sizes(&[("width", p.width), ("height", p.height), ("depth", p.depth), ("frame", p.frame)])?;
+        sizes(&[
+            ("width", p.width),
+            ("height", p.height),
+            ("depth", p.depth),
+            ("frame", p.frame),
+        ])?;
         if 2.0 * p.frame >= p.width.min(p.height) {
             return Err(OpError::Failed("the frame leaves no room for glass".into()));
         }
@@ -413,7 +436,10 @@ element!(
         made(
             "Window",
             m,
-            vec![(arch::WINDOW_SLOTS[0], painted), (arch::WINDOW_SLOTS[1], glass)],
+            vec![
+                (arch::WINDOW_SLOTS[0], painted),
+                (arch::WINDOW_SLOTS[1], glass),
+            ],
         )
     }
 );
@@ -462,9 +488,16 @@ impl Default for AddStairsParams {
 
 element!(
     /// A straight flight of stairs, climbing along +Y.
-    AddStairs, AddStairsParams, "object.add_stairs", "Add Stairs",
+    AddStairs,
+    AddStairsParams,
+    "object.add_stairs",
+    "Add Stairs",
     |p| {
-        sizes(&[("width", p.width), ("height", p.height), ("length", p.length)])?;
+        sizes(&[
+            ("width", p.width),
+            ("height", p.height),
+            ("length", p.length),
+        ])?;
         let m = arch::stairs(&arch::Stairs {
             width: p.width as f32,
             height: p.height as f32,
@@ -519,7 +552,10 @@ impl Default for AddColumnParams {
 
 element!(
     /// A column, round or square, with a square base and capital.
-    AddColumn, AddColumnParams, "object.add_column", "Add Column",
+    AddColumn,
+    AddColumnParams,
+    "object.add_column",
+    "Add Column",
     |p| {
         sizes(&[("diameter", p.diameter), ("height", p.height)])?;
         let m = arch::column(&arch::Column {
@@ -576,9 +612,16 @@ impl Default for AddRailingParams {
 
 element!(
     /// A railing: posts at its ends, a top and a bottom rail, balusters.
-    AddRailing, AddRailingParams, "object.add_railing", "Add Railing",
+    AddRailing,
+    AddRailingParams,
+    "object.add_railing",
+    "Add Railing",
     |p| {
-        sizes(&[("length", p.length), ("height", p.height), ("spacing", p.spacing)])?;
+        sizes(&[
+            ("length", p.length),
+            ("height", p.height),
+            ("spacing", p.spacing),
+        ])?;
         let m = arch::railing(&arch::Railing {
             length: p.length as f32,
             height: p.height as f32,
@@ -622,9 +665,16 @@ impl Default for AddSlabParams {
 
 element!(
     /// A floor slab, its top at its origin: the level it is the floor of.
-    AddSlab, AddSlabParams, "object.add_slab", "Add Floor Slab",
+    AddSlab,
+    AddSlabParams,
+    "object.add_slab",
+    "Add Floor Slab",
     |p| {
-        sizes(&[("width", p.width), ("length", p.length), ("thickness", p.thickness)])?;
+        sizes(&[
+            ("width", p.width),
+            ("length", p.length),
+            ("thickness", p.thickness),
+        ])?;
         let m = arch::slab(p.width as f32, p.length as f32, p.thickness as f32);
         made("Floor Slab", m, vec![("Concrete", concrete)])
     }
@@ -676,9 +726,17 @@ impl Default for AddRoofParams {
 element!(
     /// A roof over a plan — gable, hip, shed or flat — its eaves at its
     /// origin's height: set it on the walls' tops.
-    AddRoof, AddRoofParams, "object.add_roof", "Add Roof",
+    AddRoof,
+    AddRoofParams,
+    "object.add_roof",
+    "Add Roof",
     |p| {
-        sizes(&[("width", p.width), ("length", p.length), ("rise", p.rise), ("thickness", p.thickness)])?;
+        sizes(&[
+            ("width", p.width),
+            ("length", p.length),
+            ("rise", p.rise),
+            ("thickness", p.thickness),
+        ])?;
         let kind = match p.kind {
             1 => arch::RoofKind::Hip,
             2 => arch::RoofKind::Shed,

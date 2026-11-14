@@ -1609,7 +1609,6 @@ dependencies = [
  "kreate-fonts",
  "kreate-math",
  "rayon",
- "smallvec",
  "thiserror 2.0.20",
  "ttf-parser",
 ]

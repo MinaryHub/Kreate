@@ -2943,7 +2943,7 @@ impl Viewport {
                 .screen
                 .bind_group(device, self.hdr.view(), &self.screen_params);
         }
-        self.render_size = self.render_size.clamp_to(size);
+        self.render_size = self.render_size.fit_within(size);
     }
 
     /// Sets the exact region of the target that is drawn into.
@@ -5740,11 +5740,11 @@ impl Viewport {
 
 /// Clamps a size to fit inside another.
 trait ClampTo {
-    fn clamp_to(self, bounds: Self) -> Self;
+    fn fit_within(self, bounds: Self) -> Self;
 }
 
 impl ClampTo for (u32, u32) {
-    fn clamp_to(self, bounds: Self) -> Self {
+    fn fit_within(self, bounds: Self) -> Self {
         (self.0.min(bounds.0).max(1), self.1.min(bounds.1).max(1))
     }
 }

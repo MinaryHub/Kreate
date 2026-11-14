@@ -751,8 +751,8 @@ impl Operator for Symmetrize {
         let mut edited = original.clone();
         let mut changed = 0;
         // Parents first, so a mirrored parent is there for its child.
-        for i in 0..original.bones.len() {
-            let bone = original.bones[i].clone();
+        for bone in &original.bones {
+            let bone = bone.clone();
             let Some(other) = mirrored_name(&bone.name) else {
                 continue;
             };

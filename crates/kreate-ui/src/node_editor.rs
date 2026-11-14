@@ -667,8 +667,8 @@ pub fn node_editor(
                 if let Some(p) = pointer {
                     let r = Rect::from_two_pos(from, p);
                     if r.width() > 3.0 || r.height() > 3.0 {
-                        for n in 0..view.nodes.len() {
-                            let at = node_rect(&view.nodes[n]);
+                        for (n, node) in view.nodes.iter().enumerate() {
+                            let at = node_rect(node);
                             let on = Rect::from_two_pos(
                                 camera.to_screen(at.min),
                                 camera.to_screen(at.max),
