@@ -1856,6 +1856,7 @@ struct Labels {
     /// One per entry of `ADD_ARCHITECTURE`.
     add_arch: [String; 8],
     add_text: String,
+    add_path3d: String,
     /// The Mechanical menu's names, by their catalogue key.
     mech: std::collections::BTreeMap<&'static str, String>,
     shading_studio: String,
@@ -2280,6 +2281,7 @@ impl Labels {
             add_architecture: t("menu-add-architecture"),
             add_arch: ADD_ARCHITECTURE.map(|(_, key)| t(key)),
             add_text: t("menu-add-text"),
+            add_path3d: t("menu-add-path3d"),
             shading_studio: t("shading-studio"),
             shading_flat: t("shading-flat"),
             shading_wireframe: t("shading-wireframe"),
@@ -4820,6 +4822,8 @@ fn viewport_menus(l: &Labels, mode: kreate_ops::operator::Mode, select_mode: u32
                         "circle_tangent2",
                         "circle_tangent3",
                         "spline_cv",
+                        "conic",
+                        "text_path",
                     ],
                 )
                 .into_iter()
@@ -5294,6 +5298,14 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
                 .variant("shape", V::Enum(shape)),
             )
         })
+        .chain([
+            MenuNode::Separator,
+            entry(
+                "app.path3d",
+                &l.add_path3d,
+                Run::Dispatch("app.path3d", PropertyMap::new()),
+            ),
+        ])
         .collect();
     vec![
         MenuNode::Sub(l.add_mesh.clone(), shapes),
@@ -15442,7 +15454,7 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The sketch tools, by the names the keys and menus use.
-const SKETCH_TOOLS: [&str; 49] = [
+const SKETCH_TOOLS: [&str; 51] = [
     "select",
     "pattern",
     "line",
@@ -15478,6 +15490,8 @@ const SKETCH_TOOLS: [&str; 49] = [
     "circle_tangent2",
     "circle_tangent3",
     "spline_cv",
+    "conic",
+    "text_path",
     "collinear",
     "dimension",
     "coincident",

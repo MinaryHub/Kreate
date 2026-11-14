@@ -84,6 +84,11 @@ pub enum Tool {
     TangentCircle2,
     /// A circle tangent to three lines: click them.
     TangentCircle3,
+    /// A conic: its two ends, then where their tangents meet; how full
+    /// typed (one half, a parabola, when not).
+    Conic,
+    /// Text along a curve: click the curve.
+    TextPath,
     /// A spline by its control points, as the spline tool takes points.
     ControlSpline,
     /// A constraint, by its tag in `kreate_scene::sketch::KINDS` — or
@@ -133,6 +138,8 @@ impl Tool {
             "slot_arc" => Tool::SlotArc,
             "circle_tangent2" => Tool::TangentCircle2,
             "circle_tangent3" => Tool::TangentCircle3,
+            "conic" => Tool::Conic,
+            "text_path" => Tool::TextPath,
             "spline_cv" => Tool::ControlSpline,
             "collinear" => Tool::Constrain("collinear"),
             "dimension" => Tool::Dimension,
@@ -188,6 +195,8 @@ impl Tool {
             Tool::SlotArc => "slot_arc",
             Tool::TangentCircle2 => "circle_tangent2",
             Tool::TangentCircle3 => "circle_tangent3",
+            Tool::Conic => "conic",
+            Tool::TextPath => "text_path",
             Tool::ControlSpline => "spline_cv",
             Tool::Dimension => "dimension",
             Tool::Extrude => "extrude",
@@ -221,6 +230,7 @@ impl Tool {
                 | Tool::PolygonEdge
                 | Tool::Ellipse
                 | Tool::SlotArc
+                | Tool::Conic
                 | Tool::ControlSpline
         )
     }
@@ -1941,6 +1951,10 @@ fn overlay(
         (Tool::SlotArc, _) => "sketch-prompt-slot-width",
         (Tool::TangentCircle2, _) => "sketch-prompt-tangent2",
         (Tool::TangentCircle3, _) => "sketch-prompt-tangent3",
+        (Tool::Conic, 0) => "sketch-prompt-conic-start",
+        (Tool::Conic, 1) => "sketch-prompt-conic-end",
+        (Tool::Conic, _) => "sketch-prompt-conic-apex",
+        (Tool::TextPath, _) => "sketch-prompt-text-path",
         (Tool::Line, 0) => "sketch-prompt-line-start",
         (Tool::Line, _) => "sketch-prompt-line-next",
         (Tool::Rectangle, 0) => "sketch-prompt-corner",

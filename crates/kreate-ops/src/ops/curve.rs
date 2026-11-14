@@ -23,6 +23,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<FollowPath>();
     registry.register::<FollowPathSet>();
     registry.register::<FollowPathClear>();
+    registry.register::<Path3d>();
 }
 
 /// The active object, when it is a curve object.
@@ -739,6 +740,169 @@ impl Operator for FollowPathClear {
     }
 }
 
+// --- 3D sketch ----------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct Path3dParams {
+    /// The points clicked, in the world, three numbers each.
+    #[param(unit = "length")]
+    pub points: Vec<f64>,
+    /// Straight lines from point to point, or a smooth spline through them.
+    #[param(variants("lines", "spline"))]
+    pub shape: u32,
+    /// Lines only: each corner rounded to this radius — a bent pipe or
+    /// rod; 0 keeps the corners sharp.
+    #[param(min = 0.0, soft_max = 0.1, unit = "length")]
+    pub bend: f64,
+    /// Back to the first point at the end.
+    pub closed: bool,
+}
+
+impl Default for Path3dParams {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            shape: 0,
+            bend: 0.0,
+            closed: false,
+        }
+    }
+}
+
+/// A path drawn in space, point by point: a curve object a sweep follows,
+/// or shown as a pipe by its bevel. Fusion's 3D sketch lines and splines,
+/// with a bend radius at the corners as a pipe route has.
+pub struct Path3d;
+
+impl Operator for Path3d {
+    type Params = Path3dParams;
+    fn id() -> &'static str {
+        "curve.path3d"
+    }
+    fn label() -> &'static str {
+        "3D Path"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let mut points: Vec<DVec3> = params
+            .points
+            .chunks_exact(3)
+            .map(|c| DVec3::new(c[0], c[1], c[2]))
+            .collect();
+        points.dedup_by(|a, b| a.distance(*b) < 1e-9);
+        if params.closed && points.len() > 2 && points[0].distance(points[points.len() - 1]) < 1e-9
+        {
+            points.pop();
+        }
+        if points.len() < 2 || points.iter().any(|p| !p.is_finite()) {
+            return Err(OpError::Failed("a path needs two points apart".into()));
+        }
+        let closed = params.closed && points.len() > 2;
+        let origin = points[0];
+        let local: Vec<DVec3> = points.iter().map(|p| *p - origin).collect();
+        let curve = match params.shape {
+            1 => Curve::bezier_through(&local, closed),
+            _ if params.bend > 0.0 && params.bend.is_finite() => bent(&local, params.bend, closed),
+            _ => Curve::poly(&local, closed),
+        };
+        let d = doc.document_mut();
+        let mesh = d.add_mesh(curve.to_mesh());
+        let name = d.unique_object_name("Path3D");
+        let mut object = Object::new(name, ObjectData::Mesh(mesh));
+        object.transform.translation = origin;
+        object.curve = Some(curve);
+        let id = d.add_object(object);
+        d.selection.clear();
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        Ok(OpResult::Finished)
+    }
+}
+
+/// Straight runs through `points` with each corner rounded to `radius` — a
+/// circular arc tangent to both runs, as a Bézier — the radius cut down
+/// where the runs are too short for it.
+pub fn bent(points: &[DVec3], radius: f64, closed: bool) -> Curve {
+    let n = points.len();
+    // Each corner's arc: where it leaves the run in, where it joins the run
+    // out, and its handle length. `None` for an end or a straight corner.
+    let corner = |i: usize| -> Option<(DVec3, DVec3, DVec3, DVec3, f64)> {
+        if !closed && (i == 0 || i + 1 == n) {
+            return None;
+        }
+        let p = points[i];
+        let prev = points[(i + n - 1) % n];
+        let next = points[(i + 1) % n];
+        let (d1, d2) = (
+            (p - prev).normalize_or_zero(),
+            (next - p).normalize_or_zero(),
+        );
+        let turn = d1.angle_between(d2);
+        if turn.is_nan() || turn <= 1e-6 || turn > std::f64::consts::PI - 1e-6 {
+            return None;
+        }
+        // Each run gives a corner no more than half of itself.
+        let room = (p.distance(prev) * 0.5).min(p.distance(next) * 0.5);
+        let back = (radius * (turn * 0.5).tan()).min(room);
+        let r = back / (turn * 0.5).tan();
+        let handle = 4.0 / 3.0 * (turn * 0.25).tan() * r;
+        Some((p - d1 * back, p + d2 * back, d1, d2, handle))
+    };
+    // The points in order, each with the neighbour its straight handles
+    // point at, filled in once all are known.
+    let mut out: Vec<CurvePoint> = Vec::new();
+    // Whether a point's left/right handle is straight (along the run).
+    let mut straight: Vec<(bool, bool)> = Vec::new();
+    for (i, point) in points.iter().enumerate() {
+        match corner(i) {
+            Some((a, b, d1, d2, h)) => {
+                out.push(CurvePoint {
+                    position: a,
+                    left: a,
+                    right: a + d1 * h,
+                    radius: 1.0,
+                    tilt: 0.0,
+                });
+                straight.push((true, false));
+                out.push(CurvePoint {
+                    position: b,
+                    left: b - d2 * h,
+                    right: b,
+                    radius: 1.0,
+                    tilt: 0.0,
+                });
+                straight.push((false, true));
+            }
+            None => {
+                out.push(CurvePoint::at(*point));
+                straight.push((true, true));
+            }
+        }
+    }
+    // Straight handles a third of the way along their run, so each run is
+    // a straight Bézier segment.
+    let m = out.len();
+    for i in 0..m {
+        let (l, r) = straight[i];
+        let p = out[i].position;
+        if l && (closed || i > 0) {
+            let prev = out[(i + m - 1) % m].position;
+            out[i].left = p + (prev - p) / 3.0;
+        }
+        if r && (closed || i + 1 < m) {
+            let next = out[(i + 1) % m].position;
+            out[i].right = p + (next - p) / 3.0;
+        }
+    }
+    Curve {
+        splines: vec![Spline::new(SplineKind::Bezier, out, closed)],
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,5 +1168,95 @@ mod tests {
             .document;
         let (_, o) = back.objects().next().unwrap();
         assert_eq!(o.curve, b.2.object(id).unwrap().curve);
+    }
+
+    fn path_points(b: &(OperatorRegistry, History, Document)) -> Vec<DVec3> {
+        let id = b.2.selection.active.expect("a path");
+        let o = b.2.object(id).unwrap();
+        let at = o.transform.translation;
+        o.curve.as_ref().unwrap().sampled()[0]
+            .0
+            .iter()
+            .map(|s| s.position + at)
+            .collect()
+    }
+
+    #[test]
+    fn a_3d_path_goes_through_its_points_in_the_world() {
+        let mut b = bench();
+        let pts = [1.0, 2.0, 3.0, 2.0, 2.0, 3.0, 2.0, 3.0, 4.0];
+        run(
+            &mut b,
+            "curve.path3d",
+            &[("points", PropertyValue::Floats(pts.to_vec()))],
+        )
+        .unwrap();
+        let s = path_points(&b);
+        assert!(s[0].distance(DVec3::new(1.0, 2.0, 3.0)) < 1e-9);
+        assert!(s.last().unwrap().distance(DVec3::new(2.0, 3.0, 4.0)) < 1e-9);
+        assert!(s
+            .iter()
+            .any(|p| p.distance(DVec3::new(2.0, 2.0, 3.0)) < 1e-9));
+        // One point alone is not a path.
+        assert!(run(
+            &mut b,
+            "curve.path3d",
+            &[("points", PropertyValue::Floats(vec![0.0; 6]))]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_bent_path_rounds_its_corner_at_the_radius() {
+        let mut b = bench();
+        // A right-angle corner at the origin, bent to 0.2.
+        let pts = [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        run(
+            &mut b,
+            "curve.path3d",
+            &[
+                ("points", PropertyValue::Floats(pts.to_vec())),
+                ("bend", PropertyValue::Float(0.2)),
+            ],
+        )
+        .unwrap();
+        let s = path_points(&b);
+        // The arc's centre is at (-0.2, 0.2): every point of the bend is the
+        // radius from it, and the sharp corner is not on the path.
+        let centre = DVec3::new(-0.2, 0.2, 0.0);
+        let bend: Vec<&DVec3> = s
+            .iter()
+            .filter(|p| p.x > -0.2 + 1e-9 && p.y < 0.2 - 1e-9)
+            .collect();
+        assert!(!bend.is_empty());
+        for p in bend {
+            assert!((p.distance(centre) - 0.2).abs() < 1e-3, "{p}");
+        }
+        assert!(s.iter().all(|p| p.length() > 0.05));
+        // The runs either side are still straight to the ends.
+        assert!(s[0].distance(DVec3::new(-1.0, 0.0, 0.0)) < 1e-9);
+        assert!(s.last().unwrap().distance(DVec3::new(0.0, 1.0, 0.0)) < 1e-9);
+    }
+
+    #[test]
+    fn a_3d_spline_path_is_smooth_through_its_points() {
+        let mut b = bench();
+        let pts = [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 1.0, 0.0];
+        run(
+            &mut b,
+            "curve.path3d",
+            &[
+                ("points", PropertyValue::Floats(pts.to_vec())),
+                ("shape", PropertyValue::Enum(1)),
+            ],
+        )
+        .unwrap();
+        let s = path_points(&b);
+        assert!(s
+            .iter()
+            .any(|p| p.distance(DVec3::new(1.0, 0.0, 1.0)) < 1e-9));
+        assert!(s
+            .iter()
+            .any(|p| p.z > 0.5 && p.distance(DVec3::new(1.0, 0.0, 1.0)) > 1e-3));
     }
 }

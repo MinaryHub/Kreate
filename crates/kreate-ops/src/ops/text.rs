@@ -17,6 +17,7 @@ use crate::OpParams;
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddText>();
     registry.register::<SketchText>();
+    registry.register::<DraftTextOnPath>();
 }
 
 fn align_of(v: u32) -> Align {
@@ -276,6 +277,187 @@ impl Operator for SketchText {
     }
 }
 
+// --- text along a curve ----------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct DraftTextOnPathParams {
+    /// The curve it follows, by its number in the drawing.
+    pub path: u32,
+    pub text: String,
+    #[param(unit = "font")]
+    pub font: String,
+    /// The font's size (its em).
+    #[param(min = 0.0001, soft_max = 1.0, unit = "length")]
+    pub size: f64,
+    /// Where along the curve it sits: from its start, centred, or ending at
+    /// its end — round a closed curve, centred on its top.
+    #[param(variants("start", "center", "end"))]
+    pub align: u32,
+    /// The letters stand on the other side of the curve, reading the other
+    /// way: inside a closed curve rather than round its outside.
+    pub flip: bool,
+    /// The letters this far off the curve, up from it.
+    #[param(soft_min = -0.1, soft_max = 0.1, unit = "length")]
+    pub offset: f64,
+}
+
+impl Default for DraftTextOnPathParams {
+    fn default() -> Self {
+        Self {
+            path: 0,
+            text: "Text".into(),
+            font: text::DEFAULT_FONT_NAME.into(),
+            size: 0.01,
+            align: 1,
+            flip: false,
+            offset: 0.0,
+        }
+    }
+}
+
+/// A curve as a run of points with the distance along it to each.
+struct Run {
+    points: Vec<DVec2>,
+    along: Vec<f64>,
+    /// Round and round: past the end is the start again.
+    closed: bool,
+}
+
+impl Run {
+    fn new(points: Vec<DVec2>, closed: bool) -> Option<Self> {
+        let mut along = vec![0.0];
+        for w in points.windows(2) {
+            along.push(along.last().unwrap() + w[0].distance(w[1]));
+        }
+        (points.len() >= 2 && *along.last().unwrap() > 0.0).then_some(Self {
+            points,
+            along,
+            closed,
+        })
+    }
+
+    fn length(&self) -> f64 {
+        *self.along.last().unwrap()
+    }
+
+    /// The point `s` along and the way the run goes there; past either end,
+    /// on along the end's direction.
+    fn at(&self, s: f64) -> (DVec2, DVec2) {
+        let s = if self.closed {
+            s.rem_euclid(self.length())
+        } else {
+            s
+        };
+        let n = self.points.len();
+        let i = match self.along.partition_point(|a| *a <= s) {
+            0 => 1,
+            k if k >= n => n - 1,
+            k => k,
+        };
+        let (a, b) = (self.points[i - 1], self.points[i]);
+        let span = self.along[i] - self.along[i - 1];
+        let dir = (b - a) / span.max(1e-300);
+        (a + dir * (s - self.along[i - 1]), dir)
+    }
+}
+
+/// Letters laid along a curve of the drawing, each point of their outlines
+/// carried from the straight baseline on to the curve: Fusion's text on a
+/// path, as closed outlines to extrude or cut.
+pub struct DraftTextOnPath;
+
+impl Operator for DraftTextOnPath {
+    type Params = DraftTextOnPathParams;
+    fn id() -> &'static str {
+        "draft.text_on_path"
+    }
+    fn label() -> &'static str {
+        "Text on Path"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        crate::ops::draft::active_drawing(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let curve = crate::ops::draft::active_drawing(doc.document())
+            .and_then(|id| doc.document().object(id)?.drawing.as_deref())
+            .and_then(|d| {
+                d.curve(kreate_scene::drawing::EntityId(params.path))
+                    .cloned()
+            })
+            .ok_or_else(|| OpError::Failed("there is no curve to set the text along".into()))?;
+        let tol = (curve.length() * 1e-4).max(1e-9);
+        let mut points = curve.tessellate(tol);
+        let closed = curve.is_closed();
+        // Round a closed curve the letters stand outside it, so read
+        // clockwise; flipped, inside and anticlockwise.
+        let anticlockwise = closed && {
+            let n = points.len();
+            (0..n)
+                .map(|i| points[i].perp_dot(points[(i + 1) % n]))
+                .sum::<f64>()
+                > 0.0
+        };
+        if anticlockwise != params.flip && closed || params.flip && !closed {
+            points.reverse();
+        }
+        let run = Run::new(points, closed)
+            .ok_or_else(|| OpError::Failed("the curve has no length to set text along".into()))?;
+        let l = laid_out(
+            &params.font,
+            params.text.lines().next().unwrap_or(""),
+            params.size,
+            0,
+            1.0,
+        )?;
+        let width = l.width as f64;
+        let from = if closed {
+            // From, round, or to the curve's top (its bottom, flipped, where
+            // text inside reads upright).
+            let top = (0..run.points.len())
+                .max_by(|a, b| {
+                    let (ya, yb) = (run.points[*a].y, run.points[*b].y);
+                    let (ya, yb) = if params.flip { (-ya, -yb) } else { (ya, yb) };
+                    ya.total_cmp(&yb)
+                })
+                .map(|i| run.along[i])
+                .unwrap_or(0.0);
+            match params.align {
+                0 => top,
+                2 => top - width,
+                _ => top - width * 0.5,
+            }
+        } else {
+            match params.align {
+                0 => 0.0,
+                2 => run.length() - width,
+                _ => (run.length() - width) * 0.5,
+            }
+        };
+        if width > run.length() {
+            crate::report::say(
+                "the text is longer than the curve: it runs on past its ends".to_string(),
+            );
+        }
+        let rings = l
+            .contours
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .map(|p| {
+                        let (at, dir) = run.at(from + p.x as f64);
+                        at + dir.perp() * (p.y as f64 + params.offset)
+                    })
+                    .collect()
+            })
+            .collect();
+        crate::ops::draft::add_outlines(doc, rings)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +642,141 @@ mod tests {
             "a letter, not a slab: {}",
             mp.volume
         );
+    }
+
+    fn path_text_points(doc: &Document, first: u32) -> Vec<DVec2> {
+        let d = doc
+            .object(crate::ops::draft::active_drawing(doc).unwrap())
+            .unwrap()
+            .drawing
+            .as_deref()
+            .unwrap();
+        d.entities
+            .iter()
+            .filter(|e| e.id.0 >= first)
+            .filter_map(|e| d.curve(e.id))
+            .flat_map(|c| match c {
+                kreate_geom2d::Curve2D::Polyline { verts, .. } => {
+                    verts.iter().map(|v| v.0).collect()
+                }
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Text on a circle stands on it, its letters' height out from it — or
+    /// in from it, flipped; on a line it is the text as written, centred.
+    #[test]
+    fn text_on_a_path_follows_the_curve() {
+        let (r, mut h, mut doc) = setup();
+        run(&r, &mut h, &mut doc, "draft.new", &[]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.circle",
+            &[
+                ("centre", PropertyValue::Vec3([0.0; 3])),
+                ("radius", PropertyValue::Float(0.05)),
+            ],
+        )
+        .unwrap();
+        let circle = path_text_points(&doc, 0).len();
+        assert_eq!(circle, 0);
+        let first = |doc: &Document| {
+            doc.object(crate::ops::draft::active_drawing(doc).unwrap())
+                .unwrap()
+                .drawing
+                .as_deref()
+                .unwrap()
+                .counters()
+                .0
+        };
+        let circle_id = first(&doc) - 1;
+        for flip in [false, true] {
+            let from = first(&doc);
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                "draft.text_on_path",
+                &[
+                    ("path", PropertyValue::Int(circle_id as i64)),
+                    ("text", PropertyValue::Text("KREATE".into())),
+                    ("size", PropertyValue::Float(0.01)),
+                    ("flip", PropertyValue::Bool(flip)),
+                ],
+            )
+            .unwrap();
+            let pts = path_text_points(&doc, from);
+            assert!(pts.len() > 20);
+            // Centred on the top, or flipped on the bottom, reading upright.
+            let mean = pts.iter().copied().sum::<DVec2>() / pts.len() as f64;
+            assert!(
+                mean.x.abs() < 0.005 && (mean.y > 0.04) != flip && (mean.y < -0.04) == flip,
+                "{mean}"
+            );
+            let (left, right) = (
+                pts.iter().map(|p| p.x).fold(f64::MAX, f64::min),
+                pts.iter().map(|p| p.x).fold(f64::MIN, f64::max),
+            );
+            assert!(left < -0.01 && right > 0.01);
+            for p in &pts {
+                let off = p.length() - 0.05;
+                if flip {
+                    assert!((-0.0101..=0.0001).contains(&off), "{off}");
+                } else {
+                    assert!((-0.0001..=0.0101).contains(&off), "{off}");
+                }
+            }
+        }
+        // Along a straight line: the letters as written, centred on it.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.line",
+            &[("points", PropertyValue::Floats(vec![0.2, 0.0, 0.4, 0.0]))],
+        )
+        .unwrap();
+        let line_id = first(&doc) - 1;
+        let from = first(&doc);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.text_on_path",
+            &[
+                ("path", PropertyValue::Int(line_id as i64)),
+                ("text", PropertyValue::Text("KREATE".into())),
+                ("size", PropertyValue::Float(0.01)),
+            ],
+        )
+        .unwrap();
+        let pts = path_text_points(&doc, from);
+        let l = laid_out(text::DEFAULT_FONT_NAME, "KREATE", 0.01, 0, 1.0).unwrap();
+        let start = 0.3 - l.width as f64 * 0.5;
+        let want: Vec<DVec2> = l
+            .contours
+            .iter()
+            .flatten()
+            .map(|p| DVec2::new(start + p.x as f64, p.y as f64))
+            .collect();
+        let (min_x, max_x) = pts
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.x), b.max(p.x)));
+        let (want_min, want_max) = want
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.x), b.max(p.x)));
+        assert!((min_x - want_min).abs() < 1e-6 && (max_x - want_max).abs() < 1e-6);
+        // No curve there, no text.
+        assert!(run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.text_on_path",
+            &[("path", PropertyValue::Int(9999))],
+        )
+        .is_err());
     }
 }

@@ -35,10 +35,23 @@ pub fn picked_regions(doc: &Document, id: ObjectId, seeds: &[[f64; 2]]) -> Vec<R
         .collect()
 }
 
-/// An object's lines as one path, in the world: a sketch's lines, or a
-/// mesh's edges — the longest chain through them, and whether it closes.
+/// An object's lines as one path, in the world: a curve object's first
+/// spline, a sketch's lines, or a mesh's edges — the longest chain through
+/// them — and whether it closes.
 pub fn object_path(doc: &Document, id: ObjectId) -> Option<(Vec<DVec3>, bool)> {
     let o = doc.object(id)?;
+    if let Some((pts, closed)) = o
+        .curve
+        .as_ref()
+        .and_then(|c| c.sampled().into_iter().next())
+    {
+        let world = doc.world_transform(id);
+        let points: Vec<DVec3> = pts
+            .iter()
+            .map(|s| world.transform_point3(s.position))
+            .collect();
+        return (points.len() >= 2).then_some((points, closed));
+    }
     let mesh = doc.mesh(o.mesh()?)?;
     let mut edges: Vec<[u32; 2]> = mesh.edges().to_vec();
     edges.extend(o.sketch_lines.iter().copied());
