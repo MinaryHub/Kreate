@@ -16068,6 +16068,9 @@ pub struct SketchView {
     /// Each line, and whether both its ends are pinned — Fusion's black
     /// (here the text colour) against its blue.
     pub lines: Vec<([kreate_math::DVec3; 2], bool, bool, bool)>,
+    /// Which of `lines` are reference — a face's outline, projected edges —
+    /// drawn thin and purple, as Fusion draws them.
+    pub reference: Vec<bool>,
     /// The points a tool can pick: pinned, selected.
     pub points: Vec<(kreate_math::DVec3, bool, bool)>,
     /// A constraint's mark, where it is drawn.
@@ -16382,8 +16385,14 @@ fn draw_sketches(
         fill(r, 35);
     }
     let halo = egui::Color32::from_black_alpha(150);
-    for ([a, b], pinned, selected, construction) in &view.lines {
+    let purple = egui::Color32::from_rgb(0xa0, 0x6c, 0xd5);
+    for (i, ([a, b], pinned, selected, construction)) in view.lines.iter().enumerate() {
         if let (Some(p), Some(q)) = (project(a), project(b)) {
+            // Reference: thin and purple, under nothing.
+            if !*selected && view.reference.get(i).copied().unwrap_or(false) {
+                painter.line_segment([p, q], egui::Stroke::new(1.2, purple));
+                continue;
+            }
             let ink = if *selected {
                 theme.accent
             } else if *pinned {

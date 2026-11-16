@@ -403,7 +403,10 @@ impl Operator for NewDrawing {
             _ => (DVec3::ZERO, DQuat::IDENTITY),
         };
         let mut drawing = Drawing::new();
-        // The face's outlines, held where the face is.
+        // The face's outlines, held where the face is, on the PROJECTED
+        // layer: what the drawing is drawn against, not what was drawn —
+        // shown as Fusion shows a face's edges brought into a sketch.
+        let reference = (!outlines.is_empty()).then(|| project::layer(&mut drawing));
         for ring in &outlines {
             if ring.len() < 3 {
                 continue;
@@ -412,6 +415,9 @@ impl Operator for NewDrawing {
                 verts: ring.iter().map(|p| (*p, 0.0)).collect(),
                 closed: true,
             });
+            if let (Some(l), Some(e)) = (reference, drawing.entity_mut(id)) {
+                e.layer = l;
+            }
             for (k, p) in ring.iter().enumerate() {
                 drawing.constraints.push(Constraint::Fixed(
                     EntityRef::at(id, Part::Vertex(k as u32)),

@@ -242,7 +242,7 @@ fn join_straight(
 }
 
 /// The PROJECTED layer, made the first time.
-fn layer(d: &mut Drawing) -> LayerId {
+pub(crate) fn layer(d: &mut Drawing) -> LayerId {
     if let Some(l) = d.layers.iter().find(|l| l.name == LAYER) {
         return l.id;
     }

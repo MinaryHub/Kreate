@@ -54,6 +54,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- A sketch on a face no longer shows the face's outline as a rectangle
+  you drew: it is reference, drawn thin and purple inside the sketch and
+  not drawn again outside it, where the face's own edges already are.
 - A trim in a sketch reaching a curve's end — a rectangle's side cut at
   its corner — left a point with no line to it there.
 - Extruding one of several boxes drawn on a face extruded the others

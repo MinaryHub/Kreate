@@ -1219,6 +1219,41 @@ pub fn drawing_tolerance(d: &Drawing) -> f64 {
 /// A drawing's curves as straight pieces in its own plane, a thousandth of
 /// its size off at the most: what is drawn of it when it is not being drawn
 /// in, and what is snapped to and clicked.
+/// Whether an entity of a drawing is reference, not drawing: brought in to
+/// draw against — a face's outline, a part's edges projected — on the
+/// PROJECTED layer, or (in drawings made before that layer was used for
+/// it) a curve every point of which is held where it is.
+pub fn is_reference(d: &Drawing, e: &kreate_scene::drawing::Entity) -> bool {
+    use kreate_scene::drawing::Constraint;
+    if d.layer(e.layer).is_some_and(|l| l.name == "PROJECTED") {
+        return true;
+    }
+    if !matches!(e.kind, EntityKind::Curve(_)) {
+        return false;
+    }
+    let parts = d.parts(e.id);
+    !parts.is_empty()
+        && parts.iter().all(|(r, _)| {
+            d.constraints
+                .iter()
+                .any(|c| matches!(c, Constraint::Fixed(at, _) if at == r))
+        })
+}
+
+/// [`drawing_pieces`] without what is only reference: what was drawn.
+pub fn drawing_own_pieces(d: &Drawing) -> Vec<[DVec2; 2]> {
+    let tol = drawing_tolerance(d);
+    let mut out = Vec::new();
+    for e in d.entities.iter().filter(|e| !is_reference(d, e)) {
+        if let EntityKind::Curve(c) = &e.kind {
+            for w in c.tessellate(tol).windows(2) {
+                out.push([w[0], w[1]]);
+            }
+        }
+    }
+    out
+}
+
 pub fn drawing_pieces(d: &Drawing) -> Vec<[DVec2; 2]> {
     let tol = drawing_tolerance(d);
     let curves = d.entities.iter().filter_map(|e| match &e.kind {
@@ -1246,7 +1281,10 @@ pub fn world_lines(
     let world = doc.world_transform(id);
     let w = |p: DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
     if let Some(d) = o.drawing.as_deref() {
-        return drawing_pieces(d)
+        // Not what it was drawn against: a face's outline lies on the
+        // face's own edges, and drawn again as the sketch it was a
+        // rectangle nobody drew.
+        return drawing_own_pieces(d)
             .into_iter()
             .map(|[a, b]| [w(a), w(b)])
             .collect();
@@ -2193,6 +2231,8 @@ pub fn drawing_view(
     };
     for (i, [a, b]) in g.lines.iter().enumerate() {
         let e = map.line_entity[i];
+        view.reference
+            .push(d.entity(e).is_some_and(|x| is_reference(d, x)));
         view.lines.push((
             [
                 to_world(g.points[*a as usize]),
