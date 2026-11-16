@@ -19,6 +19,10 @@ use; `scripts/release.sh` turns that section into the next release.
   they meet something on the way — the body's far side, a hole, another
   pocket: pushed deeper than the body is thick, a pocket becomes a hole
   through it. A push that meets nothing is as before.
+- A sketch's first point can be typed from a point: with a drawing tool
+  in hand, over a face's corner or any point of the sketch, type how far
+  across and up ("20, 10") and Enter — the line, rectangle or circle
+  starts there. Over nothing, it is measured from the sketch's origin.
 - G in a sketch takes up what is selected: it follows the pointer, caught
   by what drawing is caught by, until a click sets it down; Escape or the
   right button puts it back.

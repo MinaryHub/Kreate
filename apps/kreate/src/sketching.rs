@@ -1105,6 +1105,12 @@ pub fn corner(from: DVec2, toward: DVec2, w: f64, h: f64) -> DVec2 {
 #[derive(Clone, Debug, Default)]
 pub struct SketchUi {
     pub tool: Tool,
+    /// Where a drawing tool's first point is measured from, when it is
+    /// typed rather than clicked: the point the pointer was on when the
+    /// first number was typed — a corner of a face's outline, an end, a
+    /// centre — or the sketch's origin when it was on none. The point goes
+    /// as far from it as is typed, across and up: "20, 10" and Enter.
+    pub from: Option<DVec2>,
     /// Points clicked so far by a drawing tool, each with the existing point
     /// it landed on (plus one; zero for none).
     pub clicks: Vec<(DVec2, u32)>,
@@ -1918,6 +1924,24 @@ fn overlay(
                 }
             }
         }
+        // A first point typed from a point: the line from that point to
+        // where it lands, and the place caught there.
+        if let (Some(from), true) = (ui.from, ui.clicks.is_empty()) {
+            let across = typed.first().copied().unwrap_or(0.0);
+            let up = typed.get(1).copied().unwrap_or(0.0);
+            let to = from + DVec2::new(across, up);
+            view.preview
+                .push(polyline(vec![from, DVec2::new(to.x, from.y), to]));
+            view.snap = Some(to_world(to));
+            let show = |v: f64| {
+                let s = format!("{:.3}", v / unit);
+                s.trim_end_matches('0').trim_end_matches('.').to_string()
+            };
+            view.glyphs.push((
+                to_world(to),
+                format!("{}, {} {}", show(across), show(up), view.unit.1),
+            ));
+        }
         if let (Tool::Trim, Some((line, on))) = (ui.tool, ui.trim) {
             match drawing {
                 Some(g) => {
@@ -1994,6 +2018,7 @@ fn overlay(
         view.axis = ui.axis;
     }
     let prompt_key = match (ui.tool, ui.clicks.len()) {
+        (t, 0) if t.draws() && ui.from.is_some() => "sketch-prompt-from",
         (Tool::Spline | Tool::ControlSpline, 0) => "sketch-prompt-spline-start",
         (Tool::Spline | Tool::ControlSpline, _) => "sketch-prompt-spline-next",
         (Tool::Rectangle3, 0) => "sketch-prompt-corner",

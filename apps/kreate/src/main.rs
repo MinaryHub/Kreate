@@ -5798,6 +5798,23 @@ impl App {
         }
     }
 
+    /// A drawing tool's first point put at `at` as a click there would put
+    /// it, with nothing under the pointer to join: what Enter does after a
+    /// distance from a point has been typed.
+    fn place_first_point(&mut self, tool: kreate::sketching::Tool, at: glam::DVec2) {
+        use kreate::sketching::Tool;
+        match tool {
+            Tool::Line | Tool::Spline | Tool::ControlSpline => {
+                self.sketching.clicks.push((at, 0));
+            }
+            _ if self.active_drawing().is_some() => self.drawing_click(tool, at, None),
+            _ => {
+                let message = self.ui.catalog.get("sketch-from-drawing-only");
+                self.status(&message);
+            }
+        }
+    }
+
     /// Ends a drag's step whose drag is gone — the tool changed, or Delete
     /// pressed, with the button still down. What it moved stays, as the one
     /// step it was. Left open, the next drag carried on from it: the drawing
@@ -7270,6 +7287,24 @@ impl App {
             KeyCode::Comma | KeyCode::Space => Some(','),
             _ => None,
         };
+        // Before a drawing tool's first point: a number typed measures that
+        // point from the one under the pointer — a face's corner, an end —
+        // or from the sketch's origin when it is over none. The rest is
+        // typed as usual, and Enter puts the point there.
+        let starting = tool.draws() && self.sketching.clicks.is_empty();
+        if let (true, Some(ch)) = (starting, typed) {
+            if self.sketching.from.is_none() {
+                let caught = self
+                    .sketching
+                    .hover
+                    .filter(|(_, join)| *join > 0 || self.sketching.snapped)
+                    .map(|(p, _)| p);
+                self.sketching.from = Some(caught.unwrap_or(glam::DVec2::ZERO));
+            }
+            self.sketching.typed.push(ch);
+            self.redraw.set(RedrawReason::UI);
+            return true;
+        }
         // A fillet's radius is typed before its corner is clicked, and kept
         // for the corners after it.
         let typing = drawing || matches!(tool, Tool::Fillet | Tool::Chamfer | Tool::Offset);
@@ -7286,6 +7321,36 @@ impl App {
             return true;
         }
         match code {
+            // The first point's distances, taken back a key at a time; all
+            // gone, it is not measured from anywhere.
+            KeyCode::Backspace if starting && self.sketching.from.is_some() => {
+                self.sketching.typed.pop();
+                if self.sketching.typed.is_empty() {
+                    self.sketching.from = None;
+                }
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
+            // And put there.
+            KeyCode::Enter | KeyCode::NumpadEnter if starting && self.sketching.from.is_some() => {
+                let from = self.sketching.from.take().unwrap_or_default();
+                let lengths = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
+                self.sketching.typed.clear();
+                let at = from
+                    + glam::DVec2::new(
+                        lengths.first().copied().unwrap_or(0.0),
+                        lengths.get(1).copied().unwrap_or(0.0),
+                    );
+                self.place_first_point(tool, at);
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+                true
+            }
+            KeyCode::Escape if starting && self.sketching.from.is_some() => {
+                self.sketching.from = None;
+                self.sketching.typed.clear();
+                self.redraw.set(RedrawReason::UI);
+                true
+            }
             KeyCode::Backspace
                 if matches!(tool, Tool::Fillet | Tool::Chamfer | Tool::Offset) && !drawing =>
             {
@@ -20473,6 +20538,82 @@ kreate.ops.object.add_primitive(size=2.0)" }),
             app.sketch_own_edge_snap(glam::DVec2::new(0.5, 0.0)),
             None,
             "its own rim is not somewhere for it to land"
+        );
+    }
+
+    /// A first point typed from a point: over a rectangle's corner, "0.2,
+    /// 0.1" and Enter starts the line that far across and up from the
+    /// corner; over nothing, from the origin. Backspace takes the numbers
+    /// back and, all gone, the reference with them.
+    #[test]
+    fn a_first_point_is_typed_from_the_point_under_the_pointer() {
+        use kreate::sketching::Tool;
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        app.run_op_with(
+            "draft.rectangle",
+            &[
+                ("a", PropertyValue::Vec3([1.0, 1.0, 0.0])),
+                ("b", PropertyValue::Vec3([2.0, 2.0, 0.0])),
+            ],
+        );
+        app.update_sketch_view();
+        app.update_ui_state_for_test();
+        app.sketching.take(Tool::Line);
+        let ppp = app.egui_ctx.pixels_per_point() as f64;
+        let s = app
+            .ui
+            .projector
+            .unwrap()
+            .project(DVec3::new(1.0, 1.0, 0.0))
+            .expect("on screen");
+        app.input.cursor = Some(((s.x as f64 + 2.0) * ppp, (s.y as f64 + 1.0) * ppp));
+        app.sketch_hover();
+        for key in [
+            KeyCode::Digit0,
+            KeyCode::Period,
+            KeyCode::Digit2,
+            KeyCode::Comma,
+        ] {
+            assert!(app.sketch_key(key));
+        }
+        assert_eq!(
+            app.sketching.from,
+            Some(glam::DVec2::new(1.0, 1.0)),
+            "the corner"
+        );
+        for key in [KeyCode::Digit0, KeyCode::Period, KeyCode::Digit1] {
+            app.sketch_key(key);
+        }
+        assert!(app.sketch_key(KeyCode::Enter));
+        let first = app.sketching.clicks.first().expect("a first point").0;
+        assert!(
+            (first - glam::DVec2::new(1.2, 1.1)).length() < 1e-9,
+            "{first:?}"
+        );
+        assert!(app.sketching.from.is_none() && app.sketching.typed.is_empty());
+
+        // Over nothing: from the origin; Backspace to nothing lets go of it.
+        app.sketching.take(Tool::Line);
+        app.sketching.hover = Some((glam::DVec2::new(5.0, 5.0), 0));
+        app.sketching.snapped = false;
+        app.sketch_key(KeyCode::Digit3);
+        assert_eq!(app.sketching.from, Some(glam::DVec2::ZERO));
+        assert!(app.sketch_key(KeyCode::Backspace));
+        assert!(app.sketching.from.is_none());
+        // A rectangle's first corner, typed: the rectangle tool goes on from
+        // there, as from a click.
+        app.sketching.take(Tool::Rectangle);
+        app.sketching.hover = None;
+        for key in [KeyCode::Digit3, KeyCode::Comma, KeyCode::Digit4] {
+            app.sketch_key(key);
+        }
+        app.sketch_key(KeyCode::Enter);
+        let corner = app.sketching.clicks.first().expect("the first corner").0;
+        assert!(
+            (corner - glam::DVec2::new(3.0, 4.0)).length() < 1e-9,
+            "{corner:?}"
         );
     }
 
