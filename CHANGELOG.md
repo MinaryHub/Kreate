@@ -43,6 +43,12 @@ use; `scripts/release.sh` turns that section into the next release.
   selected, it had gone straight back into that one. F2, Tab on a sketch
   and a double-click in the timeline still open the sketch itself.
 
+### Fixed
+
+- After drawing on a part's side or a tilted plane, orbiting the view
+  turned it about one axis only: the view was left rolled, as squared to
+  the sketch. Orbiting levels it first.
+
 ## [0.12.0] - 2026-11-15
 
 ### Added

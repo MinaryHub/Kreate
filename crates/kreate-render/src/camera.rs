@@ -173,6 +173,12 @@ impl Camera {
     pub fn orbit(&mut self, yaw: f64, pitch: f64) {
         match self.orbit_style {
             OrbitStyle::Turntable => {
+                // Level first. A view squared to a sketch on a tilted plane
+                // or a part's side is rolled — its right running up the
+                // world — and turning a rolled view about the world's up and
+                // its own right turned it about one axis twice: the orbit
+                // was locked to that axis until the view was reset.
+                self.level();
                 // Yaw pre-multiplied (world space) and pitch post-multiplied
                 // (camera space). Doing both in camera space is what makes naive
                 // orbit cameras slowly roll until the horizon is crooked.
@@ -184,6 +190,24 @@ impl Camera {
             }
         }
         self.rotation = self.rotation.normalize();
+    }
+
+    /// Turns the view about its line of sight until its right is level with
+    /// the ground, its up then the world's up as near as the view allows.
+    /// Looking straight up or down there is nothing to level by, and a view
+    /// already level is left exactly as it is.
+    fn level(&mut self) {
+        let forward = self.forward();
+        let right = self.right();
+        if forward.z.abs() > 0.999 || right.z.abs() < 1e-9 {
+            return;
+        }
+        let up = (DVec3::Z - forward * forward.z).normalize();
+        let right = forward.cross(up).normalize();
+        let levelled = DQuat::from_mat3(&glam::DMat3::from_cols(right, up, -forward));
+        if levelled.is_finite() {
+            self.rotation = levelled.normalize();
+        }
     }
 
     /// Turns the head, the eye staying where it is: walking's look, where
@@ -467,6 +491,35 @@ mod tests {
                 c.right()
             );
         }
+    }
+
+    /// A view left rolled — as one squared to a sketch on a part's side is,
+    /// its right running straight up — turns on both axes again: dragging
+    /// across turns it about the world's up, dragging up and down tilts it,
+    /// and the horizon comes level.
+    #[test]
+    fn a_rolled_view_is_levelled_and_turns_both_ways() {
+        let mut c = Camera::default();
+        // Looking along +X with its right pointing up the world.
+        c.rotation = DQuat::from_mat3(&glam::DMat3::from_cols(DVec3::Z, DVec3::Y, -DVec3::X));
+        assert!((c.right() - DVec3::Z).length() < 1e-9, "rolled to start");
+        c.orbit(0.0, 0.3);
+        assert!(c.right().z.abs() < 1e-9, "level: {:?}", c.right());
+        // The tilt is a tilt: the line of sight now points up or down.
+        assert!(c.forward().z.abs() > 0.2, "tilted: {:?}", c.forward());
+        let before = c.forward();
+        c.orbit(0.4, 0.0);
+        let after = c.forward();
+        assert!(
+            (before.z - after.z).abs() < 1e-9,
+            "a turn about up keeps the tilt"
+        );
+        assert!(before.truncate().angle_to(after.truncate()).abs() > 0.3);
+        // A level view is not touched by levelling.
+        let mut d = Camera::default();
+        let was = d.rotation;
+        d.level();
+        assert_eq!(d.rotation, was);
     }
 
     #[test]
