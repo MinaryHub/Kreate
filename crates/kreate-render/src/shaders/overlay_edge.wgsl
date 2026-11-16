@@ -34,7 +34,8 @@ struct EdgeObject {
     // w: the rubber-band preview applies to this draw.
     flags_params: vec4<f32>,
     // x: draw only the selected edges — the wireframe overlay is off and the
-    // mesh is being edited.
+    // mesh is being edited. y: draw only the shape's edges, and the selected
+    // ones — the material preview, drawn as a CAD program draws a part.
     show: vec4<f32>,
 };
 
@@ -102,6 +103,7 @@ const FLAG_SEAM: u32 = 16u;
 const FLAG_BOUNDARY: u32 = 32u;
 const FLAG_NON_MANIFOLD: u32 = 64u;
 const FLAG_HIDDEN: u32 = 4u;
+const FLAG_FEATURE: u32 = 128u;
 
 fn position_of(i: u32) -> vec3<f32> {
     let b = 3u * i;
@@ -146,7 +148,8 @@ fn vs_main(
         out.flags = out.flags & ~FLAG_SELECTED;
     }
     // Only the selection: every other edge collapses, as a hidden one does.
-    if (object.show.x > 0.5 && (out.flags & FLAG_SELECTED) == 0u) {
+    let hidden_facet = object.show.y > 0.5 && (out.flags & FLAG_FEATURE) == 0u;
+    if ((object.show.x > 0.5 || hidden_facet) && (out.flags & FLAG_SELECTED) == 0u) {
         out.clip = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         out.across_px = 0.0;
         return out;
@@ -215,6 +218,11 @@ fn edge_color(flags: u32) -> vec4<f32> {
 
     if ((flags & FLAG_SELECTED) != 0u) {
         return object.selected_color;
+    }
+    // The shape's edges: in its own ink, the diagnostics' colours left to
+    // the wireframe.
+    if (object.show.y > 0.5) {
+        return base;
     }
     if ((flags & FLAG_NON_MANIFOLD) != 0u) {
         // Loud on purpose: a non-manifold edge is nearly always a mistake, and

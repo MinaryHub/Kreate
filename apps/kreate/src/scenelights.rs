@@ -104,10 +104,21 @@ pub fn material_preview(view: glam::DQuat) -> Preview {
     material_preview_in(view, Room::Studio)
 }
 
-/// The same, in the room chosen.
+/// The same, in the room chosen. In the default studio, behind the part,
+/// SolidWorks's sweep: a pale steel blue at the top of the view going to
+/// near white at the bottom — the preview is where a part is modelled, and
+/// that is the background a CAD user reads a part against.
 pub fn material_preview_in(view: glam::DQuat, room: Room) -> Preview {
-    studio(yaw_of(view.as_quat() * -glam::Vec3::Z), room)
+    let mut preview = studio(yaw_of(view.as_quat() * -glam::Vec3::Z), room);
+    if room == Room::Studio {
+        preview.backdrop = Some(CAD_BACKDROP);
+    }
+    preview
 }
+
+/// The material preview's backdrop in the default studio, top and bottom,
+/// in the renderer's linear units before the studio's exposure.
+pub const CAD_BACKDROP: [[f32; 3]; 2] = [[1.0, 1.3, 1.85], [6.0, 6.05, 6.2]];
 
 /// How far a view looking along `ahead` is turned about up from +Y, which
 /// is what the studio is laid out for.

@@ -68,7 +68,16 @@ pub mod flags {
     pub const BOUNDARY: u32 = 1 << 5;
     /// Edge only: used by three or more faces.
     pub const NON_MANIFOLD: u32 = 1 << 6;
+    /// Edge only: where the shape turns — its faces meet at more than
+    /// [`super::FEATURE_ANGLE_DEGREES`], or it is an open edge: what a CAD
+    /// program draws as a part's edges, the facets of a curve left out.
+    pub const FEATURE: u32 = 1 << 7;
 }
+
+/// How far two faces turn from each other at an edge for it to be one of the
+/// shape's edges and not a facet of a curve: a cylinder of thirty-two sides
+/// turns eleven degrees at each.
+pub const FEATURE_ANGLE_DEGREES: f32 = 30.0;
 
 /// Encodes a unit vector into two snorm16 values, octahedron mapping.
 ///
@@ -232,6 +241,45 @@ impl ElementFlags {
         for (f, count) in self.edge_flags.iter_mut().zip(&face_count) {
             set_bit(f, flags::BOUNDARY, *count == 1);
             set_bit(f, flags::NON_MANIFOLD, *count > 2);
+        }
+        // Where the shape turns: each edge's first face's normal, and the
+        // turn to the next face met along it.
+        let positions = mesh.positions();
+        let (offsets, corners) = (mesh.face_offsets(), mesh.corner_verts());
+        let corner_edges = mesh.corner_edges();
+        let cos_feature = FEATURE_ANGLE_DEGREES.to_radians().cos();
+        let mut first: Vec<Option<Vec3>> = vec![None; mesh.num_edges() as usize];
+        let mut turns = vec![false; mesh.num_edges() as usize];
+        for w in offsets.windows(2) {
+            let (a, b) = (w[0] as usize, w[1] as usize);
+            if b <= a || b > corners.len() {
+                continue;
+            }
+            let ring = &corners[a..b];
+            let mut n = Vec3::ZERO;
+            for i in 0..ring.len() {
+                let p = positions.get(ring[i] as usize).copied().unwrap_or_default();
+                let q = positions
+                    .get(ring[(i + 1) % ring.len()] as usize)
+                    .copied()
+                    .unwrap_or_default();
+                n += p.cross(q);
+            }
+            let n = n.normalize_or_zero();
+            for c in a..b {
+                let Some(&e) = corner_edges.get(c) else {
+                    continue;
+                };
+                let e = e as usize;
+                match first.get(e) {
+                    Some(None) => first[e] = Some(n),
+                    Some(Some(m)) if m.dot(n) < cos_feature => turns[e] = true,
+                    _ => {}
+                }
+            }
+        }
+        for ((f, count), turn) in self.edge_flags.iter_mut().zip(&face_count).zip(&turns) {
+            set_bit(f, flags::FEATURE, *turn || *count != 2);
         }
     }
 }
@@ -898,6 +946,21 @@ mod tests {
         // breaks, not the mesh vertices the document keeps.
         assert!(r.indices.iter().all(|&v| v < r.render_verts()));
         assert!(r.edge_verts.iter().flatten().all(|&v| v < r.render_verts()));
+    }
+
+    #[test]
+    fn a_part_shows_its_edges_and_not_its_facets() {
+        let features = |m: &MeshData| {
+            ElementFlags::extract(m)
+                .edge_flags
+                .iter()
+                .filter(|f| **f & flags::FEATURE != 0)
+                .count()
+        };
+        // A cube's twelve.
+        assert_eq!(features(&primitives::cube(2.0)), 12);
+        // A cylinder's two rims, and none of the sixteen lines down its side.
+        assert_eq!(features(&primitives::cylinder(1.0, 2.0, 16)), 32);
     }
 
     #[test]

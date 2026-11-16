@@ -12,6 +12,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- The material preview looks like SolidWorks: a part's edges — where its
+  faces turn, not the facets of a curve — drawn in dark ink, and a pale
+  steel-blue sweep to white behind it in the default studio.
+- The wireframe overlay starts checked: every edge of a mesh over the
+  preview, until it is unchecked in Overlays.
 - Drawing or dragging in a sketch catches the sketch's own lines and
   curves, as it catches its points, with snapping off: a circle's centre
   dragged to another circle's rim lands on the rim.

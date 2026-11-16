@@ -75,8 +75,8 @@ pub fn wires_shown(shading: ShadingMode, overlay: bool) -> (bool, bool) {
         ShadingMode::Wireframe => (true, true),
         // The overlay's toggle decides in every lit-by-the-viewport mode, the
         // material preview too: it is the view the application works in.
-        // The application starts it off there, since a mesh's wires drawn
-        // over every surface were most of what the preview showed.
+        // The application starts it on; off, the preview draws only a
+        // part's edges, as a CAD program does.
         _ => (overlay, true),
     }
 }
@@ -221,6 +221,8 @@ enum EdgeShow {
     /// selected edges still show — what is selected has to be seen, or an
     /// edge selection is invisible in every view but the wireframe one.
     Selected,
+    /// The material preview: the shape's edges, and the selected ones.
+    Features,
 }
 
 #[repr(C)]
@@ -1757,6 +1759,9 @@ pub struct Viewport {
     pub lod_budget: Budget,
     /// Whether to draw the wireframe overlay.
     pub show_wireframe: bool,
+    /// Whether the material preview draws the shape's edges — where its
+    /// faces turn — in dark ink, as SolidWorks's shaded-with-edges does.
+    pub show_feature_edges: bool,
     /// Whether to draw the element overlays: selected-face fill and vertex
     /// points. On in edit mode and off outside it — a scene full of vertex dots
     /// is unreadable when the user is arranging objects.
@@ -2908,6 +2913,7 @@ impl Viewport {
             cluster_path: false,
             lod_budget: Budget::default(),
             show_wireframe: true,
+            show_feature_edges: true,
             show_elements: false,
             wireframe_width: 1.5,
             point_size: 6.0,
@@ -3552,7 +3558,11 @@ impl Viewport {
                 self.edge_objects.offset(i) as u64,
                 bytemuck::bytes_of(&EdgeObject {
                     model: m.to_cols_array_2d(),
-                    base_color: palette::display_rgba(palette::WIRE),
+                    base_color: if self.edge_show(draw) == EdgeShow::Features {
+                        FEATURE_INK
+                    } else {
+                        palette::display_rgba(palette::WIRE)
+                    },
                     selected_color: selected_color(),
                     flags_params: [
                         // The wireframe's base alpha, scaled by the density
@@ -3565,7 +3575,7 @@ impl Viewport {
                     ],
                     show: [
                         f32::from(u8::from(self.edge_show(draw) == EdgeShow::Selected)),
-                        0.0,
+                        f32::from(u8::from(self.edge_show(draw) == EdgeShow::Features)),
                         0.0,
                         0.0,
                     ],
@@ -4871,6 +4881,10 @@ impl Viewport {
         let (all_wires, wire_only) = wires_shown(self.shading, self.show_wireframe);
         if all_wires || (wire_only && draw.wire_only) {
             EdgeShow::All
+        } else if self.shading == ShadingMode::Material && self.show_feature_edges {
+            // The material preview draws a part as a CAD program does, its
+            // shape's edges in dark ink — and, editing, the selection.
+            EdgeShow::Features
         } else if self.show_elements && draw.editing {
             EdgeShow::Selected
         } else {
@@ -6016,6 +6030,10 @@ pub const VIEWPORT_DEPTH_FORMAT: wgpu::TextureFormat = DEPTH_FORMAT;
 /// wire-only draw. There the fade made whole objects vanish as the view drew
 /// back, and come back as it closed in: a CAD part of a hundred thousand
 /// triangles faded away a few metres off.
+/// The ink of a part's edges in the material preview: near black, a little
+/// under opaque, as a CAD program draws them.
+const FEATURE_INK: [f32; 4] = [0.02, 0.02, 0.025, 0.9];
+
 fn wire_alpha(shading: ShadingMode, wire_only: bool, detail: crate::lod::Detail) -> f32 {
     if shading == ShadingMode::Wireframe || wire_only {
         1.0
