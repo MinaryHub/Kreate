@@ -1857,6 +1857,33 @@ fn overlay(
             }
             _ => {}
         }
+        // Offset: what the click would make, drawn as the pointer moves —
+        // as far as the pointer is from the nearest of what is picked, or
+        // as far as is typed, on the pointer's side — with the distance
+        // written by it.
+        if let (Tool::Offset, Some(g)) = (ui.tool, drawing) {
+            let ids = g.entities_in(&[], &ui.lines);
+            let d = doc.object(id).and_then(|o| o.drawing.as_deref());
+            let near = d.and_then(|d| {
+                ids.iter()
+                    .filter_map(|i| d.curve(kreate_scene::drawing::EntityId(*i)))
+                    .map(|c| c.closest(h).1)
+                    .min_by(|a, b| a.distance(h).total_cmp(&b.distance(h)))
+            });
+            if let (Some(d), Some(near)) = (d, near) {
+                let distance = typed.first().map(|t| t.abs()).unwrap_or(near.distance(h));
+                let tol = trim_tolerance(points);
+                for curve in kreate_ops::ops::draft::offset_preview(d, &ids, distance, h) {
+                    view.preview.push(polyline(curve.tessellate(tol)));
+                }
+                if distance > 1e-9 {
+                    let shown = format!("{:.3}", distance / unit);
+                    let shown = shown.trim_end_matches('0').trim_end_matches('.');
+                    view.glyphs
+                        .push((to_world(h), format!("{shown} {}", view.unit.1)));
+                }
+            }
+        }
         if let (Tool::Trim, Some((line, on))) = (ui.tool, ui.trim) {
             match drawing {
                 Some(g) => {

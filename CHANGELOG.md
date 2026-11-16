@@ -10,6 +10,16 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- A sketch offset shows what it will make as the pointer moves, with the
+  distance written by it; a distance typed and Enter makes it there, on
+  the pointer's side, without a click.
+- Pattern along a path in a sketch (Pattern ▸ Along Path): pick the
+  curve — or curves joined end to end — and the copies follow it, spread
+  over the whole of it or a spacing apart, turned with the path or not.
+  `draft.pattern(kind="path", path=[…])` for scripts.
+
 ## [0.12.0] - 2026-11-15
 
 ### Added

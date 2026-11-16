@@ -1513,6 +1513,22 @@ fn offset_chains(
     Ok(made)
 }
 
+/// What [`DraftOffset`] would add, for showing before it is done: the
+/// curves, and nothing changed. Empty when the offset cannot be made.
+pub fn offset_preview(d: &Drawing, ids: &[u32], distance: f64, toward: DVec2) -> Vec<Curve2D> {
+    if distance == 0.0 || !distance.is_finite() {
+        return Vec::new();
+    }
+    let mut trial = d.clone();
+    match offset_chains(&mut trial, ids, distance, toward) {
+        Ok(made) => made
+            .iter()
+            .filter_map(|id| trial.curve(*id).cloned())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Curves sorted into chains: each run end to start, turned round where it
 /// was drawn the other way, and whether it closes on itself.
 fn chains(mut left: Vec<(EntityId, Curve2D)>) -> Vec<(Vec<Curve2D>, bool)> {
@@ -2176,9 +2192,15 @@ impl Operator for DraftMirror {
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct DraftPatternParams {
     pub ids: Vec<u32>,
-    /// In rows and columns, or round a centre.
-    #[param(variants("rectangular", "circular"))]
+    /// In rows and columns, round a centre, or along a path.
+    #[param(variants("rectangular", "circular", "path"))]
     pub kind: u32,
+    /// The curves the copies follow, for a pattern along a path: one curve,
+    /// or several joined end to end.
+    #[param(hidden)]
+    pub path: Vec<u32>,
+    /// Along a path, each copy turned as the path turns.
+    pub align: bool,
     /// How many along the first direction — or round the circle — the
     /// original counted.
     #[param(min = 1.0, max = 500.0)]
@@ -2205,6 +2227,8 @@ impl Default for DraftPatternParams {
         let p = crate::ops::sketch_draw::PatternParams::default();
         Self {
             ids: Vec::new(),
+            path: Vec::new(),
+            align: true,
             kind: p.kind,
             count: p.count,
             spacing: p.spacing,
@@ -2217,7 +2241,17 @@ impl Default for DraftPatternParams {
 }
 
 impl DraftPatternParams {
-    /// Where each copy goes, the original's place left out.
+    /// Where each copy goes in drawing `d`, the original's place left out.
+    pub fn moves_in(&self, d: &Drawing) -> Vec<glam::DAffine2> {
+        if self.kind == 2 {
+            path_moves(d, &self.path, self.count, self.spacing, self.align)
+        } else {
+            self.moves()
+        }
+    }
+
+    /// Where each copy goes, the original's place left out: the kinds that
+    /// need no drawing to say.
     pub fn moves(&self) -> Vec<glam::DAffine2> {
         crate::ops::sketch_draw::pattern_moves(&crate::ops::sketch_draw::PatternParams {
             points: Vec::new(),
@@ -2233,7 +2267,100 @@ impl DraftPatternParams {
     }
 }
 
-/// Copies of entities in rows and columns, or round a centre.
+/// Where the copies of a pattern along a path go: the path's curves — one,
+/// or several joined end to end, taken in order from one end — walked from
+/// its start, a copy at each step. `spacing` apart when it is given, as
+/// many as `count` and the path's length allow; else `count` of them spread
+/// over the whole path, the last on its end (or, round a closed path,
+/// evenly). Each move takes what stands at the path's start to its place
+/// along it, turned as the path has turned when `align`. The original's own
+/// place is left out.
+pub fn path_moves(
+    d: &Drawing,
+    path: &[u32],
+    count: u32,
+    spacing: f64,
+    align: bool,
+) -> Vec<glam::DAffine2> {
+    use glam::DAffine2;
+    let curves: Vec<(EntityId, Curve2D)> = path
+        .iter()
+        .filter_map(|i| Some((EntityId(*i), d.curve(EntityId(*i))?.clone())))
+        .collect();
+    let Some((chain, closed)) = chains(curves).into_iter().next() else {
+        return Vec::new();
+    };
+    // The path as points close enough to it, and how far along each is.
+    let length: f64 = chain.iter().map(Curve2D::length).sum();
+    if !length.is_finite() || length <= 1e-12 {
+        return Vec::new();
+    }
+    let mut points: Vec<DVec2> = Vec::new();
+    for curve in &chain {
+        for p in curve.tessellate(length * 1e-5) {
+            if points.last().is_none_or(|q| q.distance(p) > length * 1e-9) {
+                points.push(p);
+            }
+        }
+    }
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let mut along = vec![0.0];
+    for w in points.windows(2) {
+        along.push(along.last().unwrap() + w[0].distance(w[1]));
+    }
+    let total = *along.last().unwrap();
+    // Where a distance along it is, and the way the path runs there.
+    let place = |s: f64| {
+        let s = s.clamp(0.0, total);
+        let k = along.partition_point(|a| *a < s).clamp(1, points.len() - 1);
+        let (a, b) = (points[k - 1], points[k]);
+        let span = along[k] - along[k - 1];
+        let t = if span > 0.0 {
+            (s - along[k - 1]) / span
+        } else {
+            0.0
+        };
+        (a.lerp(b, t), (b - a).normalize_or_zero())
+    };
+    let n = count.clamp(1, 500);
+    let steps: Vec<f64> = if spacing.is_finite() && spacing > 0.0 {
+        (1..n)
+            .map(|k| spacing * f64::from(k))
+            .take_while(|s| {
+                if closed {
+                    *s < total - total * 1e-9
+                } else {
+                    *s <= total + total * 1e-9
+                }
+            })
+            .collect()
+    } else if closed {
+        (1..n)
+            .map(|k| total * f64::from(k) / f64::from(n))
+            .collect()
+    } else if n >= 2 {
+        (1..n)
+            .map(|k| total * f64::from(k) / f64::from(n - 1))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (start, heading) = place(0.0);
+    steps
+        .into_iter()
+        .map(|s| {
+            let (at, way) = place(s);
+            let turn = if align { heading.angle_to(way) } else { 0.0 };
+            DAffine2::from_translation(at)
+                * DAffine2::from_angle(turn)
+                * DAffine2::from_translation(-start)
+        })
+        .collect()
+}
+
+/// Copies of entities in rows and columns, round a centre, or along a path.
 pub struct DraftPattern;
 
 impl Operator for DraftPattern {
@@ -2253,11 +2380,16 @@ impl Operator for DraftPattern {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let ids: Vec<EntityId> = params.ids.iter().map(|i| EntityId(*i)).collect();
-        let moves = params.moves();
-        if moves.len() > 5000 {
-            return Err(OpError::Failed("that is too many copies".into()));
-        }
         edit(doc, |d| {
+            let moves = params.moves_in(d);
+            if moves.len() > 5000 {
+                return Err(OpError::Failed("that is too many copies".into()));
+            }
+            if params.kind == 2 && moves.is_empty() {
+                return Err(OpError::Failed(
+                    "a pattern along a path needs a path: a curve, or curves end to end".into(),
+                ));
+            }
             copy_moved(d, &ids, &moves);
             Ok(())
         })
@@ -3116,5 +3248,126 @@ mod parameter_tests {
             "50 mm wide: {}",
             area(&back)
         );
+    }
+    /// A pattern along a path: copies spread over an L of two lines, each
+    /// turned as the path turns; a given spacing instead; the copies drawn
+    /// by the operator; and an offset shown before it is made.
+    #[test]
+    fn a_pattern_follows_a_path_and_an_offset_is_shown_first() {
+        let mut d = Drawing::new();
+        // The path: 30 mm along X, then 30 mm up, joined at the corner.
+        let a = d.add_curve(Curve2D::Line {
+            a: DVec2::new(0.0, 0.0),
+            b: DVec2::new(0.03, 0.0),
+        });
+        let b = d.add_curve(Curve2D::Line {
+            a: DVec2::new(0.03, 0.0),
+            b: DVec2::new(0.03, 0.03),
+        });
+        let path = [a.0, b.0];
+        // Seven over the whole 60 mm: every 10 mm, the last on the end.
+        let moves = path_moves(&d, &path, 7, 0.0, true);
+        assert_eq!(moves.len(), 6, "the original's own place left out");
+        let at = |m: &glam::DAffine2| m.transform_point2(DVec2::ZERO);
+        let near = |p: DVec2, q: DVec2| p.distance(q) < 1e-6;
+        assert!(
+            near(at(&moves[0]), DVec2::new(0.01, 0.0)),
+            "{:?}",
+            at(&moves[0])
+        );
+        assert!(near(at(&moves[2]), DVec2::new(0.03, 0.0)));
+        assert!(near(at(&moves[5]), DVec2::new(0.03, 0.03)));
+        // Past the corner the path runs up, and so does what was along X.
+        let along = moves[4].transform_vector2(DVec2::X);
+        assert!(near(along, DVec2::Y), "{along:?}");
+        // Not turned when not asked to be.
+        let flat = path_moves(&d, &path, 7, 0.0, false);
+        assert!(near(flat[4].transform_vector2(DVec2::X), DVec2::X));
+        // 25 mm apart: at 25 and 50, and no further than the path goes.
+        let spaced = path_moves(&d, &path, 10, 0.025, true);
+        assert_eq!(spaced.len(), 2);
+        assert!(near(at(&spaced[1]), DVec2::new(0.03, 0.02)));
+        // No path, no copies.
+        assert!(path_moves(&d, &[], 5, 0.0, true).is_empty());
+
+        // An offset shown: the two lines 5 mm to the inside, meeting at
+        // their corner — and the drawing as it was.
+        let before = d.entities.len();
+        let shown = offset_preview(&d, &path, 0.005, DVec2::new(0.01, 0.01));
+        assert_eq!(shown.len(), 2);
+        assert_eq!(d.entities.len(), before, "nothing was drawn");
+        assert!(shown.iter().any(|c| matches!(c, Curve2D::Line { a, b }
+            if near(*a, DVec2::new(0.0, 0.005)) && near(*b, DVec2::new(0.025, 0.005))
+                || near(*b, DVec2::new(0.0, 0.005)) && near(*a, DVec2::new(0.025, 0.005)))));
+        assert!(offset_preview(&d, &path, 0.0, DVec2::ZERO).is_empty());
+    }
+
+    /// The operator draws a pattern along a path, and says so when there is
+    /// no path.
+    #[test]
+    fn the_pattern_operator_draws_along_a_path() {
+        use crate::history::History;
+        use crate::operator::{Mode, OperatorRegistry};
+        let mut registry = OperatorRegistry::new();
+        crate::register_builtin(&mut registry);
+        let mut history = History::new();
+        let mut doc = Document::new();
+        let mut go = |doc: &mut Document, line: &str| {
+            let call = crate::script::parse_call(&registry, line)
+                .unwrap_or_else(|e| panic!("{line}: {e}"));
+            history.dispatch(
+                &registry,
+                doc,
+                &Context { mode: Mode::Object },
+                call.op_id,
+                &call.params,
+            )
+        };
+        go(&mut doc, "kreate.ops.draft.new()").unwrap();
+        go(
+            &mut doc,
+            "kreate.ops.draft.line(points=[0.0, 0.0, 0.04, 0.0])",
+        )
+        .unwrap();
+        go(
+            &mut doc,
+            "kreate.ops.draft.circle(centre=(0.0, 0.005, 0.0), radius=0.002)",
+        )
+        .unwrap();
+        let drawing = |doc: &Document| {
+            let id = active_drawing(doc).expect("a drawing");
+            doc.object(id).unwrap().drawing.as_deref().unwrap().clone()
+        };
+        let ids: Vec<u32> = drawing(&doc).entities.iter().map(|e| e.id.0).collect();
+        let (line, circle) = (ids[0], ids[1]);
+        assert!(go(
+            &mut doc,
+            &format!(
+                "kreate.ops.draft.pattern(ids=[{circle}], kind=\"path\", count=5, spacing=0.0)"
+            ),
+        )
+        .is_err());
+        go(
+            &mut doc,
+            &format!(
+                "kreate.ops.draft.pattern(ids=[{circle}], kind=\"path\", path=[{line}], count=5, spacing=0.0)"
+            ),
+        )
+        .unwrap();
+        let centres: Vec<f64> = drawing(&doc)
+            .entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Curve(Curve2D::Circle { c, .. }) => Some(c.x),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(centres.len(), 5, "the original and four copies");
+        for x in [0.0, 0.01, 0.02, 0.03, 0.04] {
+            assert!(
+                centres.iter().any(|c| (c - x).abs() < 1e-6),
+                "{x}: {centres:?}"
+            );
+        }
     }
 }

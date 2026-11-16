@@ -16181,6 +16181,15 @@ pub struct PatternDialog {
     pub centre: [f64; 2],
     /// The next click in the view puts the centre.
     pub picking_centre: bool,
+    /// Along a path, in place of rows or a circle: the path's curves, by
+    /// their ids in the drawing; whether the next click in the view picks
+    /// them; the copies turned with the path; and spread over the whole of
+    /// it, or `spacing` apart.
+    pub along_path: bool,
+    pub path: Vec<u32>,
+    pub picking_path: bool,
+    pub align: bool,
+    pub even: bool,
 }
 
 impl Default for PatternDialog {
@@ -16194,6 +16203,11 @@ impl Default for PatternDialog {
             angle: 360.0,
             centre: [0.0, 0.0],
             picking_centre: false,
+            along_path: false,
+            path: Vec::new(),
+            picking_path: false,
+            align: true,
+            even: true,
         }
     }
 }
@@ -16662,8 +16676,17 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
     let centre_pick = t("pattern-centre-pick");
     let centre_picking = t("pattern-centre-picking");
     let nothing = t("pattern-nothing");
-    let picked = !view.picked_points.is_empty() || !view.picked_lines.is_empty();
+    let path_kind = t("pattern-path");
+    let path_label = t("pattern-path-curve");
+    let path_pick = t("pattern-path-pick");
+    let path_picking = t("pattern-path-picking");
+    let path_picked = t("pattern-path-picked");
+    let path_even = t("pattern-path-even");
+    let path_align = t("pattern-path-align");
     let mut d = state.pattern_dialog.clone();
+    // Along a path there has to be a path as well.
+    let picked = (!view.picked_points.is_empty() || !view.picked_lines.is_empty())
+        && (!d.along_path || !d.path.is_empty());
     let mut done: Option<bool> = None;
     let shown = egui::Area::new(egui::Id::new("pattern-dialog"))
         .order(egui::Order::Middle)
@@ -16679,8 +16702,18 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
                     ui.separator();
                 }
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut d.circular, false, &kinds[0]);
-                    ui.selectable_value(&mut d.circular, true, &kinds[1]);
+                    let (rows, round) = (!d.circular && !d.along_path, d.circular && !d.along_path);
+                    if ui.selectable_label(rows, &kinds[0]).clicked() {
+                        (d.circular, d.along_path) = (false, false);
+                    }
+                    if ui.selectable_label(round, &kinds[1]).clicked() {
+                        (d.circular, d.along_path) = (true, false);
+                    }
+                    // Along a path: a drawing's, where a curve has a name.
+                    if view.drafting && ui.selectable_label(d.along_path, &path_kind).clicked() {
+                        d.along_path = true;
+                        d.picking_path = d.path.is_empty();
+                    }
                 });
                 egui::Grid::new("pattern-dialog-grid")
                     .num_columns(2)
@@ -16689,7 +16722,36 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
                         ui.label(&count);
                         ui.add(egui::DragValue::new(&mut d.count).range(1..=500).speed(0.1));
                         ui.end_row();
-                        if d.circular {
+                        if d.along_path {
+                            ui.label(&path_label);
+                            let pick = if d.picking_path {
+                                path_picking.clone()
+                            } else if d.path.is_empty() {
+                                path_pick.clone()
+                            } else {
+                                path_picked.clone()
+                            };
+                            if ui.selectable_label(d.picking_path, pick).clicked() {
+                                d.picking_path = !d.picking_path;
+                            }
+                            ui.end_row();
+                            ui.label("");
+                            ui.checkbox(&mut d.even, &path_even);
+                            ui.end_row();
+                            if !d.even {
+                                ui.label(&spacing);
+                                ui.add(
+                                    egui::DragValue::new(&mut d.spacing)
+                                        .range(0.0..=f64::MAX)
+                                        .speed(0.1)
+                                        .suffix(unit.clone()),
+                                );
+                                ui.end_row();
+                            }
+                            ui.label("");
+                            ui.checkbox(&mut d.align, &path_align);
+                            ui.end_row();
+                        } else if d.circular {
                             ui.label(&angle);
                             ui.add(
                                 egui::DragValue::new(&mut d.angle)
@@ -16764,6 +16826,14 @@ fn draw_pattern_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner
             p.set("kind", V::Enum(params.kind));
             p.set("count", V::Int(params.count as i64));
             p.set("spacing", V::Float(params.spacing));
+            if d.along_path && view.drafting {
+                p.set("kind", V::Enum(2));
+                p.set("path", V::Ints(d.path.clone()));
+                p.set("align", V::Bool(d.align));
+                if d.even {
+                    p.set("spacing", V::Float(0.0));
+                }
+            }
             p.set("count2", V::Int(params.count2 as i64));
             p.set("spacing2", V::Float(params.spacing2));
             p.set("centre", V::Vec3(params.centre));

@@ -6207,6 +6207,19 @@ impl App {
                             }
                         }
                     }
+                    // The pattern's path, when the dialog asks for it: the
+                    // curve clicked, with what it is joined to end to end.
+                    Tool::Pattern
+                        if self.ui.pattern_dialog.along_path
+                            && self.ui.pattern_dialog.picking_path =>
+                    {
+                        let g = self.sketch_geometry().unwrap_or_default();
+                        if let Some(e) = pick.and_then(|k| g.entity_of(k)) {
+                            self.ui.pattern_dialog.path =
+                                g.chain_of(e).iter().map(|e| e.0).collect();
+                            self.ui.pattern_dialog.picking_path = false;
+                        }
+                    }
                     // The pattern's centre, when the dialog asks for it.
                     Tool::Pattern
                         if self.ui.pattern_dialog.circular
@@ -7098,6 +7111,20 @@ impl App {
                 self.redraw.set(RedrawReason::UI);
                 true
             }
+            // A distance typed for an offset, and Enter: made there, on the
+            // pointer's side, with no click wanted.
+            KeyCode::Enter | KeyCode::NumpadEnter
+                if tool == Tool::Offset
+                    && !self.sketching.typed.is_empty()
+                    && !self.sketching.lines.is_empty()
+                    && self.active_drawing().is_some() =>
+            {
+                if let Some((at, _)) = self.sketching.hover {
+                    self.drawing_click(Tool::Offset, at, None);
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+                true
+            }
             KeyCode::Backspace if drawing => {
                 if self.sketching.typed.pop().is_none() {
                     self.sketching.clicks.pop();
@@ -7367,7 +7394,18 @@ impl App {
                 .ui
                 .pattern_dialog
                 .params(self.doc.design.length_unit.metres());
-            let moves = kreate_ops::ops::sketch_draw::pattern_moves(&params);
+            let dialog = &self.ui.pattern_dialog;
+            let moves = if dialog.along_path {
+                kreate_ops::ops::draft::path_moves(
+                    d,
+                    &dialog.path,
+                    params.count,
+                    if dialog.even { 0.0 } else { params.spacing },
+                    dialog.align,
+                )
+            } else {
+                kreate_ops::ops::sketch_draw::pattern_moves(&params)
+            };
             let to_world = |p: glam::DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
             let mut preview = Vec::new();
             for m in moves.iter().take(2000) {
@@ -20032,6 +20070,44 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         third.chat = Some(kreate::claude::Chat::new(|| {}));
         third.restore_chat();
         assert!(third.ui.chat_log.is_empty());
+    }
+
+    /// Drawing in one sketch catches another's: the pointer near an end of
+    /// its line is on that end, and near the line's middle is on the line.
+    #[test]
+    fn a_sketch_catches_another_sketchs_ends_and_lines() {
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        app.run_op_with(
+            "draft.line",
+            &[("points", PropertyValue::Floats(vec![1.0, 0.0, 2.0, 0.0]))],
+        );
+        app.set_mode(OpMode::Object);
+        app.run_op_with("draft.new", &[]);
+        assert!(app.active_drawing().is_some_and(|d| d.entities.is_empty()));
+        app.update_ui_state_for_test();
+        app.sketching.take(kreate::sketching::Tool::Line);
+        let ppp = app.egui_ctx.pixels_per_point() as f64;
+        let over = |app: &mut App, world: DVec3, nudge: (f64, f64)| {
+            let s = app.ui.projector.unwrap().project(world).expect("on screen");
+            app.input.cursor = Some(((s.x as f64 + nudge.0) * ppp, (s.y as f64 + nudge.1) * ppp));
+            app.sketch_hover();
+            (
+                app.sketching.hover.expect("a hover").0,
+                app.sketching.snapped,
+            )
+        };
+        let (end, snapped) = over(&mut app, DVec3::new(2.0, 0.0, 0.0), (3.0, 2.0));
+        assert!(
+            snapped && end.distance(glam::DVec2::new(2.0, 0.0)) < 1e-9,
+            "{end:?} {snapped}"
+        );
+        let (on, snapped) = over(&mut app, DVec3::new(1.5, 0.0, 0.0), (0.0, 4.0));
+        assert!(
+            snapped && on.y.abs() < 1e-9 && (on.x - 1.5).abs() < 0.2,
+            "{on:?} {snapped}"
+        );
     }
 
     /// The sketch tools in a drawing: a rectangle clicked, a line drawn on
