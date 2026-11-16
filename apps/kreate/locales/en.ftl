@@ -1586,6 +1586,7 @@ sketch-tool-fixed = Fix
 sketch-tool-extrude = Extrude
 sketch-tool-revolve = Revolve
 sketch-cannot-constrain = Those cannot take that constraint
+sketch-grab-nothing = Select something to move first
 sketch-prompt-line-start = click where the line starts
 sketch-prompt-line-next = click the next point, or type a length; A for a tangent arc, Ctrl to draw free of H, V, parallel and square; Enter or right-click to finish
 sketch-prompt-corner = click a corner

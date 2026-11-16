@@ -1592,6 +1592,7 @@ sketch-tool-fixed = 고정
 sketch-tool-extrude = 돌출
 sketch-tool-revolve = 회전
 sketch-cannot-constrain = 그 요소들에는 그 구속을 걸 수 없습니다
+sketch-grab-nothing = 먼저 옮길 것을 선택하세요
 sketch-prompt-line-start = 선이 시작할 곳을 클릭
 sketch-prompt-line-next = 다음 점을 클릭하거나 길이를 입력. A: 접선 호, Ctrl: 수평·수직·평행·직각 맞춤 없이 자유롭게. Enter나 오른쪽 클릭으로 끝내기
 sketch-prompt-corner = 한 모서리를 클릭

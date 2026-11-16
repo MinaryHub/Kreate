@@ -12,6 +12,12 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- G in a sketch takes up what is selected: it follows the pointer, caught
+  by what drawing is caught by, until a click sets it down; Escape or the
+  right button puts it back.
+- Moving objects with snapping on, sketches are caught and catch: a
+  sketch's ends, centres and lines are there for anything to land on, and
+  a sketch being moved lands by its own nearest end.
 - A sketch offset shows what it will make as the pointer moves, with the
   distance written by it; a distance typed and Enter makes it there, on
   the pointer's side, without a click.

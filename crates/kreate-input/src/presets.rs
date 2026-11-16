@@ -753,6 +753,14 @@ fn common() -> Vec<Binding> {
             Context::Sketch,
             Action::new("app.sketch_construction"),
         ),
+        // G, as everywhere: what is selected follows the pointer until a
+        // click sets it down.
+        key(
+            "sketch.grab",
+            "G",
+            Context::Sketch,
+            Action::new("app.sketch_grab"),
+        ),
         // Blender's F and Shift+F: the brush's size and strength, set by
         // moving the pointer, in every brush mode.
         key(

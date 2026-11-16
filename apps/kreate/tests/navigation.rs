@@ -293,6 +293,7 @@ const APP_ACTIONS: &[&str] = &[
     "app.sketch_tool",
     "app.sketch_delete",
     "app.sketch_construction",
+    "app.sketch_grab",
     "app.sketch_free",
     "app.sketch_slice",
     "app.place_text",

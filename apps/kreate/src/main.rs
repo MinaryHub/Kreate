@@ -2699,6 +2699,27 @@ impl App {
 
             world.add_mesh(mesh, &to_world, &moving);
         }
+        // The sketches too, which have no mesh to be found by: their ends
+        // and centres, and their lines. A sketch moved onto another — a
+        // corner to a corner, an end onto a line — had nothing of the other
+        // to land on. Not while drawing in one, where the sketch in hand is
+        // left out and the rest are added by `sketch_snap_world`.
+        if self.op_ctx.mode != OpMode::Sketch {
+            for (id, o) in self.doc.objects() {
+                if !kreate::sketching::is_sketch(o)
+                    || moving.contains(&id)
+                    || !self.doc.is_shown(id)
+                {
+                    continue;
+                }
+                world
+                    .verts
+                    .extend(kreate::sketching::world_points(&self.doc, id, o));
+                for [a, b] in kreate::sketching::world_lines(&self.doc, id, o) {
+                    world.edges.push([a, b]);
+                }
+            }
+        }
         world
     }
 
@@ -2729,6 +2750,24 @@ impl App {
                 }
             } else if moving.contains(id) {
                 world.add_mesh(mesh, &to_world, &[]);
+            }
+        }
+        // A sketch being moved: its own points and lines, for the base.
+        if !self.op_ctx.mode.edits_elements() {
+            for id in &moving {
+                let Some(o) = self
+                    .doc
+                    .object(*id)
+                    .filter(|o| kreate::sketching::is_sketch(o))
+                else {
+                    continue;
+                };
+                world
+                    .verts
+                    .extend(kreate::sketching::world_points(&self.doc, *id, o));
+                for [a, b] in kreate::sketching::world_lines(&self.doc, *id, o) {
+                    world.edges.push([a, b]);
+                }
             }
         }
         world
@@ -2808,6 +2847,15 @@ impl App {
                         out.extend(mesh.positions().iter().map(|p| point(&to_world, *p)));
                     }
                     None => out.push(to_world.translation),
+                }
+                // A sketch has no mesh's points: its own ends and centres,
+                // so the nearest of them is what lands on the target.
+                if let Some(o) = self
+                    .doc
+                    .object(*id)
+                    .filter(|o| kreate::sketching::is_sketch(o))
+                {
+                    out.extend(kreate::sketching::world_points(&self.doc, *id, o));
                 }
             }
         }
@@ -5691,8 +5739,64 @@ impl App {
         }
     }
 
+    /// G in a sketch: what is selected is taken up and follows the pointer,
+    /// caught by what drawing is caught by — the sketch's own points, the
+    /// other sketches', the parts' — until a click sets it down. Escape or
+    /// the right button puts it back. Blender's grab, on Fusion's Move.
+    fn sketch_grab(&mut self) {
+        if self.sketching.drag.is_some() {
+            return;
+        }
+        let Some(g) = self.sketch_geometry() else {
+            return;
+        };
+        // Everything selected moves: its points and its lines' ends, a
+        // circle's centre with its ring.
+        let mut points = self.sketching.points.clone();
+        for l in &self.sketching.lines {
+            if let Some(ends) = g.lines.get(*l as usize) {
+                points.extend_from_slice(ends);
+            }
+        }
+        for (c, ring, _) in &g.rounds {
+            if ring.iter().all(|v| points.contains(v)) {
+                points.push(*c);
+            }
+        }
+        points.sort_unstable();
+        points.dedup();
+        if points.is_empty() {
+            self.status(&self.ui.catalog.get("sketch-grab-nothing"));
+            return;
+        }
+        self.sketch_hover();
+        let Some(raw) = self.sketch_plane_point() else {
+            return;
+        };
+        // One point alone is carried by itself, and lands on what catches
+        // it; more move whole, by where the pointer took them up.
+        let single = (points.len() == 1 && self.sketching.lines.is_empty()).then(|| points[0]);
+        let anchor = single
+            .and_then(|v| g.points.get(v as usize).copied())
+            .unwrap_or(raw);
+        let at = single.and_then(|v| g.point_ref(v));
+        let entities = g.entities_in(&self.sketching.points, &self.sketching.lines);
+        self.settle_sketch_drag();
+        self.sketching.take(kreate::sketching::Tool::Select);
+        self.sketching.drag = Some(kreate::sketching::SketchDrag {
+            points,
+            anchor,
+            single,
+            at,
+            entities,
+        });
+        self.sketching.grab = true;
+        self.redraw.set(RedrawReason::UI);
+    }
+
     /// Puts a drag back where it began: Esc or the right button.
     fn cancel_sketch_drag(&mut self) -> bool {
+        self.sketching.grab = false;
         if self.sketching.drag.take().is_none() {
             return false;
         }
@@ -5801,6 +5905,12 @@ impl App {
         use kreate::sketching::{Pick, Tool};
         let tool = self.sketching.tool;
         match (button, pressed) {
+            // Taken up with G: the click sets it down, as a release would.
+            (MouseButton::Left, true) if self.sketching.grab => {
+                self.sketching.grab = false;
+                self.sketch_hover();
+                self.sketch_mouse(MouseButton::Left, false)
+            }
             (MouseButton::Right, true) => {
                 if self.cancel_sketch_drag() {
                     return true;
@@ -15055,6 +15165,7 @@ impl App {
             }
             // The selected lines made construction, or ordinary again when
             // every one of them already is.
+            "app.sketch_grab" if self.op_ctx.mode == OpMode::Sketch => self.sketch_grab(),
             "app.sketch_construction"
                 if self.op_ctx.mode == OpMode::Sketch && self.active_drawing().is_some() =>
             {
@@ -20108,6 +20219,99 @@ kreate.ops.object.add_primitive(size=2.0)" }),
             snapped && on.y.abs() < 1e-9 && (on.x - 1.5).abs() < 0.2,
             "{on:?} {snapped}"
         );
+    }
+
+    /// Moving objects, the sketches are there to land on and to land by:
+    /// another sketch's ends and lines among what a move can catch, the
+    /// moving sketch's own ends among what lands — and the moving one never
+    /// a target of itself.
+    #[test]
+    fn a_sketch_moved_can_land_on_another_sketch() {
+        let mut app = app();
+        let line = |app: &mut App, pts: Vec<f64>| {
+            app.run_op_with("draft.new", &[]);
+            app.run_op_with("draft.line", &[("points", PropertyValue::Floats(pts))]);
+            let id = app.doc.selection.active.unwrap();
+            app.set_mode(OpMode::Object);
+            id
+        };
+        let still = line(&mut app, vec![1.0, 0.0, 2.0, 0.0]);
+        let moved = line(&mut app, vec![5.0, 5.0, 6.0, 5.0]);
+        app.doc.selection.clear();
+        app.doc.selection.add(moved);
+        app.doc.selection.active = Some(moved);
+        let has = |points: &[DVec3], p: DVec3| points.iter().any(|q| q.distance(p) < 1e-9);
+        let world = app.build_snap_world(kreate::snap::Mode::Element);
+        assert!(
+            has(&world.verts, DVec3::new(2.0, 0.0, 0.0)),
+            "the other's end"
+        );
+        assert!(!has(&world.verts, DVec3::new(5.0, 5.0, 0.0)), "not its own");
+        assert!(world
+            .edges
+            .iter()
+            .any(|[a, b]| a.distance(DVec3::new(1.0, 0.0, 0.0)) < 1e-9
+                && b.distance(DVec3::new(2.0, 0.0, 0.0)) < 1e-9));
+        let sources = app.snap_sources();
+        assert!(
+            has(&sources, DVec3::new(6.0, 5.0, 0.0)),
+            "its own end lands"
+        );
+        assert!(!has(&sources, DVec3::new(1.0, 0.0, 0.0)));
+        let own = app.build_own_snap_world();
+        assert!(has(&own.verts, DVec3::new(5.0, 5.0, 0.0)));
+        let _ = still;
+    }
+
+    /// G in a sketch takes up what is selected: it follows the pointer with
+    /// no button held, a click sets it down as one step, and Escape puts it
+    /// back.
+    #[test]
+    fn g_in_a_sketch_moves_what_is_selected_until_a_click() {
+        use kreate::sketching::Tool;
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        app.run_op_with(
+            "draft.line",
+            &[("points", PropertyValue::Floats(vec![0.0, 0.0, 1.0, 0.0]))],
+        );
+        app.update_ui_state_for_test();
+        app.sketching.take(Tool::Select);
+        let ends = |app: &App| match &app.active_drawing().unwrap().entities[0].kind {
+            kreate_scene::drawing::EntityKind::Curve(kreate_geom2d::Curve2D::Line { a, b }) => {
+                (*a, *b)
+            }
+            other => panic!("{other:?}"),
+        };
+        // Nothing selected: nothing taken up.
+        app.sketch_grab();
+        assert!(app.sketching.drag.is_none() && !app.sketching.grab);
+        app.sketching.lines = vec![0];
+        let steps = app.history.cursor();
+        app.sketch_grab();
+        assert!(app.sketching.grab && app.sketching.drag.is_some());
+        let from = app.sketching.drag.as_ref().unwrap().anchor;
+        app.drive_sketch_drag(from + glam::DVec2::new(0.5, 0.25));
+        let (a, b) = ends(&app);
+        assert!((a - glam::DVec2::new(0.5, 0.25)).length() < 1e-6, "{a:?}");
+        assert!((b - glam::DVec2::new(1.5, 0.25)).length() < 1e-6, "{b:?}");
+        // Escape: back where it was, and nothing in the history.
+        assert!(app.cancel_sketch_drag());
+        assert!(!app.sketching.grab);
+        assert!(ends(&app).0.length() < 1e-9);
+        assert_eq!(app.history.cursor(), steps);
+        // Again, and set down: one step.
+        app.sketching.lines = vec![0];
+        app.sketch_grab();
+        let from = app.sketching.drag.as_ref().unwrap().anchor;
+        app.drive_sketch_drag(from + glam::DVec2::new(0.0, 1.0));
+        let session = app.sketch_drag_session.take().expect("a live step");
+        app.history.commit_modal(session);
+        app.sketching.drag = None;
+        app.sketching.grab = false;
+        assert_eq!(app.history.cursor(), steps + 1);
+        assert!((ends(&app).0 - glam::DVec2::new(0.0, 1.0)).length() < 1e-6);
     }
 
     /// The sketch tools in a drawing: a rectangle clicked, a line drawn on

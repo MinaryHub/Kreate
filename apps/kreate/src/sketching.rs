@@ -1123,6 +1123,10 @@ pub struct SketchUi {
     pub lines: Vec<u32>,
     /// What is being dragged, if anything.
     pub drag: Option<SketchDrag>,
+    /// Whether the drag was taken up with G and follows the pointer with no
+    /// button held: a click sets it down, Escape or the right button puts
+    /// it back.
+    pub grab: bool,
     /// The line the trim tool is over, and where on the plane.
     pub trim: Option<(u32, DVec2)>,
     /// The hover was caught by snapping — a midpoint, a crossing, the grid,
@@ -1227,7 +1231,7 @@ pub fn drawing_pieces(d: &Drawing) -> Vec<[DVec2; 2]> {
 
 /// Every sketch's and drawing's lines in the world, with the object they
 /// are of: sketches by their line list, drawings by [`drawing_pieces`].
-fn world_lines(
+pub fn world_lines(
     doc: &kreate_scene::Document,
     id: kreate_scene::document::ObjectId,
     o: &kreate_scene::document::Object,
@@ -1246,6 +1250,36 @@ fn world_lines(
         .iter()
         .filter_map(|[a, b]| Some([w(*pts.get(*a as usize)?), w(*pts.get(*b as usize)?)]))
         .collect()
+}
+
+/// One sketch's points to catch or to be caught by, in the world: a
+/// drawing's ends, centres and middles; an older sketch's points.
+pub fn world_points(
+    doc: &kreate_scene::Document,
+    id: kreate_scene::document::ObjectId,
+    o: &kreate_scene::document::Object,
+) -> Vec<kreate_math::DVec3> {
+    use kreate_math::DVec3;
+    let world = doc.world_transform(id);
+    let w = |p: DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
+    if let Some(d) = o.drawing.as_deref() {
+        return d
+            .entities
+            .iter()
+            .flat_map(|e| d.parts(e.id))
+            .map(|(_, p)| w(p))
+            .collect();
+    }
+    kreate_ops::ops::sketch_draw::points(doc, id)
+        .into_iter()
+        .skip(1)
+        .map(w)
+        .collect()
+}
+
+/// Whether an object is a sketch: an older one's lines, or a drawing.
+pub fn is_sketch(o: &kreate_scene::document::Object) -> bool {
+    !o.sketch_lines.is_empty() || o.drawing.is_some()
 }
 
 /// Every sketch's lines but `active`'s, in the world: what the overlay draws
