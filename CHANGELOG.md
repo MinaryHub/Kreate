@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-17
+
 ### Added
 
 - The rest of Fusion's assembly, under Mechanical ▸ Assembly Joints:
@@ -1029,7 +1031,8 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.13.0
 [0.12.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.12.0
 [0.11.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.11.0
 [0.10.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.10.0
