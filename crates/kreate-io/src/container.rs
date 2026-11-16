@@ -948,6 +948,10 @@ pub struct DesignRecord {
     /// and the feature's order; then the expression.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<(String, u64, u64, String)>,
+    /// Where the timeline is rolled back to: the last feature built, by
+    /// its order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<u64>,
 }
 
 /// The scene's render settings. See `kreate_scene::render`.
@@ -2198,6 +2202,7 @@ pub fn write(
                     ),
                 })
                 .collect(),
+            rollback: document.design.rollback,
         });
         scene.collections = document
             .collections()
@@ -3047,6 +3052,7 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
             })
             .collect();
         document.design.evaluate_parameters();
+        document.design.rollback = d.rollback;
         document.design.section =
             d.section
                 .filter(|s| s.0 <= 3 && s.1.is_finite())
@@ -3538,9 +3544,16 @@ pub struct FeatureRecord {
     /// A sheet metal feature's flanged edges, each by a point by it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<[f64; 2]>,
+    /// A fillet's chosen edges, each by a point on it in the body's space;
+    /// none for every sharp edge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<[f64; 3]>,
     /// Left out of the body for now.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suppressed: bool,
+    /// The name it was given on the timeline; empty for its kind and place.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// Fields a newer build added, kept for it.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -3563,6 +3576,10 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
     };
     let edges = match &f.shape {
         Shape::SheetMetal { edges, .. } => edges.clone(),
+        _ => Vec::new(),
+    };
+    let points = match &f.shape {
+        Shape::Round { edges, .. } => edges.clone(),
         _ => Vec::new(),
     };
     let (distance, symmetric, axis, angle, count, step, open) = match &f.shape {
@@ -3630,7 +3647,9 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         path,
         sections,
         edges,
+        points,
         suppressed: f.suppressed,
+        name: f.name.clone(),
         extra: BTreeMap::new(),
     }
 }
@@ -3693,6 +3712,12 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         "fillet" | "chamfer" if r.distance.is_finite() => Shape::Round {
             radius: r.distance,
             chamfer: r.kind == "chamfer",
+            edges: r
+                .points
+                .iter()
+                .copied()
+                .filter(|p| p.iter().all(|v| v.is_finite()))
+                .collect(),
         },
         "shell" if r.distance.is_finite() => Shape::Shell {
             thickness: r.distance,
@@ -3756,5 +3781,6 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         operation: Operation::from_tag(&r.operation)?,
         order: r.order,
         suppressed: r.suppressed,
+        name: r.name.clone(),
     })
 }

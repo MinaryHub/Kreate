@@ -3206,7 +3206,8 @@ fn a_sketch_becomes_a_plate_and_the_plate_follows_the_sketch() {
                 }
                 state.sketch_lines =
                     kreate::sketching::other_lines_marked(doc, in_sketch.then_some(sketch));
-                state.features = kreate::sketching::feature_rows(doc, &state.catalog);
+                state.features =
+                    kreate::sketching::feature_rows(doc, &state.catalog, &|_| Vec::new());
             },
         );
         FRAMING.with(|f| f.set(None));

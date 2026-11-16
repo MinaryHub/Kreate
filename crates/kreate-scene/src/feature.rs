@@ -109,9 +109,15 @@ pub enum Shape {
     /// many radians — or about the sketch's own horizontal or vertical axis,
     /// when both are [`AXIS_X`] or [`AXIS_Y`].
     Revolve { axis: [u32; 2], angle: f64 },
-    /// Every sharp edge of the body so far rounded to this radius, in
-    /// metres — or cut back this far, for a chamfer. Names no sketch.
-    Round { radius: f64, chamfer: bool },
+    /// The body's edges at `edges` — a point on each, in the body's space,
+    /// with the chain of edges each runs on in — rounded to this radius, in
+    /// metres, or cut back this far, for a chamfer; every sharp edge when
+    /// there are none. Names no sketch.
+    Round {
+        radius: f64,
+        chamfer: bool,
+        edges: Vec<[f64; 3]>,
+    },
     /// The body hollowed to a wall `thickness` thick; `open` is the side
     /// taken off — 0 none, then +X, −X, +Y, −Y, +Z, −Z — so a box becomes a
     /// tray. Fusion's Shell.
@@ -184,6 +190,8 @@ pub struct Feature {
     /// Left out of the body for now, and kept: Fusion's Suppress. What comes
     /// after it is built as if it were not there.
     pub suppressed: bool,
+    /// What the timeline calls it; empty for its kind and its place.
+    pub name: String,
 }
 
 impl Feature {
@@ -726,6 +734,41 @@ fn faces_facing(mesh: &MeshData, dir: kreate_math::DVec3) -> Vec<u32> {
 /// A body: its features run in order, in its own space. The first one
 /// starts it whatever it says; after that, each joins or cuts.
 pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshData {
+    body_with_status(doc, features, body_world).0
+}
+
+/// Why a feature made nothing of the body, as a catalogue key: its sketch
+/// gone, its regions closed up or changed, its edges gone, nothing before
+/// it to repeat. One for each of `features`; `None` for one that built, or
+/// is left out.
+pub type FeatureStatus = Option<&'static str>;
+
+/// [`body`], with what became of each feature.
+pub fn body_with_status(
+    doc: &Document,
+    features: &[Feature],
+    body_world: DAffine3,
+) -> (MeshData, Vec<FeatureStatus>) {
+    let mut status: Vec<FeatureStatus> = vec![None; features.len()];
+    // Past the rollback marker, left out as a suppressed one is.
+    let rolled = |f: &Feature| doc.design.rollback.is_some_and(|r| f.order > r);
+    let marked: Vec<Feature>;
+    let features = if features.iter().any(&rolled) {
+        marked = features
+            .iter()
+            .map(|f| Feature {
+                suppressed: f.suppressed || rolled(f),
+                ..f.clone()
+            })
+            .collect();
+        &marked[..]
+    } else {
+        features
+    };
+    // Where each of what is built stands among all of them, for its status.
+    let places: Vec<usize> = (0..features.len())
+        .filter(|i| !features[*i].suppressed)
+        .collect();
     // Without what is suppressed, for the kernel and the meshes alike.
     let live: Vec<Feature>;
     let features = if features.iter().any(|f| f.suppressed) {
@@ -761,21 +804,53 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
         features
     };
     // Exactly, by the kernel, where it is there and can; otherwise as
-    // meshes, as below.
+    // meshes, as below. The kernel builds a body whole or not at all, so
+    // what it builds failed nowhere.
     if let Some(exact) = exact::body_mesh(doc, features, body_world) {
-        return exact;
+        return (exact, status);
     }
+    let place = |i: usize| places.get(i).copied();
     let to_body = body_world.inverse();
     let mut out = MeshData::empty();
     // The last solid a feature made, in the body's space, with what it did:
     // what a pattern or a mirror repeats.
     let mut last: Option<(MeshData, Operation)> = None;
-    for f in features {
+    for (i, f) in features.iter().enumerate() {
+        let mut fail = |why: &'static str| {
+            if let Some(at) = place(i) {
+                status[at] = Some(why);
+            }
+        };
         // These work on what the body is so far, not on a sketch.
+        if matches!(
+            f.shape,
+            Shape::Pattern { .. } | Shape::Circular { .. } | Shape::Mirror { .. }
+        ) && last.is_none()
+        {
+            fail("feature-failed-source");
+        }
         match f.shape {
-            Shape::Round { radius, chamfer } => {
+            Shape::Round {
+                radius,
+                chamfer,
+                ref edges,
+            } => {
                 if out.num_faces() > 0 && radius > 0.0 {
-                    out = kreate_mesh::modifiers::bevel::round_edges(&out, radius as f32, chamfer);
+                    let points: Vec<kreate_math::Vec3> = edges
+                        .iter()
+                        .map(|p| kreate_math::DVec3::from_array(*p).as_vec3())
+                        .collect();
+                    if !points.is_empty()
+                        && kreate_mesh::modifiers::bevel::chosen_edges(&out, &points).is_empty()
+                    {
+                        fail("feature-failed-edges");
+                    }
+                    out = kreate_mesh::modifiers::bevel::round_chosen(
+                        &out,
+                        radius as f32,
+                        chamfer,
+                        &points,
+                    );
                 }
                 continue;
             }
@@ -853,6 +928,11 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
         };
         let mut piece = solid_reaching(doc, f, reach);
         if piece.num_faces() == 0 {
+            fail(if doc.object_by_uid(f.sketch).is_none() {
+                "feature-failed-sketch"
+            } else {
+                "feature-failed-region"
+            });
             // Nothing made — its sketch gone, its region closed up: what
             // follows has nothing of this one to repeat.
             last = None;
@@ -865,7 +945,34 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
         last = Some((piece.clone(), f.operation));
         out = combine(out, piece, f.operation);
     }
-    out
+    (out, status)
+}
+
+/// The order a feature made now takes: the next on the timeline — or,
+/// rolled back, the one just after the marker, those after it moved one
+/// on to make room (and what is held to them with them), and the marker
+/// after the new one, as Fusion puts a feature in where the marker is.
+pub fn take_order(doc: &mut Document) -> u64 {
+    let Some(r) = doc.design.rollback else {
+        return next_order(doc);
+    };
+    let ids: Vec<crate::document::ObjectId> = doc.objects().map(|(id, _)| id).collect();
+    for id in ids {
+        if let Some(o) = doc.object_mut(id) {
+            for f in o.features.iter_mut().filter(|f| f.order > r) {
+                f.order += 1;
+            }
+        }
+    }
+    for b in &mut doc.design.bindings {
+        if let crate::design::Bound::FeatureAmount { order, .. } = &mut b.target {
+            if *order > r {
+                *order += 1;
+            }
+        }
+    }
+    doc.design.rollback = Some(r + 1);
+    r + 1
 }
 
 /// What a body's shape depends on, for the cache: its features, each
@@ -874,6 +981,7 @@ pub fn key(doc: &Document, features: &[Feature], body_world: DAffine3) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     format!("{features:?}").hash(&mut h);
+    doc.design.rollback.hash(&mut h);
     // Where each thing it is made from stands *from the body*, to a
     // nanometre: a body moved with its sketches is the same body, and
     // built again at every step of a drag it was a boolean per frame.
@@ -985,6 +1093,7 @@ mod tests {
             operation: Operation::Join,
             order: 1,
             suppressed: false,
+            name: String::new(),
         };
         let hole = Feature {
             seeds: vec![[0.02, 0.01]],
@@ -1027,6 +1136,7 @@ mod tests {
             operation: Operation::Join,
             order: 1,
             suppressed: false,
+            name: String::new(),
         };
         let area = 0.04 * 0.02;
         let volume = |features: &[Feature]| {
@@ -1123,6 +1233,7 @@ mod tests {
             operation: Operation::Join,
             order: 1,
             suppressed: false,
+            name: String::new(),
         };
         let hole = Feature {
             seeds: vec![[0.02, 0.01]],
@@ -1146,6 +1257,137 @@ mod tests {
         assert!((v - want).abs() < want * 1e-3, "{v} against {want}");
     }
 
+    /// A fillet on one edge rounds that edge only — less taken away than
+    /// every edge; and when an edit takes the edge away from where it was
+    /// picked, it rounds nothing rather than another edge.
+    #[test]
+    fn a_fillet_on_one_edge_rounds_that_edge_and_follows_an_edit() {
+        let mut doc = Document::new();
+        let s = sketch(&mut doc, &[rect(0.04, 0.02)]);
+        let plate = |height: f64| Feature {
+            shape: Shape::Extrude {
+                distance: height,
+                symmetric: false,
+                more: Default::default(),
+            },
+            sketch: s,
+            seeds: vec![[0.002, 0.002]],
+            operation: Operation::Join,
+            order: 1,
+            suppressed: false,
+            name: String::new(),
+        };
+        let round = |edges: Vec<[f64; 3]>| Feature {
+            shape: Shape::Round {
+                radius: 0.003,
+                chamfer: false,
+                edges,
+            },
+            sketch: kreate_reflect::Uid::NONE,
+            seeds: Vec::new(),
+            operation: Operation::Join,
+            order: 2,
+            suppressed: false,
+            name: String::new(),
+        };
+        let volume = |features: &[Feature]| {
+            mass_properties(&body(&doc, features, DAffine3::IDENTITY), |p| p).volume
+        };
+        let whole = volume(&[plate(0.01)]);
+        // The long top edge along X, at y = 0, z = 0.01.
+        let one = volume(&[plate(0.01), round(vec![[0.02, 0.0, 0.01]])]);
+        let all = volume(&[plate(0.01), round(Vec::new())]);
+        // A quarter round of 3 mm along 40 mm takes (1 - π/4) r² l.
+        let want = whole - (1.0 - std::f64::consts::FRAC_PI_4) * 0.003f64.powi(2) * 0.04;
+        assert!((one - want).abs() < want * 2e-3, "{one} against {want}");
+        assert!(all < one, "every edge takes more: {all} {one}");
+        // Twice as thick: the top edge has gone 10 mm up from the point it
+        // was kept by, out of reach, and the fillet finds nothing to round
+        // — it does not round some other edge instead.
+        let thick = volume(&[plate(0.02), round(vec![[0.02, 0.0, 0.01]])]);
+        let thick_whole = volume(&[plate(0.02)]);
+        assert!((thick - thick_whole).abs() < thick_whole * 1e-9);
+    }
+
+    /// A feature that makes nothing says why; one rolled past the marker
+    /// is left out; one made while rolled back goes in at the marker, the
+    /// later ones moved on to make room.
+    #[test]
+    fn a_failed_feature_says_why_and_the_marker_leaves_out_what_follows() {
+        let mut doc = Document::new();
+        let s = sketch(
+            &mut doc,
+            &[rect(0.04, 0.02), circle(Vec2::new(0.02, 0.01), 0.005)],
+        );
+        let plate = Feature {
+            shape: Shape::Extrude {
+                distance: 0.01,
+                symmetric: false,
+                more: Default::default(),
+            },
+            sketch: s,
+            seeds: vec![[0.002, 0.002], [0.02, 0.01]],
+            operation: Operation::Join,
+            order: 1,
+            suppressed: false,
+            name: String::new(),
+        };
+        // A hole whose seed is in no region; a pattern after a sketch gone.
+        let lost = Feature {
+            seeds: vec![[5.0, 5.0]],
+            operation: Operation::Cut,
+            order: 2,
+            ..plate.clone()
+        };
+        let gone = Feature {
+            sketch: kreate_reflect::Uid::from_raw(999_999),
+            order: 3,
+            ..plate.clone()
+        };
+        let pattern = Feature {
+            shape: Shape::Pattern {
+                count: 2,
+                step: [0.1, 0.0, 0.0],
+            },
+            order: 4,
+            ..plate.clone()
+        };
+        let all = [plate.clone(), lost, gone, pattern];
+        let (_, status) = body_with_status(&doc, &all, DAffine3::IDENTITY);
+        assert_eq!(
+            status,
+            vec![
+                None,
+                Some("feature-failed-region"),
+                Some("feature-failed-sketch"),
+                Some("feature-failed-source"),
+            ]
+        );
+        // Rolled back to the plate: the rest are left out, and fail nothing.
+        doc.design.rollback = Some(1);
+        let (made, status) = body_with_status(&doc, &all, DAffine3::IDENTITY);
+        assert!(status.iter().all(Option::is_none), "{status:?}");
+        let v = mass_properties(&made, |p| p).volume;
+        assert!((v - 0.04 * 0.02 * 0.01).abs() < 1e-9, "{v}");
+        // A feature made now goes in after the plate; those after move on.
+        let mut body_object = crate::document::Object::new(
+            "Body",
+            crate::document::ObjectData::Mesh(doc.add_mesh(MeshData::empty())),
+        );
+        body_object.features = all.to_vec();
+        let id = doc.add_object(body_object);
+        assert_eq!(take_order(&mut doc), 2);
+        assert_eq!(doc.design.rollback, Some(2));
+        let orders: Vec<u64> = doc
+            .object(id)
+            .unwrap()
+            .features
+            .iter()
+            .map(|f| f.order)
+            .collect();
+        assert_eq!(orders, vec![1, 3, 4, 5]);
+    }
+
     #[test]
     fn a_body_lands_where_its_sketch_is() {
         let mut doc = Document::new();
@@ -1164,6 +1406,7 @@ mod tests {
             operation: Operation::Join,
             order: 1,
             suppressed: false,
+            name: String::new(),
         };
         let solid = body(&doc, &[f], DAffine3::IDENTITY);
         let lo = solid
@@ -1188,6 +1431,7 @@ mod tests {
             operation: Operation::Join,
             order: 1,
             suppressed: false,
+            name: String::new(),
         };
         assert_eq!(body(&doc, &[f], DAffine3::IDENTITY).num_faces(), 0);
     }

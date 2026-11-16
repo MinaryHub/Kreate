@@ -103,6 +103,10 @@ pub struct DesignSettings {
     /// Dimensions and feature amounts held to expressions of the parameters:
     /// change a parameter and they follow.
     pub bindings: Vec<Binding>,
+    /// Fusion's rollback marker: the timeline built only to the feature of
+    /// this order, those after it left out for now; a feature made then
+    /// goes in at the marker. `None` is all of it.
+    pub rollback: Option<u64>,
 }
 
 /// One named number.
@@ -351,6 +355,7 @@ impl Default for DesignSettings {
             section: None,
             parameters: Vec::new(),
             bindings: Vec::new(),
+            rollback: None,
         }
     }
 }

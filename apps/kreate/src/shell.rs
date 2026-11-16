@@ -458,8 +458,14 @@ pub struct ShellState {
     pub features: Vec<FeatureRow>,
     /// A feature being edited from the list.
     pub feature_edit: Option<FeatureEdit>,
+    /// A feature being renamed on the timeline: its body, its place, and the
+    /// name as typed.
+    pub feature_rename: Option<(String, u32, String)>,
     /// The Measure tool's points so far and where the next would go.
     pub measure_preview: Vec<kreate_math::DVec3>,
+    /// The Fillet tool's edges: those picked, and those under the pointer.
+    pub edges_picked: Vec<[kreate_math::DVec3; 2]>,
+    pub edges_hover: Vec<[kreate_math::DVec3; 2]>,
     /// The active object's volume, surface and middle, in the world, as it
     /// is evaluated. See `kreate_mesh::measure`.
     pub mass: Option<kreate_mesh::measure::MassProperties>,
@@ -1006,7 +1012,10 @@ impl Default for ShellState {
             sheet: SheetDialog::default(),
             features: Vec::new(),
             feature_edit: None,
+            feature_rename: None,
             measure_preview: Vec::new(),
+            edges_picked: Vec::new(),
+            edges_hover: Vec::new(),
             mass: None,
             check_thickness: 0.001,
             sketch_slice: false,
@@ -3693,6 +3702,20 @@ fn draw_area(
                             draw_sketch_dimensions(&painter, &projector, doc);
                         }
                         draw_measurement(&painter, &projector, &state.measure_preview, true);
+                        // The Fillet tool's edges: picked thick, the one under
+                        // the pointer thin.
+                        let accent = theme_accent(ui);
+                        for (lines, width) in
+                            [(&state.edges_picked, 4.0), (&state.edges_hover, 2.0)]
+                        {
+                            for [a, b] in lines.iter() {
+                                if let (Some(p), Some(q)) =
+                                    (projector.project(*a), projector.project(*b))
+                                {
+                                    painter.line_segment([p, q], egui::Stroke::new(width, accent));
+                                }
+                            }
+                        }
                         // The work plane, while the Cursor orientation is
                         // chosen: a grid on the cursor, square to it.
                         if state.tools.orientation == 2 {
@@ -5566,16 +5589,9 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
     (
         "",
         &[
-            (
-                "mech-fillet",
-                "feature.round",
-                MechArg::Bool("chamfer", false),
-            ),
-            (
-                "mech-chamfer",
-                "feature.round",
-                MechArg::Bool("chamfer", true),
-            ),
+            // Edges clicked on the body, then the radius: Fusion's way.
+            ("mech-fillet", "app.fillet_edges", MechArg::Tool(0)),
+            ("mech-chamfer", "app.chamfer_edges", MechArg::Tool(0)),
             ("mech-shell-feature", "feature.shell", MechArg::None),
             ("mech-pattern", "feature.pattern", MechArg::None),
             ("mech-circular", "feature.circular", MechArg::None),
@@ -14833,7 +14849,8 @@ impl RibbonIcon {
             // The body's, not the edge menu's: there the loop cut and the
             // subdivision are what the group's three buttons are for.
             "feature.round" if flag("chamfer") == Some(true) => Self::Chamfer,
-            "feature.round" => Self::Fillet,
+            "feature.round" | "app.fillet_edges" => Self::Fillet,
+            "app.chamfer_edges" => Self::Chamfer,
             "feature.shell" | "mesh.shell" => Self::Shell,
             "pose.ik_add" => Self::Ik,
             "pose.clear_transform" if variant("what") == Some(0) => Self::ClearPose,
@@ -16421,6 +16438,12 @@ pub struct FeatureRow {
     pub count: u32,
     /// What holds its amount to the parameters, when something does.
     pub expression: Option<String>,
+    /// The feature's place on the timeline, as its order.
+    pub feature_order: u64,
+    /// Why it made nothing, when it did: its sketch gone, its edges gone.
+    pub failed: Option<String>,
+    /// Past the rollback marker: left out until the timeline is rolled on.
+    pub rolled_out: bool,
 }
 
 /// A feature open for editing from the list.
@@ -17347,6 +17370,20 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
     }
     let theme = kreate_ui::theme::from_ui(ui);
     let rows = state.features.clone();
+    // Rolled back: said, with the way on to the end.
+    if rows.iter().any(|r| r.rolled_out) {
+        ui.horizontal(|ui| {
+            ui.colored_label(theme.info, state.catalog.get("feature-rolled-back"));
+            if ui
+                .small_button(state.catalog.get("feature-roll-end"))
+                .clicked()
+            {
+                let mut p = PropertyMap::new();
+                p.set("order", kreate_reflect::PropertyValue::Int(-1));
+                state.queue.run("feature.rollback", p);
+            }
+        });
+    }
     egui::CollapsingHeader::new(state.catalog.get("feature-list"))
         .id_salt("feature-list")
         .default_open(true)
@@ -17363,7 +17400,36 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                         } else {
                             "⬆"
                         };
-                        let colour = if row.suppressed {
+                        // Being renamed: the field in its place.
+                        if let Some((body, index, name)) = state.feature_rename.as_mut() {
+                            if !row.is_sketch && *body == row.body && *index == row.index {
+                                let field = ui.add(
+                                    egui::TextEdit::singleline(name).desired_width(f32::INFINITY),
+                                );
+                                field.request_focus();
+                                let (enter, escape) = ui.input(|i| {
+                                    (
+                                        i.key_pressed(egui::Key::Enter),
+                                        i.key_pressed(egui::Key::Escape),
+                                    )
+                                });
+                                if enter {
+                                    use kreate_reflect::PropertyValue as V;
+                                    let mut p = PropertyMap::new();
+                                    p.set("body", V::Text(body.clone()));
+                                    p.set("index", V::Int(i64::from(*index)));
+                                    p.set("name", V::Text(name.clone()));
+                                    state.queue.run("feature.rename", p);
+                                    state.feature_rename = None;
+                                } else if escape || field.lost_focus() {
+                                    state.feature_rename = None;
+                                }
+                                continue;
+                            }
+                        }
+                        let colour = if row.failed.is_some() {
+                            theme.axis_x
+                        } else if row.suppressed || row.rolled_out {
                             theme.text_faint
                         } else if row.cut {
                             theme.info
@@ -17376,11 +17442,24 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                         } else {
                             format!("{icon}  {}  · {}", row.label, row.body)
                         };
+                        // A feature that made nothing, marked as Fusion marks it.
+                        let text = if row.failed.is_some() {
+                            format!("⚠ {text}")
+                        } else {
+                            text
+                        };
                         let mut text = egui::RichText::new(text).color(colour);
                         if row.suppressed {
                             text = text.strikethrough();
                         }
+                        if row.rolled_out {
+                            text = text.italics();
+                        }
                         let r = ui.selectable_label(false, text);
+                        let r = match &row.failed {
+                            Some(why) => r.on_hover_text(why),
+                            None => r,
+                        };
                         // A feature's own menu: leave it out or put it back,
                         // move it among its body's, or take it away.
                         if !row.is_sketch {
@@ -17423,6 +17502,30 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                                     "feature-move-later",
                                     Some(row.index + 1).filter(|to| *to < row.count),
                                 );
+                                ui.separator();
+                                if ui.button(state.catalog.get("feature-rename")).clicked() {
+                                    let shown = if row.label.contains(' ')
+                                        && row.label.ends_with(&row.feature_order.to_string())
+                                    {
+                                        String::new()
+                                    } else {
+                                        row.label.clone()
+                                    };
+                                    state.feature_rename =
+                                        Some((row.body.clone(), row.index, shown));
+                                    ui.close();
+                                }
+                                // The rollback marker after this one, or the
+                                // whole timeline back.
+                                if ui.button(state.catalog.get("feature-roll-here")).clicked() {
+                                    let mut p = PropertyMap::new();
+                                    p.set(
+                                        "order",
+                                        V::Int(i64::try_from(row.feature_order).unwrap_or(-1)),
+                                    );
+                                    state.queue.run("feature.rollback", p);
+                                    ui.close();
+                                }
                                 ui.separator();
                                 if ui.button(state.catalog.get("feature-delete")).clicked() {
                                     state.queue.run("feature.remove", named(&row));
@@ -19499,4 +19602,9 @@ pub fn choose_environment_file(state: &mut ShellState, file: Option<std::path::P
             state.environment_file.as_deref(),
         );
     }
+}
+
+/// The theme's accent, from a `Ui`.
+fn theme_accent(ui: &Ui) -> egui::Color32 {
+    kreate_ui::theme::from_ui(ui).accent
 }

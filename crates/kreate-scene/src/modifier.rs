@@ -620,6 +620,9 @@ struct BodyEntry {
     key: u64,
     output: Arc<MeshData>,
     used: u64,
+    /// What became of each of its features: see
+    /// [`crate::feature::FeatureStatus`].
+    status: Vec<crate::feature::FeatureStatus>,
 }
 
 /// A mesh with its simulation laid on: what it was made from and of.
@@ -1165,15 +1168,30 @@ impl ModifierCache {
             return e.output.clone();
         }
         self.misses += 1;
-        let output = Arc::new(crate::feature::body(doc, &object.features, world));
+        let (built, status) = crate::feature::body_with_status(doc, &object.features, world);
+        let output = Arc::new(built);
         self.bodies.retain(|e| e.object != uid);
         self.bodies.push(BodyEntry {
             object: uid,
             key,
             output: output.clone(),
             used: self.generation,
+            status,
         });
         output
+    }
+
+    /// What became of each of a body's features when it was last built:
+    /// why one made nothing, as a catalogue key. `None` for a body not
+    /// built yet.
+    pub fn body_status(
+        &self,
+        body: kreate_reflect::Uid,
+    ) -> Option<&[crate::feature::FeatureStatus]> {
+        self.bodies
+            .iter()
+            .find(|e| e.object == body)
+            .map(|e| e.status.as_slice())
     }
 
     /// A curve object's shape, built from its curve or found again. The
@@ -1201,6 +1219,7 @@ impl ModifierCache {
             key,
             output: output.clone(),
             used: self.generation,
+            status: Vec::new(),
         });
         output
     }

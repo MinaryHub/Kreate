@@ -176,6 +176,7 @@ fn sketch_lines_and_a_bodys_features_are_saved() {
             operation: Operation::Join,
             order: 1,
             suppressed: false,
+            name: String::new(),
         },
         Feature {
             shape: Shape::Revolve {
@@ -187,6 +188,7 @@ fn sketch_lines_and_a_bodys_features_are_saved() {
             operation: Operation::Cut,
             order: 2,
             suppressed: false,
+            name: String::new(),
         },
     ];
     let original = body.features.clone();
@@ -271,6 +273,7 @@ fn a_newer_builds_feature_is_kept_and_written_back() {
         operation: Operation::Join,
         order,
         suppressed: false,
+        name: String::new(),
     };
     body.features = vec![known(1), known(3)];
     body.foreign_features = vec![

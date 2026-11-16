@@ -756,6 +756,15 @@ struct SculptView {
 
 /// The Measure tool: the points clicked so far, where the next would go,
 /// and everything it can catch on — all of the scene, gathered once.
+struct FilletTool {
+    body: ObjectId,
+    chamfer: bool,
+    points: Vec<DVec3>,
+    typed: String,
+    /// The edge under the pointer: a point on it, in the world.
+    hover: Option<DVec3>,
+}
+
 struct MeasureTool {
     world: kreate::snap::SnapWorld,
     points: Vec<DVec3>,
@@ -1096,6 +1105,9 @@ struct App {
     /// Align Faces, while it is out: the first face clicked, once it has
     /// been — the part that moves, its face's middle and normal.
     mate: Option<Option<(ObjectId, DVec3, DVec3)>>,
+    /// The Fillet or Chamfer tool: the body, whether it chamfers, the
+    /// edges picked (a point on each, in the world) and the radius typed.
+    fillet_tool: Option<FilletTool>,
     /// Fusion's Joint, being made: the motion asked for, and the moving
     /// part's joint origin once it has been picked.
     joint_tool: Option<(u32, Option<(ObjectId, kreate::assembly::Origin)>)>,
@@ -1348,6 +1360,7 @@ impl App {
             asking: false,
             quitting: false,
             mate: None,
+            fillet_tool: None,
             joint_tool: None,
             joint_anim: None,
             mass_cache: None,
@@ -4824,6 +4837,241 @@ impl App {
         Some((hit.object, middle, normal.normalize_or_zero()))
     }
 
+    /// The Fillet tool's state, in the status line.
+    fn say_fillet(&mut self) {
+        let Some(tool) = &self.fillet_tool else {
+            return;
+        };
+        let unit = self.doc.design.length_unit.symbol();
+        let radius = if tool.typed.is_empty() {
+            "1".to_string()
+        } else {
+            tool.typed.clone()
+        };
+        let count = tool.points.len().to_string();
+        let said = self.ui.catalog.format(
+            if tool.chamfer {
+                "chamfer-status"
+            } else {
+                "fillet-status"
+            },
+            kreate_i18n::TextKind::Ui,
+            &[
+                ("count", count.as_str()),
+                ("radius", radius.as_str()),
+                ("unit", unit),
+            ],
+        );
+        self.status(&said);
+    }
+
+    /// The body's sharp edges, in the world, with the body's mesh as it
+    /// shows and its place.
+    fn fillet_edges_of(
+        &self,
+        body: ObjectId,
+    ) -> Option<(Arc<kreate_mesh::MeshData>, kreate_math::DAffine3)> {
+        let mesh = self.evaluated.iter().find(|(id, _)| *id == body)?.1.clone();
+        Some((mesh, self.doc.world_transform(body)))
+    }
+
+    /// The edge of the body under the pointer, and the chain it runs on in.
+    fn update_fillet_hover(&mut self) {
+        let Some(body) = self.fillet_tool.as_ref().map(|t| t.body) else {
+            return;
+        };
+        let (Some((mesh, world)), Some(projector), Some(cursor)) = (
+            self.fillet_edges_of(body),
+            self.ui.projector,
+            self.sketch_cursor(),
+        ) else {
+            return;
+        };
+        let cursor = egui::pos2(cursor.x as f32, cursor.y as f32);
+        let edges = kreate_mesh::modifiers::bevel::sharp_edges(&mesh);
+        let p = mesh.positions();
+        let mut best: Option<(f32, DVec3)> = None;
+        for [a, b] in &edges {
+            let (wa, wb) = (
+                world.transform_point3(p[*a as usize].as_dvec3()),
+                world.transform_point3(p[*b as usize].as_dvec3()),
+            );
+            let (Some(sa), Some(sb)) = (projector.project(wa), projector.project(wb)) else {
+                continue;
+            };
+            let ab = sb - sa;
+            let t = ((cursor - sa).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+            let d = (sa + ab * t).distance(cursor);
+            if d <= 10.0 && best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, wa.lerp(wb, t as f64)));
+            }
+        }
+        let hover = best.map(|(_, at)| at);
+        let chain = |points: &[DVec3]| -> Vec<[DVec3; 2]> {
+            let to_body = world.inverse();
+            let local: Vec<kreate_math::Vec3> = points
+                .iter()
+                .map(|q| to_body.transform_point3(*q).as_vec3())
+                .collect();
+            kreate_mesh::modifiers::bevel::chosen_edges(&mesh, &local)
+                .into_iter()
+                .map(|[a, b]| {
+                    [
+                        world.transform_point3(a.as_dvec3()),
+                        world.transform_point3(b.as_dvec3()),
+                    ]
+                })
+                .collect()
+        };
+        self.ui.edges_hover = hover.map(|h| chain(&[h])).unwrap_or_default();
+        let picked = self
+            .fillet_tool
+            .as_ref()
+            .map(|t| t.points.clone())
+            .unwrap_or_default();
+        self.ui.edges_picked = chain(&picked);
+        if let Some(tool) = self.fillet_tool.as_mut() {
+            tool.hover = hover;
+        }
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    /// A click with the Fillet tool: the edge under the pointer picked, or
+    /// let go when it was.
+    fn fillet_click(&mut self) {
+        self.update_fillet_hover();
+        let hovered = self.ui.edges_hover.clone();
+        let Some(tool) = self.fillet_tool.as_mut() else {
+            return;
+        };
+        let Some(at) = tool.hover else {
+            return;
+        };
+        // Already picked: the click on any of its chain lets it go.
+        let picked_here = hovered.iter().any(|[a, b]| {
+            self.ui.edges_picked.iter().any(|[c, d]| {
+                (a.distance(*c) + b.distance(*d)).min(a.distance(*d) + b.distance(*c)) < 1e-9
+            })
+        });
+        if picked_here {
+            let (mesh_world, points) = (
+                self.evaluated
+                    .iter()
+                    .find(|(id, _)| *id == tool.body)
+                    .map(|(_, m)| (m.clone(), self.doc.world_transform(tool.body))),
+                tool.points.clone(),
+            );
+            if let Some((mesh, world)) = mesh_world {
+                let to_body = world.inverse();
+                // Keep each picked point whose chain is not this one.
+                tool.points = points
+                    .into_iter()
+                    .filter(|q| {
+                        let local = to_body.transform_point3(*q).as_vec3();
+                        let theirs = kreate_mesh::modifiers::bevel::chosen_edges(&mesh, &[local]);
+                        !theirs.iter().any(|[c, d]| {
+                            hovered.iter().any(|[a, b]| {
+                                let (c, d) = (
+                                    world.transform_point3(c.as_dvec3()),
+                                    world.transform_point3(d.as_dvec3()),
+                                );
+                                (a.distance(c) + b.distance(d)).min(a.distance(d) + b.distance(c))
+                                    < 1e-9
+                            })
+                        })
+                    })
+                    .collect();
+            }
+        } else {
+            tool.points.push(at);
+        }
+        self.update_fillet_hover();
+        self.say_fillet();
+    }
+
+    /// A key with the Fillet tool: the radius typed, Enter to make it,
+    /// Escape to stop. Whether the key was the tool's.
+    fn fillet_key(&mut self, code: KeyCode) -> bool {
+        let Some(tool) = self.fillet_tool.as_mut() else {
+            return false;
+        };
+        let digit = match code {
+            KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
+            KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
+            KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
+            KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
+            KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
+            KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
+            KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
+            KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
+            KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
+            KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
+            KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
+            _ => None,
+        };
+        match (code, digit) {
+            (_, Some(c)) => tool.typed.push(c),
+            (KeyCode::Backspace, _) => {
+                tool.typed.pop();
+            }
+            (KeyCode::Enter | KeyCode::NumpadEnter, _) => {
+                self.finish_fillet();
+                return true;
+            }
+            (KeyCode::Escape, _) => {
+                self.fillet_tool = None;
+                self.ui.edges_hover.clear();
+                self.ui.edges_picked.clear();
+                let message = self.ui.catalog.get("fillet-cancelled");
+                self.status(&message);
+                self.redraw.set(RedrawReason::UI);
+                return true;
+            }
+            _ => return false,
+        }
+        self.say_fillet();
+        true
+    }
+
+    /// The Fillet tool's edges rounded by the radius typed — a millimetre's
+    /// worth of the scene's unit when none was — as one step on the
+    /// timeline; nothing picked, nothing done.
+    fn finish_fillet(&mut self) {
+        let Some(tool) = self.fillet_tool.take() else {
+            return;
+        };
+        self.ui.edges_hover.clear();
+        self.ui.edges_picked.clear();
+        self.redraw.set(RedrawReason::UI);
+        if tool.points.is_empty() {
+            let message = self.ui.catalog.get("fillet-cancelled");
+            self.status(&message);
+            return;
+        }
+        let unit = self.doc.design.length_unit.metres();
+        let radius = tool
+            .typed
+            .parse::<f64>()
+            .ok()
+            .filter(|r| *r > 0.0)
+            .unwrap_or(1.0)
+            * unit;
+        let name = self
+            .doc
+            .object(tool.body)
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
+        let mut p = PropertyMap::new();
+        p.set("body", PropertyValue::Text(name));
+        p.set("radius", PropertyValue::Float(radius));
+        p.set("chamfer", PropertyValue::Bool(tool.chamfer));
+        p.set(
+            "edges",
+            PropertyValue::Floats(tool.points.iter().flat_map(|q| q.to_array()).collect()),
+        );
+        self.run_op("feature.round", p);
+    }
+
     /// The joint origin under the pointer: whose it is, and where — a
     /// hole's centre near the click, else the middle of the flat face it is
     /// on — with the face's outward normal, in the world.
@@ -7734,7 +7982,13 @@ impl App {
             .flatten();
         self.ui.sketch_lines = kreate::sketching::other_lines_marked(&self.doc, active);
         self.ui.length_unit = self.doc.design.length_unit.metres();
-        self.ui.features = kreate::sketching::feature_rows(&self.doc, &self.ui.catalog);
+        let modifiers = &self.modifiers;
+        self.ui.features = kreate::sketching::feature_rows(&self.doc, &self.ui.catalog, &|uid| {
+            modifiers
+                .body_status(uid)
+                .map(|s| s.to_vec())
+                .unwrap_or_default()
+        });
 
         // Waiting for a plane: entered once the new sketch is active, given
         // up when the menu closed without one.
@@ -15293,6 +15547,9 @@ impl App {
             self.status("Align Faces cancelled");
             return;
         }
+        if self.fillet_tool.is_some() && self.fillet_key(code) {
+            return;
+        }
         if self.joint_tool.is_some() && code == KeyCode::Escape {
             self.joint_tool = None;
             self.status(&self.ui.catalog.get("joint-cancelled"));
@@ -15825,6 +16082,31 @@ impl App {
             "view.measure" => self.begin_measure(),
             "app.path3d" => self.begin_path3d(),
             "view.walk" => self.begin_walk(),
+            "app.fillet_edges" | "app.chamfer_edges" => {
+                let chamfer = action.op_id == "app.chamfer_edges";
+                let body = self
+                    .doc
+                    .selection
+                    .active
+                    .filter(|id| self.doc.object(*id).is_some_and(|o| !o.features.is_empty()));
+                match body {
+                    Some(body) => {
+                        self.end_loop_cut_hover();
+                        self.fillet_tool = Some(FilletTool {
+                            body,
+                            chamfer,
+                            points: Vec::new(),
+                            typed: String::new(),
+                            hover: None,
+                        });
+                        self.say_fillet();
+                    }
+                    None => {
+                        let message = self.ui.catalog.get("fillet-pick-body");
+                        self.status(&message);
+                    }
+                }
+            }
             "assembly.joint_tool" => {
                 let kind = action
                     .params
@@ -16955,6 +17237,20 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // Fillet: left picks an edge, right finishes.
+                if self.fillet_tool.is_some() && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.fillet_click();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.finish_fillet();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // Joint: left picks an origin, right gives up.
                 if self.joint_tool.is_some() && pressed {
                     match button {
@@ -17193,6 +17489,9 @@ impl ApplicationHandler for App {
                 }
                 if self.measure.is_some() {
                     self.update_measure();
+                }
+                if self.fillet_tool.is_some() {
+                    self.update_fillet_hover();
                 }
                 if self.ui.brush_adjust.is_some() {
                     self.update_brush_adjust();

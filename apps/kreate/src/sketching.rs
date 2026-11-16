@@ -1588,9 +1588,15 @@ pub fn other_points(
 pub fn feature_rows(
     doc: &kreate_scene::Document,
     catalog: &kreate_i18n::Catalog,
+    status: &dyn Fn(kreate_scene::Uid) -> Vec<kreate_scene::feature::FeatureStatus>,
 ) -> Vec<crate::shell::FeatureRow> {
     let mut rows = Vec::new();
     for (_, o) in doc.objects() {
+        let failed = if o.features.is_empty() {
+            Vec::new()
+        } else {
+            status(o.uid)
+        };
         for (i, f) in o.features.iter().enumerate() {
             let (revolve, amount, symmetric) = match f.shape {
                 kreate_scene::feature::Shape::Extrude {
@@ -1629,8 +1635,16 @@ pub fn feature_rows(
             });
             rows.push(crate::shell::FeatureRow {
                 order: f.order * 2 + 1,
+                // Its own name, given; else its kind and its place.
                 // i18n-exempt: a translated name and its place on the timeline
-                label: format!("{kind} {}", f.order),
+                label: if f.name.is_empty() {
+                    format!("{kind} {}", f.order)
+                } else {
+                    f.name.clone()
+                },
+                feature_order: f.order,
+                failed: failed.get(i).copied().flatten().map(|key| catalog.get(key)),
+                rolled_out: doc.design.rollback.is_some_and(|r| f.order > r),
                 body: o.name.clone(),
                 index: i as u32,
                 is_sketch: false,
@@ -1677,6 +1691,9 @@ pub fn feature_rows(
             suppressed: false,
             count: 0,
             expression: None,
+            feature_order: 0,
+            failed: None,
+            rolled_out: false,
         });
     }
     rows.sort_by_key(|r| r.order);

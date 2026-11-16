@@ -431,6 +431,7 @@ mod tests {
                 operation: Operation::Join,
                 order: 1,
                 suppressed: false,
+                name: String::new(),
             },
             Feature {
                 shape: Shape::Pattern {
@@ -442,6 +443,7 @@ mod tests {
                 operation: Operation::Join,
                 order: 2,
                 suppressed: false,
+                name: String::new(),
             },
         ];
         let solid = body_solid(&doc, &features, DAffine3::IDENTITY).expect("built exactly");
@@ -475,12 +477,14 @@ mod tests {
             shape: Shape::Round {
                 radius: 0.001,
                 chamfer: false,
+                edges: Vec::new(),
             },
             sketch: kreate_reflect::Uid::from_raw(1),
             seeds: Vec::new(),
             operation: Operation::Join,
             order: 1,
             suppressed: false,
+            name: String::new(),
         }];
         assert!(body_solid(&doc, &features, DAffine3::IDENTITY).is_none());
     }

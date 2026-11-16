@@ -27,6 +27,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Move>();
     registry.register::<ToMesh>();
     registry.register::<Round>();
+    registry.register::<Rollback>();
+    registry.register::<Rename>();
     registry.register::<ShellFeature>();
     registry.register::<PatternFeature>();
     registry.register::<CircularFeature>();
@@ -51,7 +53,7 @@ fn body_for(doc: &Document, name: &str) -> Result<ObjectId, OpError> {
 /// Adds a feature that works on the body so far, as the next step of its
 /// timeline, doing what the step before it did — joining or cutting.
 fn add_on_body(doc: &mut DocMut<'_>, body: ObjectId, shape: Shape) -> Result<OpResult, OpError> {
-    let order = feature::next_order(doc.document());
+    let order = feature::take_order(doc.document_mut());
     let operation = doc
         .document()
         .object(body)
@@ -65,6 +67,7 @@ fn add_on_body(doc: &mut DocMut<'_>, body: ObjectId, shape: Shape) -> Result<OpR
         operation,
         order,
         suppressed: false,
+        name: String::new(),
     };
     doc.document_mut()
         .object_mut(body)
@@ -334,7 +337,7 @@ fn add_from(
     if !matches!(shape, Shape::Loft { .. }) && feature::picked(&regions, &seeds).is_empty() {
         return Err(OpError::Failed("pick a closed region of the sketch".into()));
     }
-    let order = feature::next_order(d);
+    let order = 0;
     // 0 a new body, 1 join, 2 cut.
     let into = match operation {
         0 => None,
@@ -354,12 +357,15 @@ fn add_from(
         },
         order,
         suppressed: false,
+        name: String::new(),
     };
     let plain = into.filter(|o| d.object(*o).is_some_and(|o| o.features.is_empty()));
     if let Some(target) = plain {
         return join_or_cut_mesh(doc, f, target);
     }
     let d = doc.document_mut();
+    let mut f = f;
+    f.order = feature::take_order(d);
     match into {
         Some(body) => d.object_mut(body).expect("a body").features.push(f),
         None => {
@@ -708,12 +714,15 @@ impl Operator for SheetMetalFeature {
             sketch: d.object_uid(sketch).expect("an object"),
             seeds,
             operation: Operation::Join,
-            order: feature::next_order(d),
+            order: 0,
             suppressed: false,
+            name: String::new(),
         };
         if feature::solid(d, &f).num_faces() == 0 {
             return Err(OpError::Failed("this outline makes no plate".into()));
         }
+        let mut f = f;
+        f.order = feature::take_order(doc.document_mut());
         let d = doc.document_mut();
         let mesh = d.add_mesh(kreate_mesh::MeshData::empty());
         let name = d.unique_object_name("Sheet Metal");
@@ -1197,6 +1206,11 @@ pub struct RoundParams {
     pub radius: f64,
     /// A flat cut instead of a round.
     pub chamfer: bool,
+    /// The edges, each by a point on it in the world, as x, y, z triples:
+    /// each with the chain of edges it runs on in — a round edge whole.
+    /// Empty for every sharp edge of the body.
+    #[param(unit = "length")]
+    pub edges: Vec<f64>,
 }
 
 impl Default for RoundParams {
@@ -1205,6 +1219,7 @@ impl Default for RoundParams {
             body: String::new(),
             radius: 0.001,
             chamfer: false,
+            edges: Vec::new(),
         }
     }
 }
@@ -1243,18 +1258,36 @@ impl Operator for Round {
         if params.radius.is_nan() || params.radius <= 0.0 {
             return Ok(OpResult::Cancelled);
         }
-        let order = feature::next_order(d);
+        // The edges, in the body's own space: they stay its edges however
+        // it is moved.
+        let to_body = d.world_transform(body).inverse();
+        let edges: Vec<[f64; 3]> = params
+            .edges
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| {
+                to_body
+                    .transform_point3(kreate_math::DVec3::from_array(*c))
+                    .to_array()
+            })
+            .filter(|p| p.iter().all(|v| v.is_finite()))
+            .collect();
         let f = Feature {
             shape: Shape::Round {
                 radius: params.radius,
                 chamfer: params.chamfer,
+                edges,
             },
             sketch: kreate_scene::Uid::NONE,
             seeds: Vec::new(),
             operation: Operation::Join,
-            order,
+            order: 0,
             suppressed: false,
+            name: String::new(),
         };
+        let mut f = f;
+        f.order = feature::take_order(doc.document_mut());
         doc.document_mut()
             .object_mut(body)
             .expect("a body")
@@ -1313,6 +1346,91 @@ impl Operator for ToMesh {
         object.features.clear();
         // A newer build's features, never run here, go with the history.
         object.foreign_features.clear();
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RollbackParams {
+    /// The feature the timeline is built to, by its order; below nought,
+    /// all of it.
+    pub order: i64,
+}
+
+/// Fusion's rollback marker: the timeline built only as far as one
+/// feature, those after it left out until it is rolled on — and a feature
+/// made meanwhile put in where the marker is.
+pub struct Rollback;
+
+impl Operator for Rollback {
+    type Params = RollbackParams;
+    fn id() -> &'static str {
+        "feature.rollback"
+    }
+    fn label() -> &'static str {
+        "Roll Back"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let last = d
+            .objects()
+            .flat_map(|(_, o)| o.features.iter().map(|f| f.order))
+            .max();
+        // At or past the last feature is the whole timeline.
+        let to = u64::try_from(params.order)
+            .ok()
+            .filter(|o| last.is_some_and(|l| *o < l));
+        if d.design.rollback == to {
+            return Ok(OpResult::Cancelled);
+        }
+        doc.document_mut().design.rollback = to;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct RenameParams {
+    /// The body, by name, and which of its features.
+    pub body: String,
+    pub index: u32,
+    /// What the timeline calls it; empty for its kind and its place.
+    pub name: String,
+}
+
+/// Names a feature on the timeline: "Boss", "Mounting holes".
+pub struct Rename;
+
+impl Operator for Rename {
+    type Params = RenameParams;
+    fn id() -> &'static str {
+        "feature.rename"
+    }
+    fn label() -> &'static str {
+        "Rename Feature"
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let body = body_named(doc.document(), &params.body)
+            .ok_or_else(|| OpError::Failed("no such body".into()))?;
+        let Some(f) = doc
+            .document_mut()
+            .object_mut(body)
+            .and_then(|o| o.features.get_mut(params.index as usize))
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        let name = params.name.trim().to_string();
+        if f.name == name {
+            return Ok(OpResult::Cancelled);
+        }
+        f.name = name;
         Ok(OpResult::Finished)
     }
 }

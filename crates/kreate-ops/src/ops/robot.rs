@@ -1370,7 +1370,10 @@ mod tests {
         // Brought there: its bottom on the plate's top, its middle over
         // the plate's.
         let at = doc.world_transform(shaft).translation;
-        assert!((at - DVec3::new(0.0, 0.0, 0.055)).length() < 1e-9, "{at:?}");
+        assert!(
+            (at - DVec3::new(0.0, 0.0, 0.05 + 0.005)).length() < 1e-9,
+            "{at:?}"
+        );
         assert_eq!(doc.object(shaft).unwrap().parent, Some(joint));
         // Its slide: 20 mm up the axis. Its turn kept.
         run(

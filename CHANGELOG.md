@@ -10,6 +10,22 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- **Fillet and Chamfer on the edges you pick**, as Fusion and SolidWorks
+  do (Mechanical ▸ Fillet / Chamfer): click edges of a body — a click on
+  one takes the edges it runs smoothly into, a round edge whole — type
+  the radius, Enter. Click a picked edge again to let it go. The fillet
+  is a step on the timeline and stays on its edges through edits that
+  leave them where they were (`feature.round(edges=…)`).
+- The timeline marks a feature that makes nothing — its sketch gone, its
+  region or its edges gone, nothing before a pattern to repeat — in red
+  with a ⚠, and says why on hover.
+- A **rollback marker**: right-click a feature ▸ Roll Back to Here builds
+  the timeline only that far; a feature made meanwhile goes in at the
+  marker; Roll to End puts the rest back.
+- Features can be renamed: right-click ▸ Rename.
+
 ## [0.13.0] - 2026-11-17
 
 ### Added
