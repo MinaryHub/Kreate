@@ -475,11 +475,13 @@ fn apply(doc: &mut DocMut<'_>, id: ObjectId, plan: Plan) -> Result<OpResult, OpE
             loose.extend([a, b]);
             let (lo, hi) = plan.cut;
             let mut pieces: Vec<[u32; 2]> = Vec::new();
-            if lo > 0.0 {
+            // Nothing kept at an end the trim reaches: a piece of no length
+            // there would leave its point standing alone.
+            if lo > 1e-9 {
                 let n = add(&mut pts, pa.lerp(pb, lo));
                 pieces.push([a, n]);
             }
-            if hi < 1.0 {
+            if hi < 1.0 - 1e-9 {
                 let n = add(&mut pts, pa.lerp(pb, hi));
                 pieces.push([n, b]);
             }

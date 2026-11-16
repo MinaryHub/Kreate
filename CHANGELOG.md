@@ -19,6 +19,11 @@ use; `scripts/release.sh` turns that section into the next release.
   they meet something on the way — the body's far side, a hole, another
   pocket: pushed deeper than the body is thick, a pocket becomes a hole
   through it. A push that meets nothing is as before.
+- The Extrude tool shows what it will make: the regions picked as a
+  solid, outlined at the sketch and at the distance — in red when it will
+  cut a part, in the accent when it joins one or stands alone — and turns
+  the view a three-quarter way off the sketch to show its depth; the view
+  can be orbited while it is open.
 - A sketch's first point can be typed from a point: with a drawing tool
   in hand, over a face's corner or any point of the sketch, type how far
   across and up ("20, 10") and Enter — the line, rectangle or circle
@@ -49,6 +54,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- A trim in a sketch reaching a curve's end — a rectangle's side cut at
+  its corner — left a point with no line to it there.
 - Extruding one of several boxes drawn on a face extruded the others
   instead: the Extrude tool picked every profile at once, and the click on
   the box wanted put that one back. It now starts with what is selected in

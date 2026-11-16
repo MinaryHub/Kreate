@@ -1423,6 +1423,11 @@ pub fn trim_plan(
             Ok((vec![curve.sub(from, to)], curve.sub(to, from)))
         }
         (b, a, false) => {
+            // What is left at each end, if anything is: a curve crossed
+            // right at its end — a rectangle's side at its corner — keeps
+            // nothing there, where it had kept a piece of no length, seen as
+            // a lone point once the rest had gone.
+            let least = curve.length() * 1e-9;
             let mut keep = Vec::new();
             if let Some(b) = b {
                 keep.push(curve.sub(lo, b));
@@ -1430,6 +1435,7 @@ pub fn trim_plan(
             if let Some(a) = a {
                 keep.push(curve.sub(a, hi));
             }
+            keep.retain(|piece| piece.length() > least);
             Ok((keep, curve.sub(b.unwrap_or(lo), a.unwrap_or(hi))))
         }
     }
@@ -3419,5 +3425,29 @@ mod parameter_tests {
                 "{x}: {centres:?}"
             );
         }
+    }
+    /// A rectangle's side trimmed between its corner and a line across it:
+    /// the piece beyond the line is left, and nothing at the corner — a
+    /// piece of no length there was a point with no line to it. Trimmed
+    /// again, the side is gone and so are its ends.
+    #[test]
+    fn a_trim_at_a_corner_leaves_no_point_behind() {
+        let mut d = Drawing::new();
+        let pts = [(0.0, 0.0), (0.04, 0.0), (0.04, 0.02), (0.0, 0.02)];
+        for k in 0..4 {
+            let (a, b) = (pts[k], pts[(k + 1) % 4]);
+            d.add_curve(Curve2D::Line {
+                a: DVec2::new(a.0, a.1),
+                b: DVec2::new(b.0, b.1),
+            });
+        }
+        d.add_curve(Curve2D::Line {
+            a: DVec2::new(0.02, -0.01),
+            b: DVec2::new(0.02, 0.03),
+        });
+        let (keep, _) = trim_plan(&d, EntityId(1), DVec2::new(0.01, 0.0)).unwrap();
+        assert_eq!(keep.len(), 1, "only the piece beyond the line");
+        assert!((keep[0].length() - 0.02).abs() < 1e-12);
+        assert!(keep.iter().all(|c| c.length() > 1e-9));
     }
 }

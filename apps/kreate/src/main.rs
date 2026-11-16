@@ -7592,6 +7592,7 @@ impl App {
             });
             self.preview_sketch_pattern(id, world);
             self.choose_solid_operation(id);
+            self.preview_extrude(id, world);
             return;
         }
         // Pinned, worked out again only when the sketch changed.
@@ -7623,6 +7624,7 @@ impl App {
         ));
         self.preview_sketch_pattern(id, world);
         self.choose_solid_operation(id);
+        self.preview_extrude(id, world);
     }
 
     /// The pattern's copies, as they would be made, into the view's preview;
@@ -7730,6 +7732,99 @@ impl App {
                 view.snap = centre;
             }
         }
+    }
+
+    /// The extrude's guide, while its dialog is open: the regions picked as
+    /// the solid they would make — each outline at the sketch and at the
+    /// distance, joined by its corners — drawn red where it will be cut
+    /// from a part, in the accent where it joins one or stands alone.
+    fn preview_extrude(&mut self, id: ObjectId, world: glam::DAffine3) {
+        use kreate::sketching::Tool;
+        if self.sketching.tool != Tool::Extrude || self.sketching.seeds.is_empty() {
+            return;
+        }
+        let regions = kreate_scene::feature::sketch_regions(&self.doc, id);
+        let mut picked: Vec<usize> = Vec::new();
+        for s in &self.sketching.seeds {
+            if let Some(i) = kreate_mesh::regions::region_at(&regions, s.as_vec2()) {
+                if !picked.contains(&i) {
+                    picked.push(i);
+                }
+            }
+        }
+        let dialog = &self.ui.solid_dialog;
+        let d = dialog.distance * self.ui.length_unit;
+        if !d.is_finite() || d.abs() < 1e-12 {
+            return;
+        }
+        let (z0, z1) = if dialog.symmetric {
+            (-d * 0.5, d * 0.5)
+        } else {
+            (0.0, d)
+        };
+        let cut = dialog.operation == 2;
+        let at =
+            |p: glam::Vec2, z: f64| world.transform_point3(DVec3::new(p.x as f64, p.y as f64, z));
+        let mut lines: Vec<Vec<DVec3>> = Vec::new();
+        for i in picked {
+            let region = &regions[i];
+            for ring in std::iter::once(&region.outline).chain(&region.holes) {
+                if ring.len() < 2 {
+                    continue;
+                }
+                for z in [z0, z1] {
+                    let mut l: Vec<DVec3> = ring.iter().map(|p| at(*p, z)).collect();
+                    l.push(at(ring[0], z));
+                    lines.push(l);
+                }
+                // The edges up its side: at its corners, and some way round
+                // a curve, which has a corner at every piece.
+                let n = ring.len();
+                let step = n.div_ceil(16).max(1);
+                for (k, p) in ring.iter().enumerate() {
+                    let (before, after) = (ring[(k + n - 1) % n], ring[(k + 1) % n]);
+                    let turn = (*p - before)
+                        .normalize_or_zero()
+                        .dot((after - *p).normalize_or_zero());
+                    if turn < 0.97 || k % step == 0 {
+                        lines.push(vec![at(*p, z0), at(*p, z1)]);
+                    }
+                }
+            }
+        }
+        let Some(view) = self.ui.sketch_view.as_mut() else {
+            return;
+        };
+        if cut {
+            for l in &lines {
+                for w in l.windows(2) {
+                    view.cut.push([w[0], w[1]]);
+                }
+            }
+        } else {
+            view.preview.extend(lines);
+        }
+    }
+
+    /// Turns the view a three-quarter way off the sketch, so what an extrude
+    /// or a revolve will make has depth to be seen in — square to the
+    /// sketch, the solid stands straight at the eye and is only its outline.
+    fn tilt_for_solid(&mut self) {
+        let Some((_, world)) = self.sketch_target() else {
+            return;
+        };
+        let (_, plane, _) = world.to_scale_rotation_translation();
+        let mut camera = self.motion.target;
+        // Still square to the sketch: from there, off it above its plane.
+        if (camera.forward() - plane * -DVec3::Z).length() > 1e-3 {
+            return;
+        }
+        camera.rotation =
+            (plane * glam::DQuat::from_rotation_z(-0.6) * glam::DQuat::from_rotation_x(0.95))
+                .normalize();
+        camera.projection = kreate_render::Projection::Perspective;
+        self.motion.target = camera;
+        self.redraw.set(RedrawReason::CAMERA_MOVED);
     }
 
     /// Fusion's choice for an extrude, while its dialog is open and nothing
@@ -13224,7 +13319,13 @@ impl App {
         }
         // Drawing in 2D the view stays square to the drawing: what would
         // turn it pans, as a CAD program's middle button does.
-        if self.op_ctx.mode == OpMode::Sketch && self.active_drawing().is_some() {
+        if self.op_ctx.mode == OpMode::Sketch
+            && self.active_drawing().is_some()
+            && !matches!(
+                self.sketching.tool,
+                kreate::sketching::Tool::Extrude | kreate::sketching::Tool::Revolve
+            )
+        {
             let (dx, dy) = std::mem::take(&mut self.input.orbit_delta);
             self.input.pan_delta.0 += dx;
             self.input.pan_delta.1 += dy;
@@ -15270,6 +15371,7 @@ impl App {
                                 None => Vec::new(),
                             };
                         }
+                        self.tilt_for_solid();
                     }
                     if matches!(
                         tool,
@@ -19508,6 +19610,10 @@ kreate.ops.object.add_primitive(size=2.0)" }),
             );
         }
         app.evaluate_scene();
+        // In the sketch, squared to it, as one is when a tool is taken.
+        if app.op_ctx.mode != OpMode::Sketch {
+            app.set_mode(OpMode::Sketch);
+        }
         app.update_sketch_view();
         app.update_ui_state_for_test();
         let tool = |app: &mut App, name: &str| {
@@ -19537,6 +19643,29 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         assert!(
             seed.x > 0.0 && seed.x < 0.2 && seed.y > 0.0 && seed.y < 0.2,
             "{seed:?}"
+        );
+        // The view turned off the face so the solid has depth, and the
+        // guide drawn: the box at the face and at the distance, standing off
+        // the face.
+        assert!(
+            app.motion.target.forward().z > -0.99,
+            "the view tilted off the face: {:?}",
+            app.motion.target.forward()
+        );
+        // 0.1 m, in the scene's unit, which the dialog is typed in.
+        app.ui.solid_dialog.distance = 0.1 / app.doc.design.length_unit.metres();
+        app.update_sketch_view();
+        let view = app.ui.sketch_view.as_ref().expect("the sketch view");
+        let off_face = view
+            .preview
+            .iter()
+            .flatten()
+            .chain(view.cut.iter().flatten())
+            .filter(|p| (p.z - 0.5).abs() > 0.05)
+            .count();
+        assert!(
+            off_face >= 4,
+            "the guide's far outline: {off_face} points off the face"
         );
         app.run_op_with(
             "feature.extrude",
