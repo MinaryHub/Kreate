@@ -499,9 +499,11 @@ mod tests {
     /// and the horizon comes level.
     #[test]
     fn a_rolled_view_is_levelled_and_turns_both_ways() {
-        let mut c = Camera::default();
         // Looking along +X with its right pointing up the world.
-        c.rotation = DQuat::from_mat3(&glam::DMat3::from_cols(DVec3::Z, DVec3::Y, -DVec3::X));
+        let mut c = Camera {
+            rotation: DQuat::from_mat3(&glam::DMat3::from_cols(DVec3::Z, DVec3::Y, -DVec3::X)),
+            ..Camera::default()
+        };
         assert!((c.right() - DVec3::Z).length() < 1e-9, "rolled to start");
         c.orbit(0.0, 0.3);
         assert!(c.right().z.abs() < 1e-9, "level: {:?}", c.right());
