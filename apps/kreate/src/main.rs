@@ -5388,7 +5388,8 @@ impl App {
         let (hover, snapped) = match caught {
             Some((v, g)) => ((g.points[v as usize], v + 1), false),
             None => match self
-                .sketch_other_snap()
+                .sketch_own_edge_snap(on_plane)
+                .or_else(|| self.sketch_other_snap())
                 .or_else(|| self.sketch_object_snap())
             {
                 Some(p) => ((p, 0), true),
@@ -5448,6 +5449,66 @@ impl App {
             self.drive_sketch_drag(hover.0);
         }
         self.redraw.set(RedrawReason::UI);
+    }
+
+    /// The sketch's own lines and curves near the pointer: the nearest place
+    /// on one — on the curve itself, not on the straight pieces it is drawn
+    /// with — whatever the snap toggle says, as its points are caught. A
+    /// circle's rim has no points to catch, so a centre dragged to another
+    /// circle's edge had nothing there to land on. Not what is being
+    /// dragged, nor what moves with it.
+    fn sketch_own_edge_snap(&self, on_plane: glam::DVec2) -> Option<glam::DVec2> {
+        const REACH: f64 = 8.0;
+        let g = self.sketch_snap_geometry()?;
+        let at = self.sketch_cursor()?;
+        let moving: Vec<u32> = self
+            .sketching
+            .drag
+            .as_ref()
+            .map(|d| {
+                d.entities
+                    .iter()
+                    .copied()
+                    .chain(d.at.map(|r| r.entity.0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut best: Option<(usize, f64, glam::DVec2)> = None;
+        for (i, l) in g.lines.iter().enumerate() {
+            if g.entity_of_line(i as u32)
+                .is_some_and(|e| moving.contains(&e.0))
+            {
+                continue;
+            }
+            let (Some(Some(sa)), Some(Some(sb))) =
+                (g.screen.get(l[0] as usize), g.screen.get(l[1] as usize))
+            else {
+                continue;
+            };
+            let d = *sb - *sa;
+            let t = if d.length_squared() > 1e-12 {
+                ((at - *sa).dot(d) / d.length_squared()).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let gap = (*sa + d * t).distance(at);
+            if gap <= REACH && best.is_none_or(|(_, b, _)| gap < b) {
+                let (pa, pb) = (g.points[l[0] as usize], g.points[l[1] as usize]);
+                best = Some((i, gap, pa.lerp(pb, t)));
+            }
+        }
+        let (line, _, on_piece) = best?;
+        // On the curve the piece is of, where there is one to ask.
+        let exact = g.entity_of_line(line as u32).and_then(|e| {
+            let curve = self.active_drawing()?.curve(e)?;
+            Some(curve.closest(on_plane).1)
+        });
+        // The pointer's own place on the plane, when that is on the curve's
+        // nearest; else the place along the piece under it.
+        Some(match exact {
+            Some(p) if p.distance(on_piece) <= on_piece.distance(on_plane).max(1e-9) * 4.0 => p,
+            _ => on_piece,
+        })
     }
 
     /// The other sketches' points and lines near the pointer, laid onto this
@@ -20327,6 +20388,76 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         app.sketching.grab = false;
         assert_eq!(app.history.cursor(), steps + 1);
         assert!((ends(&app).0 - glam::DVec2::new(0.0, 1.0)).length() < 1e-6);
+    }
+
+    /// A circle's centre dragged to another circle's rim lands on the rim:
+    /// the sketch's own curves are caught as its points are, with snapping
+    /// off, and not the circle that is being dragged.
+    #[test]
+    fn a_centre_dragged_lands_on_another_circles_rim() {
+        use kreate::sketching::Tool;
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        let circle = |app: &mut App, x: f64, r: f64| {
+            app.run_op_with(
+                "draft.circle",
+                &[
+                    ("centre", PropertyValue::Vec3([x, 0.0, 0.0])),
+                    ("radius", PropertyValue::Float(r)),
+                ],
+            );
+        };
+        circle(&mut app, 0.0, 0.5);
+        circle(&mut app, 2.0, 1.0);
+        app.update_sketch_view();
+        app.update_ui_state_for_test();
+        app.sketching.take(Tool::Select);
+        assert!(!app.snap.enabled, "the magnet is off");
+        let ppp = app.egui_ctx.pixels_per_point() as f64;
+        // The pointer a few points off the second circle's rim, at its left.
+        let s = app
+            .ui
+            .projector
+            .unwrap()
+            .project(DVec3::new(1.0, 0.0, 0.0))
+            .expect("on screen");
+        app.input.cursor = Some(((s.x as f64 + 3.0) * ppp, (s.y as f64 + 2.0) * ppp));
+        app.sketch_hover();
+        let (at, _) = app.sketching.hover.expect("a hover");
+        assert!(app.sketching.snapped, "caught by the rim");
+        assert!(
+            (at.distance(glam::DVec2::new(2.0, 0.0)) - 1.0).abs() < 1e-6,
+            "on the rim: {at:?}"
+        );
+        // The first circle's centre taken up: its own rim does not catch it.
+        let g = app.sketch_geometry().unwrap();
+        let centre = g
+            .rounds
+            .iter()
+            .map(|(c, _, _)| *c)
+            .find(|c| g.points[*c as usize].length() < 1e-9)
+            .expect("the first circle's centre");
+        let own = g.point_ref(centre).expect("a part of the drawing");
+        app.sketching.drag = Some(kreate::sketching::SketchDrag {
+            points: vec![centre],
+            anchor: glam::DVec2::ZERO,
+            single: Some(centre),
+            at: Some(own),
+            entities: vec![own.entity.0],
+        });
+        let s = app
+            .ui
+            .projector
+            .unwrap()
+            .project(DVec3::new(0.5, 0.0, 0.0))
+            .expect("on screen");
+        app.input.cursor = Some((s.x as f64 * ppp, s.y as f64 * ppp));
+        assert_eq!(
+            app.sketch_own_edge_snap(glam::DVec2::new(0.5, 0.0)),
+            None,
+            "its own rim is not somewhere for it to land"
+        );
     }
 
     /// The Sketch tab asks for a plane every time, a sketch selected or not;

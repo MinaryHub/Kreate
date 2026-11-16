@@ -12,6 +12,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Drawing or dragging in a sketch catches the sketch's own lines and
+  curves, as it catches its points, with snapping off: a circle's centre
+  dragged to another circle's rim lands on the rim.
 - G in a sketch takes up what is selected: it follows the pointer, caught
   by what drawing is caught by, until a click sets it down; Escape or the
   right button puts it back.
