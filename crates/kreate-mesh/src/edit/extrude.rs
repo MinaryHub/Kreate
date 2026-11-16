@@ -222,9 +222,198 @@ pub fn extrude_selected_faces(mesh: &mut BMesh, distance: f32) -> Result<Extrusi
     let faces = mesh.selected_faces();
     let normal = mesh.region_normal(&faces);
     if distance < 0.0 {
+        // Into the solid and on through something — its far side, a hole,
+        // another pocket: what is swept is cut away, as a cut is. Pushing
+        // the faces alone would carry them out through the other side and
+        // leave the body crossing itself.
+        if let Some(cut) = cut_through(mesh, &faces, normal * distance) {
+            *mesh = cut;
+            return Ok(Extrusion {
+                new_faces: mesh.selected_faces(),
+                side_faces: Vec::new(),
+                new_verts: Vec::new(),
+                normal,
+            });
+        }
         return push_faces(mesh, &faces, normal * distance);
     }
     extrude_faces(mesh, &faces, normal * distance)
+}
+
+/// `faces` pushed `offset` into a closed solid, when the push meets
+/// something on its way: the solid with what they sweep through taken out
+/// of it, by a boolean, the pocket's floor selected if it has one. `None`
+/// when the mesh is not a closed solid, when the sweep meets nothing (the
+/// plain push is then exact, and keeps the mesh's faces as they are), or
+/// when the cut cannot be made.
+fn cut_through(mesh: &BMesh, faces: &[FaceId], offset: Vec3) -> Option<BMesh> {
+    use crate::modifiers::boolean::{try_boolean, BooleanOp};
+    let depth = offset.length();
+    let dir = offset.normalize_or_zero();
+    if faces.is_empty() || dir == Vec3::ZERO {
+        return None;
+    }
+    let solid = mesh.to_mesh_data();
+    if !crate::measure::is_closed(&solid) {
+        return None;
+    }
+    // The region, by its points: each once, with the faces on them.
+    let mut index: std::collections::BTreeMap<u32, u32> = Default::default();
+    let mut points: Vec<Vec3> = Vec::new();
+    let mut rings: Vec<Vec<u32>> = Vec::new();
+    for f in faces {
+        let ring: Vec<u32> = mesh
+            .face_verts(*f)
+            .into_iter()
+            .filter_map(|v| {
+                let p = mesh.position(v)?;
+                Some(*index.entry(v.index()).or_insert_with(|| {
+                    points.push(p);
+                    points.len() as u32 - 1
+                }))
+            })
+            .collect();
+        if ring.len() >= 3 {
+            rings.push(ring);
+        }
+    }
+    if rings.is_empty() {
+        return None;
+    }
+    let size = solid
+        .positions()
+        .iter()
+        .fold(0.0f32, |m, p| m.max(p.abs().max_element()))
+        .max(1e-6);
+    // Does the sweep meet anything? A ray from each of the region's points,
+    // and from each face's middle, the way it is pushed: something of the
+    // solid nearer than the push is deep — not the region itself, nor what
+    // touches it where it starts.
+    let tri = solid.triangulate();
+    let positions = solid.positions();
+    let region: Vec<[Vec3; 3]> = rings
+        .iter()
+        .flat_map(|r| (1..r.len() - 1).map(|i| [r[0], r[i], r[i + 1]]))
+        .map(|t| t.map(|v| points[v as usize]))
+        .collect();
+    let is_region = |a: Vec3, b: Vec3, c: Vec3| {
+        let mid = (a + b + c) / 3.0;
+        region.iter().any(|[p, q, r]| {
+            let n = (*q - *p).cross(*r - *p);
+            let area = n.length();
+            // On the region's plane and inside one of its triangles.
+            area > 0.0
+                && (mid - *p).dot(n / area).abs() <= size * 1e-5
+                && [(*p, *q), (*q, *r), (*r, *p)]
+                    .iter()
+                    .all(|(u, v)| (*v - *u).cross(mid - *u).dot(n) >= -area * size * 1e-5)
+        })
+    };
+    let near = size * 1e-4;
+    let mut starts: Vec<Vec3> = rings
+        .iter()
+        .map(|r| r.iter().map(|v| points[*v as usize]).sum::<Vec3>() / r.len() as f32)
+        .collect();
+    // A little in from each corner, so the faces beside the region — which
+    // the corners themselves lie on — are not what is met.
+    let middle = points.iter().sum::<Vec3>() / points.len() as f32;
+    starts.extend(points.iter().map(|p| *p + (middle - *p) * 0.02));
+    let (tris, _) = tri.indices.as_chunks::<3>();
+    let meets = starts.iter().any(|origin| {
+        tris.iter().any(|t| {
+            let [a, b, c] = t.map(|v| positions[v as usize]);
+            if is_region(a, b, c) {
+                return false;
+            }
+            // Möller–Trumbore.
+            let (e1, e2) = (b - a, c - a);
+            let h = dir.cross(e2);
+            let det = e1.dot(h);
+            if det.abs() < 1e-12 {
+                return false;
+            }
+            let s = *origin - a;
+            let u = s.dot(h) / det;
+            let q = s.cross(e1);
+            let v = dir.dot(q) / det;
+            let t = e2.dot(q) / det;
+            u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > near && t < depth - near
+        })
+    });
+    if !meets {
+        return None;
+    }
+    // The cutter: the region swept from a hair outside the solid to where
+    // it is pushed, a hair wider than the region, so none of its faces lies
+    // in a face of the solid.
+    let grow = 1.0 + 2e-4;
+    let widened: Vec<Vec3> = points
+        .iter()
+        .map(|p| {
+            let out = *p - middle;
+            let along = dir * out.dot(dir);
+            middle + along + (out - along) * grow
+        })
+        .collect();
+    let n = widened.len() as u32;
+    let mut cutter_points: Vec<Vec3> = widened.iter().map(|p| *p - dir * (size * 1e-3)).collect();
+    cutter_points.extend(widened.iter().map(|p| *p + offset));
+    let mut cutter_faces: Vec<Vec<u32>> = rings.clone();
+    cutter_faces.extend(
+        rings
+            .iter()
+            .map(|r| r.iter().rev().map(|v| v + n).collect()),
+    );
+    // A wall on every edge the region has once.
+    let mut uses: std::collections::BTreeMap<(u32, u32), u32> = Default::default();
+    for r in &rings {
+        for i in 0..r.len() {
+            let (a, b) = (r[i], r[(i + 1) % r.len()]);
+            *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    for r in &rings {
+        for i in 0..r.len() {
+            let (a, b) = (r[i], r[(i + 1) % r.len()]);
+            if uses.get(&(a.min(b), a.max(b))) == Some(&1) {
+                cutter_faces.push(vec![a, a + n, b + n, b]);
+            }
+        }
+    }
+    let cutter = crate::MeshData::from_faces(cutter_points, &cutter_faces);
+    if !crate::measure::is_closed(&cutter) {
+        return None;
+    }
+    let cut = try_boolean(&solid, &cutter, BooleanOp::Difference).ok()?;
+    if cut.num_faces() == 0 || !crate::measure::is_closed(&cut) {
+        return None;
+    }
+    // The floor, where one is left: the faces lying where the region was
+    // pushed to, looking back the way it came.
+    let mut out = BMesh::from_mesh_data(&cut);
+    let floor = points[0] + offset;
+    let ids: Vec<FaceId> = out.face_ids().collect();
+    for f in ids {
+        let ring: Vec<Vec3> = out
+            .face_verts(f)
+            .into_iter()
+            .filter_map(|v| out.position(v))
+            .collect();
+        let on_floor = ring.len() >= 3
+            && ring
+                .iter()
+                .all(|p| (*p - floor).dot(dir).abs() <= size * 1e-4)
+            && {
+                let mut normal = Vec3::ZERO;
+                for i in 0..ring.len() {
+                    normal += ring[i].cross(ring[(i + 1) % ring.len()]);
+                }
+                normal.normalize_or_zero().dot(dir) < -0.9
+            };
+        out.set_face_selected(f, on_floor);
+    }
+    out.flush_selection(SelectMode::Face);
+    Some(out)
 }
 
 /// Faces pushed into the solid, as Fusion's Press Pull cuts: what they sweep
@@ -1132,6 +1321,40 @@ mod push_tests {
             "{}",
             volume(&m)
         );
+    }
+
+    /// An inset face pushed in further than the box is deep goes through
+    /// it: a hole, cut, the box still one closed solid and the far side
+    /// open where the hole comes out — not a pocket's floor carried out
+    /// through the bottom. Pushed a little further than a pocket already
+    /// there, to within the box, it is still a pocket, with its floor
+    /// selected to go on from.
+    #[test]
+    fn an_inset_face_pushed_through_the_box_cuts_a_hole() {
+        let inset_top = || {
+            let mut m = BMesh::from_mesh_data(&primitives::cube(2.0));
+            let f = top(&m);
+            m.set_face_selected(f, true);
+            m.flush_selection(SelectMode::Face);
+            crate::edit::inset_selected(&mut m, 0.25, 0.0).unwrap();
+            m
+        };
+        let mut m = inset_top();
+        extrude_selected_faces(&mut m, -3.0).unwrap();
+        let cut = m.to_mesh_data();
+        assert!(crate::measure::is_closed(&cut), "one closed solid");
+        // 8, less a hole a hair over 1.5 × 1.5 right through its 2.
+        let hole = 8.0 - volume(&m);
+        assert!((hole - 1.5 * 1.5 * 2.0).abs() < 0.01, "{hole}");
+        assert!(m.selected_faces().is_empty(), "no floor to a hole");
+        // Nothing of it sticks out below the box.
+        assert!(cut.positions().iter().all(|p| p.z >= -1.0 - 1e-4));
+
+        // Not through: the plain push, exactly, as before.
+        let mut m = inset_top();
+        extrude_selected_faces(&mut m, -0.5).unwrap();
+        assert!((volume(&m) - (8.0 - 1.5 * 1.5 * 0.5)).abs() < 1e-4);
+        assert_eq!(m.selected_faces().len(), 1, "the pocket's floor");
     }
 
     /// A box cut into strips by two loop cuts on its front; `strip` picks

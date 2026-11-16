@@ -2267,6 +2267,34 @@ impl DraftPatternParams {
     }
 }
 
+/// How far what a pattern along a path repeats has to move to sit on the
+/// path: from the middle of `ids` — of the box round them — to the path's
+/// start. `None` with nothing to repeat or no path; what is itself part of
+/// the path is not counted.
+pub fn path_seat(d: &Drawing, ids: &[u32], path: &[u32]) -> Option<DVec2> {
+    let curves: Vec<(EntityId, Curve2D)> = path
+        .iter()
+        .filter_map(|i| Some((EntityId(*i), d.curve(EntityId(*i))?.clone())))
+        .collect();
+    let start = chains(curves).into_iter().next()?.0.first()?.start();
+    let mut lo = DVec2::splat(f64::INFINITY);
+    let mut hi = DVec2::splat(f64::NEG_INFINITY);
+    for id in ids.iter().filter(|i| !path.contains(i)) {
+        let Some(e) = d.entity(EntityId(*id)) else {
+            continue;
+        };
+        let (a, b) = match &e.kind {
+            EntityKind::Curve(c) => c.bounds(),
+            EntityKind::Point(p) => (*p, *p),
+            EntityKind::Text(t) => (t.at, t.at),
+            EntityKind::Dimension(_) => continue,
+        };
+        lo = lo.min(a);
+        hi = hi.max(b);
+    }
+    (lo.is_finite() && hi.is_finite()).then(|| start - (lo + hi) * 0.5)
+}
+
 /// Where the copies of a pattern along a path go: the path's curves — one,
 /// or several joined end to end, taken in order from one end — walked from
 /// its start, a copy at each step. `spacing` apart when it is given, as
@@ -2389,6 +2417,17 @@ impl Operator for DraftPattern {
                 return Err(OpError::Failed(
                     "a pattern along a path needs a path: a curve, or curves end to end".into(),
                 ));
+            }
+            // Along a path, the pattern is on the path: what is repeated is
+            // first put with its middle on the path's start, and the copies
+            // go on from there. Left where it stood, the copies traced the
+            // path's shape beside it, off the path by however far it was.
+            if params.kind == 2 {
+                if let Some(by) = path_seat(d, &params.ids, &params.path) {
+                    for id in &ids {
+                        translate_part(d, EntityRef::whole(*id), by);
+                    }
+                }
             }
             copy_moved(d, &ids, &moves);
             Ok(())
@@ -3363,6 +3402,17 @@ mod parameter_tests {
             })
             .collect();
         assert_eq!(centres.len(), 5, "the original and four copies");
+        // And on the path, the original with them: it stood 5 mm off the
+        // line, and its middle is on it now.
+        let heights: Vec<f64> = drawing(&doc)
+            .entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Curve(Curve2D::Circle { c, .. }) => Some(c.y),
+                _ => None,
+            })
+            .collect();
+        assert!(heights.iter().all(|y| y.abs() < 1e-6), "{heights:?}");
         for x in [0.0, 0.01, 0.02, 0.03, 0.04] {
             assert!(
                 centres.iter().any(|c| (c - x).abs() < 1e-6),

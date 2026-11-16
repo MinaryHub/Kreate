@@ -7588,6 +7588,22 @@ impl App {
             } else {
                 kreate_ops::ops::sketch_draw::pattern_moves(&params)
             };
+            // Along a path, what is repeated goes onto the path first: shown
+            // there, with the copies on from it.
+            let seat = dialog
+                .along_path
+                .then(|| kreate_ops::ops::draft::path_seat(d, &ids, &dialog.path))
+                .flatten();
+            let (pieces, moves) = match seat {
+                Some(by) => {
+                    let seated: Vec<[glam::DVec2; 2]> =
+                        pieces.iter().map(|[a, b]| [*a + by, *b + by]).collect();
+                    let mut all = vec![glam::DAffine2::IDENTITY];
+                    all.extend(moves);
+                    (seated, all)
+                }
+                None => (pieces, moves),
+            };
             let to_world = |p: glam::DVec2| world.transform_point3(DVec3::new(p.x, p.y, 0.0));
             let mut preview = Vec::new();
             for m in moves.iter().take(2000) {

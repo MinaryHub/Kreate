@@ -15,6 +15,10 @@ use; `scripts/release.sh` turns that section into the next release.
 - Drawing or dragging in a sketch catches the sketch's own lines and
   curves, as it catches its points, with snapping off: a circle's centre
   dragged to another circle's rim lands on the rim.
+- Faces pushed into a body (E, inward) cut what they sweep through when
+  they meet something on the way — the body's far side, a hole, another
+  pocket: pushed deeper than the body is thick, a pocket becomes a hole
+  through it. A push that meets nothing is as before.
 - G in a sketch takes up what is selected: it follows the pointer, caught
   by what drawing is caught by, until a click sets it down; Escape or the
   right button puts it back.
@@ -31,6 +35,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- A pattern along a path is on the path: what is repeated is put with
+  its middle on the path's start and the copies go on from there, where
+  they had traced the path's shape beside it.
 - The Sketch tab asks where the sketch goes every time — a plane for a
   new one, or one of the sketches there are — where, with a sketch
   selected, it had gone straight back into that one. F2, Tab on a sketch
