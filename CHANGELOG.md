@@ -26,6 +26,13 @@ use; `scripts/release.sh` turns that section into the next release.
   over the whole of it or a spacing apart, turned with the path or not.
   `draft.pattern(kind="path", path=[…])` for scripts.
 
+### Changed
+
+- The Sketch tab asks where the sketch goes every time — a plane for a
+  new one, or one of the sketches there are — where, with a sketch
+  selected, it had gone straight back into that one. F2, Tab on a sketch
+  and a double-click in the timeline still open the sketch itself.
+
 ## [0.12.0] - 2026-11-15
 
 ### Added

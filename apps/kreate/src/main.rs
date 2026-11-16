@@ -1566,6 +1566,17 @@ impl App {
         self.set_mode(kreate::mode::toggled(self.op_ctx.mode, has));
     }
 
+    /// The Sketch tab, from outside a sketch: where the sketch goes is
+    /// asked every time — a plane for a new one, or one of those there are
+    /// to open. With a sketch selected it had gone straight into it, so the
+    /// sketch just made was the only one that could be drawn in without
+    /// first clicking away from it. F2 (between 2D and 3D), Tab on a sketch
+    /// and a double-click on one in the timeline still go straight in.
+    fn ask_sketch_plane(&mut self) {
+        self.sketch_waiting = true;
+        self.open_popup_menu("sketch_plane");
+    }
+
     /// Switches mode, if the mode can be entered.
     ///
     /// One door, so that everything a mode change has to bring with it happens
@@ -8506,7 +8517,11 @@ impl App {
                 // written against a later version should get.
                 Command::SetMode(tag) => {
                     if let Some(mode) = OpMode::from_tag(&tag) {
-                        self.set_mode(mode);
+                        if mode == OpMode::Sketch && self.op_ctx.mode != OpMode::Sketch {
+                            self.ask_sketch_plane();
+                        } else {
+                            self.set_mode(mode);
+                        }
                     }
                 }
                 Command::EditSketch(name) => {
@@ -20312,6 +20327,34 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         app.sketching.grab = false;
         assert_eq!(app.history.cursor(), steps + 1);
         assert!((ends(&app).0 - glam::DVec2::new(0.0, 1.0)).length() < 1e-6);
+    }
+
+    /// The Sketch tab asks for a plane every time, a sketch selected or not;
+    /// Tab on a sketch goes straight into it.
+    #[test]
+    fn the_sketch_tab_asks_for_a_plane_even_with_a_sketch_selected() {
+        let mut app = app();
+        with_viewport(&mut app);
+        app.run_op_with("draft.new", &[]);
+        let first = app.doc.selection.active.unwrap();
+        app.set_mode(OpMode::Object);
+        assert_eq!(
+            app.doc.selection.active,
+            Some(first),
+            "the sketch still selected"
+        );
+        app.ui
+            .queue
+            .push(kreate_ui::Command::SetMode("sketch".into()));
+        app.drain_ui_commands();
+        assert_eq!(app.op_ctx.mode, OpMode::Object, "not into the old sketch");
+        assert!(!app.ui.context_menu.groups.is_empty(), "the plane menu");
+        assert!(app.sketch_waiting);
+        // Tab is "into this one".
+        app.ui.context_menu.groups.clear();
+        app.sketch_waiting = false;
+        app.toggle_edit_mode();
+        assert_eq!(app.op_ctx.mode, OpMode::Sketch);
     }
 
     /// The sketch tools in a drawing: a rectangle clicked, a line drawn on
