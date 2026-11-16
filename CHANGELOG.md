@@ -12,6 +12,13 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- The rest of Fusion's assembly, under Mechanical ▸ Assembly Joints:
+  **Motion Link** (one joint follows another by a ratio — gears, a
+  screw and its slide); **Contact** on a joint (what it moves stops at
+  touching the part in its way, along the whole of its travel);
+  **Exploded View** (the parts moved out from their middle, undone with
+  Undo); and **New Component** (the selected parts gathered under one
+  object, moved and hidden as one).
 - **Assembly joints as Fusion makes them** (Mechanical ▸ Assembly Joints ▸
   Joint: …): click where on the moving part the joint is, then where on
   the other part it joins — a face is caught at its middle, or at a

@@ -21,6 +21,10 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<AddJoint>();
     registry.register::<MotionCheck>();
     registry.register::<AssemblyJoint>();
+    registry.register::<MotionLink>();
+    registry.register::<Contact>();
+    registry.register::<Explode>();
+    registry.register::<NewComponent>();
 }
 
 fn joint_of(doc: &Document, id: ObjectId) -> Option<Joint> {
@@ -69,6 +73,60 @@ pub fn set_dof(doc: &mut Document, id: ObjectId, index: usize, position: f64) ->
         }
         _ => false,
     }
+}
+
+/// Where a joint with contact on can go toward `position` before what it
+/// moves goes into another part: as far as it can, found by halving the
+/// way from where it is; `position` itself for a joint without contact,
+/// or with nothing in the way.
+pub fn stopped_by_contact(doc: &Document, id: ObjectId, index: usize, position: f64) -> f64 {
+    let Some(joint) = joint_of(doc, id).filter(|j| j.contact) else {
+        return position;
+    };
+    let Some(o) = doc.object(id) else {
+        return position;
+    };
+    let from = joint
+        .positions_of(&o.transform)
+        .get(index)
+        .copied()
+        .unwrap_or(0.0);
+    let at = |p: f64| {
+        let mut scratch = doc.clone();
+        set_dof(&mut scratch, id, index, p);
+        collisions_at(&scratch, id).is_empty()
+    };
+    // Already in something where it is: let it move, out or further in;
+    // contact holds a part out, it does not trap one.
+    if !at(from) {
+        return position;
+    }
+    // Along the way, not only at its end: a slide long enough goes
+    // through a wall and out the far side, clear at both ends.
+    const STEPS: usize = 32;
+    let mut free = from;
+    let mut hit = None;
+    for k in 1..=STEPS {
+        let p = from + (position - from) * k as f64 / STEPS as f64;
+        if at(p) {
+            free = p;
+        } else {
+            hit = Some(p);
+            break;
+        }
+    }
+    let Some(mut hit) = hit else {
+        return position;
+    };
+    for _ in 0..10 {
+        let mid = (free + hit) * 0.5;
+        if at(mid) {
+            free = mid;
+        } else {
+            hit = mid;
+        }
+    }
+    free
 }
 
 /// Puts `id` at `position` (held to its limits), and every joint that
@@ -158,12 +216,9 @@ impl Operator for SetJoint {
                 format!("no joint called `{}`", params.joint)
             }));
         };
-        if set_dof(
-            doc.document_mut(),
-            id,
-            params.index as usize,
-            params.position,
-        ) {
+        let position =
+            stopped_by_contact(doc.document(), id, params.index as usize, params.position);
+        if set_dof(doc.document_mut(), id, params.index as usize, position) {
             Ok(OpResult::Finished)
         } else {
             Ok(OpResult::Cancelled)
@@ -827,6 +882,387 @@ impl Operator for MotionCheck {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct MotionLinkParams {
+    /// The joint that drives, and the one that follows it, by name: empty
+    /// for the selection — the other selected joint drives the active one.
+    pub driver: String,
+    pub driven: String,
+    /// How far the follower goes for each of the driver's: a gear pair's
+    /// teeth over teeth, a screw's pitch over a turn. Nought takes the link
+    /// off.
+    pub ratio: f64,
+    /// Where the follower is when the driver is at nought.
+    pub offset: f64,
+}
+
+impl Default for MotionLinkParams {
+    fn default() -> Self {
+        Self {
+            driver: String::new(),
+            driven: String::new(),
+            ratio: 1.0,
+            offset: 0.0,
+        }
+    }
+}
+
+/// Fusion's Motion Link: one joint follows another — a gear its mate,
+/// a slide the screw that drives it. Moving the driver moves the follower
+/// by the ratio; the follower is not moved by hand while it follows.
+pub struct MotionLink;
+
+impl Operator for MotionLink {
+    type Params = MotionLinkParams;
+    fn id() -> &'static str {
+        "assembly.motion_link"
+    }
+    fn label() -> &'static str {
+        "Motion Link"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.objects()
+            .filter(|(_, o)| matches!(o.robot, Some(RobotPart::Joint(_))))
+            .count()
+            >= 2
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let d = doc.document();
+        let named = |name: &str| {
+            d.objects()
+                .find(|(id, o)| o.name == name && joint_of(d, *id).is_some())
+                .map(|(id, _)| id)
+        };
+        let driven = if params.driven.is_empty() {
+            d.selection.active.filter(|id| joint_of(d, *id).is_some())
+        } else {
+            named(&params.driven)
+        }
+        .ok_or_else(|| OpError::Failed("select the joint that follows last".into()))?;
+        let driver = if params.driver.is_empty() {
+            d.selection
+                .objects
+                .iter()
+                .copied()
+                .find(|id| *id != driven && joint_of(d, *id).is_some())
+        } else {
+            named(&params.driver)
+        }
+        .filter(|id| *id != driven)
+        .ok_or_else(|| {
+            OpError::Failed("select the joint that drives, then the one that follows".into())
+        })?;
+        let follower = joint_of(d, driven).expect("a joint");
+        if !follower.kind.moves() {
+            return Err(OpError::Failed(
+                "the follower has to be a joint that turns or slides one way".into(),
+            ));
+        }
+        // A loop of links would have each move the other for ever.
+        let driver_name = d.object(driver).map(|o| o.name.clone()).unwrap_or_default();
+        let driven_name = d.object(driven).map(|o| o.name.clone()).unwrap_or_default();
+        let mut at = driver_name.clone();
+        for _ in 0..1000 {
+            let Some(next) = d
+                .objects()
+                .find(|(_, o)| o.name == at)
+                .and_then(|(id, _)| joint_of(d, id))
+                .and_then(|j| j.mimic.map(|m| m.joint))
+            else {
+                break;
+            };
+            if next == driven_name {
+                return Err(OpError::Failed(
+                    "the driver already follows this joint: a loop of links".into(),
+                ));
+            }
+            at = next;
+        }
+        let link =
+            (params.ratio != 0.0 && params.ratio.is_finite()).then(|| kreate_scene::robot::Mimic {
+                joint: driver_name,
+                multiplier: params.ratio,
+                offset: if params.offset.is_finite() {
+                    params.offset
+                } else {
+                    0.0
+                },
+            });
+        let d = doc.document_mut();
+        if let Some(Some(RobotPart::Joint(j))) = d.object_mut(driven).map(|o| o.robot.as_mut()) {
+            j.mimic = link;
+        }
+        // The follower where the driver now says.
+        if let Some(position) = joint_of(d, driver).and_then(|j| {
+            d.object(driver)
+                .map(|o| j.positions_of(&o.transform).first().copied())
+        }) {
+            set(d, driver, position.unwrap_or(0.0));
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct ContactParams {
+    /// The joint, by name; empty for the active one.
+    pub joint: String,
+    /// Turn it over, on, or off: on, what the joint moves stops where it
+    /// would go into another part.
+    #[param(variants("toggle", "on", "off"))]
+    pub set: u32,
+}
+
+/// Fusion's contact sets, by the joint: with contact on, what a joint
+/// moves goes only as far as touching what is in its way.
+pub struct Contact;
+
+impl Operator for Contact {
+    type Params = ContactParams;
+    fn id() -> &'static str {
+        "assembly.contact"
+    }
+    fn label() -> &'static str {
+        "Contact"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.objects()
+            .any(|(_, o)| matches!(o.robot, Some(RobotPart::Joint(_))))
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let id = find_joint(doc.document(), &params.joint)
+            .ok_or_else(|| OpError::Failed("select a joint".into()))?;
+        match doc
+            .document_mut()
+            .object_mut(id)
+            .and_then(|o| o.robot.as_mut())
+        {
+            Some(RobotPart::Joint(j)) => {
+                let on = match params.set {
+                    1 => true,
+                    2 => false,
+                    _ => !j.contact,
+                };
+                if j.contact == on {
+                    return Ok(OpResult::Cancelled);
+                }
+                j.contact = on;
+                Ok(OpResult::Finished)
+            }
+            _ => Ok(OpResult::Cancelled),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct ExplodeParams {
+    /// How far apart: each part moved out from the assembly's middle by
+    /// this much of how far it already is from it.
+    #[param(min = 0.0, soft_max = 3.0)]
+    pub amount: f64,
+}
+
+impl Default for ExplodeParams {
+    fn default() -> Self {
+        Self { amount: 0.6 }
+    }
+}
+
+/// An exploded view: the selected parts — every part shown, with fewer
+/// than two selected — moved out from their middle, each along the line
+/// from it, so how they go together can be seen. Undo puts them back.
+pub struct Explode;
+
+impl Operator for Explode {
+    type Params = ExplodeParams;
+    fn id() -> &'static str {
+        "assembly.explode"
+    }
+    fn label() -> &'static str {
+        "Explode"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.objects().filter(|(_, o)| o.mesh().is_some()).count() >= 2
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_math::DVec3;
+        let d = doc.document();
+        let part = |id: ObjectId| {
+            d.object(id).is_some_and(|o| {
+                o.mesh().is_some()
+                    && o.drawing.is_none()
+                    && o.sketch_lines.is_empty()
+                    && !matches!(o.robot, Some(RobotPart::Collision))
+            }) && d.is_shown(id)
+        };
+        let chosen: Vec<ObjectId> = d
+            .selection
+            .objects
+            .iter()
+            .copied()
+            .filter(|id| part(*id))
+            .collect();
+        let parts: Vec<ObjectId> = if chosen.len() >= 2 {
+            chosen
+        } else {
+            d.objects()
+                .map(|(id, _)| id)
+                .filter(|id| part(*id))
+                .collect()
+        };
+        if parts.len() < 2 {
+            return Err(OpError::Failed(
+                "an exploded view needs two parts or more".into(),
+            ));
+        }
+        // Each part's middle, in the world, as it shows.
+        let middles: Vec<(ObjectId, DVec3)> = parts
+            .iter()
+            .filter_map(|id| {
+                let mesh = kreate_scene::modifier::shown_base(d, *id)?;
+                if mesh.num_verts() == 0 {
+                    return None;
+                }
+                let b = mesh.bounds();
+                let c = (b.min + b.max).as_dvec3() * 0.5;
+                Some((*id, d.world_transform(*id).transform_point3(c)))
+            })
+            .collect();
+        let centre = middles.iter().map(|(_, c)| *c).sum::<DVec3>() / middles.len().max(1) as f64;
+        // In each one's own parent's space, before anything is moved: a
+        // part under another that moves is moved by its own amount only.
+        let moves: Vec<(ObjectId, DVec3)> = middles
+            .iter()
+            .map(|(id, c)| {
+                let delta = (*c - centre) * params.amount;
+                let above = d.world_transform(*id)
+                    * d.object(*id)
+                        .expect("a part")
+                        .transform
+                        .to_affine()
+                        .inverse();
+                (*id, above.inverse().transform_vector3(delta))
+            })
+            .collect();
+        // A child's own move less what its parent's moves already gave it.
+        let given: std::collections::HashMap<ObjectId, DVec3> = middles
+            .iter()
+            .map(|(id, c)| (*id, (*c - centre) * params.amount))
+            .collect();
+        let d = doc.document_mut();
+        for (id, local) in moves {
+            let mut inherited = DVec3::ZERO;
+            let mut up = d.object(id).and_then(|o| o.parent);
+            while let Some(p) = up {
+                if let Some(m) = given.get(&p) {
+                    inherited += *m;
+                }
+                up = d.object(p).and_then(|o| o.parent);
+            }
+            let above = d.world_transform(id)
+                * d.object(id)
+                    .expect("a part")
+                    .transform
+                    .to_affine()
+                    .inverse();
+            let extra = above.inverse().transform_vector3(inherited);
+            if let Some(o) = d.object_mut(id) {
+                o.transform.translation += local - extra;
+            }
+        }
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct NewComponentParams {
+    /// Its name; "Component" when none is given.
+    pub name: String,
+}
+
+/// Fusion's New Component from bodies: the selected parts gathered under
+/// one object at their middle — moved, hidden, duplicated and listed as
+/// one, each kept where it is.
+pub struct NewComponent;
+
+impl Operator for NewComponent {
+    type Params = NewComponentParams;
+    fn id() -> &'static str {
+        "assembly.component"
+    }
+    fn label() -> &'static str {
+        "New Component"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        !doc.selection.objects.is_empty()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_math::DVec3;
+        let d = doc.document();
+        // The selected ones nothing else selected is above: the others go
+        // with them.
+        let picked: Vec<ObjectId> = d.selection.objects.clone();
+        let tops: Vec<ObjectId> = picked
+            .iter()
+            .copied()
+            .filter(|id| !picked.iter().any(|p| p != id && d.is_ancestor(*p, *id)))
+            .collect();
+        if tops.is_empty() {
+            return Err(OpError::Failed("select the parts to gather".into()));
+        }
+        let middle = tops
+            .iter()
+            .map(|id| d.world_transform(*id).translation)
+            .sum::<DVec3>()
+            / tops.len() as f64;
+        // Under what they were all under, if one thing: a component in a
+        // component stays where it was in the tree.
+        let parent = d.object(tops[0]).and_then(|o| o.parent);
+        let shared = tops
+            .iter()
+            .all(|id| d.object(*id).and_then(|o| o.parent) == parent)
+            .then_some(parent)
+            .flatten();
+        let name = if params.name.trim().is_empty() {
+            "Component"
+        } else {
+            params.name.trim()
+        };
+        let d = doc.document_mut();
+        let name = d.unique_object_name(name);
+        let mut o = kreate_scene::Object::new(name, kreate_scene::ObjectData::Empty);
+        o.transform.translation = middle;
+        let id = d.add_object(o);
+        if let Some(p) = shared {
+            let _ = d.set_parent(id, Some(p));
+        }
+        for top in &tops {
+            d.set_parent(*top, Some(id))
+                .map_err(|e| OpError::Failed(format!("{e:?}")))?;
+        }
+        d.selection.clear();
+        d.selection.add(id);
+        d.selection.active = Some(id);
+        Ok(OpResult::Finished)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,6 +1409,182 @@ mod tests {
         doc.object_mut(plate).unwrap().transform.translation = DVec3::new(1.0, 0.0, 0.0);
         let at = doc.world_transform(shaft).translation;
         assert!((at - DVec3::new(1.0, 0.0, 0.075)).length() < 1e-9, "{at:?}");
+    }
+
+    #[allow(clippy::type_complexity)]
+    /// A registry, an empty history and a runner for the tests below.
+    fn harness() -> (
+        crate::operator::OperatorRegistry,
+        crate::History,
+        impl Fn(
+            &crate::operator::OperatorRegistry,
+            &mut crate::History,
+            &mut Document,
+            &str,
+            &[(&'static str, kreate_reflect::PropertyValue)],
+        ) -> Result<OpResult, OpError>,
+    ) {
+        let mut r = crate::operator::OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let run = |r: &crate::operator::OperatorRegistry,
+                   h: &mut crate::History,
+                   doc: &mut Document,
+                   id: &str,
+                   pairs: &[(&'static str, kreate_reflect::PropertyValue)]| {
+            let mut p = kreate_reflect::PropertyMap::new();
+            for (k, v) in pairs {
+                p.set(k, v.clone());
+            }
+            h.dispatch(r, doc, &Context::default(), id, &p)
+        };
+        (r, crate::History::new(), run)
+    }
+
+    /// Two joints linked: the follower turns twice as far as the driver,
+    /// and a link that would loop is refused.
+    #[test]
+    fn a_motion_link_makes_one_joint_follow_another() {
+        use kreate_reflect::PropertyValue as V;
+        let (r, mut h, run) = harness();
+        let mut doc = Document::new();
+        let a = doc.add_object(joint("Gear A", None));
+        let b = doc.add_object(joint("Gear B", None));
+        for id in [a, b] {
+            if let Some(Some(RobotPart::Joint(j))) = doc.object_mut(id).map(|o| o.robot.as_mut()) {
+                j.kind = JointKind::Continuous;
+            }
+        }
+        doc.selection.add(a);
+        doc.selection.add(b);
+        doc.selection.active = Some(b);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "assembly.motion_link",
+            &[("ratio", V::Float(-2.0))],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "robot.set_joint",
+            &[
+                ("joint", V::Text("Gear A".into())),
+                ("position", V::Float(0.5)),
+            ],
+        )
+        .unwrap();
+        let o = doc.object(b).unwrap();
+        let j = joint_of(&doc, b).unwrap();
+        assert!((j.position_of(&o.transform) + 1.0).abs() < 1e-9);
+        // B already follows A: A following B would be a loop.
+        doc.selection.active = Some(a);
+        doc.selection.objects = vec![b, a];
+        assert!(run(&r, &mut h, &mut doc, "assembly.motion_link", &[]).is_err());
+    }
+
+    /// With contact on, a slider goes only as far as touching the part in
+    /// its way; with it off, through.
+    #[test]
+    fn contact_stops_a_slide_at_the_part_in_its_way() {
+        use kreate_reflect::PropertyValue as V;
+        let (r, mut h, run) = harness();
+        let mut doc = Document::new();
+        // A 10 mm block on a slide along X, a wall of 10 mm whose near
+        // face is 30 mm along.
+        let block = doc.add_mesh_object("Block", kreate_mesh::primitives::cube(0.01));
+        let wall = doc.add_mesh_object("Wall", kreate_mesh::primitives::cube(0.01));
+        doc.object_mut(wall).unwrap().transform.translation = DVec3::new(0.04, 0.0, 0.0);
+        doc.selection.add(block);
+        doc.selection.active = Some(block);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "object.add_joint",
+            &[
+                ("kind", V::Enum(3)),
+                ("at_cursor", V::Bool(false)),
+                ("axis", V::Vec3([1.0, 0.0, 0.0])),
+                ("lower", V::Float(-0.1)),
+                ("upper", V::Float(0.1)),
+            ],
+        )
+        .unwrap();
+        let joint_id = doc.selection.active.unwrap();
+        run(&r, &mut h, &mut doc, "assembly.contact", &[]).unwrap();
+        assert!(joint_of(&doc, joint_id).unwrap().contact);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "robot.set_joint",
+            &[("position", V::Float(0.08))],
+        )
+        .unwrap();
+        let x = doc.world_transform(block).translation.x;
+        // Touching the wall: its far face at the wall's near one, 30 mm on.
+        assert!((x - 0.03).abs() < 2e-4, "{x}");
+        // Off, it goes through.
+        run(&r, &mut h, &mut doc, "assembly.contact", &[]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "robot.set_joint",
+            &[("position", V::Float(0.08))],
+        )
+        .unwrap();
+        let x = doc.world_transform(block).translation.x;
+        assert!((x - 0.08).abs() < 1e-9, "{x}");
+    }
+
+    /// An exploded view moves each part out from the middle, by how far it
+    /// is from it; undone, they are back.
+    #[test]
+    fn an_exploded_view_moves_the_parts_apart() {
+        let (r, mut h, run) = harness();
+        let mut doc = Document::new();
+        let left = doc.add_mesh_object("Left", kreate_mesh::primitives::cube(0.01));
+        let right = doc.add_mesh_object("Right", kreate_mesh::primitives::cube(0.01));
+        doc.object_mut(left).unwrap().transform.translation = DVec3::new(-0.01, 0.0, 0.0);
+        doc.object_mut(right).unwrap().transform.translation = DVec3::new(0.01, 0.0, 0.0);
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "assembly.explode",
+            &[("amount", kreate_reflect::PropertyValue::Float(1.0))],
+        )
+        .unwrap();
+        assert!((doc.world_transform(left).translation.x + 0.02).abs() < 1e-9);
+        assert!((doc.world_transform(right).translation.x - 0.02).abs() < 1e-9);
+        h.undo(&mut doc);
+        assert!((doc.world_transform(left).translation.x + 0.01).abs() < 1e-9);
+    }
+
+    /// A component gathers the selected parts under one object, each left
+    /// where it is, and moves them as one.
+    #[test]
+    fn a_component_gathers_the_parts_and_moves_them_as_one() {
+        let (r, mut h, run) = harness();
+        let mut doc = Document::new();
+        let a = doc.add_mesh_object("A", kreate_mesh::primitives::cube(0.01));
+        let b = doc.add_mesh_object("B", kreate_mesh::primitives::cube(0.01));
+        doc.object_mut(b).unwrap().transform.translation = DVec3::new(0.1, 0.0, 0.0);
+        doc.selection.add(a);
+        doc.selection.add(b);
+        run(&r, &mut h, &mut doc, "assembly.component", &[]).unwrap();
+        let c = doc.selection.active.unwrap();
+        assert_eq!(doc.object(a).unwrap().parent, Some(c));
+        assert_eq!(doc.object(b).unwrap().parent, Some(c));
+        assert!((doc.world_transform(b).translation.x - 0.1).abs() < 1e-9);
+        assert!((doc.world_transform(c).translation.x - 0.05).abs() < 1e-9);
+        doc.object_mut(c).unwrap().transform.translation.z += 1.0;
+        assert!((doc.world_transform(a).translation.z - 1.0).abs() < 1e-9);
+        assert!((doc.world_transform(b).translation.z - 1.0).abs() < 1e-9);
     }
 
     /// Each kind's positions read back as they were put.

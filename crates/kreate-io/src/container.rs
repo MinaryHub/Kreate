@@ -194,6 +194,9 @@ pub enum RobotRecord {
         lower2: f64,
         #[serde(default, skip_serializing_if = "is_zero_f64")]
         upper2: f64,
+        /// Stopped by the parts it would go into.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        contact: bool,
     },
     Collision,
     /// An armature posing the robot: each bone and the identity of the
@@ -230,6 +233,7 @@ impl RobotRecord {
                     .map(|m| (m.joint.clone(), m.multiplier, m.offset)),
                 lower2: j.lower2,
                 upper2: j.upper2,
+                contact: j.contact,
             },
             RobotPart::Collision => RobotRecord::Collision,
             RobotPart::Rig { joints } => RobotRecord::Rig {
@@ -267,6 +271,7 @@ impl RobotRecord {
                 mimic,
                 lower2,
                 upper2,
+                contact,
             } => RobotPart::Joint(Joint {
                 kind: JointKind::from_tag(kind).unwrap_or_default(),
                 rest: kreate_math::DTransform {
@@ -285,6 +290,7 @@ impl RobotRecord {
                 }),
                 lower2: *lower2,
                 upper2: *upper2,
+                contact: *contact,
             }),
             RobotRecord::Collision => RobotPart::Collision,
             RobotRecord::Rig { joints } => RobotPart::Rig {

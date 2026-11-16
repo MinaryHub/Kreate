@@ -5721,6 +5721,10 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
                 MechArg::Enum("kind", 0),
             ),
             ("mech-motion-check", "robot.motion_check", MechArg::None),
+            ("mech-motion-link", "assembly.motion_link", MechArg::None),
+            ("mech-contact", "assembly.contact", MechArg::None),
+            ("mech-explode", "assembly.explode", MechArg::None),
+            ("mech-component", "assembly.component", MechArg::None),
         ],
     ),
     (

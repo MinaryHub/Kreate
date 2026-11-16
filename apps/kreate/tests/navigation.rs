@@ -294,6 +294,8 @@ const APP_ACTIONS: &[&str] = &[
     "app.sketch_delete",
     "app.sketch_construction",
     "app.sketch_grab",
+    "assembly.joint_tool",
+    "app.joint_animate",
     "app.sketch_free",
     "app.sketch_slice",
     "app.place_text",

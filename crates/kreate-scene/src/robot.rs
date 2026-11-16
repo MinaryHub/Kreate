@@ -171,6 +171,9 @@ pub struct Joint {
     /// otherwise.
     pub lower2: f64,
     pub upper2: f64,
+    /// What it moves is stopped by the parts it would go into, as Fusion's
+    /// contact sets stop it: a slider or a drag goes as far as touching.
+    pub contact: bool,
 }
 
 impl Default for Joint {
@@ -185,6 +188,7 @@ impl Default for Joint {
             mimic: None,
             lower2: 0.0,
             upper2: 0.0,
+            contact: false,
         }
     }
 }
