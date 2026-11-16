@@ -534,11 +534,12 @@ impl App {
                     None => self.doc.selection.active.ok_or("nothing is active")?,
                 };
                 let object = self.doc.object(id).ok_or("no such object")?;
-                let mesh = object
+                object
                     .mesh()
-                    .and_then(|m| self.doc.mesh(m))
                     .ok_or_else(|| format!("`{}` is not a mesh", object.name))?;
-                let r = kreate::meshcheck::analyze(mesh, &self.doc.world_transform(id));
+                let mesh = kreate_scene::modifier::shown_base(&self.doc, id)
+                    .ok_or_else(|| format!("`{}` is not a mesh", object.name))?;
+                let r = kreate::meshcheck::analyze(&mesh, &self.doc.world_transform(id));
                 let spots = |list: &[kreate::meshcheck::Spot]| -> Vec<serde_json::Value> {
                     list.iter()
                         .map(|s| {
@@ -1092,10 +1093,13 @@ impl App {
                 .ok_or(format!("no object called {name:?}"))?
         };
         let object = doc.object(id).ok_or("the object is gone")?;
-        let mesh = object
+        object
             .mesh()
-            .and_then(|m| doc.mesh(m))
             .ok_or(format!("{:?} is not a mesh", object.name))?;
+        // As it shows: a body built from sketches holds an empty mesh.
+        let shown = kreate_scene::modifier::shown_base(doc, id)
+            .ok_or(format!("{:?} is not a mesh", object.name))?;
+        let mesh = &*shown;
         let to_world = doc.world_transform(id);
         let at = |p: kreate_math::Vec3| {
             let p = p.as_dvec3();
@@ -1233,13 +1237,13 @@ impl App {
                         break;
                     }
                     let mesh = |id| {
-                        doc.object(id)
-                            .and_then(|o| o.mesh())
-                            .and_then(|m| doc.mesh(m))
+                        doc.object(id).and_then(|o| o.mesh())?;
+                        kreate_scene::modifier::shown_base(doc, id)
                     };
                     let (Some(ma), Some(mb)) = (mesh(*a), mesh(*b)) else {
                         continue;
                     };
+                    let (ma, mb) = (&*ma, &*mb);
                     let (wa, wb) = (doc.world_transform(*a), doc.world_transform(*b));
                     let box_overlap = depth.to_array();
                     // Closed parts: by the volume they share. Surfaces that
@@ -1484,12 +1488,14 @@ impl App {
         let mut meshes = Vec::new();
         for id in &ids {
             let o = doc.object(*id).ok_or("no such object")?;
-            let mesh = o
-                .mesh()
-                .and_then(|m| doc.mesh(m))
+            o.mesh()
+                .ok_or_else(|| format!("{:?} has no mesh to measure", o.name))?;
+            // As it shows: a body's own mesh is empty, and measured by that
+            // it was an open surface of no volume.
+            let mesh = kreate_scene::modifier::shown_base(doc, *id)
                 .ok_or_else(|| format!("{:?} has no mesh to measure", o.name))?;
             let world = doc.world_transform(*id);
-            let m = kreate_mesh::measure::mass_properties(mesh, |p| world.transform_point3(p));
+            let m = kreate_mesh::measure::mass_properties(&mesh, |p| world.transform_point3(p));
             let mut v = json!({
                 "object": o.name,
                 "closed": m.closed,
@@ -1648,7 +1654,14 @@ impl App {
                         "selected": doc.selection.contains(id),
                         "parent": o.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone()),
                     });
-                    if let Some(m) = o.mesh().and_then(|m| doc.mesh(m)) {
+                    let shown = o.mesh().and_then(|_| {
+                        if o.features.is_empty() && o.curve.is_none() {
+                            o.mesh().and_then(|m| doc.mesh_arc(m)).cloned()
+                        } else {
+                            kreate_scene::modifier::shown_base(doc, id)
+                        }
+                    });
+                    if let Some(m) = shown.as_deref() {
                         let local = m.bounds();
                         if local.min.x <= local.max.x {
                             let size = (local.max - local.min).as_dvec3() * t.scale;

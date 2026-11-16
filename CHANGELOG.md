@@ -102,6 +102,9 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- An assistant reading the scene sees a body made from sketches as it is:
+  its size in get_scene, its volume in measure, its faces in get_mesh,
+  check_overlaps and analyze_mesh. It saw an empty, open surface.
 - Boolean, Hole and Join read a body made from sketches as what it shows:
   cut with one, they cut nothing; a hole in one "missed the part"; joined,
   it was removed. Applying a modifier to a body is refused with what to do
