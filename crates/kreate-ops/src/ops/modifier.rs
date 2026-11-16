@@ -225,6 +225,16 @@ impl Operator for Apply {
                 "a mesh used by more than one object cannot have a modifier applied".into(),
             ));
         }
+        // A body is what its features build: there is no mesh of its own to
+        // bake into, and baked into the empty one it holds the modifier was
+        // taken off and its work with it.
+        if d.object(id)
+            .is_some_and(|o| !o.features.is_empty() || o.curve.is_some())
+        {
+            return Err(OpError::Failed(
+                "a body built from sketches keeps its modifiers live: convert it to a mesh first (feature.to_mesh) to apply one".into(),
+            ));
+        }
         let Some(result) = kreate_scene::modifier::apply_one(d, id, params.index as usize) else {
             return Ok(OpResult::Cancelled);
         };
@@ -1586,6 +1596,14 @@ pub(crate) fn bake_last(
         .object(id)
         .and_then(|o| o.mesh())
         .ok_or_else(|| OpError::Failed("not a mesh".into()))?;
+    // A body built from sketches has no mesh of its own to bake into: the
+    // cut stays live on it, its cutters kept, as with apply left off. Baked
+    // into the empty mesh it holds, the cut was lost and the cutters with it.
+    if d.object(id)
+        .is_some_and(|o| !o.features.is_empty() || o.curve.is_some())
+    {
+        return Ok(());
+    }
     if d.mesh_users(mesh) > 1 {
         return Err(OpError::Failed(
             "a mesh used by more than one object cannot have a boolean applied: leave apply off"

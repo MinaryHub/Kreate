@@ -18,8 +18,8 @@
 use glam::Vec3;
 
 /// The image's size: twice as wide as tall, as an equirectangular map is.
-pub const WIDTH: u32 = 512;
-pub const HEIGHT: u32 = 256;
+pub const WIDTH: u32 = 1024;
+pub const HEIGHT: u32 = 512;
 
 /// One softbox: where it is, how large and how bright.
 struct Softbox {
@@ -87,10 +87,16 @@ impl Preset {
     /// The room: its ceiling, its horizon and its floor.
     fn room(self) -> [Vec3; 3] {
         match self {
+            // A white cove under bright lamps: the floor is the paper the
+            // part stands on, as bright in a reflection as it is behind the
+            // part; the walls fall off above it to a dim ceiling the lamps
+            // hang against. That range — pale below, dark above, the lamps
+            // several times either — is what a polished part shows as
+            // shape. One flat grey all round was reflected as one flat grey.
             Preset::Studio => [
-                Vec3::new(0.52, 0.54, 0.58),
-                Vec3::new(0.44, 0.44, 0.45),
-                Vec3::new(0.24, 0.235, 0.23),
+                Vec3::new(0.9, 0.92, 0.98),
+                Vec3::new(3.0, 3.0, 3.05),
+                Vec3::new(5.6, 5.6, 5.65),
             ],
             Preset::Bright => [
                 Vec3::new(0.95, 0.96, 0.98),
@@ -141,7 +147,25 @@ impl Preset {
             radiance: [2.4, 2.4, 2.45],
         };
         match self {
-            Preset::Studio => vec![key, fill, rim, overhead, side(1.0), side(-1.0)],
+            // The default studio's own: the same lamps where they were,
+            // several times the room's brightness, and the overhead one a
+            // wide bank — what lights a part's top and draws the long
+            // highlight along a round one.
+            Preset::Studio => {
+                let lit = |b: Softbox, radiance: [f32; 3]| Softbox { radiance, ..b };
+                vec![
+                    lit(key, [19.0, 18.7, 18.2]),
+                    lit(fill, [7.5, 7.6, 7.9]),
+                    lit(rim, [15.0, 15.5, 16.0]),
+                    Softbox {
+                        towards: Vec3::new(0.0, -0.1, 1.0).normalize(),
+                        half: (0.95, 0.4),
+                        radiance: [12.5, 12.5, 12.7],
+                    },
+                    lit(side(1.0), [12.0, 12.0, 12.3]),
+                    lit(side(-1.0), [12.0, 12.0, 12.3]),
+                ]
+            }
             Preset::Bright => vec![
                 Softbox {
                     radiance: [3.0, 3.0, 2.95],
@@ -201,7 +225,7 @@ impl Preset {
     /// room's light that casts a shadow.
     pub fn key_lux(self) -> f32 {
         match self {
-            Preset::Studio => 10.0,
+            Preset::Studio => 36.0,
             Preset::Bright => 14.0,
             Preset::GreyRoom => 4.0,
             Preset::Outdoor => 40.0,
@@ -215,7 +239,9 @@ impl Preset {
     /// backdrop — a sky is.
     pub fn backdrop(self) -> Option<[[f32; 3]; 2]> {
         match self {
-            Preset::Studio => Some([[1.05, 1.07, 1.1], [0.62, 0.62, 0.64]]),
+            // A pale sweep, lighter where the part stands: a product
+            // shot's paper, bright enough that the part's shadow reads on it.
+            Preset::Studio => Some([[6.6, 6.7, 6.95], [10.0, 10.0, 10.1]]),
             Preset::Bright => Some([[1.6, 1.6, 1.62], [1.15, 1.15, 1.16]]),
             Preset::GreyRoom => Some([[0.8, 0.8, 0.8], [0.5, 0.5, 0.5]]),
             Preset::Outdoor | Preset::Sunset => None,
@@ -381,9 +407,10 @@ pub fn radiance_of(preset: Preset, dir: Vec3) -> [f32; 3] {
         let right = f.cross(Vec3::Z).normalize_or_zero();
         let up = right.cross(f);
         let (x, y) = (d.dot(right) / ahead, d.dot(up) / ahead);
-        // Soft edges, as diffusion cloth has.
-        let inside = (1.0 - smooth(b.half.0 * 0.8, b.half.0, x.abs()))
-            * (1.0 - smooth(b.half.1 * 0.8, b.half.1, y.abs()));
+        // Soft edges, as diffusion cloth has: a tenth of the lamp, which
+        // in a polished part is a highlight with an edge and not a glow.
+        let inside = (1.0 - smooth(b.half.0 * 0.9, b.half.0, x.abs()))
+            * (1.0 - smooth(b.half.1 * 0.9, b.half.1, y.abs()));
         if inside > 0.0 {
             c += Vec3::from(b.radiance) * inside;
         }
@@ -446,15 +473,21 @@ mod tests {
     }
 
     #[test]
-    fn the_key_is_the_brightest_place_and_the_floor_the_darkest() {
+    fn the_key_is_the_brightest_place_and_the_ceiling_the_darkest() {
         let key = radiance(key_direction());
-        let up = radiance(Vec3::Z);
+        // Up between the lamps: the ceiling they hang against.
+        let ceiling = radiance(Vec3::new(0.0, -0.9, 0.45));
+        // The paper the part stands on.
         let down = radiance(-Vec3::Z);
-        assert!(key[0] > up[0] * 3.0, "{key:?} {up:?}");
-        assert!(down[0] < up[0] * 0.6, "{down:?} {up:?}");
         // Away from the boxes the walls are the room's own.
         let side = radiance(Vec3::new(-1.0, 0.6, 0.0));
-        assert!(side[0] < 1.0, "{side:?}");
+        assert!(key[0] > ceiling[0] * 3.0, "{key:?} {ceiling:?}");
+        assert!(key[0] > down[0] * 2.0, "{key:?} {down:?}");
+        // Pale below and darker above: what a polished part shows as shape.
+        assert!(
+            down[0] > side[0] && side[0] > ceiling[0],
+            "{down:?} {side:?} {ceiling:?}"
+        );
     }
 
     #[test]

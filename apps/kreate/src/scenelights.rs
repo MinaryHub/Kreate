@@ -41,7 +41,7 @@ pub struct Preview {
 }
 
 /// The exposure the default studio is shown at.
-pub const STUDIO_EXPOSURE: f32 = -0.6;
+pub const STUDIO_EXPOSURE: f32 = -3.2;
 
 /// The exposure a room is shown at: each is lit to its own level.
 pub fn exposure_of(room: Room) -> f32 {
@@ -118,7 +118,7 @@ pub fn material_preview_in(view: glam::DQuat, room: Room) -> Preview {
 
 /// The material preview's backdrop in the default studio, top and bottom,
 /// in the renderer's linear units before the studio's exposure.
-pub const CAD_BACKDROP: [[f32; 3]; 2] = [[1.0, 1.3, 1.85], [6.0, 6.05, 6.2]];
+pub const CAD_BACKDROP: [[f32; 3]; 2] = [[6.0, 7.9, 11.2], [36.0, 36.4, 37.3]];
 
 /// How far a view looking along `ahead` is turned about up from +Y, which
 /// is what the studio is laid out for.

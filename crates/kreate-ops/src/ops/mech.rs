@@ -85,6 +85,9 @@ fn cut_with(
     cutter.transform.translation = at;
     cutter.transform.rotation = turn;
     let cutter = d.add_object(cutter);
+    // The part's own: moved, turned and copied with it. A hole left where
+    // it was drilled, the part slid out from under it.
+    let _ = d.set_parent(cutter, Some(into));
     let operand = d.object_uid(cutter).expect("just added");
     d.object_mut(into)
         .expect("the target")
@@ -185,11 +188,13 @@ impl Operator for Hole {
         };
         let (at, turn) = placement(d, params.at_cursor, params.location, params.rotation);
         // Through: deeper than the part is across, wherever on it it starts.
+        // The part as it shows: a body's own mesh is empty.
+        let shown = kreate_scene::modifier::shown_base(d, into);
         let depth = if params.through {
             let o = d.object(into).expect("checked");
-            let b = o
-                .mesh()
-                .and_then(|m| d.mesh(m))
+            let b = shown
+                .as_deref()
+                .filter(|m| m.num_verts() > 0)
                 .map(|m| m.bounds().size().as_dvec3().length())
                 .unwrap_or(1.0);
             let scale = o.transform.scale.abs().max_element();
@@ -207,8 +212,11 @@ impl Operator for Hole {
         // A cutter that does not reach the part cuts nothing; said, rather
         // than left as an object in empty space.
         let part = {
-            let o = d.object(into).expect("checked");
-            let m = o.mesh().and_then(|m| d.mesh(m)).expect("a mesh");
+            let Some(m) = shown.as_deref().filter(|m| m.num_verts() > 0) else {
+                return Err(OpError::Failed(
+                    "the part has no shape yet to cut a hole in".into(),
+                ));
+            };
             let w = d.world_transform(into);
             m.positions()
                 .iter()
@@ -396,7 +404,6 @@ impl Operator for CheckInterference {
         doc: &mut DocMut<'_>,
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
-        use kreate_mesh::modifiers::boolean::boolean;
         use kreate_mesh::modifiers::BooleanOp;
         use kreate_scene::modifier::{EvalCtx, ModifierCache};
         let d = doc.document();
@@ -448,6 +455,8 @@ impl Operator for CheckInterference {
             })
             .collect();
         let mut found: Vec<(String, kreate_mesh::MeshData, f64)> = Vec::new();
+        // The pairs that could not be checked: too heavy to intersect.
+        let mut unchecked: Vec<String> = Vec::new();
         for i in 0..world.len() {
             for j in i + 1..world.len() {
                 let (a, b) = (&world[i], &world[j]);
@@ -455,7 +464,16 @@ impl Operator for CheckInterference {
                 if a.2.cmpgt(b.3).any() || b.2.cmpgt(a.3).any() {
                     continue;
                 }
-                let overlap = boolean(&a.1, &b.1, BooleanOp::Intersect);
+                let name = |id: ObjectId| d.object(id).map(|o| o.name.clone()).unwrap_or_default();
+                // A pair too heavy to finish is said so: the plain boolean
+                // hands back its first part whole when it gives up, and that
+                // was shown as the whole of one part overlapping the other.
+                let Ok(overlap) =
+                    kreate_mesh::modifiers::boolean::try_boolean(&a.1, &b.1, BooleanOp::Intersect)
+                else {
+                    unchecked.push(format!("{} x {}", name(a.0), name(b.0)));
+                    continue;
+                };
                 if overlap.num_faces() == 0 {
                     continue;
                 }
@@ -466,7 +484,6 @@ impl Operator for CheckInterference {
                 if v < 1e-13 {
                     continue;
                 }
-                let name = |id: ObjectId| d.object(id).map(|o| o.name.clone()).unwrap_or_default();
                 // i18n-exempt: two part names and a volume
                 let label = format!("{} x {} ({:.3} mm3)", name(a.0), name(b.0), v * 1e9);
                 found.push((label, overlap, v));
@@ -486,6 +503,12 @@ impl Operator for CheckInterference {
             }
         }
         if found.is_empty() {
+            if !unchecked.is_empty() {
+                return Err(OpError::Failed(format!(
+                    "could not check {}: too many faces to intersect; the other parts are clear of each other",
+                    unchecked.join(", ")
+                )));
+            }
             return Err(OpError::Failed(format!(
                 "no interference: the {} parts are clear of each other",
                 parts.len()

@@ -369,6 +369,75 @@ pub fn extrude_region(region: &Region, z0: f32, z1: f32) -> MeshData {
     outward(MeshData::from_faces(verts, &faces))
 }
 
+/// A region pushed from `z0` to `z1` with its sides leaning: the end at
+/// `z1` is the region grown by `grow` all round — shrunk, when it is
+/// negative — and the end at `z0` the region as drawn. A mould's draft, a
+/// countersink, a pyramid's frustum.
+///
+/// Each point of the far end moves out along the mitre of the two edges
+/// that meet at it: outward of the solid, which for a hole is into the
+/// hole. Right while the outline does not cross itself on the way — a
+/// taper that would close a hole or a slot before the far end is more than
+/// this makes of it.
+pub fn extrude_region_tapered(region: &Region, z0: f32, z1: f32, grow: f32) -> MeshData {
+    if grow.abs() < 1e-9 {
+        return extrude_region(region, z0, z1);
+    }
+    let (points, loops) = loops_of(region);
+    if (z1 - z0).abs() < 1e-9 || points.len() < 3 {
+        return MeshData::empty();
+    }
+    let mut far = points.clone();
+    for (k, l) in loops.iter().enumerate() {
+        let n = l.len();
+        if n < 3 {
+            continue;
+        }
+        // Which way round the loop goes, for which side of it is out.
+        let mut area = 0.0f32;
+        for i in 0..n {
+            let (a, b) = (points[l[i] as usize], points[l[(i + 1) % n] as usize]);
+            area += a.x * b.y - b.x * a.y;
+        }
+        // Out of the solid: right of an anticlockwise outline's edges, and
+        // the other side for a hole, whose inside is not the solid's.
+        let side = if (area > 0.0) == (k == 0) { 1.0 } else { -1.0 };
+        for i in 0..n {
+            let p = points[l[i] as usize];
+            let before = points[l[(i + n - 1) % n] as usize];
+            let after = points[l[(i + 1) % n] as usize];
+            let e1 = (p - before).normalize_or_zero();
+            let e2 = (after - p).normalize_or_zero();
+            let n1 = Vec2::new(e1.y, -e1.x) * side;
+            let n2 = Vec2::new(e2.y, -e2.x) * side;
+            let along = 1.0 + n1.dot(n2);
+            // The mitre, held to three steps at a corner sharp enough to
+            // send it further.
+            let mitre = if along > 1e-3 {
+                (n1 + n2) / along
+            } else {
+                (n1 + n2).normalize_or_zero()
+            };
+            far[l[i] as usize] = p + mitre.clamp_length_max(3.0) * grow;
+        }
+    }
+    let n = points.len() as u32;
+    let mut verts: Vec<Vec3> = points.iter().map(|p| Vec3::new(p.x, p.y, z0)).collect();
+    verts.extend(far.iter().map(|p| Vec3::new(p.x, p.y, z1)));
+    let mut faces: Vec<Vec<u32>> = Vec::new();
+    for cap in caps(region) {
+        faces.push(cap.iter().rev().copied().collect());
+        faces.push(cap.iter().map(|v| v + n).collect());
+    }
+    for l in &loops {
+        for k in 0..l.len() {
+            let (a, b) = (l[k], l[(k + 1) % l.len()]);
+            faces.push(vec![a, b, b + n, a + n]);
+        }
+    }
+    outward(MeshData::from_faces(verts, &faces))
+}
+
 /// A region turned `angle` radians about the line through `origin` along
 /// `axis`, both in its plane, in `segments` steps for a whole turn: a lathe,
 /// closed with the region itself at both ends when it does not go all the
@@ -636,6 +705,49 @@ mod tests {
         // Symmetric: both ways, the same volume.
         let both = extrude_region(&r[plate], -0.005, 0.005);
         assert!((mass_properties(&both, |p| p).volume - want).abs() < want * 1e-4);
+    }
+
+    /// A taper grows the far end all round and leaves the near one as
+    /// drawn: a square's frustum, by its volume; and a hole in it closes in
+    /// as the plate grows, the solid still closed.
+    #[test]
+    fn a_tapered_extrude_leans_its_sides() {
+        let (p, e) = drawing(&[rect(0.0, 0.0, 2.0, 2.0)]);
+        let r = regions(&p, &e);
+        // Two wide below, four above, one tall: h/3 (a + b + sqrt(ab)).
+        let solid = extrude_region_tapered(&r[0], 0.0, 1.0, 1.0);
+        assert!(is_closed(&solid));
+        let v = mass_properties(&solid, |p| p).volume;
+        let want = (4.0 + 16.0 + 8.0) / 3.0;
+        assert!((v - want).abs() < want * 1e-4, "{v} against {want}");
+        // Narrowing: four below, one above.
+        let narrow = extrude_region_tapered(&r[0], 0.0, 1.0, -0.5);
+        let v = mass_properties(&narrow, |p| p).volume;
+        let want = (4.0 + 1.0 + 2.0) / 3.0;
+        assert!((v - want).abs() < want * 1e-4, "{v} against {want}");
+        // The other way, the same solid upside down.
+        let down = extrude_region_tapered(&r[0], 0.0, -1.0, 1.0);
+        assert!(is_closed(&down));
+        let v = mass_properties(&down, |p| p).volume;
+        assert!((v - 28.0 / 3.0).abs() < 1e-3, "{v}");
+        // None at all is the plain push.
+        assert_eq!(
+            extrude_region_tapered(&r[0], 0.0, 1.0, 0.0).num_faces(),
+            extrude_region(&r[0], 0.0, 1.0).num_faces()
+        );
+
+        let (p, e) = drawing(&[
+            rect(0.0, 0.0, 0.04, 0.02),
+            circle(Vec2::new(0.02, 0.01), 0.005, 48),
+        ]);
+        let r = regions(&p, &e);
+        let plate = region_at(&r, Vec2::new(0.002, 0.002)).expect("plate");
+        let grown = extrude_region_tapered(&r[plate], 0.0, 0.01, 0.001);
+        assert!(is_closed(&grown));
+        let straight = mass_properties(&extrude_region(&r[plate], 0.0, 0.01), |p| p).volume;
+        let v = mass_properties(&grown, |p| p).volume;
+        // More plate and less hole: more solid than the straight one.
+        assert!(v > straight * 1.05, "{v} against {straight}");
     }
 
     #[test]

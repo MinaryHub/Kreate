@@ -173,12 +173,13 @@ fn solid(doc: &Document, f: &Feature) -> Option<Solid> {
             Shape::Extrude {
                 distance,
                 symmetric,
+                more,
             } => {
-                let (z0, z1) = if symmetric {
-                    (-distance.abs() * 0.5, distance.abs() * 0.5)
-                } else {
-                    (0.0, distance)
-                };
+                // Leaning sides, and through all, are the mesh path's yet.
+                if more.taper != 0.0 || more.through {
+                    return None;
+                }
+                let (z0, z1) = more.span(distance, symmetric);
                 let (lo, hi) = (z0.min(z1), z0.max(z1));
                 let face = if lo != 0.0 {
                     face.transformed(rows(DAffine3::from_translation(DVec3::new(0.0, 0.0, lo))))?
@@ -211,9 +212,10 @@ fn solid(doc: &Document, f: &Feature) -> Option<Solid> {
 fn combine(out: Option<Solid>, piece: &Solid, op: Operation) -> Option<Option<Solid>> {
     Some(match (out, op) {
         (None, Operation::Join) => Some(piece.transformed(rows(DAffine3::IDENTITY))?),
-        (None, Operation::Cut) => None,
+        (None, Operation::Cut | Operation::Intersect) => None,
         (Some(o), Operation::Join) => Some(o.boolean(piece, Boolean::Join)?),
         (Some(o), Operation::Cut) => Some(o.boolean(piece, Boolean::Cut)?),
+        (Some(o), Operation::Intersect) => Some(o.boolean(piece, Boolean::Common)?),
     })
 }
 
@@ -422,6 +424,7 @@ mod tests {
                 shape: Shape::Extrude {
                     distance: 0.01,
                     symmetric: false,
+                    more: Default::default(),
                 },
                 sketch: uid,
                 seeds: vec![[0.03, 0.01]],

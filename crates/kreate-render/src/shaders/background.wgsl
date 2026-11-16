@@ -76,11 +76,6 @@ fn background_fragment(in: Vertex) -> @location(0) vec4<f32> {
     }
     // Mip zero: a background is what the environment *is*, not what a rough
     // surface reflects of it.
-    let colour = textureSampleLevel(
-        environment_cube,
-        environment_sampler,
-        unrotate(direction),
-        0.0,
-    ).rgb;
+    let colour = environment_sharp(unrotate(direction));
     return vec4<f32>(colour * shading.environment.w, 1.0);
 }

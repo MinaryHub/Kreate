@@ -279,6 +279,32 @@ fn average_blocker(
 /// `shading.world.w` is what says not to read it.
 @group(2) @binding(6) var environment_cube: texture_cube<f32>;
 @group(2) @binding(7) var environment_sampler: sampler;
+/// The picture the cube was made from, equirectangular, as it came: what a
+/// mirror and the background show. One texel when there is no environment.
+@group(2) @binding(10) var environment_image: texture_2d<f32>;
+
+/// The environment itself along `d` — a direction already in the
+/// environment's own frame (`unrotate`) — at the picture's own sharpness.
+/// The cube's first level is a hundred and twenty-eight texels to a face:
+/// in a chromed part it was a smear, and behind the part a blur.
+fn environment_sharp(d: vec3<f32>) -> vec3<f32> {
+    let u = 0.5 + atan2(d.x, -d.y) / 6.2831853;
+    let v = acos(clamp(d.z, -1.0, 1.0)) / 3.14159265;
+    return textureSampleLevel(environment_image, environment_sampler, vec2<f32>(u, v), 0.0).rgb;
+}
+
+/// The same at the picture's own texel, not between texels: what an aim at
+/// the environment's light is weighed by. The chance of aiming somewhere
+/// is the same across a texel, and so then is the light found there — read
+/// between texels, a sun two texels tall was half as bright at its rim as
+/// its chance said, and every sample of it a different weight.
+fn environment_texel(d: vec3<f32>) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(environment_image));
+    let u = fract(0.5 + atan2(d.x, -d.y) / 6.2831853);
+    let v = acos(clamp(d.z, -1.0, 1.0)) / 3.14159265;
+    let at = min(vec2<u32>(vec2<f32>(u, v) * size), vec2<u32>(size) - vec2<u32>(1u, 1u));
+    return textureLoad(environment_image, at, 0).rgb;
+}
 
 @group(2) @binding(3) var<storage, read> shadows: array<ShadowInfo>;
 @group(2) @binding(4) var shadow_maps: texture_depth_2d_array;

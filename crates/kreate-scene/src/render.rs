@@ -62,12 +62,16 @@ impl Default for RenderSettings {
         Self {
             width: 1920,
             height: 1080,
-            samples: 128,
+            // The High preset: what a picture someone keeps is made at. A
+            // hundred and twenty-eight samples and four bounces was a
+            // preview's — grain left in the shadows, and glass gone dark
+            // where the light ran out of bounces inside it.
+            samples: 256,
             format: OutputFormat::Png,
             output: String::new(),
             denoise: true,
             motion_blur: false,
-            bounces: 4,
+            bounces: 6,
             video_quality: 2,
         }
     }

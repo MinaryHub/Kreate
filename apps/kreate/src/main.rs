@@ -789,8 +789,16 @@ struct App {
     update_check: Option<Arc<std::sync::Mutex<Option<kreate::update::Checked>>>>,
     /// The Claude panel's conversation. See `kreate::claude`.
     chat: Option<kreate::claude::Chat>,
+    /// Where the pointer was pressed to take hold of something in a sketch:
+    /// it is not dragged until the pointer has left that place.
+    sketch_press: Option<glam::DVec2>,
     /// Whether the last chat entry is a reply still streaming in.
     chat_streaming: bool,
+    /// When the message being answered was sent, and what the assistant's
+    /// program says the answer took — tokens read and written, and their
+    /// cost — for the line under it.
+    chat_sent: Option<std::time::Instant>,
+    chat_usage: Option<(u64, u64, Option<f64>)>,
     /// Each answer's changes, by the history it began and ended at — what
     /// the chat panel's "undo this answer" takes back.
     chat_turns: Vec<ChatTurn>,
@@ -1216,7 +1224,10 @@ impl App {
             update_ready: None,
             update_check: None,
             chat: None,
+            sketch_press: None,
             chat_streaming: false,
+            chat_sent: None,
+            chat_usage: None,
             chat_turns: Vec::new(),
             asset_wishes: std::collections::HashMap::new(),
             import_wishes: std::collections::HashMap::new(),
@@ -1609,6 +1620,10 @@ impl App {
         {
             self.run_op_with("feature.to_mesh", &[]);
             self.status(&self.ui.catalog.get("feature-made-mesh"));
+        }
+        // Leaving a sketch: the stroke under way is kept, a drag ended.
+        if self.op_ctx.mode == OpMode::Sketch && mode != OpMode::Sketch {
+            self.finish_sketch_stroke();
         }
         let has = kreate_ops::mode::Has::of(&self.doc);
         let Some(change) = kreate::mode::plan(self.op_ctx.mode, mode, has) else {
@@ -5430,7 +5445,9 @@ impl App {
         let first = self.sketching.clicks.first().copied();
         let closing = matches!(
             self.sketching.tool,
-            kreate::sketching::Tool::Line | kreate::sketching::Tool::Spline
+            kreate::sketching::Tool::Line
+                | kreate::sketching::Tool::Spline
+                | kreate::sketching::Tool::ControlSpline
         ) && self.sketching.clicks.len() >= 3
             && first.is_some_and(|(p, _)| {
                 self.sketch_screen(p)
@@ -5716,6 +5733,17 @@ impl App {
         if self.sketch_drag_session.is_none() && offset.length() < 1e-9 {
             return;
         }
+        // Nor until it has gone a little way from where it was pressed: a
+        // point is taken by its own place, so a click a few pixels off its
+        // middle — any click, on a touch screen — moved it there and wrote
+        // a step for it.
+        if self.sketch_drag_session.is_none() {
+            if let (Some(press), Some(now)) = (self.sketch_press, self.sketch_cursor()) {
+                if press.distance(now) < 4.0 {
+                    return;
+                }
+            }
+        }
         let mut params = PropertyMap::new();
         let op = if self.active_drawing().is_some() {
             match drag.at {
@@ -5886,6 +5914,7 @@ impl App {
     /// Puts a drag back where it began: Esc or the right button.
     fn cancel_sketch_drag(&mut self) -> bool {
         self.sketching.grab = false;
+        self.sketch_press = None;
         if self.sketching.drag.take().is_none() {
             return false;
         }
@@ -5899,6 +5928,25 @@ impl App {
     fn sketch_tool_done(&mut self) {
         self.sketching.reset();
         self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// What a line or a spline tool has drawn so far, kept: before another
+    /// tool is taken up, or the sketch left. Four segments clicked and then
+    /// C pressed for a circle were four segments gone — they are in the
+    /// drawing only once the stroke is ended. And a drag or a grab still
+    /// under way is put back, its step ended: left open, the next thing
+    /// drawn was recorded under it and one undo took both.
+    fn finish_sketch_stroke(&mut self) {
+        use kreate::sketching::Tool;
+        self.cancel_sketch_drag();
+        self.settle_sketch_drag();
+        if self.sketching.clicks.len() >= 2 {
+            match self.sketching.tool {
+                Tool::Line => self.commit_sketch_line(false),
+                Tool::Spline | Tool::ControlSpline => self.commit_sketch_spline(false),
+                _ => {}
+            }
+        }
     }
 
     /// A line tool's points so far, run as one stroke.
@@ -6006,7 +6054,9 @@ impl App {
                 }
                 if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
                     self.commit_sketch_line(false);
-                } else if tool == Tool::Spline && self.sketching.clicks.len() >= 2 {
+                } else if matches!(tool, Tool::Spline | Tool::ControlSpline)
+                    && self.sketching.clicks.len() >= 2
+                {
                     self.commit_sketch_spline(false);
                 } else if !self.sketching.clicks.is_empty() || !self.sketching.picks.is_empty() {
                     self.sketch_tool_done();
@@ -6038,8 +6088,16 @@ impl App {
             (MouseButton::Left, false) => {
                 // The end of a drag: what it moved is one step.
                 if let Some(drag) = self.sketching.drag.take() {
+                    self.sketch_press = None;
                     if let Some(session) = self.sketch_drag_session.take() {
                         self.history.commit_modal(session);
+                        // What was selected is still what is: by what it is,
+                        // not by the number it was drawn under before.
+                        if !self.sketching.lines.is_empty() && !drag.entities.is_empty() {
+                            if let Some(g) = self.sketch_geometry() {
+                                self.sketching.lines = g.lines_of_entities(&drag.entities);
+                            }
+                        }
                         // One point dropped on another of the sketch: joined.
                         let (hover, snapped) = (self.sketching.hover, self.sketching.snapped);
                         if let (Some(at), Some((_, join)), false) = (drag.at, hover, snapped) {
@@ -6147,6 +6205,21 @@ impl App {
                             self.commit_sketch_line(true);
                             return true;
                         }
+                        // A second click where the last one was — a double
+                        // click, Fusion's and SolidWorks's way of ending a
+                        // chain — ends it there, and is not a line of no
+                        // length left at its end.
+                        if self
+                            .sketching
+                            .clicks
+                            .last()
+                            .is_some_and(|(last, _)| last.distance(p) <= 1e-9 * p.length().max(1.0))
+                        {
+                            if self.sketching.clicks.len() >= 2 {
+                                self.commit_sketch_line(false);
+                            }
+                            return true;
+                        }
                         let first = self.sketching.clicks.first().map(|c| c.1);
                         self.sketching.clicks.push((p, join));
                         self.sketching.typed.clear();
@@ -6159,6 +6232,18 @@ impl App {
                     Tool::Spline | Tool::ControlSpline => {
                         if self.sketching.closing {
                             self.commit_sketch_spline(true);
+                            return true;
+                        }
+                        // A double click ends it, as it ends a line.
+                        if self
+                            .sketching
+                            .clicks
+                            .last()
+                            .is_some_and(|(last, _)| last.distance(p) <= 1e-9 * p.length().max(1.0))
+                        {
+                            if self.sketching.clicks.len() >= 2 {
+                                self.commit_sketch_spline(false);
+                            }
                             return true;
                         }
                         self.sketching.clicks.push((p, join));
@@ -6547,6 +6632,7 @@ impl App {
                                 }
                             }
                             self.settle_sketch_drag();
+                            self.sketch_press = self.sketch_cursor();
                             self.sketching.drag = Some(kreate::sketching::SketchDrag {
                                 points,
                                 anchor,
@@ -6900,9 +6986,12 @@ impl App {
                     // A conic: its ends, then the apex; rho typed, or a
                     // parabola's one half.
                     (Tool::Conic, 3) => {
+                        // A number, not a length: what is typed comes
+                        // through in the scene's unit, and 0.3 in a
+                        // millimetre scene was 0.0003 — a straight chord.
                         let rho = typed
                             .first()
-                            .copied()
+                            .map(|r| r / unit)
                             .filter(|r| *r > 0.0 && *r < 1.0)
                             .unwrap_or(0.5);
                         self.run_op_with(
@@ -7290,8 +7379,18 @@ impl App {
             KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
             KeyCode::Minus | KeyCode::NumpadSubtract => Some('-'),
             KeyCode::Comma | KeyCode::Space => Some(','),
+            // Tab goes on to the next number while one is being typed, as
+            // it does in Fusion's and SolidWorks's boxes — it left the
+            // sketch instead, and the rectangle with it.
+            KeyCode::Tab if !self.sketching.typed.is_empty() => Some(','),
             _ => None,
         };
+        // A letter while a number is being typed is its unit begun, or a
+        // slip: not another tool's shortcut, which threw the number and
+        // what was being drawn away.
+        if !self.sketching.typed.is_empty() && format!("{code:?}").starts_with("Key") {
+            return true;
+        }
         // Before a drawing tool's first point: a number typed measures that
         // point from the one under the pointer — a face's corner, an end —
         // or from the sketch's origin when it is over none. The rest is
@@ -7420,7 +7519,7 @@ impl App {
                         self.sketching.typed.clear();
                     }
                     (Tool::Line, []) => self.commit_sketch_line(false),
-                    (Tool::Spline, []) => self.commit_sketch_spline(false),
+                    (Tool::Spline | Tool::ControlSpline, []) => self.commit_sketch_spline(false),
                     (Tool::Rectangle, [w, h, ..]) if self.active_drawing().is_some() => {
                         let first = self.sketching.clicks[0];
                         let far = kreate::sketching::corner(first.0, toward, *w, *h);
@@ -7484,7 +7583,9 @@ impl App {
                     // Put back, nothing else.
                 } else if tool == Tool::Line && self.sketching.clicks.len() >= 2 {
                     self.commit_sketch_line(false);
-                } else if tool == Tool::Spline && self.sketching.clicks.len() >= 2 {
+                } else if matches!(tool, Tool::Spline | Tool::ControlSpline)
+                    && self.sketching.clicks.len() >= 2
+                {
                     self.commit_sketch_spline(false);
                 } else if !self.sketching.clicks.is_empty()
                     || !self.sketching.picks.is_empty()
@@ -7757,11 +7858,22 @@ impl App {
         if !d.is_finite() || d.abs() < 1e-12 {
             return;
         }
-        let (z0, z1) = if dialog.symmetric {
-            (-d * 0.5, d * 0.5)
+        // From its start offset, and back along its second side, as it will
+        // be made.
+        let more = if dialog.more {
+            kreate_scene::feature::ExtrudeMore {
+                second: if dialog.symmetric {
+                    0.0
+                } else {
+                    dialog.second * self.ui.length_unit
+                },
+                offset: dialog.offset * self.ui.length_unit,
+                ..Default::default()
+            }
         } else {
-            (0.0, d)
+            Default::default()
         };
+        let (z0, z1) = more.span(d, dialog.symmetric);
         let cut = dialog.operation == 2;
         let at =
             |p: glam::Vec2, z: f64| world.transform_point3(DVec3::new(p.x as f64, p.y as f64, z));
@@ -8540,14 +8652,11 @@ impl App {
                     if let Some(chat) = &mut self.chat {
                         chat.set_provider(provider);
                     }
+                    // The one to start with next time.
+                    provider.save();
                     self.ui.chat_provider = index;
                     // A program's own list now; Ollama's when it answers.
-                    self.ui.chat_models = self
-                        .chat
-                        .as_ref()
-                        .map(|c| c.model_names())
-                        .unwrap_or_default();
-                    self.ui.chat_model = self.chat.as_ref().map_or(0, |c| c.model_index());
+                    self.publish_chat_choices();
                     self.ui.chat_log.clear();
                     self.ui.chat_account = kreate_ui::chat::ChatAccount::Checking;
                     self.ui.chat_busy = false;
@@ -8555,16 +8664,20 @@ impl App {
                 Command::ChatModel { index } => {
                     if let Some(chat) = &mut self.chat {
                         chat.set_model(index);
-                        self.ui.chat_models = chat.model_names();
-                        self.ui.chat_model = chat.model_index();
                     }
+                    self.publish_chat_choices();
                 }
                 Command::ChatModelName { name } => {
                     if let Some(chat) = &mut self.chat {
                         chat.set_model_name(&name);
-                        self.ui.chat_models = chat.model_names();
-                        self.ui.chat_model = chat.model_index();
                     }
+                    self.publish_chat_choices();
+                }
+                Command::ChatEffort { index } => {
+                    if let Some(chat) = &mut self.chat {
+                        chat.set_effort(index);
+                    }
+                    self.publish_chat_choices();
                 }
                 Command::ChatSignIn => {
                     if let Some(chat) = &mut self.chat {
@@ -15342,6 +15455,8 @@ impl App {
                     if self.op_ctx.mode != OpMode::Sketch {
                         self.set_mode(OpMode::Sketch);
                     }
+                    // What the tool before had under way is kept first.
+                    self.finish_sketch_stroke();
                     // The pattern works on what is selected: it is kept.
                     let picked = (self.sketching.points.clone(), self.sketching.lines.clone());
                     self.sketching.take(tool);
@@ -15381,6 +15496,10 @@ impl App {
                     ) {
                         (self.sketching.points, self.sketching.lines) = picked;
                         self.ui.pattern_dialog.picking_centre = false;
+                        // A path picked in another sketch names other
+                        // curves in this one: picked again, here.
+                        self.ui.pattern_dialog.path.clear();
+                        self.ui.pattern_dialog.picking_path = self.ui.pattern_dialog.along_path;
                     }
                     self.redraw.set(RedrawReason::UI);
                 }
@@ -15491,6 +15610,10 @@ impl App {
             "app.sketch_delete"
                 if self.op_ctx.mode == OpMode::Sketch && self.active_drawing().is_some() =>
             {
+                // A drag still under way is put back first, its step ended:
+                // deleted from under it, the step stayed open.
+                self.cancel_sketch_drag();
+                self.settle_sketch_drag();
                 let ids = self
                     .sketch_geometry()
                     .map(|g| g.entities_in(&self.sketching.points, &self.sketching.lines))
@@ -17804,17 +17927,26 @@ pub fn run(event_loop: EventLoop<()>, args: Vec<String>) {
     app.file = file;
     // The connector's way in. A failure costs the connector and nothing else.
     let chat_proxy = std::sync::Mutex::new(event_loop.create_proxy());
-    let chat = kreate::claude::Chat::new(move || {
+    let mut chat = kreate::claude::Chat::new(move || {
         if let Ok(proxy) = chat_proxy.lock() {
             let _ = proxy.send_event(());
         }
     });
-    // Asked once at start, off the main thread: the panel shows who it will
-    // talk as before anything is typed.
-    chat.check_account();
-    app.ui.chat_models = chat.model_names();
-    app.ui.chat_model = chat.model_index();
+    // The assistant talked to last time. Its account is asked once at
+    // start, off the main thread: the panel shows who it will talk as
+    // before anything is typed.
+    let assistant = kreate::claude::Provider::saved();
+    if assistant == chat.provider() {
+        chat.check_account();
+    } else {
+        chat.set_provider(assistant);
+    }
+    app.ui.chat_provider = kreate::claude::Provider::ALL
+        .iter()
+        .position(|p| *p == assistant)
+        .unwrap_or(0);
     app.chat = Some(chat);
+    app.publish_chat_choices();
     app.restore_chat();
     let outbox_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     app.outbox = Some(kreate::contact::Outbox::new(move || {
@@ -21210,8 +21342,13 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         assert_ne!(s, part);
         let o = app.doc.object(s).unwrap();
         let outline = o.drawing.as_deref().unwrap().profile_curves();
+        // Each side a line of its own, to be drawn parallel to and
+        // measured from.
         assert!(
-            matches!(outline.as_slice(), [(_, kreate_geom2d::Curve2D::Polyline { verts, closed: true })] if verts.len() == 4),
+            outline.len() == 4
+                && outline
+                    .iter()
+                    .all(|(_, c)| matches!(c, kreate_geom2d::Curve2D::Line { .. })),
             "the face's square: {outline:?}"
         );
         // On the face: the sketch's origin is on the cube's surface.

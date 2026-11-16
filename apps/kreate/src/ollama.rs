@@ -398,6 +398,7 @@ pub fn turn(
     history: Arc<Mutex<Vec<Value>>>,
     words: String,
     pictures: Vec<String>,
+    think: bool,
     connector: PathBuf,
     system: &str,
     stop: Arc<Stop>,
@@ -409,7 +410,7 @@ pub fn turn(
         wake();
     };
     let end = match run(
-        &model, &history, words, pictures, &connector, system, &stop, &say,
+        &model, &history, words, pictures, think, &connector, system, &stop, &say,
     ) {
         Ok(()) => None,
         Err(_) if stop.stopped() => Some("stopped".to_string()),
@@ -424,6 +425,7 @@ fn run(
     history: &Mutex<Vec<Value>>,
     words: String,
     pictures: Vec<String>,
+    think: bool,
     connector: &Path,
     system: &str,
     stop: &Stop,
@@ -490,9 +492,10 @@ fn run(
         if !tools.is_empty() && !answer_now {
             body["tools"] = json!(tools);
         }
-        // A thinking model's thoughts are slow and not shown; told not to.
+        // A thinking model's thoughts are slow and not shown: told not to,
+        // unless the panel's effort asks for them.
         if model.thinking {
-            body["think"] = json!(false);
+            body["think"] = json!(think);
         }
         let (text, calls) = ask(&body, stop, say)?;
         let mut reply = json!({ "role": "assistant", "content": text });

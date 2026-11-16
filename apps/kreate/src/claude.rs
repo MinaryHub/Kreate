@@ -129,7 +129,7 @@ impl Provider {
     pub fn suggested_models(self) -> &'static [&'static str] {
         match self {
             // Claude Code's aliases, which follow the newest of each.
-            Provider::Claude => &["opus", "sonnet", "haiku"],
+            Provider::Claude => &["fable", "opus", "sonnet", "haiku"],
             Provider::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
             Provider::ChatGpt => &["gpt-5", "gpt-5-codex"],
             Provider::Ollama => &[],
@@ -163,6 +163,64 @@ impl Provider {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(path, with_saved_model(&text, self.key(), model));
+    }
+
+    /// How hard the assistant can be told to think before it answers, least
+    /// first, in the words its program takes; none where the program gives
+    /// no say in it. More is slower and costs more, and does better on a
+    /// part that takes working out.
+    pub fn efforts(self) -> &'static [&'static str] {
+        match self {
+            // `claude --effort`.
+            Provider::Claude => &["low", "medium", "high", "xhigh", "max"],
+            // Codex's `model_reasoning_effort`.
+            Provider::ChatGpt => &["low", "medium", "high"],
+            // The Gemini CLI takes none.
+            Provider::Gemini => &[],
+            // A model that thinks is let think, or told not to.
+            Provider::Ollama => &["low", "high"],
+        }
+    }
+
+    /// The effort picked for it last time; `None` is the tool's own.
+    pub fn saved_effort(self) -> Option<String> {
+        let text = std::fs::read_to_string(chat_models_path()?).ok()?;
+        saved_model_in(&text, &format!("{}.effort", self.key()))
+            .filter(|e| self.efforts().contains(&e.as_str()))
+    }
+
+    /// Remembers the effort picked for it; `None` goes back to its own.
+    pub fn save_effort(self, effort: Option<&str>) {
+        let Some(path) = chat_models_path() else {
+            return;
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let key = format!("{}.effort", self.key());
+        let _ = std::fs::write(path, with_saved_model(&text, &key, effort));
+    }
+
+    /// The assistant the panel talked to last time, to start with it again.
+    pub fn saved() -> Provider {
+        chat_models_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|text| saved_model_in(&text, "assistant"))
+            .and_then(|key| Provider::ALL.into_iter().find(|p| p.key() == key))
+            .unwrap_or_default()
+    }
+
+    /// Remembers this as the assistant talked to.
+    pub fn save(self) {
+        let Some(path) = chat_models_path() else {
+            return;
+        };
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, with_saved_model(&text, "assistant", Some(self.key())));
     }
 
     /// A folder of Kreate's own for the tool to run in.
@@ -261,21 +319,32 @@ pub fn claude_tool_args(memory: Option<String>) -> Vec<String> {
 
 /// Whether this Claude Code can refuse what would need asking.
 fn claude_knows_prompts(tool: &Path) -> bool {
+    claude_knows(tool, "--permission-prompts")
+}
+
+/// Whether this Claude Code's help names `flag`: asked of it once, and
+/// kept — an older one stops at a flag it does not know.
+fn claude_knows(tool: &Path, flag: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static KNOWN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
-    let known = KNOWN.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(answer) = known.lock().ok().and_then(|k| k.get(tool).copied()) {
+    static HELP: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let known = HELP.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(answer) = known
+        .lock()
+        .ok()
+        .and_then(|k| k.get(tool).map(|help| help.contains(flag)))
+    {
         return answer;
     }
-    let answer = quiet_command(tool)
+    let help = quiet_command(tool)
         .arg("--help")
         .stdin(Stdio::null())
         .output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).contains("--permission-prompts"))
-        .unwrap_or(false);
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    let answer = help.contains(flag);
     if let Ok(mut k) = known.lock() {
-        k.insert(tool.to_path_buf(), answer);
+        k.insert(tool.to_path_buf(), help);
     }
     answer
 }
@@ -358,6 +427,13 @@ pub enum Event {
     SignedIn(Option<String>),
     /// The models Ollama has; [`Chat::model`] is the one picked.
     Models(Vec<crate::ollama::Model>),
+    /// What the answer took, where the tool says: the tokens read and
+    /// written, and what they cost in dollars.
+    Usage {
+        input: u64,
+        output: u64,
+        cost: Option<f64>,
+    },
 }
 
 /// Who an assistant's tool is signed in as.
@@ -393,6 +469,9 @@ pub struct Chat {
     model: Option<usize>,
     /// The model a CLI tool is asked for, `None` its own default.
     cli_model: Option<String>,
+    /// How hard the assistant is told to think, one of
+    /// [`Provider::efforts`]; `None` its own default.
+    effort: Option<String>,
     local: Arc<std::sync::Mutex<Vec<Value>>>,
     /// A message waiting on its YouTube links being read.
     preparing: Option<Preparing>,
@@ -436,6 +515,7 @@ impl Chat {
             models: Vec::new(),
             model: None,
             cli_model: Provider::default().saved_model(),
+            effort: Provider::default().saved_effort(),
             local: Arc::default(),
             preparing: None,
         }
@@ -518,6 +598,42 @@ impl Chat {
         self.provider.save_model(self.cli_model.as_deref());
     }
 
+    /// The efforts the panel offers: the assistant's own default first, as
+    /// an empty name, then [`Provider::efforts`]; empty when the assistant's
+    /// program gives no say in it.
+    pub fn effort_names(&self) -> Vec<String> {
+        let efforts = self.provider.efforts();
+        if efforts.is_empty() {
+            return Vec::new();
+        }
+        std::iter::once(String::new())
+            .chain(efforts.iter().map(|e| e.to_string()))
+            .collect()
+    }
+
+    /// Which of [`Chat::effort_names`] the next message is answered with.
+    pub fn effort_index(&self) -> usize {
+        self.effort
+            .as_ref()
+            .and_then(|e| self.effort_names().iter().position(|n| n == e))
+            .unwrap_or(0)
+    }
+
+    /// The effort the next message is answered with; `None` the tool's own.
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
+    }
+
+    /// Answers with another of [`Chat::effort_names`] from the next message
+    /// on, remembered for next time. The conversation carries over.
+    pub fn set_effort(&mut self, index: usize) {
+        let Some(name) = self.effort_names().get(index).cloned() else {
+            return;
+        };
+        self.effort = (!name.is_empty()).then_some(name);
+        self.provider.save_effort(self.effort.as_deref());
+    }
+
     /// The assistant's session, which the next message carries on.
     pub fn session(&self) -> Option<&str> {
         self.session.as_deref()
@@ -544,6 +660,7 @@ impl Chat {
         self.cancel_sign_in();
         self.provider = provider;
         self.cli_model = provider.saved_model();
+        self.effort = provider.saved_effort();
         self.check_account();
     }
 
@@ -887,6 +1004,11 @@ impl Chat {
                 if let Some(model) = &self.cli_model {
                     command.arg("--model").arg(model);
                 }
+                if let Some(effort) = self.effort.as_deref() {
+                    if claude_knows(&tool, "--effort") {
+                        command.arg("--effort").arg(effort);
+                    }
+                }
                 if let Some(session) = &self.session {
                     command.args(["--resume", session]);
                 }
@@ -943,6 +1065,11 @@ impl Chat {
                     .args(["-c", "approval_policy=\"never\""]);
                 if let Some(model) = &self.cli_model {
                     command.arg("--model").arg(model);
+                }
+                if let Some(effort) = self.effort.as_deref() {
+                    command
+                        .arg("-c")
+                        .arg(format!("model_reasoning_effort={}", toml_string(effort)));
                 }
                 // Pictures as files in Kreate's own folder for the tool, the
                 // only place it is let read.
@@ -1041,12 +1168,15 @@ impl Chat {
             Arc::clone(&self.wake),
             Arc::clone(&stop),
         );
+        // A model that thinks is let think only when asked for the effort.
+        let think = self.effort.as_deref() == Some("high");
         std::thread::spawn(move || {
             crate::ollama::turn(
                 model,
                 history,
                 words,
                 pictures,
+                think,
                 connector,
                 SYSTEM_PROMPT,
                 halt,
@@ -1565,12 +1695,14 @@ pub fn parse_gemini_line(line: &str) -> Vec<Event> {
         Some("error") if text("severity") != "warning" => vec![Event::ToolError(text("message"))],
         Some("result") => {
             let failed = text("status") == "error";
-            vec![Event::Done(failed.then(|| {
+            let mut out = usage_of(m.get("stats"), None);
+            out.push(Event::Done(failed.then(|| {
                 m.pointer("/error/message")
                     .and_then(Value::as_str)
                     .unwrap_or("Gemini did not answer")
                     .to_string()
-            }))]
+            })));
+            out
         }
         _ => Vec::new(),
     }
@@ -1616,7 +1748,11 @@ pub fn parse_codex_line(line: &str) -> Vec<Event> {
                 detail: field(item, "command"),
             }]
         }
-        (Some("turn.completed"), _) => vec![Event::Done(None)],
+        (Some("turn.completed"), _) => {
+            let mut out = usage_of(m.get("usage"), None);
+            out.push(Event::Done(None));
+            out
+        }
         (Some("turn.failed"), _) => {
             let why = m
                 .pointer("/error/message")
@@ -1682,6 +1818,10 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                     .get("subtype")
                     .and_then(Value::as_str)
                     .is_some_and(|s| s != "success");
+            out.extend(usage_of(
+                message.get("usage"),
+                message.get("total_cost_usd").and_then(Value::as_f64),
+            ));
             out.push(Event::Done(failed.then(|| {
                 message
                     .get("result")
@@ -1694,6 +1834,28 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         _ => {}
     }
     out
+}
+
+/// A tool's count of what a turn took, as [`Event::Usage`]: the tokens it
+/// read — those it had kept from before among them — and wrote. Nothing
+/// when the tool counted none.
+fn usage_of(usage: Option<&Value>, cost: Option<f64>) -> Vec<Event> {
+    let Some(usage) = usage else {
+        return Vec::new();
+    };
+    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let input = count("input_tokens")
+        + count("cache_creation_input_tokens")
+        + count("cache_read_input_tokens");
+    let output = count("output_tokens");
+    if input + output == 0 {
+        return Vec::new();
+    }
+    vec![Event::Usage {
+        input,
+        output,
+        cost: cost.filter(|c| *c > 0.0),
+    }]
 }
 
 fn content(message: &Value) -> &[Value] {
@@ -2241,11 +2403,16 @@ mod tests {
         assert_eq!(saved_model_in(&text, "codex"), None);
     }
 
+    /// The file the choices are kept in is every test's: those that write
+    /// it take turns.
+    static CHOICES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A program's list starts with its own default, then what it is known
     /// to take; a name typed is added to it, picked, and kept for that
     /// assistant only.
     #[test]
     fn a_model_is_picked_from_the_list_or_typed() {
+        let _turn = CHOICES.lock();
         let mut chat = Chat::new(|| {});
         chat.set_provider(Provider::Gemini);
         chat.set_model_name("");
@@ -2278,5 +2445,98 @@ mod tests {
         chat.set_model(0);
         assert_eq!(chat.cli_model(), None);
         assert_eq!(Provider::Gemini.saved_model(), None);
+    }
+
+    /// An effort is one of the assistant's own, its default first; picked,
+    /// it is kept for that assistant alone, beside its model. An assistant
+    /// whose program takes none offers none.
+    #[test]
+    fn an_effort_is_picked_and_kept_for_its_assistant() {
+        let _turn = CHOICES.lock();
+        let mut chat = Chat::new(|| {});
+        chat.set_provider(Provider::ChatGpt);
+        chat.set_effort(0);
+        assert_eq!(chat.effort_names(), ["", "low", "medium", "high"]);
+        assert_eq!((chat.effort(), chat.effort_index()), (None, 0));
+        chat.set_effort(3);
+        assert_eq!((chat.effort(), chat.effort_index()), (Some("high"), 3));
+        // Out of the list: nothing changes.
+        chat.set_effort(9);
+        assert_eq!(chat.effort(), Some("high"));
+
+        chat.set_effort(0);
+        assert_eq!(chat.effort(), None);
+
+        // An assistant whose program takes no effort offers none.
+        chat.set_provider(Provider::Gemini);
+        assert!(chat.effort_names().is_empty());
+        chat.set_effort(1);
+        assert_eq!(chat.effort(), None);
+
+        // Kept on a line of its own beside the assistant's model, which it
+        // does not disturb. (By the text: the file is every test's.)
+        let text = with_saved_model(
+            "codex = gpt-5
+",
+            "codex.effort",
+            Some("high"),
+        );
+        assert_eq!(
+            saved_model_in(&text, "codex.effort").as_deref(),
+            Some("high")
+        );
+        assert_eq!(saved_model_in(&text, "codex").as_deref(), Some("gpt-5"));
+        let text = with_saved_model(&text, "codex.effort", None);
+        assert_eq!(saved_model_in(&text, "codex.effort"), None);
+        assert_eq!(saved_model_in(&text, "codex").as_deref(), Some("gpt-5"));
+
+        // A saved word the program no longer takes is not passed on.
+        let text = with_saved_model("", "codex.effort", Some("ludicrous"));
+        assert_eq!(
+            saved_model_in(&text, "codex.effort")
+                .filter(|e| Provider::ChatGpt.efforts().contains(&e.as_str())),
+            None
+        );
+    }
+
+    /// What a turn took is said once, before its end, where the program
+    /// counts it: the tokens kept from before among those read, and the
+    /// cost only where there is one.
+    #[test]
+    fn a_turn_says_what_it_took() {
+        let claude = parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"abc","total_cost_usd":0.0421,"usage":{"input_tokens":12,"cache_read_input_tokens":3000,"cache_creation_input_tokens":88,"output_tokens":240}}"#,
+        );
+        assert_eq!(
+            claude,
+            vec![
+                Event::Session("abc".into()),
+                Event::Usage {
+                    input: 3100,
+                    output: 240,
+                    cost: Some(0.0421),
+                },
+                Event::Done(None),
+            ]
+        );
+        let codex = parse_codex_line(
+            r#"{"type":"turn.completed","usage":{"input_tokens":900,"cached_input_tokens":800,"output_tokens":50}}"#,
+        );
+        assert_eq!(
+            codex,
+            vec![
+                Event::Usage {
+                    input: 900,
+                    output: 50,
+                    cost: None,
+                },
+                Event::Done(None),
+            ]
+        );
+        // Nothing counted, nothing said.
+        assert_eq!(
+            parse_gemini_line(r#"{"type":"result","status":"success","stats":{}}"#),
+            vec![Event::Done(None)]
+        );
     }
 }

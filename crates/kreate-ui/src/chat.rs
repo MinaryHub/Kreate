@@ -115,6 +115,12 @@ pub struct ChatText {
     pub model_default: String,
     pub model_other: String,
     pub model_hint: String,
+    /// What the effort list is called, and what hovering it says.
+    pub effort: String,
+    pub effort_hint: String,
+    /// Things to ask, offered while nothing has been said: a click puts one
+    /// in the box, to send or to change first.
+    pub suggestions: Vec<String>,
     /// The API keys: the button that shows them, what is said of each — held
     /// (`{tail}` its last characters) or not — the field, its buttons, the
     /// link to where one is made, and the note under them.
@@ -151,6 +157,13 @@ pub struct ChatProviders<'a> {
     /// Whether a model the list does not have can be typed: the assistants
     /// whose program takes any name (not Ollama, which has what it has).
     pub other: bool,
+    /// How hard the assistant can be told to think, as the panel words
+    /// them, its own default first; empty when its program gives no say.
+    pub efforts: &'a [String],
+    pub effort: usize,
+    /// Whether there is an account to sign out of: not a model on this
+    /// computer, nor an API key, which is forgotten under API keys.
+    pub leaves: bool,
 }
 
 /// The panel itself. `attachments` go with the next message. Returns whether the input box has
@@ -171,6 +184,18 @@ pub fn chat(
     queue: &mut CommandQueue,
 ) -> bool {
     let theme = crate::theme::from_ui(ui);
+    let input_id = egui::Id::new("kreate-chat-input");
+    // How long the answer in progress has been coming, for the line that
+    // says it is: a spinner alone says nothing of a long think.
+    let since_id = egui::Id::new("kreate-chat-busy-since");
+    let now = ui.input(|i| i.time);
+    let waited = if busy {
+        let since: f64 = ui.data_mut(|d| *d.get_temp_mut_or(since_id, now));
+        (now - since).max(0.0) as u64
+    } else {
+        ui.data_mut(|d| d.remove::<f64>(since_id));
+        0
+    };
 
     // Which assistant, first: changing it starts a new conversation, so not
     // while one is answering or signing in.
@@ -248,6 +273,30 @@ pub fn chat(
                     .response
                     .on_hover_text(&text.model_hint);
             }
+            // How hard it thinks: beside the model, which it goes with.
+            if !providers.efforts.is_empty() {
+                let current = providers
+                    .efforts
+                    .get(providers.effort)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                egui::ComboBox::from_id_salt("chat-effort")
+                    .width(124.0)
+                    .selected_text(format!("{}: {current}", text.effort))
+                    .show_ui(ui, |ui| {
+                        for (index, name) in providers.efforts.iter().enumerate() {
+                            if ui
+                                .selectable_label(index == providers.effort, name.as_str())
+                                .clicked()
+                                && index != providers.effort
+                            {
+                                queue.push(Command::ChatEffort { index });
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(&text.effort_hint);
+            }
         });
         // To the right when they fit beside the assistant, else on a row
         // of their own.
@@ -303,7 +352,7 @@ pub fn chat(
             buttons(ui);
         }
     });
-    draw_account(ui, &theme, text, account, code, queue);
+    draw_account(ui, &theme, text, account, providers.leaves, code, queue);
     let open_id = ui.id().with("chat-keys-open");
     if ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
         draw_keys(ui, &theme, text, keys, queue);
@@ -345,7 +394,7 @@ pub fn chat(
             });
         }
         ui.add_space(4.0);
-        let id = ui.make_persistent_id("claude-chat-input");
+        let id = input_id;
         let mut focused = ui.memory(|m| m.has_focus(id));
         egui::Frame::new()
             .fill(theme.raised)
@@ -368,6 +417,16 @@ pub fn chat(
                         .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter)),
                 );
                 focused = response.has_focus();
+                // Up in an empty box brings back what was last said, to send
+                // again or to change — as a shell's history does.
+                if response.has_focus()
+                    && input.is_empty()
+                    && ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
+                {
+                    if let Some(last) = messages.iter().rev().find(|m| m.role == ChatRole::User) {
+                        *input = last.text.clone();
+                    }
+                }
                 let entered = response.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                 // Something attached is worth sending without a word.
@@ -420,7 +479,10 @@ pub fn chat(
         .show(ui, |ui| {
             ui.add_space(4.0);
             if messages.is_empty() {
-                draw_empty(ui, &theme, &text.empty);
+                if let Some(ask) = draw_empty(ui, &theme, text) {
+                    *input = ask;
+                    ui.memory_mut(|m| m.request_focus(input_id));
+                }
             }
             let mut index = 0;
             while index < messages.len() {
@@ -443,7 +505,27 @@ pub fn chat(
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(egui::RichText::new(&text.working).color(theme.text_dim));
+                    // How long, and the tool it is waiting on, when it is.
+                    let clock = if waited >= 60 {
+                        format!("{}:{:02}", waited / 60, waited % 60)
+                    } else {
+                        format!("{waited} s")
+                    };
+                    let doing = messages
+                        .last()
+                        .filter(|m| m.role == ChatRole::Tool)
+                        .map(|m| m.text.split(':').next().unwrap_or("").trim().to_string())
+                        .filter(|name| !name.is_empty());
+                    let said = match doing {
+                        Some(name) => format!("{clock} · {name}"),
+                        None => clock,
+                    };
+                    // i18n-exempt: a time and a tool's name
+                    ui.label(egui::RichText::new(said).small().color(theme.text_faint));
                 });
+                // The clock moves while nothing else does.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(500));
             }
             ui.add_space(6.0);
         });
@@ -451,8 +533,10 @@ pub fn chat(
     focused
 }
 
-/// What the panel says before anything has been said.
-fn draw_empty(ui: &mut Ui, theme: &crate::Theme, empty: &str) {
+/// What the panel says before anything has been said, and a few things to
+/// ask: the one clicked, to go in the box.
+fn draw_empty(ui: &mut Ui, theme: &crate::Theme, text: &ChatText) -> Option<String> {
+    let mut picked = None;
     ui.add_space(24.0);
     ui.vertical_centered(|ui| {
         ui.set_max_width(320.0_f32.min(ui.available_width()));
@@ -461,9 +545,22 @@ fn draw_empty(ui: &mut Ui, theme: &crate::Theme, empty: &str) {
             .corner_radius(8.0)
             .inner_margin(egui::Margin::same(14))
             .show(ui, |ui| {
-                ui.add(egui::Label::new(egui::RichText::new(empty).color(theme.text_dim)).wrap());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&text.empty).color(theme.text_dim)).wrap(),
+                );
             });
+        ui.add_space(8.0);
+        for ask in &text.suggestions {
+            let button = egui::Button::new(egui::RichText::new(ask).small().color(theme.text_dim))
+                .wrap()
+                .min_size(egui::vec2(ui.available_width(), 0.0));
+            if ui.add(button).clicked() {
+                picked = Some(ask.clone());
+            }
+            ui.add_space(2.0);
+        }
     });
+    picked
 }
 
 /// A run of tool lines, folded under one row that counts them.
@@ -501,6 +598,7 @@ fn draw_account(
     theme: &crate::Theme,
     text: &ChatText,
     account: &ChatAccount,
+    leaves: bool,
     code: &mut String,
     queue: &mut CommandQueue,
 ) {
@@ -514,8 +612,10 @@ fn draw_account(
         ChatAccount::SignedIn { email, detail } => {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // A model on this computer has no account to leave.
-                    if detail != "(local)"
+                    // A model on this computer has no account to leave, nor
+                    // has an API key.
+                    if leaves
+                        && detail != "(local)"
                         && ui
                             .add(
                                 egui::Button::new(egui::RichText::new(&text.sign_out).small())

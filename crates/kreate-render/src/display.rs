@@ -386,7 +386,19 @@ impl ScreenResolve {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: Some("resolve_fragment"),
+                // Eight bits a channel band a slow gradient — a backdrop
+                // from grey to white in sixty steps — so onto those the
+                // picture goes with a step's worth of noise.
+                entry_point: Some(
+                    if matches!(
+                        format,
+                        wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb
+                    ) {
+                        "resolve_fragment_dithered"
+                    } else {
+                        "resolve_fragment"
+                    },
+                ),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,

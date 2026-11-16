@@ -506,10 +506,16 @@ fn dimension(d: &Dimension, sign: f64, layout: &Layout, x: &[f64], out: &mut Vec
     if let Some(got) = got {
         // Horizontal and vertical are signed by how they were drawn, so a
         // value holds the points on the side they are on.
+        // An angle too: measured one way round it is negative, and held
+        // to its size without its side the second line swung through to the
+        // other — sixty degrees, for an angle of thirty.
         let want = match d.kind {
             DimKind::Horizontal | DimKind::Vertical | DimKind::OrdinateX | DimKind::OrdinateY => {
                 d.value * sign
             }
+            // By its size, on the side it is: a sketch brought from an
+            // older file holds its angles signed already.
+            DimKind::Angular => d.value.abs() * sign,
             _ => d.value,
         };
         out.push(got - want);

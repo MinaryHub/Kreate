@@ -29,6 +29,7 @@ fn a_local_model_looks_at_the_scene_through_the_tools() {
             "Call get_scene, then tell me in one sentence how many objects the scene has.".into()
         }),
         Vec::new(),
+        false,
         connector,
         "You are inside Kreate, a 3D modelling application.",
         Arc::default(),

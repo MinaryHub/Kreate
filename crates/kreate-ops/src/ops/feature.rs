@@ -347,10 +347,10 @@ fn add_from(
         shape,
         sketch: sketch_uid,
         seeds,
-        operation: if operation == 2 {
-            Operation::Cut
-        } else {
-            Operation::Join
+        operation: match operation {
+            2 => Operation::Cut,
+            3 => Operation::Intersect,
+            _ => Operation::Join,
         },
         order,
         suppressed: false,
@@ -367,7 +367,19 @@ fn add_from(
             let name = d.unique_object_name("Body");
             let mut object = Object::new(name, ObjectData::Mesh(mesh));
             object.features.push(f);
-            d.add_object(object);
+            let body = d.add_object(object);
+            // The sketch it is made from goes with it from now on: a body
+            // is placed by its sketches, and with the sketch left behind
+            // moving the body moved its origin and nothing else. Only a
+            // sketch that is nobody's yet — one already a face's, or
+            // another body's, stays theirs.
+            let free = d.object(sketch).is_some_and(|o| o.parent.is_none())
+                && !d
+                    .objects()
+                    .any(|(id, o)| id != body && o.features.iter().any(|g| g.sketch == sketch_uid));
+            if free {
+                let _ = d.set_parent(sketch, Some(body));
+            }
         }
     }
     Ok(OpResult::Finished)
@@ -388,33 +400,51 @@ fn join_or_cut_mesh(
 ) -> Result<OpResult, OpError> {
     use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
     let d = doc.document();
-    let mut piece = feature::solid(d, &f);
-    if piece.num_faces() == 0 {
-        return Err(OpError::Failed("the regions make no solid".into()));
-    }
     let sketch_world = d
         .object_by_uid(f.sketch)
         .map(|id| d.world_transform(id))
         .unwrap_or_default();
+    // Through all: past the far side of the part as it stands.
+    let reach = match f.shape {
+        Shape::Extrude { more, .. } if more.through => {
+            let to_sketch = sketch_world.inverse() * d.world_transform(target);
+            kreate_scene::modifier::shown_base(d, target).map(|m| {
+                m.positions()
+                    .iter()
+                    .map(|p| to_sketch.transform_point3(p.as_dvec3()).z.abs())
+                    .fold(0.0f64, f64::max)
+            })
+        }
+        _ => None,
+    };
+    let mut piece = feature::solid_reaching(d, &f, reach);
+    if piece.num_faces() == 0 {
+        return Err(OpError::Failed("the regions make no solid".into()));
+    }
     for p in piece.positions_mut() {
         *p = sketch_world.transform_point3(p.as_dvec3()).as_vec3();
     }
-    let cut = f.operation == Operation::Cut;
     let target_name = d.object(target).map(|o| o.name.clone()).unwrap_or_default();
     let d = doc.document_mut();
     let mesh = d.add_mesh(piece);
     let name = d.unique_object_name(&format!(
         "{target_name} {}",
-        if cut { "Cut" } else { "Join" }
+        match f.operation {
+            Operation::Cut => "Cut",
+            Operation::Intersect => "Intersect",
+            Operation::Join => "Join",
+        }
     ));
     let mut tool = Object::new(name, ObjectData::Mesh(mesh));
     tool.visible = false;
     let tool = d.add_object(tool);
+    // The part's own: moved with it, where it is kept live.
+    let _ = d.set_parent(tool, Some(target));
     let operand = d.object_uid(tool).expect("just added");
-    let op = if cut {
-        kreate_mesh::modifiers::BooleanOp::Difference
-    } else {
-        kreate_mesh::modifiers::BooleanOp::Union
+    let op = match f.operation {
+        Operation::Cut => kreate_mesh::modifiers::BooleanOp::Difference,
+        Operation::Intersect => kreate_mesh::modifiers::BooleanOp::Intersect,
+        Operation::Join => kreate_mesh::modifiers::BooleanOp::Union,
     };
     let object = d.object_mut(target).expect("the target");
     let bakeable = object.modifiers.is_empty();
@@ -704,10 +734,24 @@ pub struct ExtrudeParams {
     pub distance: f64,
     /// Half each way.
     pub symmetric: bool,
-    #[param(variants("new_body", "join", "cut"))]
+    /// Join adds to the body, cut takes away, intersect keeps only what
+    /// the body and the extrude share.
+    #[param(variants("new_body", "join", "cut", "intersect"))]
     pub operation: u32,
     /// The body joined or cut, by name; the latest when empty.
     pub target: String,
+    /// How far it goes the other way too: two sides, each its own length.
+    #[param(min = 0.0, soft_max = 1.0, unit = "length")]
+    pub second: f64,
+    /// Where it starts: this far off the sketch's plane, the way it goes.
+    #[param(soft_min = -1.0, soft_max = 1.0, unit = "length")]
+    pub offset: f64,
+    /// How its sides lean, in radians: positive widens as it goes,
+    /// negative narrows — a draft.
+    #[param(min = -1.4, max = 1.4, unit = "angle")]
+    pub taper: f64,
+    /// Through all of the body in its way; `distance` says which way.
+    pub through: bool,
 }
 
 impl Default for ExtrudeParams {
@@ -718,6 +762,10 @@ impl Default for ExtrudeParams {
             symmetric: false,
             operation: 0,
             target: String::new(),
+            second: 0.0,
+            offset: 0.0,
+            taper: 0.0,
+            through: false,
         }
     }
 }
@@ -744,11 +792,18 @@ impl Operator for Extrude {
         if !params.distance.is_finite() || params.distance == 0.0 {
             return Err(OpError::Failed("an extrude needs a distance".into()));
         }
+        let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
         add(
             doc,
             Shape::Extrude {
                 distance: params.distance,
                 symmetric: params.symmetric,
+                more: kreate_scene::feature::ExtrudeMore {
+                    second: finite(params.second).abs(),
+                    offset: finite(params.offset),
+                    taper: finite(params.taper).clamp(-1.4, 1.4),
+                    through: params.through,
+                },
             },
             &params.seeds,
             params.operation,
@@ -771,7 +826,7 @@ pub struct RevolveParams {
     /// How far round, in radians: a whole turn is a ring.
     #[param(unit = "angle")]
     pub angle: f64,
-    #[param(variants("new_body", "join", "cut"))]
+    #[param(variants("new_body", "join", "cut", "intersect"))]
     pub operation: u32,
     pub target: String,
 }
@@ -848,8 +903,17 @@ pub struct SetParams {
     /// The extrude's distance, or the revolve's angle.
     pub amount: f64,
     pub symmetric: bool,
-    #[param(variants("join", "cut"))]
+    #[param(variants("join", "cut", "intersect"))]
     pub operation: u32,
+    /// An extrude's second side, start offset, taper (radians) and whether
+    /// it goes through all: see `feature.extrude`.
+    #[param(unit = "length")]
+    pub second: f64,
+    #[param(unit = "length")]
+    pub offset: f64,
+    #[param(unit = "angle")]
+    pub taper: f64,
+    pub through: bool,
     /// New regions, as x, y pairs; empty keeps them.
     #[param(hidden)]
     pub seeds: Vec<f64>,
@@ -887,10 +951,15 @@ impl Operator for Set {
         };
         let body = body_named(doc, &name).filter(|_| !name.trim().is_empty())?;
         let f = doc.object(body)?.features.get(index as usize)?;
+        let more = match &f.shape {
+            Shape::Extrude { more, .. } => *more,
+            _ => Default::default(),
+        };
         let (amount, symmetric) = match &f.shape {
             Shape::Extrude {
                 distance,
                 symmetric,
+                ..
             } => (*distance, *symmetric),
             Shape::Revolve { angle, .. } => (*angle, false),
             Shape::Round { radius, .. } => (*radius, false),
@@ -909,7 +978,15 @@ impl Operator for Set {
             index,
             amount,
             symmetric,
-            operation: u32::from(f.operation == Operation::Cut),
+            operation: match f.operation {
+                Operation::Join => 0,
+                Operation::Cut => 1,
+                Operation::Intersect => 2,
+            },
+            second: more.second,
+            offset: more.offset,
+            taper: more.taper,
+            through: more.through,
             seeds: Vec::new(),
         })
     }
@@ -931,9 +1008,17 @@ impl Operator for Set {
                 Shape::Extrude {
                     distance,
                     symmetric,
+                    more,
                 } => {
                     *distance = params.amount;
                     *symmetric = params.symmetric;
+                    let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
+                    *more = kreate_scene::feature::ExtrudeMore {
+                        second: finite(params.second).abs(),
+                        offset: finite(params.offset),
+                        taper: finite(params.taper).clamp(-1.4, 1.4),
+                        through: params.through,
+                    };
                 }
                 Shape::Revolve { angle, .. } => *angle = params.amount,
                 Shape::Round { radius, .. } => *radius = params.amount.abs(),
@@ -954,10 +1039,10 @@ impl Operator for Set {
                 Shape::Mirror { .. } | Shape::Loft { .. } => {}
             }
         }
-        f.operation = if params.operation == 1 {
-            Operation::Cut
-        } else {
-            Operation::Join
+        f.operation = match params.operation {
+            1 => Operation::Cut,
+            2 => Operation::Intersect,
+            _ => Operation::Join,
         };
         let seeds = seeds_of(&params.seeds);
         if !seeds.is_empty() {

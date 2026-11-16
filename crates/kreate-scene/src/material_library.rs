@@ -31,12 +31,15 @@ pub enum Category {
     Glass,
     Stone,
     Rubber,
+    /// Paint over metal: a car's, under its clear coat; a powder coat.
+    Paint,
 }
 
 impl Category {
-    pub const ALL: [Category; 6] = [
+    pub const ALL: [Category; 7] = [
         Category::Metal,
         Category::Plastic,
+        Category::Paint,
         Category::Wood,
         Category::Glass,
         Category::Stone,
@@ -52,6 +55,7 @@ impl Category {
             Category::Glass => "physical-category-glass",
             Category::Stone => "physical-category-stone",
             Category::Rubber => "physical-category-rubber",
+            Category::Paint => "physical-category-paint",
         }
     }
 }
@@ -101,6 +105,10 @@ pub struct PhysicalMaterial {
     /// Kilograms per cubic metre.
     pub density: f64,
     pub finish: Finish,
+    /// A clear coat over it, nought to one: a car's lacquer, a varnish.
+    /// What gives paint its second, sharper highlight over the colour's
+    /// own soft one.
+    pub coat: f32,
 }
 
 impl PhysicalMaterial {
@@ -124,12 +132,22 @@ impl PhysicalMaterial {
             physical: Some(self.id.to_string()),
             ..Material::default()
         };
+        if self.coat > 0.0 {
+            material.layers.coat = self.coat;
+            material.layers.coat_roughness = 0.03;
+        }
         material.graph = finish_graph(&material, self.finish);
         material
     }
 
     const fn with(mut self, finish: Finish) -> Self {
         self.finish = finish;
+        self
+    }
+
+    /// Under a clear coat.
+    const fn coated(mut self) -> Self {
+        self.coat = 1.0;
         self
     }
 }
@@ -463,6 +481,7 @@ const fn solid(
         ior: 1.5,
         density,
         finish: Finish::Satin,
+        coat: 0.0,
     }
 }
 
@@ -485,6 +504,7 @@ const fn clear(
         ior,
         density,
         finish: Finish::Plain,
+        coat: 0.0,
     }
 }
 
@@ -505,6 +525,10 @@ pub const LIBRARY: &[PhysicalMaterial] = &[
     solid("bronze", Metal, 0xB8874F, 1.0, 0.35, 8800.0),
     solid("gold", Metal, 0xF3C766, 1.0, 0.2, 19300.0).with(Finish::Plain),
     solid("titanium", Metal, 0xA7A39C, 1.0, 0.35, 4500.0).with(Finish::Brushed),
+    solid("aluminum_polished", Metal, 0xE6E8EA, 1.0, 0.08, 2700.0).with(Finish::Plain),
+    solid("anodized_aluminum_red", Metal, 0xB0282E, 1.0, 0.38, 2700.0),
+    solid("anodized_aluminum_blue", Metal, 0x2A4FA8, 1.0, 0.38, 2700.0),
+    solid("anodized_aluminum_gold", Metal, 0xC9A24A, 1.0, 0.38, 2700.0),
     // Plastics.
     solid("abs_white", Plastic, 0xEDEBE6, 0.0, 0.45, 1050.0).with(Finish::Molded),
     solid("abs_black", Plastic, 0x1E1F21, 0.0, 0.45, 1050.0).with(Finish::Molded),
@@ -513,6 +537,27 @@ pub const LIBRARY: &[PhysicalMaterial] = &[
     solid("polypropylene", Plastic, 0xE9E7E1, 0.0, 0.5, 905.0).with(Finish::Molded),
     solid("plastic_glossy_red", Plastic, 0xC2272D, 0.0, 0.15, 1050.0),
     solid("plastic_matte_blue", Plastic, 0x2F5DA8, 0.0, 0.6, 1050.0).with(Finish::Molded),
+    solid("plastic_glossy_black", Plastic, 0x101113, 0.0, 0.1, 1050.0).with(Finish::Plain),
+    solid("plastic_glossy_white", Plastic, 0xF2F2EF, 0.0, 0.12, 1050.0).with(Finish::Plain),
+    // Paint over steel: the colour's own soft highlight under the
+    // lacquer's sharp one. The metallic one has flake in its colour coat.
+    solid("car_paint_red", Paint, 0xA80F18, 0.0, 0.5, 7850.0)
+        .with(Finish::Plain)
+        .coated(),
+    solid("car_paint_blue", Paint, 0x10357F, 0.0, 0.5, 7850.0)
+        .with(Finish::Plain)
+        .coated(),
+    solid("car_paint_black", Paint, 0x08080A, 0.0, 0.5, 7850.0)
+        .with(Finish::Plain)
+        .coated(),
+    solid("car_paint_white", Paint, 0xECECE8, 0.0, 0.5, 7850.0)
+        .with(Finish::Plain)
+        .coated(),
+    solid("car_paint_silver", Paint, 0xB4B7BB, 0.85, 0.42, 7850.0)
+        .with(Finish::Plain)
+        .coated(),
+    solid("powder_coat_black", Paint, 0x1B1C1E, 0.0, 0.55, 7850.0).with(Finish::Molded),
+    solid("powder_coat_white", Paint, 0xE8E8E4, 0.0, 0.5, 7850.0).with(Finish::Molded),
     clear("acrylic_clear", Plastic, 0xFFFFFF, 0.02, 0.95, 1.49, 1180.0),
     clear(
         "polycarbonate_clear",

@@ -150,6 +150,7 @@ impl App {
         });
         v.path_trace_denoise = settings.denoise;
         v.path_trace_bounces = settings.bounces;
+        v.path_trace_noise_threshold = quiet_enough(settings.samples);
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 
@@ -646,6 +647,7 @@ impl App {
                 v.path_trace_denoise,
             ) = saved.look;
             v.path_trace_bounces = 4;
+            v.path_trace_noise_threshold = quiet_enough(0);
         }
         self.camera = saved.camera;
         self.motion = saved.motion;
@@ -751,6 +753,7 @@ impl App {
             v.xray = false;
             v.face_orientation = false;
             v.sample_cap = Some(samples);
+            v.path_trace_noise_threshold = quiet_enough(samples);
         }
         self.rendering_still = true;
         self.capturing = true;
@@ -794,6 +797,49 @@ impl App {
             .as_ref()
             .map(|g| g.viewport.path_trace_samples())
             .unwrap_or(0);
+        // The summed picture through Open Image Denoise, where it is
+        // installed, as a render from the Render menu goes: the view's own
+        // filter leaves most of the grain in a picture of a few hundred
+        // samples, and this is a picture someone keeps.
+        let own_filter = self
+            .gfx
+            .as_ref()
+            .is_some_and(|g| g.viewport.path_trace_denoise);
+        if summed > 0 && own_filter && kreate_render::oidn::available() {
+            let cleaned = self.gfx.as_mut().is_some_and(|gfx| {
+                let clean = gfx
+                    .viewport
+                    .read_traced(&gfx.gpu.device, &gfx.gpu.queue)
+                    .and_then(|gathered| {
+                        let clean = kreate_render::oidn::denoise(&kreate_render::oidn::Noisy {
+                            width: gathered.width as usize,
+                            height: gathered.height as usize,
+                            color: &gathered.color,
+                            albedo: &gathered.albedo,
+                            normal: &gathered.normal,
+                        })?;
+                        Ok((gathered, clean))
+                    });
+                match clean {
+                    Ok((gathered, clean)) => {
+                        gfx.viewport.path_trace_denoise = false;
+                        gfx.viewport
+                            .show_traced_mean(&gfx.gpu.queue, &gathered, &clean);
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!("Open Image Denoise: {e}; the view's own filter is kept");
+                        false
+                    }
+                }
+            });
+            if cleaned {
+                // A frame for the cleaned picture to be shown in.
+                self.wanted_viewport = size;
+                self.render();
+                self.redraw.clear();
+            }
+        }
         let shot = self.read_target_png();
 
         // Back as it was, whatever happened.
@@ -811,6 +857,8 @@ impl App {
                 v.face_orientation,
                 v.sample_cap,
             ) = look;
+            v.path_trace_denoise = own_filter;
+            v.path_trace_noise_threshold = quiet_enough(0);
         }
         (
             self.camera,
@@ -930,5 +978,20 @@ impl App {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .map_err(|e| format!("cannot encode the capture: {e}"))?;
         Ok((w, h, png))
+    }
+}
+
+/// How quiet a pixel has to be for the path tracer to stop adding to it —
+/// its mean's standard error as a share of the mean — by how many samples a
+/// render asked for: a hundredth for the view and a quick render, less for
+/// one asked for more, or the samples it asked for were never taken where
+/// the picture was nearly, and not quite, clean.
+pub(crate) fn quiet_enough(samples: u32) -> f32 {
+    if samples >= 1024 {
+        0.002
+    } else if samples >= 256 {
+        0.004
+    } else {
+        0.01
     }
 }

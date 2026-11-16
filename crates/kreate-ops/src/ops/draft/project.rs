@@ -256,7 +256,7 @@ pub(crate) fn layer(d: &mut Drawing) -> LayerId {
 
 /// `curves` into the drawing on the PROJECTED layer, every point held where
 /// it is. Their ids.
-fn put(d: &mut Drawing, curves: Vec<Curve2D>) -> Vec<EntityId> {
+pub(crate) fn put(d: &mut Drawing, curves: Vec<Curve2D>) -> Vec<EntityId> {
     let on = layer(d);
     let before = d.current_layer;
     d.current_layer = on;

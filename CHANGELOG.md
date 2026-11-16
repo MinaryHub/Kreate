@@ -12,6 +12,34 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Extrude has what Fusion's and SolidWorks's have under the distance:
+  **Through all** of the part in its way, however thick it is or becomes;
+  a **second side** with its own distance; a **start offset** from the
+  sketch's plane; a **taper** for a mould's draft; and **Intersect** beside
+  Join and Cut, which keeps only what the part and the extrude share
+  (`feature.extrude(through=…, second=…, offset=…, taper=…,
+  operation="intersect")`; a revolve can intersect too).
+- The chat panel has an **Effort** list beside the model: how hard the
+  assistant thinks before it answers — Low to Max for Claude, Low to High
+  for ChatGPT — kept for each assistant. The assistant picked is the one
+  it starts with next time.
+- The chat says how long an answer has been coming and which tool it is
+  waiting on, and under each answer how long it took and the tokens it
+  read and wrote — with their cost, when an API key paid for them.
+- Up in the chat's empty box brings back what was last said; an empty
+  conversation offers three things to ask, a click each.
+- A dimension takes a length with its unit — `20mm`, `1.5 in`, `2 cm` —
+  in whatever unit the scene is in. Tab goes to the next number while one
+  is being typed in a sketch.
+- A sketch says whether it is fully defined, by its prompt: or how many of
+  its curves can still move.
+- Two parallel sides picked with the Dimension tool are dimensioned as the
+  distance between them (level or upright), not as an angle of nought.
+- The physical library has paint: car paint under a clear coat in five
+  colours, powder coat in two; and polished and anodised aluminium, and
+  gloss black and white plastic.
+- A render through the connector (`render_image`) is cleaned by Open Image
+  Denoise where it is installed, as a render from the Render menu is.
 - The material preview looks like SolidWorks: a part's edges — where its
   faces turn, not the facets of a curve — drawn in dark ink, and a pale
   steel-blue sweep to white behind it in the default studio.
@@ -49,6 +77,21 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- Renders and the rendered view look as a product shot does. The default
+  studio is a white cove under bright lamps — pale below, darker above, the
+  softboxes several times either — so chrome and brass show shape and not a
+  flat grey; the part stands on light paper. The path tracer reflects the
+  environment at its own sharpness (it read a 128-pixel copy), aims at the
+  lamps and the environment at every surface (it took one of them by
+  turns), and spreads each pixel's samples as a bell, not a box. A render
+  is made at High quality by default (256 samples, 6 bounces), gets the
+  samples it asks for past 512, and goes onto an eight-bit screen with a
+  step of noise, so a backdrop's sweep no longer bands.
+- A sketch on a face holds the face's outline as a line for each straight
+  side: a line of the sketch can be made parallel to, square to or
+  dimensioned from one side of the face.
+- A new body carries the sketch it was made from: moving the body moves
+  it whole.
 - A pattern along a path is on the path: what is repeated is put with
   its middle on the path's start and the copies go on from there, where
   they had traced the path's shape beside it.
@@ -59,6 +102,29 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- Boolean, Hole and Join read a body made from sketches as what it shows:
+  cut with one, they cut nothing; a hole in one "missed the part"; joined,
+  it was removed. Applying a modifier to a body is refused with what to do
+  instead, where it used to take the modifier off and lose its work.
+- A hole stays with its part when the part is moved; so does the live cut
+  of an extrude into a mesh.
+- A pattern, a ring or a mirror whose feature is suppressed is left out
+  with it, where it repeated the feature before that one instead.
+- A face pushed in exactly as deep as its wall is thick makes a hole
+  through, not a floor of no thickness.
+- A sweep along a curve follows the curve when its points are moved.
+- An interference check says which pair it could not finish, where it
+  showed the whole of one part as the overlap.
+- In a sketch: a line or spline under way is kept when another tool is
+  taken up or the sketch left; a double click ends a line where it is and
+  leaves no line of no length; a control-point spline can be finished
+  (Enter, right click); what was selected stays selected through a drag;
+  a click a few pixels off a point no longer moves it; a trimmed curve
+  keeps its layer and its being a construction line, and its untouched end
+  stays joined; an angle dimension holds its side; a conic's fullness is
+  read as a number in a millimetre scene; a pattern's path is not carried
+  from one sketch into another; a circle with its centre fixed is no
+  longer drawn as reference.
 - A sketch on a face no longer shows the face's outline as a rectangle
   you drew: it is reference, drawn thin and purple inside the sketch and
   not drawn again outside it, where the face's own edges already are.

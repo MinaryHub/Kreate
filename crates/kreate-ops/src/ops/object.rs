@@ -3718,20 +3718,34 @@ impl Operator for Join {
         let Some(target_mesh) = doc.document().object(active).and_then(|o| o.mesh()) else {
             return Err(OpError::Failed("the active object has no mesh".into()));
         };
+        // A body is what its features build: joined into the empty mesh it
+        // holds, the others would be gone and nothing shown for them.
+        if doc
+            .document()
+            .object(active)
+            .is_some_and(|o| !o.features.is_empty() || o.curve.is_some())
+        {
+            return Err(OpError::Failed(
+                "the active object is a body built from sketches: convert it to a mesh first (feature.to_mesh), or make a mesh the active one".into(),
+            ));
+        }
 
         // Into the target's space. Read before anything is mutated, because a
         // world transform depends on the hierarchy and the hierarchy is about
         // to lose objects.
         let into_target = doc.document().world_transform(active).inverse();
-        let sources: Vec<(ObjectId, MeshId, DAffine3)> = selection
+        let sources: Vec<(ObjectId, std::sync::Arc<kreate_mesh::MeshData>, DAffine3)> = selection
             .objects
             .iter()
             .copied()
             .filter(|id| *id != active)
             .filter_map(|id| {
-                let mesh = doc.document().object(id).and_then(|o| o.mesh())?;
+                doc.document().object(id).and_then(|o| o.mesh())?;
+                // As it shows: a body's own mesh is empty, and joined by that
+                // the body was removed and nothing of it kept.
                 // A linked datablock is read-only, but *reading* it into a join
                 // is fine: what the join writes is the target.
+                let mesh = kreate_scene::modifier::shown_base(doc.document(), id)?;
                 Some((id, mesh, into_target * doc.document().world_transform(id)))
             })
             .collect();
@@ -3750,12 +3764,10 @@ impl Operator for Join {
                 transform: DAffine3::IDENTITY,
             });
             for (_, mesh, transform) in &sources {
-                if let Some(m) = d.mesh(*mesh) {
-                    parts.push(edit::join::Part {
-                        mesh: m,
-                        transform: *transform,
-                    });
-                }
+                parts.push(edit::join::Part {
+                    mesh,
+                    transform: *transform,
+                });
             }
             edit::join::join(&parts)
         };

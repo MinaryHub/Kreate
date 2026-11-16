@@ -230,6 +230,11 @@ pub enum Command {
     ChatModelName {
         name: String,
     },
+    /// From the chat panel: have the assistant think harder, or less — an
+    /// index into the efforts the panel was given.
+    ChatEffort {
+        index: usize,
+    },
     /// From the Claude panel: sign Claude Code in, in the browser.
     ChatSignIn,
     /// From the Claude panel: the code the sign-in page showed.

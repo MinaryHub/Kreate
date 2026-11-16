@@ -2259,6 +2259,17 @@ impl Viewport {
                     },
                     count: None,
                 },
+                // The environment's own picture, for what shows it sharp.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         // The path tracer reads the lights and the environment through the
@@ -5178,11 +5189,15 @@ impl Viewport {
     /// How many frames a still view takes: the raster mean's sixteen, or the
     /// path tracer's hundreds.
     fn sample_limit(&self) -> u32 {
-        let limit = if self.path_tracing() {
-            crate::pathtrace::SAMPLES
-        } else {
-            crate::accum::SAMPLES
-        };
+        if self.path_tracing() {
+            // A render asks for its own count, and gets it: held to the
+            // view's five hundred and twelve, a render asked for a thousand
+            // stopped at half and said nothing.
+            return self
+                .sample_cap
+                .map_or(crate::pathtrace::SAMPLES, |cap| cap.clamp(1, 65_536));
+        }
+        let limit = crate::accum::SAMPLES;
         self.sample_cap.map_or(limit, |cap| cap.clamp(1, limit))
     }
 
@@ -5825,6 +5840,10 @@ fn shading_bind_group(
             wgpu::BindGroupEntry {
                 binding: 9,
                 resource: wgpu::BindingResource::TextureView(behind),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(environment.image()),
             },
         ],
     })

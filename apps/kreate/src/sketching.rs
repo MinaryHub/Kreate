@@ -620,6 +620,20 @@ impl Geometry {
 
     /// A drawing's entities among selected points and lines: each line's
     /// curve, and the lone points.
+    /// The lines these entities are drawn as, now: a selection kept by what
+    /// is selected. A curve's pieces are numbered as the whole drawing is
+    /// drawn, and a drag that changes its size redraws its circles in more
+    /// pieces or fewer — the numbers a selection held then named other
+    /// curves, and Delete took one of those.
+    pub fn lines_of_entities(&self, entities: &[u32]) -> Vec<u32> {
+        let Some(map) = &self.map else {
+            return Vec::new();
+        };
+        (0..map.line_entity.len() as u32)
+            .filter(|l| entities.contains(&map.line_entity[*l as usize].0))
+            .collect()
+    }
+
     pub fn entities_in(&self, points: &[u32], lines: &[u32]) -> Vec<u32> {
         let Some(map) = &self.map else {
             return Vec::new();
@@ -981,13 +995,65 @@ pub fn drawing_dimension_for(
             (kind, vec![EntityRef::whole(e)])
         }
         [Point(a), Point(b)] => ("aligned", vec![point(*a)?, point(*b)?]),
-        [x @ Line(_), y @ Line(_)] if is_line(*x) && is_line(*y) => (
-            "angular",
-            vec![EntityRef::whole(entity(*x)?), EntityRef::whole(entity(*y)?)],
-        ),
+        [x @ Line(_), y @ Line(_)] if is_line(*x) && is_line(*y) => {
+            let (ex, ey) = (entity(*x)?, entity(*y)?);
+            // Two lines that run the same way have no angle between them
+            // to hold — nought or a half turn was what they got. Upright or
+            // level, they are a distance apart: a rectangle's width, taken
+            // from two of its sides.
+            let along = |e| match d.curve(e) {
+                Some(Curve2D::Line { a, b }) => (*b - *a).normalize_or_zero(),
+                _ => DVec2::ZERO,
+            };
+            let (u, v) = (along(ex), along(ey));
+            if u.perp_dot(v).abs() < 1e-6 {
+                let kind = if u.x.abs() < 1e-6 {
+                    "horizontal"
+                } else if u.y.abs() < 1e-6 {
+                    "vertical"
+                } else {
+                    return Err(CannotConstrain);
+                };
+                (
+                    kind,
+                    vec![
+                        EntityRef::at(ex, Part::Start),
+                        EntityRef::at(ey, Part::Start),
+                    ],
+                )
+            } else {
+                ("angular", vec![EntityRef::whole(ex), EntityRef::whole(ey)])
+            }
+        }
         [Point(_)] | [] => return Ok(None),
         _ => return Err(CannotConstrain),
     }))
+}
+
+/// A length typed with its unit — `20mm`, `1.5 in`, `2 cm` — as so many
+/// of the scene's own unit, which is `unit` metres; a bare number is
+/// itself. `None` for what is neither: a parameter's name, an expression.
+/// What a person arriving from Fusion or SolidWorks types into a
+/// dimension, in whatever unit the drawing they are reading from uses.
+pub fn typed_with_unit(text: &str, unit: f64) -> Option<f64> {
+    let t = text.trim();
+    if let Ok(v) = t.parse::<f64>() {
+        return Some(v);
+    }
+    let split = t.find(|c: char| c.is_alphabetic() || c == '"' || c == '\'')?;
+    let (number, name) = t.split_at(split);
+    let v: f64 = number.trim().parse().ok()?;
+    let metres = match name.trim().to_lowercase().as_str() {
+        "mm" => 1e-3,
+        "cm" => 1e-2,
+        "m" => 1.0,
+        "um" | "µm" | "μm" => 1e-6,
+        "in" | "inch" | "inches" | "\"" => 0.0254,
+        "ft" | "foot" | "feet" | "'" => 0.3048,
+        "mil" | "thou" => 2.54e-5,
+        _ => return None,
+    };
+    (unit > 0.0).then(|| v * metres / unit)
 }
 
 /// `3.start`: a reference as the drafting operators read it.
@@ -1228,7 +1294,13 @@ pub fn is_reference(d: &Drawing, e: &kreate_scene::drawing::Entity) -> bool {
     if d.layer(e.layer).is_some_and(|l| l.name == "PROJECTED") {
         return true;
     }
-    if !matches!(e.kind, EntityKind::Curve(_)) {
+    // Before that layer was used for it, a face's outline was one closed
+    // polyline with every corner held. Only that: a circle whose centre is
+    // fixed, a line held at both ends, are the user's own, held.
+    if !matches!(
+        e.kind,
+        EntityKind::Curve(Curve2D::Polyline { closed: true, .. })
+    ) {
         return false;
     }
     let parts = d.parts(e.id);
@@ -1524,6 +1596,7 @@ pub fn feature_rows(
                 kreate_scene::feature::Shape::Extrude {
                     distance,
                     symmetric,
+                    ..
                 } => (false, distance, symmetric),
                 kreate_scene::feature::Shape::Revolve { angle, .. } => (true, angle, false),
                 kreate_scene::feature::Shape::Round { radius, .. } => (false, radius, false),
@@ -2177,6 +2250,17 @@ fn overlay(
     view.drawing = ui.tool.draws();
 }
 
+/// How many of a drawing's own curves and points can still move: none is
+/// Fusion's fully defined sketch, SolidWorks's Fully Defined. What it was
+/// drawn against — a face's outline, projected edges — is not counted.
+pub fn still_free(d: &Drawing, pinned: &[EntityId]) -> usize {
+    d.entities
+        .iter()
+        .filter(|e| matches!(e.kind, EntityKind::Curve(_) | EntityKind::Point(_)))
+        .filter(|e| !is_reference(d, e) && !pinned.contains(&e.id))
+        .count()
+}
+
 /// How finely a preview draws a curve: a thousandth of the drawing's size.
 fn trim_tolerance(points: &[DVec2]) -> f64 {
     let (lo, hi) = points.iter().fold(
@@ -2229,6 +2313,7 @@ pub fn drawing_view(
         typed: ui.typed.clone(),
         ..Default::default()
     };
+    view.free = Some(still_free(d, pinned));
     for (i, [a, b]) in g.lines.iter().enumerate() {
         let e = map.line_entity[i];
         view.reference
@@ -2512,6 +2597,21 @@ fn crossing(p0: DVec2, p1: DVec2, q0: DVec2, q1: DVec2) -> Option<DVec2> {
 
 #[cfg(test)]
 mod tests {
+    /// A length typed with its unit is that length in the scene's own; a
+    /// bare number is itself; a name is neither.
+    #[test]
+    fn a_length_is_typed_in_any_unit() {
+        let mm = 1e-3;
+        assert_eq!(typed_with_unit("20", mm), Some(20.0));
+        assert_eq!(typed_with_unit(" 20mm ", mm), Some(20.0));
+        assert!((typed_with_unit("2 cm", mm).unwrap() - 20.0).abs() < 1e-9);
+        assert!((typed_with_unit("1in", mm).unwrap() - 25.4).abs() < 1e-9);
+        assert!((typed_with_unit("0.5\"", mm).unwrap() - 12.7).abs() < 1e-9);
+        assert!((typed_with_unit("25.4mm", 0.0254).unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(typed_with_unit("width", mm), None);
+        assert_eq!(typed_with_unit("2 * width", mm), None);
+        assert_eq!(typed_with_unit("20furlongs", mm), None);
+    }
 
     /// What is selected stays selected when a tool that works on it is
     /// taken — so choosing first and the tool after works — and goes when

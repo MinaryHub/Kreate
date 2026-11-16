@@ -214,6 +214,35 @@ fn resolve_fragment(@builtin(position) coord: vec4<f32>) -> @location(0) vec4<f3
     return vec4<f32>(display_transform(source.rgb, params), source.a);
 }
 
+/// The same onto a screen of eight bits a channel: with under a step of
+/// noise, so a slow sweep is rounded into grain too fine to see and not
+/// into bands. A target that holds more is given the transform as it is.
+@fragment
+fn resolve_fragment_dithered(@builtin(position) coord: vec4<f32>) -> @location(0) vec4<f32> {
+    let source = textureLoad(scene_texture, vec2<i32>(coord.xy), 0);
+    return vec4<f32>(dithered(display_transform(source.rgb, params), coord.xy), source.a);
+}
+
+/// `colour` with under a step of noise on it, a different speck at every
+/// pixel, so that eight bits round a slow sweep — a backdrop from grey to
+/// white — into grain too fine to see and not into bands. The step is one
+/// of the screen's own, so the noise goes on in its encoding and comes back.
+fn dithered(colour: vec3<f32>, at: vec2<f32>) -> vec3<f32> {
+    // Two hashes of the pixel, their difference: a triangle about nought.
+    let p = vec2<u32>(at);
+    var a = p.x * 1973u + p.y * 9277u + 26699u;
+    a = (a ^ (a >> 15u)) * 0x2c1b3c6du;
+    a = (a ^ (a >> 12u)) * 0x297a2d39u;
+    a = a ^ (a >> 15u);
+    var b = a * 747796405u + 2891336453u;
+    b = (b ^ (b >> 16u)) * 0x7feb352du;
+    b = b ^ (b >> 15u);
+    let noise = (f32(a >> 8u) - f32(b >> 8u)) / 16777216.0;
+    let encoded = pow(nonneg3(colour), vec3<f32>(1.0 / 2.2)); // srgb-exempt: a step's width, not a transfer
+    let stepped = clamp(encoded + noise / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    return pow(stepped, vec3<f32>(2.2)); // srgb-exempt: the same, undone
+}
+
 @compute @workgroup_size(64)
 fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;

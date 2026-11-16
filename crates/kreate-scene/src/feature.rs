@@ -29,15 +29,19 @@ pub enum Operation {
     Join,
     /// Takes away from it.
     Cut,
+    /// Keeps only what the body and it share — Fusion's Intersect,
+    /// SolidWorks's Common.
+    Intersect,
 }
 
 impl Operation {
-    pub const ALL: [Operation; 2] = [Operation::Join, Operation::Cut];
+    pub const ALL: [Operation; 3] = [Operation::Join, Operation::Cut, Operation::Intersect];
 
     pub fn tag(self) -> &'static str {
         match self {
             Operation::Join => "join",
             Operation::Cut => "cut",
+            Operation::Intersect => "intersect",
         }
     }
 
@@ -46,12 +50,61 @@ impl Operation {
     }
 }
 
+/// The rest of how an extrude goes, beside how far: what Fusion's and
+/// SolidWorks's extrudes offer under their distance. All nought, it is the
+/// plain push.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExtrudeMore {
+    /// How far it goes the other way too, in metres: two sides, each its
+    /// own length.
+    pub second: f64,
+    /// Where it starts: this far off the sketch's plane, the way it goes.
+    pub offset: f64,
+    /// How its sides lean, in radians: positive, it widens as it goes;
+    /// negative, it narrows — a mould's draft.
+    pub taper: f64,
+    /// Through all of the body in its way, however thick that is or
+    /// becomes: the distance says only which way.
+    pub through: bool,
+}
+
+impl ExtrudeMore {
+    /// Where the extrude starts and ends along the sketch's normal: the
+    /// start is the end that is the region as drawn, the other the one a
+    /// taper has grown or shrunk.
+    pub fn span(&self, distance: f64, symmetric: bool) -> (f64, f64) {
+        if symmetric {
+            let half = distance.abs() * 0.5;
+            return (self.offset - half, self.offset + half);
+        }
+        let way = if distance < 0.0 { -1.0 } else { 1.0 };
+        (
+            way * (self.offset - self.second.abs()),
+            way * self.offset + distance,
+        )
+    }
+
+    /// The distance a through-all extrude goes: past `reach`, how far the
+    /// body lies from the sketch's plane at its furthest, the way
+    /// `distance` points.
+    pub fn through_distance(&self, distance: f64, symmetric: bool, reach: f64) -> f64 {
+        let way = if distance < 0.0 { -1.0 } else { 1.0 };
+        let far = reach * 1.001 + 1e-4;
+        way * if symmetric { far * 2.0 } else { far }
+    }
+}
+
 /// The solid a feature makes of its regions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     /// Pushed out of the sketch's plane this far, in metres: negative goes
-    /// the other way; symmetric goes half each way.
-    Extrude { distance: f64, symmetric: bool },
+    /// the other way; symmetric goes half each way. `more` is the rest of
+    /// it: a second side, a start offset, a taper, through all.
+    Extrude {
+        distance: f64,
+        symmetric: bool,
+        more: ExtrudeMore,
+    },
     /// Turned about the line through two of the sketch's points, by this
     /// many radians — or about the sketch's own horizontal or vertical axis,
     /// when both are [`AXIS_X`] or [`AXIS_Y`].
@@ -431,6 +484,13 @@ pub fn drawn_edges(drawing: &crate::drawing::Drawing) -> (Vec<Vec2>, Vec<[u32; 2
 /// The solid one feature makes, in its sketch's own space; empty when its
 /// sketch is gone or its seeds fall in no region.
 pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
+    solid_reaching(doc, feature, None)
+}
+
+/// [`solid`], for a feature in a body: `reach` is how far the body so far
+/// lies from the feature's sketch plane at its furthest, which is how far a
+/// through-all extrude goes.
+pub fn solid_reaching(doc: &Document, feature: &Feature, reach: Option<f64>) -> MeshData {
     let Some(sketch) = doc.object_by_uid(feature.sketch) else {
         return MeshData::empty();
     };
@@ -478,14 +538,15 @@ pub fn solid(doc: &Document, feature: &Feature) -> MeshData {
             Shape::Extrude {
                 distance,
                 symmetric,
+                more,
             } => {
-                let d = distance as f32;
-                let (z0, z1) = if symmetric {
-                    (-d.abs() * 0.5, d.abs() * 0.5)
-                } else {
-                    (0.0, d)
+                let distance = match (more.through, reach) {
+                    (true, Some(reach)) => more.through_distance(distance, symmetric, reach),
+                    _ => distance,
                 };
-                regions::extrude_region(&all[i], z0, z1)
+                let (z0, z1) = more.span(distance, symmetric);
+                let grow = more.taper.tan() * (z1 - z0).abs();
+                regions::extrude_region_tapered(&all[i], z0 as f32, z1 as f32, grow as f32)
             }
             Shape::Revolve { axis, angle } => {
                 let Some((origin, dir)) = revolve_axis(doc, sketch, axis) else {
@@ -584,12 +645,14 @@ fn combine(out: MeshData, piece: MeshData, op: Operation) -> MeshData {
     if out.num_faces() == 0 {
         return match op {
             Operation::Join => piece,
-            Operation::Cut => out,
+            // Nothing to take from, nothing to share with.
+            Operation::Cut | Operation::Intersect => out,
         };
     }
     let op = match op {
         Operation::Join => BooleanOp::Union,
         Operation::Cut => BooleanOp::Difference,
+        Operation::Intersect => BooleanOp::Intersect,
     };
     boolean(&out, &piece, op)
 }
@@ -666,7 +729,33 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
     // Without what is suppressed, for the kernel and the meshes alike.
     let live: Vec<Feature>;
     let features = if features.iter().any(|f| f.suppressed) {
-        live = features.iter().filter(|f| !f.suppressed).cloned().collect();
+        // A pattern, a ring or a mirror repeats the feature before it:
+        // with that one left out there is nothing of its own to repeat, and
+        // it goes too — taken as it stood, it repeated whatever came before
+        // that instead, and a suppressed hole's pattern made five plates.
+        let mut source_gone = false;
+        live = features
+            .iter()
+            .filter(|f| {
+                let repeats = matches!(
+                    f.shape,
+                    Shape::Pattern { .. } | Shape::Circular { .. } | Shape::Mirror { .. }
+                );
+                let from_sketch = matches!(
+                    f.shape,
+                    Shape::Extrude { .. }
+                        | Shape::Revolve { .. }
+                        | Shape::Sweep { .. }
+                        | Shape::Loft { .. }
+                        | Shape::SheetMetal { .. }
+                );
+                if from_sketch {
+                    source_gone = f.suppressed;
+                }
+                !f.suppressed && !(repeats && source_gone)
+            })
+            .cloned()
+            .collect();
         &live[..]
     } else {
         features
@@ -744,14 +833,31 @@ pub fn body(doc: &Document, features: &[Feature], body_world: DAffine3) -> MeshD
             | Shape::Loft { .. }
             | Shape::SheetMetal { .. } => {}
         }
-        let mut piece = solid(doc, f);
-        if piece.num_faces() == 0 {
-            continue;
-        }
         let sketch_world = doc
             .object_by_uid(f.sketch)
             .map(|id| doc.world_transform(id))
             .unwrap_or(DAffine3::IDENTITY);
+        // Through all: how far the body so far lies from the sketch's
+        // plane, in the sketch's own space, which is what it has to pass.
+        let reach = match f.shape {
+            Shape::Extrude { more, .. } if more.through && out.num_faces() > 0 => {
+                let to_sketch = (to_body * sketch_world).inverse();
+                Some(
+                    out.positions()
+                        .iter()
+                        .map(|p| to_sketch.transform_point3(p.as_dvec3()).z.abs())
+                        .fold(0.0f64, f64::max),
+                )
+            }
+            _ => None,
+        };
+        let mut piece = solid_reaching(doc, f, reach);
+        if piece.num_faces() == 0 {
+            // Nothing made — its sketch gone, its region closed up: what
+            // follows has nothing of this one to repeat.
+            last = None;
+            continue;
+        }
         let into = to_body * sketch_world;
         for p in piece.positions_mut() {
             *p = into.transform_point3(p.as_dvec3()).as_vec3();
@@ -768,15 +874,20 @@ pub fn key(doc: &Document, features: &[Feature], body_world: DAffine3) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     format!("{features:?}").hash(&mut h);
-    for v in body_world.to_cols_array() {
-        v.to_bits().hash(&mut h);
-    }
+    // Where each thing it is made from stands *from the body*, to a
+    // nanometre: a body moved with its sketches is the same body, and
+    // built again at every step of a drag it was a boolean per frame.
+    let to_body = body_world.inverse();
     for uid in features.iter().flat_map(Feature::references) {
         if let Some(id) = doc.object_by_uid(uid) {
-            for v in doc.world_transform(id).to_cols_array() {
-                v.to_bits().hash(&mut h);
+            for v in (to_body * doc.world_transform(id)).to_cols_array() {
+                ((v * 1e9).round() as i64).hash(&mut h);
             }
             if let Some(o) = doc.object(id) {
+                // A path that is a curve: its points are the curve's.
+                if let Some(curve) = &o.curve {
+                    curve.key().hash(&mut h);
+                }
                 o.sketch_lines.hash(&mut h);
                 // Which of its lines are construction: they bound no region.
                 format!("{:?}", o.sketch).hash(&mut h);
@@ -867,6 +978,7 @@ mod tests {
             shape: Shape::Extrude {
                 distance: 0.01,
                 symmetric: false,
+                more: Default::default(),
             },
             sketch: s,
             seeds: vec![[0.002, 0.002], [0.02, 0.01]],
@@ -893,6 +1005,147 @@ mod tests {
         );
     }
 
+    /// What an extrude has beside its distance: a start offset, a second
+    /// side, through all of the body in its way, and keeping only what it
+    /// shares with the body.
+    #[test]
+    fn an_extrude_starts_off_the_plane_goes_both_ways_and_through_all() {
+        let mut doc = Document::new();
+        let s = sketch(
+            &mut doc,
+            &[rect(0.04, 0.02), circle(Vec2::new(0.02, 0.01), 0.005)],
+        );
+        let extrude = |distance: f64, more: ExtrudeMore| Shape::Extrude {
+            distance,
+            symmetric: false,
+            more,
+        };
+        let plate = Feature {
+            shape: extrude(0.01, ExtrudeMore::default()),
+            sketch: s,
+            seeds: vec![[0.002, 0.002], [0.02, 0.01]],
+            operation: Operation::Join,
+            order: 1,
+            suppressed: false,
+        };
+        let area = 0.04 * 0.02;
+        let volume = |features: &[Feature]| {
+            mass_properties(&body(&doc, features, DAffine3::IDENTITY), |p| p).volume
+        };
+        // From 2 mm off the plane, 10 mm on: the same slab, higher.
+        let lifted = Feature {
+            shape: extrude(
+                0.01,
+                ExtrudeMore {
+                    offset: 0.002,
+                    ..Default::default()
+                },
+            ),
+            ..plate.clone()
+        };
+        let made = body(&doc, std::slice::from_ref(&lifted), DAffine3::IDENTITY);
+        let b = made.bounds();
+        assert!(
+            (b.min.z - 0.002).abs() < 1e-6 && (b.max.z - 0.012).abs() < 1e-6,
+            "{b:?}"
+        );
+        // 10 mm one way and 4 the other.
+        let both = Feature {
+            shape: extrude(
+                0.01,
+                ExtrudeMore {
+                    second: 0.004,
+                    ..Default::default()
+                },
+            ),
+            ..plate.clone()
+        };
+        let v = volume(std::slice::from_ref(&both));
+        assert!((v - area * 0.014).abs() < area * 0.014 * 1e-3, "{v}");
+        // The disc cut through all, asked for only a hair deep: all the
+        // way, however thick the plate.
+        let disc = std::f64::consts::PI * 0.005f64.powi(2);
+        let through = Feature {
+            shape: extrude(
+                0.0001,
+                ExtrudeMore {
+                    through: true,
+                    ..Default::default()
+                },
+            ),
+            seeds: vec![[0.02, 0.01]],
+            operation: Operation::Cut,
+            order: 2,
+            ..plate.clone()
+        };
+        let v = volume(&[plate.clone(), through.clone()]);
+        let want = (area - disc) * 0.01;
+        assert!((v - want).abs() < want * 5e-3, "{v} against {want}");
+        // The plate made three times as thick: still through.
+        let thick = Feature {
+            shape: extrude(0.03, ExtrudeMore::default()),
+            ..plate.clone()
+        };
+        let v = volume(&[thick, through]);
+        let want = (area - disc) * 0.03;
+        assert!((v - want).abs() < want * 5e-3, "{v} against {want}");
+        // Intersect: only the disc of the plate is left.
+        let shared = Feature {
+            shape: extrude(0.05, ExtrudeMore::default()),
+            seeds: vec![[0.02, 0.01]],
+            operation: Operation::Intersect,
+            order: 2,
+            ..plate.clone()
+        };
+        let v = volume(&[plate, shared]);
+        let want = disc * 0.01;
+        assert!((v - want).abs() < want * 2e-2, "{v} against {want}");
+    }
+
+    /// A pattern repeats the feature before it: with that one suppressed
+    /// it has nothing of its own to repeat, and does not take up the one
+    /// before that instead.
+    #[test]
+    fn a_pattern_goes_with_the_feature_it_repeats() {
+        let mut doc = Document::new();
+        let s = sketch(
+            &mut doc,
+            &[rect(0.04, 0.02), circle(Vec2::new(0.02, 0.01), 0.005)],
+        );
+        let plate = Feature {
+            shape: Shape::Extrude {
+                distance: 0.01,
+                symmetric: false,
+                more: Default::default(),
+            },
+            sketch: s,
+            seeds: vec![[0.002, 0.002], [0.02, 0.01]],
+            operation: Operation::Join,
+            order: 1,
+            suppressed: false,
+        };
+        let hole = Feature {
+            seeds: vec![[0.02, 0.01]],
+            operation: Operation::Cut,
+            order: 2,
+            suppressed: true,
+            ..plate.clone()
+        };
+        let pattern = Feature {
+            shape: Shape::Pattern {
+                count: 3,
+                step: [0.1, 0.0, 0.0],
+            },
+            order: 3,
+            ..plate.clone()
+        };
+        let made = body(&doc, &[plate, hole, pattern], DAffine3::IDENTITY);
+        let v = mass_properties(&made, |p| p).volume;
+        // One plate, whole: not three of them.
+        let want = 0.04 * 0.02 * 0.01;
+        assert!((v - want).abs() < want * 1e-3, "{v} against {want}");
+    }
+
     #[test]
     fn a_body_lands_where_its_sketch_is() {
         let mut doc = Document::new();
@@ -904,6 +1157,7 @@ mod tests {
             shape: Shape::Extrude {
                 distance: 1.0,
                 symmetric: false,
+                more: Default::default(),
             },
             sketch: s,
             seeds: vec![[0.5, 0.5]],
@@ -927,6 +1181,7 @@ mod tests {
             shape: Shape::Extrude {
                 distance: 1.0,
                 symmetric: true,
+                more: Default::default(),
             },
             sketch: s,
             seeds: vec![[5.0, 5.0]],

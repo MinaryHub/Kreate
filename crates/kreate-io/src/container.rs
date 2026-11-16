@@ -3545,10 +3545,22 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         _ => Vec::new(),
     };
     let (distance, symmetric, axis, angle, count, step, open) = match &f.shape {
+        // An extrude's second side, start offset and taper in `step`, and
+        // through all in `open`: nought and nought for the plain push, which
+        // is how every file written before them reads.
         Shape::Extrude {
             distance,
             symmetric,
-        } => (*distance, *symmetric, [0, 0], 0.0, 0, [0.0; 3], 0),
+            more,
+        } => (
+            *distance,
+            *symmetric,
+            [0, 0],
+            0.0,
+            0,
+            [more.second, more.offset, more.taper],
+            u32::from(more.through),
+        ),
         Shape::Revolve { axis, angle } => (0.0, false, *axis, *angle, 0, [0.0; 3], 0),
         Shape::Round { radius, .. } => (*radius, false, [0, 0], 0.0, 0, [0.0; 3], 0),
         Shape::Shell { thickness, open } => (*thickness, false, [0, 0], 0.0, 0, [0.0; 3], *open),
@@ -3646,6 +3658,12 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         "extrude" if r.distance.is_finite() => Shape::Extrude {
             distance: r.distance,
             symmetric: r.symmetric,
+            more: kreate_scene::feature::ExtrudeMore {
+                second: Some(r.step[0]).filter(|v| v.is_finite()).unwrap_or(0.0),
+                offset: Some(r.step[1]).filter(|v| v.is_finite()).unwrap_or(0.0),
+                taper: Some(r.step[2]).filter(|v| v.is_finite()).unwrap_or(0.0),
+                through: r.open != 0,
+            },
         },
         "revolve" if r.angle.is_finite() => Shape::Revolve {
             axis: r.axis,

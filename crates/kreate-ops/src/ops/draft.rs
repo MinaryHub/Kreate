@@ -405,25 +405,17 @@ impl Operator for NewDrawing {
         let mut drawing = Drawing::new();
         // The face's outlines, held where the face is, on the PROJECTED
         // layer: what the drawing is drawn against, not what was drawn —
-        // shown as Fusion shows a face's edges brought into a sketch.
-        let reference = (!outlines.is_empty()).then(|| project::layer(&mut drawing));
-        for ring in &outlines {
-            if ring.len() < 3 {
-                continue;
-            }
-            let id = drawing.add_curve(Curve2D::Polyline {
-                verts: ring.iter().map(|p| (*p, 0.0)).collect(),
-                closed: true,
-            });
-            if let (Some(l), Some(e)) = (reference, drawing.entity_mut(id)) {
-                e.layer = l;
-            }
-            for (k, p) in ring.iter().enumerate() {
-                drawing.constraints.push(Constraint::Fixed(
-                    EntityRef::at(id, Part::Vertex(k as u32)),
-                    *p,
-                ));
-            }
+        // shown as Fusion shows a face's edges brought into a sketch. Each
+        // straight edge a line of its own, as a projected edge is: one
+        // polyline for the whole outline could not be drawn parallel to,
+        // square to or measured from, a side at a time.
+        let reference: Vec<Curve2D> = outlines
+            .iter()
+            .filter(|ring| ring.len() >= 3)
+            .flat_map(|ring| outline_curves(ring))
+            .collect();
+        if !reference.is_empty() {
+            project::put(&mut drawing, reference);
         }
         let d = doc.document_mut();
         let name = d.unique_object_name("Drawing");
@@ -440,6 +432,54 @@ impl Operator for NewDrawing {
         d.selection.active = Some(id);
         Ok(OpResult::Finished)
     }
+}
+
+/// A face's outline as the curves a drawing holds it by: each straight
+/// side a line, each run of short pieces — a round edge's facets — one
+/// polyline, and a ring with no corner in it (a hole's) one closed
+/// polyline. A corner is where the outline turns by more than twenty
+/// degrees, or a long piece meets a short one: a side meeting an arc.
+fn outline_curves(ring: &[DVec2]) -> Vec<Curve2D> {
+    let n = ring.len();
+    let edge = |i: usize| ring[(i + 1) % n] - ring[i];
+    let corner = |i: usize| {
+        let (a, b) = (edge((i + n - 1) % n), edge(i));
+        let (la, lb) = (a.length(), b.length());
+        if la < 1e-12 || lb < 1e-12 {
+            return true;
+        }
+        let turn = a.perp_dot(b).atan2(a.dot(b)).abs();
+        turn > 20f64.to_radians() || la > lb * 4.0 || lb > la * 4.0
+    };
+    let corners: Vec<usize> = (0..n).filter(|i| corner(*i)).collect();
+    if corners.is_empty() {
+        return vec![Curve2D::Polyline {
+            verts: ring.iter().map(|p| (*p, 0.0)).collect(),
+            closed: true,
+        }];
+    }
+    let mut out = Vec::new();
+    for (k, &from) in corners.iter().enumerate() {
+        let to = corners[(k + 1) % corners.len()];
+        // How many pieces from this corner to the next, going round; all
+        // of them when there is only the one corner.
+        let count = match (to + n - from) % n {
+            0 => n,
+            c => c,
+        };
+        if count == 1 {
+            out.push(Curve2D::Line {
+                a: ring[from],
+                b: ring[to],
+            });
+        } else {
+            out.push(Curve2D::Polyline {
+                verts: (0..=count).map(|j| (ring[(from + j) % n], 0.0)).collect(),
+                closed: false,
+            });
+        }
+    }
+    out
 }
 
 // --- drawing ---------------------------------------------------------------------
@@ -1354,15 +1394,26 @@ impl Operator for DraftTrim {
         edit(doc, |d| {
             let (keep, _) = trim_plan(d, target, at)?;
             // The constraints on the old curve no longer mean what they
-            // did; the pieces are free, and their ends lie on what cut them.
-            let layer = d.entity(target).map(|e| e.layer);
+            // did. What is left of it is still what it was — on its layer,
+            // in its line, a construction line still one: made plain, the
+            // rest of a trimmed centre line bounded regions — and its ends
+            // are joined again to whatever else ends there, or the outline
+            // it was part of came apart at the end the trim never touched.
+            let old = d.entity(target).cloned();
+            let first = d.counters().0;
             d.remove(&[target]);
             for piece in keep {
                 let id = d.add_curve(piece);
-                if let (Some(l), Some(e)) = (layer, d.entity_mut(id)) {
-                    e.layer = l;
+                if let (Some(old), Some(e)) = (&old, d.entity_mut(id)) {
+                    let kind = e.kind.clone();
+                    *e = kreate_scene::drawing::Entity {
+                        id,
+                        kind,
+                        ..old.clone()
+                    };
                 }
             }
+            join_new(d, first);
             Ok(())
         })
     }

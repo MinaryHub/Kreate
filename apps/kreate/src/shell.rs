@@ -185,6 +185,12 @@ pub struct ShellState {
     /// The models the assistant can answer with (Ollama's), and which.
     pub chat_models: Vec<String>,
     pub chat_model: usize,
+    /// How hard the assistant can be told to think, in its program's own
+    /// words with its default first as an empty one, and which is picked.
+    pub chat_efforts: Vec<String>,
+    pub chat_effort: usize,
+    /// Whether the account line offers to sign out: not on an API key.
+    pub chat_leaves: bool,
     /// Who Claude Code is signed in as, and the code box for signing in.
     pub chat_account: kreate_ui::chat::ChatAccount,
     pub chat_code: String,
@@ -911,6 +917,9 @@ impl Default for ShellState {
             chat_provider: 0,
             chat_models: Vec::new(),
             chat_model: 0,
+            chat_efforts: Vec::new(),
+            chat_effort: 0,
+            chat_leaves: true,
             chat_account: kreate_ui::chat::ChatAccount::Checking,
             chat_code: String::new(),
             contact: kreate_ui::contact::ContactForm::new(),
@@ -8987,6 +8996,15 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         model_hint: state
             .catalog
             .format("chat-model-hint", kreate_i18n::TextKind::Tooltip, &[]),
+        effort: state.catalog.get("chat-effort"),
+        effort_hint: state
+            .catalog
+            .format("chat-effort-hint", kreate_i18n::TextKind::Tooltip, &[]),
+        suggestions: vec![
+            state.catalog.get("chat-suggest-1"),
+            state.catalog.get("chat-suggest-2"),
+            state.catalog.get("chat-suggest-3"),
+        ],
         keys: state.catalog.get("chat-keys"),
         key_held: state.catalog.format(
             "chat-key-held",
@@ -9024,11 +9042,28 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
         .iter()
         .map(|p| p.name())
         .collect();
+    // The efforts in the panel's words: the program's own are its flags.
+    let efforts: Vec<String> = state
+        .chat_efforts
+        .iter()
+        .map(|e| match e.as_str() {
+            "" => state.catalog.get("chat-effort-default"),
+            "low" => state.catalog.get("chat-effort-low"),
+            "medium" => state.catalog.get("chat-effort-medium"),
+            "high" => state.catalog.get("chat-effort-high"),
+            "xhigh" => state.catalog.get("chat-effort-xhigh"),
+            "max" => state.catalog.get("chat-effort-max"),
+            other => other.to_string(),
+        })
+        .collect();
     let providers = kreate_ui::chat::ChatProviders {
         names: &names,
         current: state.chat_provider,
         models: &state.chat_models,
         model: state.chat_model,
+        efforts: &efforts,
+        effort: state.chat_effort,
+        leaves: state.chat_leaves,
         other: crate::claude::Provider::ALL
             .get(state.chat_provider)
             .is_some_and(|p| *p != crate::claude::Provider::Ollama),
@@ -16093,6 +16128,9 @@ pub struct SketchView {
     /// The tool in hand, by name, and what it asks for next.
     pub tool: &'static str,
     pub prompt: String,
+    /// How many of a drawing's curves and points can still move; nought is
+    /// fully defined. `None` where it is not known.
+    pub free: Option<usize>,
     /// What has been typed.
     pub typed: String,
     /// The picked regions' seeds and the revolve's axis, for the dialog.
@@ -16250,6 +16288,14 @@ pub struct SolidDialog {
     /// What it could act on: the parts there are, those the extrude meets
     /// first.
     pub targets: Vec<String>,
+    /// The rest of an extrude, shown when asked for: through all of the
+    /// part; a second side's distance and a start offset, in the scene's
+    /// unit; a taper, in degrees.
+    pub more: bool,
+    pub through: bool,
+    pub second: f64,
+    pub offset: f64,
+    pub taper: f64,
 }
 
 impl Default for SolidDialog {
@@ -16262,6 +16308,11 @@ impl Default for SolidDialog {
             chosen: false,
             target: String::new(),
             targets: Vec::new(),
+            more: false,
+            through: false,
+            second: 0.0,
+            offset: 0.0,
+            taper: 0.0,
         }
     }
 }
@@ -16572,6 +16623,30 @@ fn draw_sketches(
             theme.text,
         );
         let _ = r;
+    }
+    // Whether the sketch is fully defined, over the prompt: in the ink
+    // held geometry is drawn in when it is, in free geometry's blue with
+    // how much can still move when it is not.
+    if let Some(free) = view.free {
+        let (said, ink) = if free == 0 {
+            (state.catalog.get("sketch-defined"), theme.text_dim)
+        } else {
+            (
+                state.catalog.format(
+                    "sketch-undefined",
+                    kreate_i18n::TextKind::Ui,
+                    &[("count", free.to_string().as_str())],
+                ),
+                egui::Color32::from_rgb(0x4d, 0x9d, 0xf0),
+            )
+        };
+        painter.text(
+            inner.left_bottom() + egui::vec2(12.0, -32.0),
+            egui::Align2::LEFT_BOTTOM,
+            said,
+            egui::FontId::proportional(11.0),
+            ink,
+        );
     }
 
     // The dimension being typed into.
@@ -16890,7 +16965,20 @@ fn draw_dimension_edit(
                 if enter {
                     use kreate_reflect::PropertyValue as V;
                     let typed = text.trim();
-                    if let Ok(v) = typed.parse::<f64>() {
+                    // A number, or a length with its unit: `20mm` in a
+                    // scene of inches is twenty millimetres, not a
+                    // parameter nobody named.
+                    let number = if dim.kind == DimKind::Angle {
+                        typed
+                            .trim_end_matches("deg")
+                            .trim_end_matches('°')
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                    } else {
+                        crate::sketching::typed_with_unit(typed, view.unit.0)
+                    };
+                    if let Some(v) = number {
                         // A number: the dimension is set, and let go of the
                         // parameters if it was held.
                         if v.is_finite() && v != 0.0 {
@@ -16949,6 +17037,7 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
         state.catalog.get("feature-new-body"),
         state.catalog.get("feature-join"),
         state.catalog.get("feature-cut"),
+        state.catalog.get("feature-intersect"),
     ];
     let mut d = state.solid_dialog.clone();
     let mut done: Option<bool> = None;
@@ -17019,10 +17108,45 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
                             ui.label(state.catalog.get("feature-symmetric"));
                             ui.checkbox(&mut d.symmetric, "");
                             ui.end_row();
+                            // Through all, a second side, a start offset
+                            // and a taper: what Fusion's and SolidWorks's
+                            // extrudes have under the distance. Out of the
+                            // way until asked for.
+                            ui.label(state.catalog.get("feature-through"));
+                            ui.checkbox(&mut d.through, "")
+                                .on_hover_text(state.catalog.get("feature-through-hint"));
+                            ui.end_row();
+                            ui.label("");
+                            ui.checkbox(&mut d.more, state.catalog.get("feature-more"));
+                            ui.end_row();
+                            if d.more {
+                                let unit = format!(" {}", view.unit.1);
+                                ui.label(state.catalog.get("feature-second"));
+                                ui.add_enabled(
+                                    !d.symmetric,
+                                    egui::DragValue::new(&mut d.second)
+                                        .speed(0.1)
+                                        .range(0.0..=f64::MAX)
+                                        .suffix(unit.clone()),
+                                );
+                                ui.end_row();
+                                ui.label(state.catalog.get("feature-offset"));
+                                ui.add(egui::DragValue::new(&mut d.offset).speed(0.1).suffix(unit));
+                                ui.end_row();
+                                ui.label(state.catalog.get("feature-taper"));
+                                ui.add(
+                                    egui::DragValue::new(&mut d.taper)
+                                        .speed(0.25)
+                                        .range(-80.0..=80.0)
+                                        .suffix("°"),
+                                )
+                                .on_hover_text(state.catalog.get("feature-taper-hint"));
+                                ui.end_row();
+                            }
                         }
                         ui.label(state.catalog.get("feature-operation"));
                         egui::ComboBox::from_id_salt("solid-op")
-                            .selected_text(ops[d.operation.min(2) as usize].clone())
+                            .selected_text(ops[d.operation.min(3) as usize].clone())
                             .show_ui(ui, |ui| {
                                 for (i, name) in ops.iter().enumerate() {
                                     if ui
@@ -17112,7 +17236,16 @@ fn draw_solid_dialog(ui: &Ui, state: &mut ShellState, view: &SketchView, inner: 
             } else {
                 p.set("distance", V::Float(d.distance * view.unit.0));
                 p.set("symmetric", V::Bool(d.symmetric));
+                p.set("through", V::Bool(d.through));
+                if d.more {
+                    let second = if d.symmetric { 0.0 } else { d.second };
+                    p.set("second", V::Float(second * view.unit.0));
+                    p.set("offset", V::Float(d.offset * view.unit.0));
+                    p.set("taper", V::Float(d.taper.to_radians()));
+                }
                 state.queue.run("feature.extrude", p);
+                // Through all is this extrude's, not the next one's.
+                state.solid_dialog.through = false;
             }
             // The sketch is finished with, as Fusion leaves it.
             state.queue.push(Command::SetMode("object".into()));

@@ -362,6 +362,11 @@ pub struct Environment {
     cube: wgpu::Texture,
     /// The whole chain, for the shading pass to sample by roughness.
     view: wgpu::TextureView,
+    /// The picture the cube was made from, as it came: what a mirror and the
+    /// background show. The cube is a hundred and twenty-eight texels to a
+    /// face — right for a rough surface, a smear in a chromed one and behind
+    /// the part — so what must be sharp reads this instead.
+    image: wgpu::TextureView,
     sampler: wgpu::Sampler,
     sh9: [Vec3; 9],
 }
@@ -434,6 +439,7 @@ impl Environment {
         Self {
             cube,
             view,
+            image: equirect,
             sampler,
             sh9,
         }
@@ -441,6 +447,12 @@ impl Environment {
 
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
+    }
+
+    /// The equirectangular picture itself, for what shows the environment
+    /// sharp: the path tracer's mirrors, and the background.
+    pub fn image(&self) -> &wgpu::TextureView {
+        &self.image
     }
 
     pub fn sampler(&self) -> &wgpu::Sampler {
@@ -494,9 +506,26 @@ impl Environment {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let image = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("no environment picture"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             cube,
             view,
+            image,
             sampler,
             sh9: [Vec3::ZERO; 9],
         }

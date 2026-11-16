@@ -1631,11 +1631,18 @@ fn ending_a_light_where_it_goes_black_changes_no_pixel() {
         },
     );
 
+    // By more than a step of the screen's eight bits: the picture goes
+    // onto it with a step's worth of noise against banding, and a value
+    // that sat on a step's edge may fall either side of it.
     let moved = cut
         .pixels
         .iter()
         .zip(&uncut.pixels)
-        .filter(|(a, b)| a != b)
+        .filter(|(a, b)| {
+            a.iter()
+                .zip(b.iter())
+                .any(|(x, y)| (x - y).abs() > 1.01 / 255.0)
+        })
         .count();
     assert_eq!(
         moved, 0,

@@ -485,14 +485,44 @@ pub fn apply_one(doc: &Document, object: ObjectId, index: usize) -> Option<MeshD
         enabled: true,
         ..modifier
     }];
-    let operands = operands_of(doc, object, &one);
+    let operands = operands_of(doc, object, &one, &mut |other| shown_base(doc, other));
     Some(apply_stack_with(input, &one, &EvalCtx::still(), &operands))
+}
+
+/// The mesh an object shows before its modifier stack: what its features
+/// build, its curve as a mesh, or the mesh it holds. Built afresh — for an
+/// operator that asks once; the cache has its own, kept.
+///
+/// What anything that reads *another* object's shape has to read: a body
+/// made from sketches holds an empty mesh, and read by that it cut nothing,
+/// joined as nothing and measured as nothing.
+pub fn shown_base(doc: &Document, id: ObjectId) -> Option<Arc<MeshData>> {
+    let o = doc.object(id)?;
+    if let Some(curve) = &o.curve {
+        return Some(Arc::new(curve.to_mesh()));
+    }
+    if !o.features.is_empty() {
+        return Some(Arc::new(crate::feature::body(
+            doc,
+            &o.features,
+            doc.world_transform(id),
+        )));
+    }
+    doc.mesh_arc(o.mesh()?).cloned()
 }
 
 /// The other objects `id`'s booleans read, resolved now: each one's mesh and
 /// where it is relative to `id`. An operand that is `id` itself, or not a mesh,
 /// is left out, and its boolean passes its input through.
-fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<Operand> {
+///
+/// `base` gives an operand's shape before its own stack: a body's is what
+/// its features build, not the empty mesh it holds.
+fn operands_of(
+    doc: &Document,
+    id: ObjectId,
+    stack: &[ModifierInstance],
+    base: &mut dyn FnMut(ObjectId) -> Option<Arc<MeshData>>,
+) -> Vec<Operand> {
     let mut out: Vec<Operand> = Vec::new();
     let to_local = doc.world_transform(id).inverse();
     for m in stack.iter().filter(|m| m.enabled) {
@@ -523,11 +553,10 @@ fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<
             });
             continue;
         }
-        let Some(mesh) = doc
-            .object(other)
-            .and_then(|o| o.mesh())
-            .and_then(|m| doc.mesh_arc(m))
-        else {
+        if doc.object(other).and_then(|o| o.mesh()).is_none() {
+            continue;
+        }
+        let Some(mesh) = base(other) else {
             continue;
         };
         let lines = doc
@@ -536,7 +565,7 @@ fn operands_of(doc: &Document, id: ObjectId, stack: &[ModifierInstance]) -> Vec<
             .unwrap_or_default();
         out.push(Operand {
             uid,
-            mesh: mesh.clone(),
+            mesh,
             to_local: to_local * doc.world_transform(other),
             lines: Arc::new(lines),
         });
@@ -739,7 +768,19 @@ impl ModifierCache {
             }
             None => input.clone(),
         };
-        let operands = operands_of(doc, id, &object.modifiers);
+        // An operand that is a body or a curve is read as what it shows,
+        // from the same cache: the same handle from one frame to the next,
+        // which is what the stack's own entry is found again by.
+        let operands = operands_of(doc, id, &object.modifiers, &mut |other| {
+            let o = doc.object(other)?;
+            if let Some(curve) = &o.curve {
+                Some(self.curve_mesh(o.uid, curve))
+            } else if !o.features.is_empty() {
+                Some(self.body(doc, other))
+            } else {
+                doc.mesh_arc(o.mesh()?).cloned()
+            }
+        });
         GAVE_UP_HERE.with(|f| f.set(false));
         let misses = self.misses;
         let stacked = self.evaluate_with(&skinned, &object.modifiers, ctx, &operands);

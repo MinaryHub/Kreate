@@ -195,6 +195,65 @@ impl App {
         }
     }
 
+    /// The panel's view of what the assistant can be asked for: its models
+    /// and efforts, and which of each is picked.
+    pub(super) fn publish_chat_choices(&mut self) {
+        let Some(chat) = &self.chat else { return };
+        self.ui.chat_models = chat.model_names();
+        self.ui.chat_model = chat.model_index();
+        self.ui.chat_efforts = chat.effort_names();
+        self.ui.chat_effort = chat.effort_index();
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    /// An answer has ended: how long it took and, where the assistant's
+    /// program counts them, the tokens — with their cost when an API key
+    /// paid for them. Nothing after one that failed or was stopped.
+    fn note_chat_usage(&mut self, failed: bool, keyed: bool) {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let (sent, usage) = (self.chat_sent.take(), self.chat_usage.take());
+        let Some(sent) = sent else { return };
+        if failed {
+            return;
+        }
+        let seconds = sent.elapsed().as_secs();
+        let clock = if seconds >= 60 {
+            format!("{}:{:02}", seconds / 60, seconds % 60)
+        } else {
+            format!("{seconds} s")
+        };
+        let short = |n: u64| {
+            if n >= 1000 {
+                format!("{:.1}k", n as f64 / 1000.0)
+            } else {
+                n.to_string()
+            }
+        };
+        let mut parts = vec![self.ui.catalog.format(
+            "chat-usage-time",
+            kreate_i18n::TextKind::Ui,
+            &[("time", clock.as_str())],
+        )];
+        if let Some((input, output, cost)) = usage {
+            parts.push(self.ui.catalog.format(
+                "chat-usage-tokens",
+                kreate_i18n::TextKind::Ui,
+                &[
+                    ("input", short(input).as_str()),
+                    ("output", short(output).as_str()),
+                ],
+            ));
+            // What a signed-in account's plan covers is not a bill.
+            if let (Some(cost), true) = (cost, keyed) {
+                parts.push(format!("${cost:.3}"));
+            }
+        }
+        self.ui.chat_log.push(ChatMessage {
+            role: ChatRole::Note,
+            text: parts.join(" · "),
+        });
+    }
+
     /// Says something to Claude from the Claude panel.
     pub(super) fn chat_send(&mut self, text: String) {
         use kreate_ui::chat::{ChatMessage, ChatRole};
@@ -216,6 +275,8 @@ impl App {
         match chat.send(&text, &self.chat_attachments) {
             Ok(()) => {
                 self.chat_attachments.clear();
+                self.chat_sent = Some(std::time::Instant::now());
+                self.chat_usage = None;
                 self.chat_turns.push(ChatTurn {
                     start: self.history.cursor(),
                     end: None,
@@ -327,9 +388,20 @@ impl App {
         use kreate_ui::chat::{ChatMessage, ChatRole};
         let Some(chat) = &mut self.chat else { return };
         let mut answered = false;
+        let mut failed = false;
+        let provider = chat.provider();
         for event in chat.poll() {
             answered |= matches!(event, Event::Done(_));
+            failed |= matches!(event, Event::Done(Some(_)));
             let (role, text) = match event {
+                Event::Usage {
+                    input,
+                    output,
+                    cost,
+                } => {
+                    self.chat_usage = Some((input, output, cost));
+                    continue;
+                }
                 Event::Session(_) | Event::Done(None) => {
                     self.chat_streaming = false;
                     continue;
@@ -357,6 +429,11 @@ impl App {
                     if chat.signing_in() {
                         continue;
                     }
+                    // An API key is forgotten under API keys, not signed
+                    // out of; a model on this computer has no account.
+                    self.ui.chat_leaves = provider
+                        .service()
+                        .is_some_and(|s| kreate::ai_keys::key(s).is_none());
                     self.ui.chat_account = match account {
                         Account::Checking => ChatAccount::Checking,
                         Account::SignedOut => ChatAccount::SignedOut,
@@ -379,6 +456,8 @@ impl App {
                 Event::Models(_) => {
                     self.ui.chat_models = chat.model_names();
                     self.ui.chat_model = chat.model_index();
+                    self.ui.chat_efforts = chat.effort_names();
+                    self.ui.chat_effort = chat.effort_index();
                     continue;
                 }
                 Event::SignInUrl(url) => {
@@ -415,6 +494,10 @@ impl App {
         self.ui.chat_busy = chat.busy();
         if answered {
             self.finish_chat_turn();
+            let keyed = provider
+                .service()
+                .is_some_and(|s| kreate::ai_keys::key(s).is_some());
+            self.note_chat_usage(failed, keyed);
         }
         // Kept as it goes, so a crash mid-answer loses nothing said. A
         // streamed answer is written when it settles, not each fragment.

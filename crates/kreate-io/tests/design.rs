@@ -164,6 +164,12 @@ fn sketch_lines_and_a_bodys_features_are_saved() {
             shape: Shape::Extrude {
                 distance: 0.25,
                 symmetric: true,
+                more: kreate_scene::feature::ExtrudeMore {
+                    second: 0.0,
+                    offset: 0.002,
+                    taper: 0.05,
+                    through: true,
+                },
             },
             sketch: uid,
             seeds: vec![[0.5, 0.5]],
@@ -258,6 +264,7 @@ fn a_newer_builds_feature_is_kept_and_written_back() {
         shape: Shape::Extrude {
             distance: 0.1,
             symmetric: false,
+            more: Default::default(),
         },
         sketch: kreate_scene::Uid::from_raw(7),
         seeds: vec![[0.0, 0.0]],

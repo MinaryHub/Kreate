@@ -319,6 +319,10 @@ fn cut_through(mesh: &BMesh, faces: &[FaceId], offset: Vec3) -> Option<BMesh> {
     let middle = points.iter().sum::<Vec3>() / points.len() as f32;
     starts.extend(points.iter().map(|p| *p + (middle - *p) * 0.02));
     let (tris, _) = tri.indices.as_chunks::<3>();
+    // Whether the push ends in a face of the solid — pushed exactly as far
+    // as the wall is thick: a hole through, whose cutter must go a hair
+    // past, or its end lies in that face and nothing is cut there.
+    let exits = std::cell::Cell::new(false);
     let meets = starts.iter().any(|origin| {
         tris.iter().any(|t| {
             let [a, b, c] = t.map(|v| positions[v as usize]);
@@ -337,12 +341,48 @@ fn cut_through(mesh: &BMesh, faces: &[FaceId], offset: Vec3) -> Option<BMesh> {
             let q = s.cross(e1);
             let v = dir.dot(q) / det;
             let t = e2.dot(q) / det;
-            u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > near && t < depth - near
+            let inside = u >= 0.0 && v >= 0.0 && u + v <= 1.0;
+            if inside && (t - depth).abs() <= near {
+                exits.set(true);
+            }
+            inside && t > near && t < depth - near
         })
     });
+    // Every ray looked at, when none met anything on the way: the far face
+    // may still be exactly where the push ends.
     if !meets {
+        for origin in &starts {
+            for t in tris {
+                let [a, b, c] = t.map(|v| positions[v as usize]);
+                if is_region(a, b, c) {
+                    continue;
+                }
+                let (e1, e2) = (b - a, c - a);
+                let h = dir.cross(e2);
+                let det = e1.dot(h);
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let s = *origin - a;
+                let u = s.dot(h) / det;
+                let q = s.cross(e1);
+                let v = dir.dot(q) / det;
+                let t = e2.dot(q) / det;
+                if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && (t - depth).abs() <= near {
+                    exits.set(true);
+                }
+            }
+        }
+    }
+    if !meets && !exits.get() {
         return None;
     }
+    // Through: a hair past the far face.
+    let offset = if exits.get() {
+        offset + dir * (size * 1e-3)
+    } else {
+        offset
+    };
     // The cutter: the region swept from a hair outside the solid to where
     // it is pushed, a hair wider than the region, so none of its faces lies
     // in a face of the solid.

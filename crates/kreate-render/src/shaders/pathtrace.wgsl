@@ -368,7 +368,16 @@ fn pt_environment(dir: vec3<f32>) -> vec3<f32> {
     if (shading.world.w <= 0.0) {
         return shading.world.rgb;
     }
-    return textureSampleLevel(environment_cube, environment_sampler, unrotate(dir), 0.0).rgb * shading.environment.w;
+    return environment_sharp(unrotate(dir)) * shading.environment.w;
+}
+
+// The environment's light along a direction it was aimed at by: by the
+// texel, as the aiming's chances are (see `environment_texel`).
+fn pt_environment_aimed(dir: vec3<f32>) -> vec3<f32> {
+    if (shading.world.w <= 0.0) {
+        return shading.world.rgb;
+    }
+    return environment_texel(unrotate(dir)) * shading.environment.w;
 }
 
 fn pt_orthonormal(n: vec3<f32>) -> mat3x3<f32> {
@@ -393,11 +402,13 @@ fn pt_luminance(c: vec3<f32>) -> f32 {
 // carries the cases it is good at (aiming for small lights and rough
 // surfaces, bouncing for big lights and mirrors).
 
-// How many of the three ways to aim there are: at a lamp, at a glowing
-// triangle, at the environment's bright part. Each that exists is chosen
-// equally often.
+// How often each way of aiming is taken — at a lamp, at a glowing triangle,
+// at the environment's bright part: every one that exists, at every surface.
+// One of them by turns left a studio's softboxes unaimed-at at half its
+// surfaces and its key lamp at the other half: twice the grain for the same
+// samples, and a shadow ray is the cheap part of a sample.
 fn pt_aim_ways() -> f32 {
-    return f32(u32(pt.light_count > 0u) + u32(pt.emitter_count > 0u) + u32(pt.env.z != 0u));
+    return 1.0;
 }
 
 // How often a surface aims at a glowing triangle.
@@ -1047,8 +1058,14 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // The ray through a random point in the pixel: the antialiasing.
-    let jitter = vec2<f32>(pt_random(), pt_random());
+    // The ray through a random point about the pixel's middle: the
+    // antialiasing. Spread as a bell three quarters of a pixel wide and not
+    // evenly over the pixel's square — a box lets an edge step from one
+    // pixel to the next, where the bell carries a little of each into its
+    // neighbour, as a film renderer's filter does.
+    let bell = min(sqrt(-2.0 * log(max(pt_random(), 1e-6))) * 0.4, 1.25);
+    let around = 6.2831853 * pt_random();
+    let jitter = vec2<f32>(0.5) + bell * vec2<f32>(cos(around), sin(around));
     let ndc = vec2<f32>(
         (f32(id.x) + jitter.x) / f32(pt.size.x) * 2.0 - 1.0,
         1.0 - (f32(id.y) + jitter.y) / f32(pt.size.y) * 2.0,
@@ -1578,17 +1595,15 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Aim at a glowing triangle, or at a lamp: one of the two, its share
         // made up by dividing by how often it is chosen.
-        let share = pt_emitter_share();
         let env_share = pt_env_share();
-        let pick = pt_random();
-        let aim_at_glow = pick < share;
-        let aim_at_sky = !aim_at_glow && pick < share + env_share;
+        let aim_at_glow = pt.emitter_count > 0u;
+        let aim_at_sky = pt.env.z != 0u;
         if (aim_at_sky) {
             let l = pt_env_sample();
             if (dot(l, geometric) > 0.0) {
                 let pdf = env_share * pt_env_pdf(l);
                 if (pdf > 0.0 && pt_trace(start, l, 1e30, true, PT_NOWHERE).t < 0.0) {
-                    let e = pt_environment(l) / pdf * pt_transmittance(start, l, 1e30);
+                    let e = pt_environment_aimed(l) / pdf * pt_transmittance(start, l, 1e30);
                     let weight = pt_power(pdf, pt_bsdf_pdf(s, n, v, l));
                     radiance += throughput * brdf_shade(s, n, v, l, e, true, true) * weight;
                 }
@@ -1645,7 +1660,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // One lamp, chosen by how much it lights this point (see
         // `pt_pick_lamp`), its share made up by dividing by that chance.
-        if (!aim_at_glow && !aim_at_sky && pt.light_count > 0u) {
+        if (pt.light_count > 0u) {
             let at = p - pt.eye.xyz;
             let chosen = pt_pick_lamp(at, geometric, pt_random());
             let light = lights[chosen.k];
