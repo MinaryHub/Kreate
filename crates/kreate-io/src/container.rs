@@ -189,6 +189,11 @@ pub enum RobotRecord {
         /// The joint followed, its multiplier and its offset.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mimic: Option<(String, f64, f64)>,
+        /// The second way it moves' limits: a cylindrical joint's slide.
+        #[serde(default, skip_serializing_if = "is_zero_f64")]
+        lower2: f64,
+        #[serde(default, skip_serializing_if = "is_zero_f64")]
+        upper2: f64,
     },
     Collision,
     /// An armature posing the robot: each bone and the identity of the
@@ -223,6 +228,8 @@ impl RobotRecord {
                     .mimic
                     .as_ref()
                     .map(|m| (m.joint.clone(), m.multiplier, m.offset)),
+                lower2: j.lower2,
+                upper2: j.upper2,
             },
             RobotPart::Collision => RobotRecord::Collision,
             RobotPart::Rig { joints } => RobotRecord::Rig {
@@ -258,6 +265,8 @@ impl RobotRecord {
                 effort,
                 velocity,
                 mimic,
+                lower2,
+                upper2,
             } => RobotPart::Joint(Joint {
                 kind: JointKind::from_tag(kind).unwrap_or_default(),
                 rest: kreate_math::DTransform {
@@ -274,6 +283,8 @@ impl RobotRecord {
                     multiplier: *multiplier,
                     offset: *offset,
                 }),
+                lower2: *lower2,
+                upper2: *upper2,
             }),
             RobotRecord::Collision => RobotPart::Collision,
             RobotRecord::Rig { joints } => RobotPart::Rig {
@@ -3531,6 +3542,10 @@ pub struct FeatureRecord {
 
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {

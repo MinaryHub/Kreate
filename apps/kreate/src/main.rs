@@ -1096,6 +1096,12 @@ struct App {
     /// Align Faces, while it is out: the first face clicked, once it has
     /// been — the part that moves, its face's middle and normal.
     mate: Option<Option<(ObjectId, DVec3, DVec3)>>,
+    /// Fusion's Joint, being made: the motion asked for, and the moving
+    /// part's joint origin once it has been picked.
+    joint_tool: Option<(u32, Option<(ObjectId, kreate::assembly::Origin)>)>,
+    /// A joint being played through its travel: the joint, when it began,
+    /// and where it was, to put it back.
+    joint_anim: Option<(ObjectId, std::time::Instant, kreate_math::DTransform)>,
     /// The active object's mass properties, and the evaluated mesh and
     /// placement they were measured for: measured again only when either
     /// changes.
@@ -1342,6 +1348,8 @@ impl App {
             asking: false,
             quitting: false,
             mate: None,
+            joint_tool: None,
+            joint_anim: None,
             mass_cache: None,
             sectioned: Vec::new(),
             circle_radius: 40.0,
@@ -4814,6 +4822,117 @@ impl App {
         }
         let middle = points.iter().sum::<DVec3>() / points.len().max(1) as f64;
         Some((hit.object, middle, normal.normalize_or_zero()))
+    }
+
+    /// The joint origin under the pointer: whose it is, and where — a
+    /// hole's centre near the click, else the middle of the flat face it is
+    /// on — with the face's outward normal, in the world.
+    fn origin_under_pointer(&mut self) -> Option<(ObjectId, kreate::assembly::Origin)> {
+        let ndc = self.cursor_ndc()?;
+        let aspect = self.viewport_aspect();
+        let hit = self
+            .pick
+            .raycast_ndc(&self.doc, &self.evaluated, &self.camera, ndc, aspect)?;
+        let mesh = self
+            .evaluated
+            .iter()
+            .find(|(id, _)| *id == hit.object)?
+            .1
+            .clone();
+        let world = self.doc.world_transform(hit.object);
+        let origin = kreate::assembly::origin_at(&mesh, &world, hit.face, hit.point)?;
+        Some((hit.object, origin))
+    }
+
+    /// A click with the Joint tool: the first picks the moving part's joint
+    /// origin, the second the other part's — and the part is brought there
+    /// and joined, in the motion the tool was taken up with.
+    fn joint_click(&mut self) {
+        let Some((kind, first)) = self.joint_tool else {
+            return;
+        };
+        let Some((part, origin)) = self.origin_under_pointer() else {
+            self.status(&self.ui.catalog.get("joint-pick-face"));
+            return;
+        };
+        let Some((moving, from)) = first else {
+            self.joint_tool = Some((kind, Some((part, origin))));
+            self.status(&self.ui.catalog.get("joint-pick-base"));
+            return;
+        };
+        if part == moving {
+            self.status(&self.ui.catalog.get("joint-pick-other"));
+            return;
+        }
+        let (Some(uid), Some(target)) = (self.doc.object_uid(moving), self.doc.object_uid(part))
+        else {
+            return;
+        };
+        let mut p = PropertyMap::new();
+        p.set("uid", PropertyValue::Text(uid.raw().to_string()));
+        p.set("target", PropertyValue::Text(target.raw().to_string()));
+        p.set("from", PropertyValue::Vec3(from.at.to_array()));
+        p.set("from_normal", PropertyValue::Vec3(from.normal.to_array()));
+        p.set("to", PropertyValue::Vec3(origin.at.to_array()));
+        p.set("to_normal", PropertyValue::Vec3(origin.normal.to_array()));
+        p.set("kind", PropertyValue::Enum(kind));
+        self.run_op("assembly.joint", p);
+        self.joint_tool = None;
+    }
+
+    /// A joint being played through its travel: a swing out to one end,
+    /// across to the other and back in three seconds, its first way of
+    /// moving only — then put back where it was, nothing kept, no step.
+    fn advance_joint_animation(&mut self) {
+        use kreate_scene::robot::RobotPart;
+        let Some((id, began, was)) = self.joint_anim else {
+            return;
+        };
+        const SECONDS: f64 = 3.0;
+        let t = began.elapsed().as_secs_f64();
+        let joint = match self.doc.object(id).and_then(|o| o.robot.as_ref()) {
+            Some(RobotPart::Joint(j)) => j.clone(),
+            _ => {
+                self.joint_anim = None;
+                return;
+            }
+        };
+        if t >= SECONDS || joint.kind.dofs().is_empty() {
+            self.joint_anim = None;
+            if let Some(o) = self.doc.object_mut(id) {
+                o.transform = was;
+            }
+            self.redraw.set(RedrawReason::SCENE_CHANGED);
+            return;
+        }
+        let slides = joint.kind.dofs()[0].slides();
+        let (lo, hi) = if joint.lower < joint.upper
+            && joint.kind != kreate_scene::robot::JointKind::Continuous
+        {
+            (joint.lower, joint.upper)
+        } else if slides {
+            (-0.05, 0.05)
+        } else {
+            (-std::f64::consts::PI, std::f64::consts::PI)
+        };
+        // From where it is, round a whole swing: a sine, so it eases at
+        // each end as a hand moving it would.
+        let mut positions = joint.positions_of(&was);
+        let start = positions.first().copied().unwrap_or(0.0).clamp(lo, hi);
+        let swing = (t / SECONDS * std::f64::consts::TAU).sin();
+        let value = if swing >= 0.0 {
+            start + (hi - start) * swing
+        } else {
+            start + (start - lo) * swing
+        };
+        if let Some(first) = positions.first_mut() {
+            *first = value;
+        }
+        let placed = joint.place_all(&positions);
+        if let Some(o) = self.doc.object_mut(id) {
+            o.transform = placed;
+        }
+        self.redraw.set(RedrawReason::PLAYING);
     }
 
     /// A click with Align Faces: the first picks the moving part's face, the
@@ -15174,6 +15293,11 @@ impl App {
             self.status("Align Faces cancelled");
             return;
         }
+        if self.joint_tool.is_some() && code == KeyCode::Escape {
+            self.joint_tool = None;
+            self.status(&self.ui.catalog.get("joint-cancelled"));
+            return;
+        }
         // Esc stops a bake that is running, before it means anything else.
         if code == KeyCode::Escape {
             if let Some(job) = &self.bake_job {
@@ -15701,6 +15825,39 @@ impl App {
             "view.measure" => self.begin_measure(),
             "app.path3d" => self.begin_path3d(),
             "view.walk" => self.begin_walk(),
+            "assembly.joint_tool" => {
+                let kind = action
+                    .params
+                    .get("kind")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(1)
+                    .clamp(0, 6) as u32;
+                self.end_loop_cut_hover();
+                self.mate = None;
+                self.joint_tool = Some((kind, None));
+                self.status(&self.ui.catalog.get("joint-pick-moving"));
+            }
+            "app.joint_animate" => {
+                let name = match action.params.get("joint") {
+                    Some(PropertyValue::Text(t)) => t.clone(),
+                    _ => String::new(),
+                };
+                let found = self
+                    .doc
+                    .objects()
+                    .find(|(_, o)| o.name == name)
+                    .map(|(id, o)| (id, o.transform));
+                // One at a time: a second press puts the first back.
+                if let Some((id, _, was)) = self.joint_anim.take() {
+                    if let Some(o) = self.doc.object_mut(id) {
+                        o.transform = was;
+                    }
+                }
+                if let Some((id, was)) = found {
+                    self.joint_anim = Some((id, std::time::Instant::now(), was));
+                    self.redraw.set(RedrawReason::PLAYING);
+                }
+            }
             "object.align_faces" => {
                 self.end_loop_cut_hover();
                 self.mate = Some(None);
@@ -16798,6 +16955,21 @@ impl ApplicationHandler for App {
                         _ => {}
                     }
                 }
+                // Joint: left picks an origin, right gives up.
+                if self.joint_tool.is_some() && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.joint_click();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.joint_tool = None;
+                            self.status(&self.ui.catalog.get("joint-cancelled"));
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 // Align Faces: left picks a face, right gives up.
                 if self.mate.is_some() && pressed {
                     match button {
@@ -17153,6 +17325,7 @@ impl ApplicationHandler for App {
                     self.drive_strokes();
                 }
                 self.advance_playback();
+                self.advance_joint_animation();
                 self.advance_walk();
                 self.sync_timeline();
                 self.apply_input();

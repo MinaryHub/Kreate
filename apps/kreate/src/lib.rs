@@ -9,6 +9,7 @@
 pub mod ai_keys;
 pub mod android;
 pub mod appcall;
+pub mod assembly;
 pub mod assets;
 pub mod attach;
 pub mod breadcrumbs;

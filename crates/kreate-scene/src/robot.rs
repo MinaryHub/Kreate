@@ -36,18 +36,50 @@ pub enum JointKind {
     Prismatic,
     /// Moves every way: placed by hand.
     Floating,
-    /// Slides in its plane: placed by hand.
+    /// Slides in its plane, its X and Y, and turns about its Z.
     Planar,
+    /// Turns about its Z and slides along it: a shaft in a bore. Fusion's
+    /// Cylindrical.
+    Cylindrical,
+    /// Turns about its Z and slides along its X: a pin in a slot. Fusion's
+    /// Pin-Slot.
+    PinSlot,
+    /// Turns every way about its origin: a ball in a socket. Fusion's Ball.
+    Ball,
+}
+
+/// One way a joint can move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dof {
+    /// A turn about the joint's own axis, in radians.
+    TurnZ,
+    /// A turn about its X, then its Y — the ball's other two.
+    TurnX,
+    TurnY,
+    /// A slide along its Z, X or Y, in metres.
+    SlideZ,
+    SlideX,
+    SlideY,
+}
+
+impl Dof {
+    /// Whether it is a distance rather than an angle.
+    pub fn slides(self) -> bool {
+        matches!(self, Dof::SlideZ | Dof::SlideX | Dof::SlideY)
+    }
 }
 
 impl JointKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::Fixed,
         Self::Revolute,
         Self::Continuous,
         Self::Prismatic,
         Self::Floating,
         Self::Planar,
+        Self::Cylindrical,
+        Self::PinSlot,
+        Self::Ball,
     ];
 
     /// URDF's name for it.
@@ -59,6 +91,34 @@ impl JointKind {
             Self::Prismatic => "prismatic",
             Self::Floating => "floating",
             Self::Planar => "planar",
+            Self::Cylindrical => "cylindrical",
+            Self::PinSlot => "pin_slot",
+            Self::Ball => "ball",
+        }
+    }
+
+    /// What a robot description calls it: those it has no word for, by
+    /// the nearest it has — a cylindrical or a pin-slot joint's turn, a
+    /// ball's freedom.
+    pub fn urdf_tag(self) -> &'static str {
+        match self {
+            Self::Cylindrical | Self::PinSlot => "continuous",
+            Self::Ball => "floating",
+            other => other.tag(),
+        }
+    }
+
+    /// The ways it moves, in the order its positions are given: the
+    /// first is the one its limits hold.
+    pub fn dofs(self) -> &'static [Dof] {
+        match self {
+            Self::Fixed | Self::Floating => &[],
+            Self::Revolute | Self::Continuous => &[Dof::TurnZ],
+            Self::Prismatic => &[Dof::SlideZ],
+            Self::Cylindrical => &[Dof::TurnZ, Dof::SlideZ],
+            Self::PinSlot => &[Dof::TurnZ, Dof::SlideX],
+            Self::Planar => &[Dof::SlideX, Dof::SlideY, Dof::TurnZ],
+            Self::Ball => &[Dof::TurnZ, Dof::TurnX, Dof::TurnY],
         }
     }
 
@@ -106,6 +166,11 @@ pub struct Joint {
     pub effort: f64,
     pub velocity: f64,
     pub mimic: Option<Mimic>,
+    /// The second way it moves held between these — a cylindrical joint's
+    /// slide, a pin-slot's — when the lower is under the upper; free
+    /// otherwise.
+    pub lower2: f64,
+    pub upper2: f64,
 }
 
 impl Default for Joint {
@@ -118,6 +183,8 @@ impl Default for Joint {
             effort: 0.0,
             velocity: 0.0,
             mimic: None,
+            lower2: 0.0,
+            upper2: 0.0,
         }
     }
 }
@@ -130,6 +197,79 @@ impl Joint {
         } else {
             position
         }
+    }
+
+    /// Position `index` of its ways of moving held to its limits: the
+    /// first by the joint's own, the second by `lower2`/`upper2`, a
+    /// turn of a joint that turns all the way round not at all.
+    pub fn clamp_at(&self, index: usize, position: f64) -> f64 {
+        match index {
+            0 if matches!(
+                self.kind,
+                JointKind::Revolute
+                    | JointKind::Prismatic
+                    | JointKind::Cylindrical
+                    | JointKind::PinSlot
+            ) && self.lower <= self.upper
+                && (self.lower != 0.0 || self.upper != 0.0) =>
+            {
+                position.clamp(self.lower, self.upper)
+            }
+            1 if self.lower2 < self.upper2 => position.clamp(self.lower2, self.upper2),
+            _ => position,
+        }
+    }
+
+    /// The joint's object's transform with its ways of moving at
+    /// `positions`, in [`JointKind::dofs`]'s order; one missing is nought.
+    pub fn place_all(&self, positions: &[f64]) -> DTransform {
+        let at = |i: usize| positions.get(i).copied().unwrap_or(0.0);
+        let mut slide = DVec3::ZERO;
+        let mut turn = DQuat::IDENTITY;
+        let (mut tx, mut ty, mut tz) = (0.0, 0.0, 0.0);
+        for (i, dof) in self.kind.dofs().iter().enumerate() {
+            match dof {
+                Dof::SlideX => slide.x = at(i),
+                Dof::SlideY => slide.y = at(i),
+                Dof::SlideZ => slide.z = at(i),
+                Dof::TurnX => tx = at(i),
+                Dof::TurnY => ty = at(i),
+                Dof::TurnZ => tz = at(i),
+            }
+        }
+        if tx != 0.0 || ty != 0.0 {
+            turn = DQuat::from_euler(kreate_math::glam::EulerRot::ZXY, tz, tx, ty);
+        } else if tz != 0.0 {
+            turn = DQuat::from_rotation_z(tz);
+        }
+        let mut t = self.rest;
+        t.translation = self.rest.translation + self.rest.rotation * slide;
+        t.rotation = (self.rest.rotation * turn).normalize();
+        t
+    }
+
+    /// Every position a transform puts the joint at, in
+    /// [`JointKind::dofs`]'s order: the inverse of [`Joint::place_all`].
+    pub fn positions_of(&self, t: &DTransform) -> Vec<f64> {
+        let local = self.rest.rotation.inverse() * (t.translation - self.rest.translation);
+        let turn = (self.rest.rotation.inverse() * t.rotation).normalize();
+        let (tz, tx, ty) = turn.to_euler(kreate_math::glam::EulerRot::ZXY);
+        let pi = std::f64::consts::PI;
+        let wrap = |a: f64| (a + pi).rem_euclid(2.0 * pi) - pi;
+        self.kind
+            .dofs()
+            .iter()
+            .map(|dof| match dof {
+                Dof::SlideX => local.x,
+                Dof::SlideY => local.y,
+                Dof::SlideZ => local.z,
+                Dof::TurnX => tx,
+                Dof::TurnY => ty,
+                // The twist about Z alone, as the one-way joints read it.
+                Dof::TurnZ if self.kind != JointKind::Ball => wrap(2.0 * turn.z.atan2(turn.w)),
+                Dof::TurnZ => wrap(tz),
+            })
+            .collect()
     }
 
     /// The joint's object's transform at `position`.

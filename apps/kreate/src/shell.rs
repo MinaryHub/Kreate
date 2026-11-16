@@ -5390,6 +5390,7 @@ fn add_nodes(l: &Labels) -> Vec<MenuNode> {
                 MechArg::None => (Vec::new(), None),
                 MechArg::Enum(n, v) => (vec![(n, V::Enum(v))], Some((n, V::Enum(v)))),
                 MechArg::Bool(n, v) => (vec![(n, V::Bool(v))], Some((n, V::Bool(v)))),
+                MechArg::Tool(_) => (Vec::new(), None),
             };
             let mut e = MenuEntry::new(id, &l.m(key), op(id, &pairs));
             if let Some((n, v)) = variant {
@@ -5549,6 +5550,9 @@ enum MechArg {
     None,
     Enum(&'static str, u32),
     Bool(&'static str, bool),
+    /// The application's tool, not an operator: taken up with this
+    /// argument, as `kind`.
+    Tool(u32),
 }
 
 /// The Mechanical menu, as data: each group (a submenu, or "" for entries
@@ -5664,6 +5668,43 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
     (
         "mech-assembly",
         &[
+            // Fusion's Joint: a point of the moving part, then a point of
+            // the part it joins — a face's middle, a hole's centre.
+            (
+                "mech-joint-pick-rigid",
+                "assembly.joint_tool",
+                MechArg::Tool(0),
+            ),
+            (
+                "mech-joint-pick-revolute",
+                "assembly.joint_tool",
+                MechArg::Tool(1),
+            ),
+            (
+                "mech-joint-pick-slider",
+                "assembly.joint_tool",
+                MechArg::Tool(2),
+            ),
+            (
+                "mech-joint-pick-cylindrical",
+                "assembly.joint_tool",
+                MechArg::Tool(3),
+            ),
+            (
+                "mech-joint-pick-pin-slot",
+                "assembly.joint_tool",
+                MechArg::Tool(4),
+            ),
+            (
+                "mech-joint-pick-planar",
+                "assembly.joint_tool",
+                MechArg::Tool(5),
+            ),
+            (
+                "mech-joint-pick-ball",
+                "assembly.joint_tool",
+                MechArg::Tool(6),
+            ),
             (
                 "mech-joint-revolute",
                 "object.add_joint",
@@ -5745,6 +5786,11 @@ fn mechanical_nodes(l: &Labels) -> Vec<MenuNode> {
             MechArg::None => (Vec::new(), None),
             MechArg::Enum(n, v) => (vec![(n, V::Enum(v))], Some((n, V::Enum(v)))),
             MechArg::Bool(n, v) => (vec![(n, V::Bool(v))], Some((n, V::Bool(v)))),
+            MechArg::Tool(kind) => {
+                let mut map = PropertyMap::new();
+                map.set("kind", V::Enum(kind));
+                return MenuNode::Entry(MenuEntry::new(id, &l.m(key), Run::Dispatch(id, map)));
+            }
         };
         let mut e = MenuEntry::new(id, &l.m(key), op(id, &pairs));
         if let Some((n, v)) = variant {
@@ -12299,7 +12345,7 @@ fn draw_robot_panel(ui: &mut Ui, state: &mut ShellState, doc: &Document, active:
     )> = doc
         .objects()
         .filter_map(|(id, o)| match &o.robot {
-            Some(RobotPart::Joint(j)) if j.kind.moves() && under(id) => {
+            Some(RobotPart::Joint(j)) if !j.kind.dofs().is_empty() && under(id) => {
                 Some((id, o.name.clone(), j.clone(), o.transform))
             }
             _ => None,
@@ -12334,46 +12380,76 @@ fn draw_robot_panel(ui: &mut Ui, state: &mut ShellState, doc: &Document, active:
         });
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         egui::Grid::new("robot-joints")
-            .num_columns(2)
+            .num_columns(3)
             .show(ui, |ui| {
                 for (id, name, joint, transform) in &joints {
-                    let position = joint.position_of(transform);
-                    let label = ui.label(name);
-                    if *id == active {
-                        label.highlight();
+                    let positions = joint.positions_of(transform);
+                    for (index, dof) in joint.kind.dofs().iter().enumerate() {
+                        let position = positions.get(index).copied().unwrap_or(0.0);
+                        let label = if index == 0 {
+                            ui.label(name)
+                        } else {
+                            ui.label("")
+                        };
+                        if *id == active {
+                            label.highlight();
+                        }
+                        let slides = dof.slides();
+                        let limited = match index {
+                            0 => joint.kind.limited() && joint.lower < joint.upper,
+                            1 => joint.lower2 < joint.upper2,
+                            _ => false,
+                        };
+                        let (lo, hi) = if limited && index == 0 {
+                            (joint.lower, joint.upper)
+                        } else if limited {
+                            (joint.lower2, joint.upper2)
+                        } else if slides {
+                            (-0.1, 0.1)
+                        } else {
+                            (-std::f64::consts::PI, std::f64::consts::PI)
+                        };
+                        // Degrees to look at, radians underneath.
+                        let to_shown = |v: f64| if slides { v } else { v.to_degrees() };
+                        let mut shown = to_shown(position);
+                        let slider = egui::Slider::new(&mut shown, to_shown(lo)..=to_shown(hi))
+                            .suffix(if slides { " m" } else { "°" })
+                            .max_decimals(if slides { 3 } else { 1 });
+                        let follows = joint.mimic.as_ref().map(|m| m.joint.clone());
+                        let response = ui.add_enabled(follows.is_none(), slider);
+                        let response = match &follows {
+                            Some(f) => response.on_disabled_hover_text(state.catalog.format(
+                                "robot-follows",
+                                kreate_i18n::TextKind::Tooltip,
+                                &[("joint", f.as_str())],
+                            )),
+                            None => response,
+                        };
+                        if response.changed() {
+                            let value = if slides { shown } else { shown.to_radians() };
+                            let mut p = PropertyMap::new();
+                            p.set("joint", kreate_reflect::PropertyValue::Text(name.clone()));
+                            p.set("position", kreate_reflect::PropertyValue::Float(value));
+                            p.set("index", kreate_reflect::PropertyValue::Int(index as i64));
+                            send_edit(state, "robot.set_joint", p, dragging);
+                        }
+                        // Animate: the joint played through its travel and put
+                        // back, as Fusion's Animate Joint plays it.
+                        if index == 0 {
+                            if ui
+                                .small_button("▶")
+                                .on_hover_text(state.catalog.get("robot-animate"))
+                                .clicked()
+                            {
+                                let mut p = PropertyMap::new();
+                                p.set("joint", kreate_reflect::PropertyValue::Text(name.clone()));
+                                state.queue.dispatch("app.joint_animate", p);
+                            }
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
                     }
-                    let slides = joint.kind.slides();
-                    let (lo, hi) = if joint.kind.limited() && joint.lower < joint.upper {
-                        (joint.lower, joint.upper)
-                    } else if slides {
-                        (-1.0, 1.0)
-                    } else {
-                        (-std::f64::consts::PI, std::f64::consts::PI)
-                    };
-                    // Degrees to look at, radians underneath.
-                    let to_shown = |v: f64| if slides { v } else { v.to_degrees() };
-                    let mut shown = to_shown(position);
-                    let slider = egui::Slider::new(&mut shown, to_shown(lo)..=to_shown(hi))
-                        .suffix(if slides { " m" } else { "°" })
-                        .max_decimals(if slides { 3 } else { 1 });
-                    let follows = joint.mimic.as_ref().map(|m| m.joint.clone());
-                    let response = ui.add_enabled(follows.is_none(), slider);
-                    let response = match &follows {
-                        Some(f) => response.on_disabled_hover_text(state.catalog.format(
-                            "robot-follows",
-                            kreate_i18n::TextKind::Tooltip,
-                            &[("joint", f.as_str())],
-                        )),
-                        None => response,
-                    };
-                    if response.changed() {
-                        let value = if slides { shown } else { shown.to_radians() };
-                        let mut p = PropertyMap::new();
-                        p.set("joint", kreate_reflect::PropertyValue::Text(name.clone()));
-                        p.set("position", kreate_reflect::PropertyValue::Float(value));
-                        send_edit(state, "robot.set_joint", p, dragging);
-                    }
-                    ui.end_row();
                 }
             });
     });

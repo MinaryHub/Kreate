@@ -20,6 +20,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<RigRobot>();
     registry.register::<AddJoint>();
     registry.register::<MotionCheck>();
+    registry.register::<AssemblyJoint>();
 }
 
 fn joint_of(doc: &Document, id: ObjectId) -> Option<Joint> {
@@ -39,6 +40,35 @@ fn find_joint(doc: &Document, name: &str) -> Option<ObjectId> {
     doc.objects()
         .find(|(id, o)| o.name == name && joint_of(doc, *id).is_some())
         .map(|(id, _)| id)
+}
+
+/// Puts one of a joint's ways of moving — `index` in its kind's
+/// [`kreate_scene::robot::JointKind::dofs`] — at `position`, held to its
+/// limits, the others left where they are. The first of a one-way joint is
+/// [`set`], with its mimics and its rig.
+pub fn set_dof(doc: &mut Document, id: ObjectId, index: usize, position: f64) -> bool {
+    let Some(joint) = joint_of(doc, id) else {
+        return false;
+    };
+    if joint.kind.moves() && index == 0 {
+        return set(doc, id, position);
+    }
+    let Some(o) = doc.object(id) else {
+        return false;
+    };
+    let mut positions = joint.positions_of(&o.transform);
+    let Some(slot) = positions.get_mut(index) else {
+        return false;
+    };
+    *slot = joint.clamp_at(index, position);
+    let placed = joint.place_all(&positions);
+    match doc.object_mut(id) {
+        Some(o) if o.transform != placed => {
+            o.transform = placed;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Puts `id` at `position` (held to its limits), and every joint that
@@ -90,6 +120,10 @@ pub struct SetJointParams {
     /// Radians for a joint that turns, metres for one that slides. Held to
     /// the joint's limits.
     pub position: f64,
+    /// Which of its ways of moving, for a joint that has more than one: a
+    /// cylindrical joint's turn (0) or slide (1), a planar one's X, Y and
+    /// turn, a ball's three turns.
+    pub index: u32,
 }
 
 /// Turns (or slides) one joint, and those that mimic it.
@@ -124,7 +158,12 @@ impl Operator for SetJoint {
                 format!("no joint called `{}`", params.joint)
             }));
         };
-        if set(doc.document_mut(), id, params.position) {
+        if set_dof(
+            doc.document_mut(),
+            id,
+            params.index as usize,
+            params.position,
+        ) {
             Ok(OpResult::Finished)
         } else {
             Ok(OpResult::Cancelled)
@@ -232,7 +271,16 @@ impl Operator for RigRobot {
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct AddJointParams {
-    #[param(variants("fixed", "revolute", "continuous", "prismatic"))]
+    #[param(variants(
+        "fixed",
+        "revolute",
+        "continuous",
+        "prismatic",
+        "cylindrical",
+        "pin_slot",
+        "planar",
+        "ball"
+    ))]
     pub kind: u32,
     /// The limits: radians for a turn, metres for a slide.
     #[param(unit = "angle")]
@@ -285,7 +333,6 @@ impl Operator for AddJoint {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         use kreate_math::{DQuat, DTransform, DVec3};
-        use kreate_scene::robot::JointKind;
         let d = doc.document();
         let part = d
             .selection
@@ -310,12 +357,7 @@ impl Operator for AddJoint {
                 "this part already has a joint; remove it first".into(),
             ));
         }
-        let kind = match params.kind {
-            0 => JointKind::Fixed,
-            2 => JointKind::Continuous,
-            3 => JointKind::Prismatic,
-            _ => JointKind::Revolute,
-        };
+        let kind = add_joint_kind(params.kind);
         let (origin, axis) = if params.at_cursor {
             (d.cursor, d.cursor_rotation * DVec3::Z)
         } else {
@@ -332,48 +374,259 @@ impl Operator for AddJoint {
         // A slide's limits are metres. Left at the turn's default of half
         // a turn each way they were 3.14 m of travel, and a motion check
         // then stepped 17 cm at a time, over whatever was in the way.
-        let pi = std::f64::consts::PI;
-        let (lower, upper) = if kind == JointKind::Prismatic
-            && (params.lower + pi).abs() < 1e-9
-            && (params.upper - pi).abs() < 1e-9
-        {
-            (-0.1, 0.1)
-        } else {
-            (params.lower, params.upper)
-        };
-        let (lower, upper) = (lower.min(upper), lower.max(upper));
         let world = DTransform {
             translation: origin,
             rotation: DQuat::from_rotation_arc(DVec3::Z, axis.normalize()),
             scale: DVec3::ONE,
         };
-        let part_name = d.object(part).map(|o| o.name.clone()).unwrap_or_default();
-        let d = doc.document_mut();
-        let name = d.unique_object_name(&format!("Joint {part_name}"));
-        let mut o = kreate_scene::Object::new(name, kreate_scene::ObjectData::Empty);
-        o.transform = world;
-        let id = d.add_object(o);
-        // Under the base where it stands, and the part under it where it
-        // stands: nothing moves now.
-        if let Some(b) = base {
-            d.set_parent(id, Some(b))
-                .map_err(|e| OpError::Failed(format!("{e:?}")))?;
-        }
-        d.set_parent(part, Some(id))
+        join_at(
+            doc.document_mut(),
+            part,
+            base,
+            world,
+            kind,
+            (params.lower, params.upper),
+        )?;
+        Ok(OpResult::Finished)
+    }
+}
+
+/// `object.add_joint`'s kinds, by their number.
+fn add_joint_kind(kind: u32) -> kreate_scene::robot::JointKind {
+    use kreate_scene::robot::JointKind;
+    match kind {
+        0 => JointKind::Fixed,
+        2 => JointKind::Continuous,
+        3 => JointKind::Prismatic,
+        4 => JointKind::Cylindrical,
+        5 => JointKind::PinSlot,
+        6 => JointKind::Planar,
+        7 => JointKind::Ball,
+        _ => JointKind::Revolute,
+    }
+}
+
+/// A joint's object made at `world` — its origin, its Z the axis — under
+/// `base` where it stands, with `part` under it where that stands: nothing
+/// moves, and from now on `part` turns or slides about it. Selected.
+fn join_at(
+    d: &mut Document,
+    part: ObjectId,
+    base: Option<ObjectId>,
+    world: kreate_math::DTransform,
+    kind: kreate_scene::robot::JointKind,
+    (lower, upper): (f64, f64),
+) -> Result<ObjectId, OpError> {
+    use kreate_scene::robot::JointKind;
+    // A slide's limits are metres. Left at the turn's default of half
+    // a turn each way they were 3.14 m of travel, and a motion check
+    // then stepped 17 cm at a time, over whatever was in the way.
+    let pi = std::f64::consts::PI;
+    let (lower, upper) =
+        if kind == JointKind::Prismatic && (lower + pi).abs() < 1e-9 && (upper - pi).abs() < 1e-9 {
+            (-0.1, 0.1)
+        } else {
+            (lower, upper)
+        };
+    let (lower, upper) = (lower.min(upper), lower.max(upper));
+    let part_name = d.object(part).map(|o| o.name.clone()).unwrap_or_default();
+    let name = d.unique_object_name(&format!("Joint {part_name}"));
+    let mut o = kreate_scene::Object::new(name, kreate_scene::ObjectData::Empty);
+    o.transform = world;
+    let id = d.add_object(o);
+    // Under the base where it stands, and the part under it where it
+    // stands: nothing moves now.
+    if let Some(b) = base {
+        d.set_parent(id, Some(b))
             .map_err(|e| OpError::Failed(format!("{e:?}")))?;
-        let rest = d.object(id).map(|o| o.transform).unwrap_or(world);
-        if let Some(o) = d.object_mut(id) {
-            o.robot = Some(RobotPart::Joint(Joint {
-                kind,
-                rest,
-                lower,
-                upper,
-                ..Joint::default()
-            }));
+    }
+    d.set_parent(part, Some(id))
+        .map_err(|e| OpError::Failed(format!("{e:?}")))?;
+    let rest = d.object(id).map(|o| o.transform).unwrap_or(world);
+    if let Some(o) = d.object_mut(id) {
+        o.robot = Some(RobotPart::Joint(Joint {
+            kind,
+            rest,
+            lower,
+            upper,
+            // A cylindrical joint's slide and a pin-slot's, free until
+            // limited.
+            ..Joint::default()
+        }));
+    }
+    d.selection.clear();
+    d.selection.add(id);
+    d.selection.active = Some(id);
+    Ok(id)
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct AssemblyJointParams {
+    /// The part that moves, by its uid.
+    pub uid: String,
+    /// Where on it the joint is — a face's middle, a hole's centre — and
+    /// which way that faces, in the world.
+    #[param(unit = "length")]
+    pub from: [f64; 3],
+    pub from_normal: [f64; 3],
+    /// The same on the part it is joined to.
+    #[param(unit = "length")]
+    pub to: [f64; 3],
+    pub to_normal: [f64; 3],
+    /// The part it is joined to, by its uid; empty for the world — the
+    /// part is then grounded through the joint.
+    pub target: String,
+    /// Rigid holds it; revolute turns it about the axis; slider slides it
+    /// along; cylindrical does both; pin-slot turns it and slides it across;
+    /// planar slides it in the plane and turns it; ball turns it every way.
+    #[param(variants(
+        "rigid",
+        "revolute",
+        "slider",
+        "cylindrical",
+        "pin_slot",
+        "planar",
+        "ball"
+    ))]
+    pub kind: u32,
+    /// The moving part the other way round on the axis: its face looking
+    /// the same way as the other's rather than at it.
+    pub flip: bool,
+    /// A gap left along the axis, and a turn about it, from where the
+    /// points meet.
+    #[param(unit = "length")]
+    pub offset: f64,
+    #[param(unit = "angle")]
+    pub angle: f64,
+    /// The first way it moves held between these: radians for a turn,
+    /// metres for a slide; equal for none.
+    pub lower: f64,
+    pub upper: f64,
+}
+
+impl Default for AssemblyJointParams {
+    fn default() -> Self {
+        Self {
+            uid: String::new(),
+            from: [0.0; 3],
+            from_normal: [0.0, 0.0, 1.0],
+            to: [0.0; 3],
+            to_normal: [0.0, 0.0, 1.0],
+            target: String::new(),
+            kind: 1,
+            flip: false,
+            offset: 0.0,
+            angle: 0.0,
+            lower: 0.0,
+            upper: 0.0,
         }
-        d.selection.clear();
-        d.selection.add(id);
-        d.selection.active = Some(id);
+    }
+}
+
+/// Fusion's Joint: a point of one part — a face's middle, a hole's centre
+/// — brought onto a point of another, the faces against each other, and
+/// joined there in the motion asked for. The joint's axis is the second
+/// face's normal; the part turns about it, slides along it, or is held.
+pub struct AssemblyJoint;
+
+impl Operator for AssemblyJoint {
+    type Params = AssemblyJointParams;
+    fn id() -> &'static str {
+        "assembly.joint"
+    }
+    fn label() -> &'static str {
+        "Joint"
+    }
+    fn poll(_ctx: &Context, _doc: &Document) -> bool {
+        true
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use kreate_math::{DAffine3, DQuat, DTransform, DVec3};
+        use kreate_scene::robot::JointKind;
+        let d = doc.document();
+        let by_uid = |text: &str| {
+            text.trim()
+                .parse::<u64>()
+                .ok()
+                .and_then(|raw| d.object_by_uid(kreate_scene::Uid::from_raw(raw)))
+        };
+        let part = by_uid(&params.uid).ok_or_else(|| OpError::Failed("no such part".into()))?;
+        let base = by_uid(&params.target).filter(|b| *b != part);
+        if base.is_some_and(|b| d.is_ancestor(part, b)) {
+            return Err(OpError::Failed(
+                "the other part already moves with this one; join them the other way".into(),
+            ));
+        }
+        if d.object(part)
+            .and_then(|o| o.parent)
+            .is_some_and(|p| joint_of(d, p).is_some())
+        {
+            return Err(OpError::Failed(
+                "this part already has a joint; remove it first".into(),
+            ));
+        }
+        let (from, to) = (DVec3::from_array(params.from), DVec3::from_array(params.to));
+        let nf = DVec3::from_array(params.from_normal).normalize_or_zero();
+        let nt = DVec3::from_array(params.to_normal).normalize_or_zero();
+        if nf == DVec3::ZERO || nt == DVec3::ZERO || !from.is_finite() || !to.is_finite() {
+            return Err(OpError::Failed(
+                "a joint needs two points and their faces' directions".into(),
+            ));
+        }
+        // The moving face turned to look back at the other — or the same
+        // way, flipped — then about the axis by the angle; its point onto
+        // the other's, the gap away along the axis.
+        let facing = if params.flip { nt } else { -nt };
+        let turn = DQuat::from_axis_angle(nt, params.angle) * DQuat::from_rotation_arc(nf, facing);
+        let origin = to + nt * params.offset;
+        let motion = DAffine3::from_translation(origin)
+            * DAffine3::from_quat(turn)
+            * DAffine3::from_translation(-from);
+        let object = d.object(part).expect("found");
+        let above = d.world_transform(part) * object.transform.to_affine().inverse();
+        let local = above.inverse() * motion * above * object.transform.to_affine();
+        let (scale, rotation, translation) = local.to_scale_rotation_translation();
+        if !translation.is_finite() || !rotation.is_finite() {
+            return Err(OpError::Failed(
+                "the parts cannot be put together that way".into(),
+            ));
+        }
+        let kind = match params.kind {
+            0 => JointKind::Fixed,
+            2 => JointKind::Prismatic,
+            3 => JointKind::Cylindrical,
+            4 => JointKind::PinSlot,
+            5 => JointKind::Planar,
+            6 => JointKind::Ball,
+            _ => JointKind::Revolute,
+        };
+        let d = doc.document_mut();
+        {
+            let o = d.object_mut(part).expect("found");
+            o.transform.translation = translation;
+            o.transform.rotation = rotation.normalize();
+            o.transform.scale = scale;
+            // A face-to-face mate is the joint's to keep now.
+            o.mate = None;
+        }
+        // The joint's frame: its Z the axis, its X along the part's own
+        // first direction across it, so a slot's slide is the part's way.
+        let world = DTransform {
+            translation: origin,
+            rotation: DQuat::from_rotation_arc(DVec3::Z, nt),
+            scale: DVec3::ONE,
+        };
+        // A revolute joint with no limits given turns all the way round.
+        let kind = if kind == JointKind::Revolute && params.lower == params.upper {
+            JointKind::Continuous
+        } else {
+            kind
+        };
+        join_at(d, part, base, world, kind, (params.lower, params.upper))?;
         Ok(OpResult::Finished)
     }
 }
@@ -628,6 +881,129 @@ mod tests {
     /// hinge from the slider's op, stays where it was when joined, and the
     /// motion check finds the wall it swings into — only on the side the
     /// wall is.
+    /// Fusion's Joint: a shaft's end brought into a plate's hole, joined
+    /// cylindrical — it turns in the hole and slides along it, each way by
+    /// its own slider; and a ball turns every way about its centre.
+    #[test]
+    fn a_shaft_is_joined_into_a_hole_and_turns_and_slides_there() {
+        use crate::operator::OperatorRegistry;
+        use crate::History;
+        use kreate_reflect::{PropertyMap, PropertyValue};
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let plate = doc.add_mesh_object("Plate", kreate_mesh::primitives::cube(0.1));
+        let shaft = doc.add_mesh_object("Shaft", kreate_mesh::primitives::cube(0.01));
+        doc.object_mut(shaft).unwrap().transform.translation = DVec3::new(0.5, 0.3, 0.2);
+        let uid = |doc: &Document, id| doc.object_uid(id).unwrap().raw().to_string();
+        let run = |r: &OperatorRegistry,
+                   h: &mut History,
+                   doc: &mut Document,
+                   id: &str,
+                   pairs: &[(&'static str, PropertyValue)]| {
+            let mut p = PropertyMap::new();
+            for (k, v) in pairs {
+                p.set(k, v.clone());
+            }
+            h.dispatch(r, doc, &Context::default(), id, &p)
+        };
+        // The shaft's bottom face's middle onto the plate's top's middle.
+        let (sid, pid) = (uid(&doc, shaft), uid(&doc, plate));
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "assembly.joint",
+            &[
+                ("uid", PropertyValue::Text(sid)),
+                ("target", PropertyValue::Text(pid)),
+                ("from", PropertyValue::Vec3([0.5, 0.3, 0.195])),
+                ("from_normal", PropertyValue::Vec3([0.0, 0.0, -1.0])),
+                ("to", PropertyValue::Vec3([0.0, 0.0, 0.05])),
+                ("to_normal", PropertyValue::Vec3([0.0, 0.0, 1.0])),
+                ("kind", PropertyValue::Enum(3)),
+            ],
+        )
+        .unwrap();
+        let joint = doc.selection.active.unwrap();
+        let Some(RobotPart::Joint(j)) = doc.object(joint).unwrap().robot.clone() else {
+            panic!("no joint");
+        };
+        assert_eq!(j.kind, kreate_scene::robot::JointKind::Cylindrical);
+        // Brought there: its bottom on the plate's top, its middle over
+        // the plate's.
+        let at = doc.world_transform(shaft).translation;
+        assert!((at - DVec3::new(0.0, 0.0, 0.055)).length() < 1e-9, "{at:?}");
+        assert_eq!(doc.object(shaft).unwrap().parent, Some(joint));
+        // Its slide: 20 mm up the axis. Its turn kept.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "robot.set_joint",
+            &[
+                ("position", PropertyValue::Float(0.02)),
+                ("index", PropertyValue::Int(1)),
+            ],
+        )
+        .unwrap();
+        let at = doc.world_transform(shaft).translation;
+        assert!((at - DVec3::new(0.0, 0.0, 0.075)).length() < 1e-9, "{at:?}");
+        // And its turn: a quarter, the slide kept.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "robot.set_joint",
+            &[(
+                "position",
+                PropertyValue::Float(std::f64::consts::FRAC_PI_2),
+            )],
+        )
+        .unwrap();
+        let o = doc.object(joint).unwrap();
+        let read = j.positions_of(&o.transform);
+        assert!(
+            (read[0] - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+            "{read:?}"
+        );
+        assert!((read[1] - 0.02).abs() < 1e-9, "{read:?}");
+        // Moving the plate takes the shaft with it.
+        doc.object_mut(plate).unwrap().transform.translation = DVec3::new(1.0, 0.0, 0.0);
+        let at = doc.world_transform(shaft).translation;
+        assert!((at - DVec3::new(1.0, 0.0, 0.075)).length() < 1e-9, "{at:?}");
+    }
+
+    /// Each kind's positions read back as they were put.
+    #[test]
+    fn every_kind_reads_back_its_positions() {
+        use kreate_scene::robot::JointKind;
+        let rest = DTransform {
+            translation: DVec3::new(1.0, 2.0, 3.0),
+            rotation: DQuat::from_rotation_x(0.4),
+            scale: DVec3::ONE,
+        };
+        for (kind, put) in [
+            (JointKind::Revolute, vec![0.7]),
+            (JointKind::Prismatic, vec![-0.03]),
+            (JointKind::Cylindrical, vec![1.1, 0.05]),
+            (JointKind::PinSlot, vec![-0.9, 0.02]),
+            (JointKind::Planar, vec![0.01, -0.02, 0.5]),
+            (JointKind::Ball, vec![0.3, -0.2, 0.25]),
+        ] {
+            let j = Joint {
+                kind,
+                rest,
+                ..Joint::default()
+            };
+            let got = j.positions_of(&j.place_all(&put));
+            for (a, b) in put.iter().zip(&got) {
+                assert!((a - b).abs() < 1e-9, "{kind:?}: {put:?} read back {got:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_hinged_arm_turns_about_its_joint_and_the_check_finds_the_wall() {
         use crate::operator::OperatorRegistry;

@@ -853,7 +853,7 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
         let (name, kind, joint) = match &joint_obj {
             Some((i, j)) => (
                 unique(&doc.object(*i).map(|o| o.name.clone()).unwrap_or_default()),
-                j.kind.tag(),
+                j.kind.urdf_tag(),
                 Some(j.clone()),
             ),
             None => (

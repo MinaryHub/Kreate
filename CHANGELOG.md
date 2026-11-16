@@ -12,6 +12,18 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- **Assembly joints as Fusion makes them** (Mechanical ▸ Assembly Joints ▸
+  Joint: …): click where on the moving part the joint is, then where on
+  the other part it joins — a face is caught at its middle, or at a
+  hole's centre when the click is by the hole — and the part is brought
+  there, faces together, and joined. Seven motions: Rigid, Revolute,
+  Slider, and the new Cylindrical (turns and slides along the axis),
+  Pin-Slot (turns, and slides across), Planar (slides in the plane and
+  turns) and Ball (turns every way) — `assembly.joint` for scripts.
+- The joints panel has a slider for every way a joint moves, and a ▶
+  that plays a joint through its travel and puts it back, as Fusion's
+  Animate Joint does. `robot.set_joint` takes `index` for a joint's
+  second or third way of moving.
 - Extrude has what Fusion's and SolidWorks's have under the distance:
   **Through all** of the part in its way, however thick it is or becomes;
   a **second side** with its own distance; a **start offset** from the
