@@ -6596,6 +6596,11 @@ impl App {
                             let at = |q: glam::DVec2| {
                                 kreate_mesh::regions::region_at(&regions, q.as_vec2())
                             };
+                            // Where the click is, not where it was caught:
+                            // caught by an edge or a corner, the place was on
+                            // the region's boundary, and the region it named
+                            // was whichever side came first.
+                            let p = self.sketch_plane_point().unwrap_or(p);
                             if let Some(r) = at(p) {
                                 let before = self.sketching.seeds.len();
                                 self.sketching.seeds.retain(|s| at(*s) != Some(r));
@@ -15239,20 +15244,31 @@ impl App {
                     // The pattern works on what is selected: it is kept.
                     let picked = (self.sketching.points.clone(), self.sketching.lines.clone());
                     self.sketching.take(tool);
-                    // An extrude nobody has picked for takes what the sketch
-                    // draws — a rectangle on a face, a plate with its holes,
-                    // a line of text — at once; a click puts a region back
-                    // or adds one, as before.
+                    // What the extrude starts with picked. What was selected
+                    // in the sketch, when something was: the regions inside
+                    // it. Else the sketch's one profile, when it draws just
+                    // one — a rectangle on a face, a plate with its holes.
+                    // With several and nothing selected, none: every one
+                    // picked, the click meant to choose a box put that box
+                    // back, and the others were extruded.
                     if matches!(
                         tool,
                         kreate::sketching::Tool::Extrude | kreate::sketching::Tool::Revolve
                     ) {
                         if let Some((id, _)) = self.sketch_target() {
-                            self.sketching.seeds =
+                            let all: Vec<glam::DVec2> =
                                 kreate_scene::feature::profile_seeds(&self.doc, id)
                                     .into_iter()
                                     .map(|s| glam::DVec2::new(s[0], s[1]))
                                     .collect();
+                            let chosen = self
+                                .sketch_geometry()
+                                .and_then(|g| kreate::sketching::seeds_inside(&g, &picked, &all));
+                            self.sketching.seeds = match chosen {
+                                Some(inside) => inside,
+                                None if all.len() == 1 => all,
+                                None => Vec::new(),
+                            };
                         }
                     }
                     if matches!(
@@ -19458,6 +19474,117 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         app.choose_solid_operation(sketch);
         assert_eq!(app.ui.solid_dialog.operation, 1, "a join");
         assert_eq!(app.ui.solid_dialog.target, "Part");
+    }
+
+    /// Three boxes drawn on a part's face: the extrude starts with none of
+    /// them picked, a click picks just the one clicked, and one extruded
+    /// joins that box alone to the part. Selected first, the box selected is
+    /// the one picked.
+    #[test]
+    fn an_extrude_of_one_box_among_several_takes_only_that_box() {
+        let mut app = app();
+        with_viewport(&mut app);
+        app.doc
+            .add_mesh_object("Part", kreate_mesh::primitives::cube(1.0));
+        app.run_op_with(
+            "draft.new",
+            &[
+                ("plane", PropertyValue::Enum(4)),
+                ("object", PropertyValue::Text("Part".into())),
+                ("at", PropertyValue::Vec3([0.0, 0.0, 0.5])),
+            ],
+        );
+        for (a, b) in [
+            ([-0.4, -0.4], [-0.2, -0.2]),
+            ([0.0, 0.0], [0.2, 0.2]),
+            ([0.25, -0.4], [0.4, -0.2]),
+        ] {
+            app.run_op_with(
+                "draft.rectangle",
+                &[
+                    ("a", PropertyValue::Vec3([a[0], a[1], 0.0])),
+                    ("b", PropertyValue::Vec3([b[0], b[1], 0.0])),
+                ],
+            );
+        }
+        app.evaluate_scene();
+        app.update_sketch_view();
+        app.update_ui_state_for_test();
+        let tool = |app: &mut App, name: &str| {
+            let mut p = PropertyMap::new();
+            p.set("tool", PropertyValue::Text(name.into()));
+            app.dispatch(&Action {
+                op_id: "app.sketch_tool".into(),
+                params: p,
+            });
+        };
+        tool(&mut app, "extrude");
+        assert!(app.sketching.seeds.is_empty(), "nothing picked of three");
+        // The middle box clicked: it alone.
+        let (_, world) = app.sketch_target().unwrap();
+        let ppp = app.egui_ctx.pixels_per_point() as f64;
+        let s = app
+            .ui
+            .projector
+            .unwrap()
+            .project(world.transform_point3(DVec3::new(0.1, 0.1, 0.0)))
+            .expect("on screen");
+        app.input.cursor = Some((s.x as f64 * ppp, s.y as f64 * ppp));
+        app.sketch_mouse(MouseButton::Left, true);
+        app.sketch_mouse(MouseButton::Left, false);
+        assert_eq!(app.sketching.seeds.len(), 1);
+        let seed = app.sketching.seeds[0];
+        assert!(
+            seed.x > 0.0 && seed.x < 0.2 && seed.y > 0.0 && seed.y < 0.2,
+            "{seed:?}"
+        );
+        app.run_op_with(
+            "feature.extrude",
+            &[
+                ("seeds", PropertyValue::Floats(vec![seed.x, seed.y])),
+                ("distance", PropertyValue::Float(0.1)),
+                ("operation", PropertyValue::Enum(1)),
+                ("target", PropertyValue::Text("Part".into())),
+            ],
+        );
+        app.evaluate_scene();
+        let (_, mesh) = app
+            .evaluated
+            .iter()
+            .find(|(id, _)| app.doc.object(*id).is_some_and(|o| o.name == "Part"))
+            .expect("the part");
+        let volume = kreate_mesh::measure::mass_properties(mesh, |p| p).volume;
+        assert!((volume - (1.0 + 0.2 * 0.2 * 0.1)).abs() < 1e-4, "{volume}");
+
+        // Selected first: the box selected is what the extrude starts with.
+        app.set_mode(OpMode::Object);
+        let drawing = app
+            .doc
+            .objects()
+            .find(|(_, o)| o.drawing.is_some())
+            .map(|(id, _)| id)
+            .unwrap();
+        app.doc.selection.clear();
+        app.doc.selection.add(drawing);
+        app.doc.selection.active = Some(drawing);
+        app.toggle_edit_mode();
+        app.update_sketch_view();
+        app.update_ui_state_for_test();
+        let g = app.sketch_geometry().unwrap();
+        app.sketching.lines = (0..g.lines.len() as u32)
+            .filter(|l| {
+                let [a, b] = g.lines[*l as usize];
+                [a, b].iter().all(|v| {
+                    let p = g.points[*v as usize];
+                    p.x > 0.2 && p.y < -0.1
+                })
+            })
+            .collect();
+        assert!(!app.sketching.lines.is_empty(), "the third box's lines");
+        tool(&mut app, "extrude");
+        assert_eq!(app.sketching.seeds.len(), 1);
+        let seed = app.sketching.seeds[0];
+        assert!(seed.x > 0.25 && seed.y < -0.2, "{seed:?}");
     }
 
     #[test]

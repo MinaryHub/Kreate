@@ -49,6 +49,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Fixed
 
+- Extruding one of several boxes drawn on a face extruded the others
+  instead: the Extrude tool picked every profile at once, and the click on
+  the box wanted put that one back. It now starts with what is selected in
+  the sketch, or the one profile when there is just one, or none; a click
+  picks the region under the pointer itself, not the edge it was caught by.
 - After drawing on a part's side or a tilted plane, orbiting the view
   turned it about one axis only: the view was left rolled, as squared to
   the sketch. Orbiting levels it first.

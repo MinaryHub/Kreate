@@ -1288,6 +1288,44 @@ pub fn is_sketch(o: &kreate_scene::document::Object) -> bool {
     !o.sketch_lines.is_empty() || o.drawing.is_some()
 }
 
+/// Of `seeds`, those inside what is selected — `picked`, the points and
+/// lines picked — by the box round it. `None` when nothing is selected,
+/// and when what is selected holds none of them.
+pub fn seeds_inside(
+    g: &Geometry,
+    picked: &(Vec<u32>, Vec<u32>),
+    seeds: &[DVec2],
+) -> Option<Vec<DVec2>> {
+    let (points, lines) = picked;
+    let mut lo = DVec2::splat(f64::INFINITY);
+    let mut hi = DVec2::splat(f64::NEG_INFINITY);
+    let corners = points.iter().copied().chain(
+        lines
+            .iter()
+            .filter_map(|l| g.lines.get(*l as usize))
+            .flatten()
+            .copied(),
+    );
+    for v in corners {
+        if let Some(p) = g.points.get(v as usize) {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return None;
+    }
+    let reach = (hi - lo).max_element() * 1e-6;
+    let inside: Vec<DVec2> = seeds
+        .iter()
+        .filter(|s| {
+            s.x >= lo.x - reach && s.y >= lo.y - reach && s.x <= hi.x + reach && s.y <= hi.y + reach
+        })
+        .copied()
+        .collect();
+    (!inside.is_empty()).then_some(inside)
+}
+
 /// Every sketch's lines but `active`'s, in the world: what the overlay draws
 /// thin, since a sketch has no faces for the renderer to draw.
 pub fn other_lines(
