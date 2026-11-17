@@ -28,6 +28,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<ToMesh>();
     registry.register::<Round>();
     registry.register::<Rollback>();
+    registry.register::<HoleFeature>();
     registry.register::<Rename>();
     registry.register::<ShellFeature>();
     registry.register::<PatternFeature>();
@@ -140,6 +141,12 @@ pub struct PatternParams {
     /// From one copy to the next, in the body's space.
     #[param(unit = "length")]
     pub step: [f64; 3],
+    /// A second direction, for a grid: how many rows, and from one to the
+    /// next. One row is a plain line of copies.
+    #[param(min = 1, max = 1000, unit = "count")]
+    pub count2: u32,
+    #[param(unit = "length")]
+    pub step2: [f64; 3],
 }
 
 impl Default for PatternParams {
@@ -148,6 +155,8 @@ impl Default for PatternParams {
             body: String::new(),
             count: 3,
             step: [0.02, 0.0, 0.0],
+            count2: 1,
+            step2: [0.0, 0.02, 0.0],
         }
     }
 }
@@ -170,15 +179,23 @@ impl Operator for PatternFeature {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let body = body_for(doc.document(), &params.body)?;
-        if params.count < 2 || params.step.iter().any(|v| !v.is_finite()) {
+        if (params.count < 2 && params.count2 < 2)
+            || params
+                .step
+                .iter()
+                .chain(&params.step2)
+                .any(|v| !v.is_finite())
+        {
             return Ok(OpResult::Cancelled);
         }
         add_on_body(
             doc,
             body,
             Shape::Pattern {
-                count: params.count,
+                count: params.count.max(1),
                 step: params.step,
+                count2: params.count2.max(1),
+                step2: params.step2,
             },
         )
     }
@@ -192,6 +209,11 @@ pub struct CircularParams {
     /// The body's axis they go round, through its origin.
     #[param(variants("x", "y", "z"))]
     pub axis: u32,
+    /// How far round they spread: a whole turn evenly, or less end to end.
+    #[param(unit = "angle")]
+    pub angle: f64,
+    /// A construction axis to go round instead (`datum.axis`), by name.
+    pub around: String,
 }
 
 impl Default for CircularParams {
@@ -200,6 +222,8 @@ impl Default for CircularParams {
             body: String::new(),
             count: 6,
             axis: 2,
+            angle: std::f64::consts::TAU,
+            around: String::new(),
         }
     }
 }
@@ -222,15 +246,28 @@ impl Operator for CircularFeature {
         _ctx: &Context,
     ) -> Result<OpResult, OpError> {
         let body = body_for(doc.document(), &params.body)?;
-        if params.count < 2 {
+        if params.count < 2 || !params.angle.is_finite() {
             return Ok(OpResult::Cancelled);
         }
+        let d = doc.document();
+        let around = if params.around.trim().is_empty() {
+            None
+        } else {
+            let id = d
+                .objects()
+                .find(|(_, o)| o.name == params.around.trim())
+                .map(|(id, _)| id)
+                .ok_or_else(|| OpError::Failed(format!("no axis called `{}`", params.around)))?;
+            d.object_uid(id)
+        };
         add_on_body(
             doc,
             body,
             Shape::Circular {
                 count: params.count,
                 axis: params.axis.min(2),
+                angle: params.angle,
+                around,
             },
         )
     }
@@ -334,7 +371,13 @@ fn add_from(
     let d = doc.document();
     let sketch_uid = d.object_uid(sketch).expect("an object");
     let regions = feature::shape_regions(d, sketch, &shape);
-    if !matches!(shape, Shape::Loft { .. }) && feature::picked(&regions, &seeds).is_empty() {
+    if matches!(shape, Shape::Hole { .. }) {
+        if feature::hole_points(d, sketch).is_empty() {
+            return Err(OpError::Failed(
+                "put points (or circles) in the sketch where the holes go".into(),
+            ));
+        }
+    } else if !matches!(shape, Shape::Loft { .. }) && feature::picked(&regions, &seeds).is_empty() {
         return Err(OpError::Failed("pick a closed region of the sketch".into()));
     }
     let order = 0;
@@ -980,6 +1023,7 @@ impl Operator for Set {
                 scale_end, caps, ..
             } => (*scale_end, *caps),
             Shape::SheetMetal { height, flat, .. } => (*height, *flat),
+            Shape::Hole { depth, through, .. } => (*depth, *through),
             Shape::Mirror { .. } | Shape::Loft { .. } => (0.0, false),
         };
         Some(SetParams {
@@ -1044,6 +1088,10 @@ impl Operator for Set {
                 Shape::SheetMetal { height, flat, .. } => {
                     *height = params.amount.abs();
                     *flat = params.symmetric;
+                }
+                Shape::Hole { depth, through, .. } => {
+                    *depth = params.amount.abs();
+                    *through = params.symmetric;
                 }
                 Shape::Mirror { .. } | Shape::Loft { .. } => {}
             }
@@ -1435,8 +1483,166 @@ impl Operator for Rename {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct HoleFeatureParams {
+    /// Plain, counterbored for a socket head cap screw, countersunk, or
+    /// tapped.
+    #[param(variants("simple", "counterbore", "countersink", "tapped"))]
+    pub kind: u32,
+    /// The screw it is for, ISO metric.
+    #[param(variants(
+        "M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10", "M12", "M14", "M16", "M20", "M24"
+    ))]
+    pub size: u32,
+    /// A plain hole's diameter, if not its size's clearance; nought for that.
+    #[param(min = 0.0, soft_max = 0.05, unit = "length")]
+    pub diameter: f64,
+    /// How deep, for a blind hole.
+    #[param(min = 0.0, soft_max = 0.1, unit = "length")]
+    pub depth: f64,
+    /// Through all of the body, however thick it is or becomes.
+    pub through: bool,
+    /// The body drilled, by name; the latest when empty.
+    pub target: String,
+}
+
+impl Default for HoleFeatureParams {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            size: 4,
+            diameter: 0.0,
+            depth: 0.01,
+            through: true,
+            target: String::new(),
+        }
+    }
+}
+
+/// Fusion's Hole from sketch points: a hole at every point of the active
+/// sketch — at every circle's centre, where it has no points — drilled down
+/// from its plane into a body, as one step on the timeline that follows
+/// the points when they move.
+pub struct HoleFeature;
+
+impl Operator for HoleFeature {
+    type Params = HoleFeatureParams;
+    fn id() -> &'static str {
+        "feature.hole"
+    }
+    fn label() -> &'static str {
+        "Hole"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_sketch(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let finite = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        if !params.through && (params.depth.is_nan() || params.depth <= 0.0) {
+            return Err(OpError::Failed("a blind hole needs a depth".into()));
+        }
+        add(
+            doc,
+            Shape::Hole {
+                kind: params.kind.min(3),
+                size: params.size.min(kreate_mesh::mech::METRIC.len() as u32 - 1),
+                diameter: finite(params.diameter),
+                depth: finite(params.depth),
+                through: params.through,
+            },
+            &[],
+            2,
+            &params.target,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// Two points sketched over a plate become two holes through it, as
+    /// one step; moving a point moves its hole.
+    #[test]
+    fn holes_go_through_at_the_sketchs_points() {
+        use crate::operator::OperatorRegistry;
+        use crate::History;
+        use kreate_reflect::{PropertyMap, PropertyValue as V};
+        let mut r = OperatorRegistry::new();
+        crate::register_builtin(&mut r);
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let run = |r: &OperatorRegistry,
+                   h: &mut History,
+                   doc: &mut Document,
+                   id: &str,
+                   pairs: &[(&'static str, V)]| {
+            let mut p = PropertyMap::new();
+            for (k, v) in pairs {
+                p.set(k, v.clone());
+            }
+            h.dispatch(r, doc, &Context::default(), id, &p)
+        };
+        run(&r, &mut h, &mut doc, "draft.new", &[("plane", V::Enum(0))]).unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "draft.rectangle",
+            &[
+                ("a", V::Vec3([0.0, 0.0, 0.0])),
+                ("b", V::Vec3([0.04, 0.02, 0.0])),
+            ],
+        )
+        .unwrap();
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.extrude",
+            &[
+                ("seeds", V::Floats(vec![0.002, 0.002])),
+                ("distance", V::Float(0.01)),
+            ],
+        )
+        .unwrap();
+        let body = doc
+            .objects()
+            .find(|(_, o)| !o.features.is_empty())
+            .unwrap()
+            .0;
+        // The holes' sketch on the plate's top: the cursor's plane, raised.
+        doc.cursor = kreate_math::DVec3::new(0.0, 0.0, 0.01);
+        run(&r, &mut h, &mut doc, "draft.new", &[("plane", V::Enum(3))]).unwrap();
+        for x in [0.01, 0.03] {
+            run(
+                &r,
+                &mut h,
+                &mut doc,
+                "draft.point",
+                &[("at", V::Vec3([x, 0.01, 0.0]))],
+            )
+            .unwrap();
+        }
+        // M5: a 5.5 mm clearance hole.
+        run(
+            &r,
+            &mut h,
+            &mut doc,
+            "feature.hole",
+            &[("size", V::Enum(4))],
+        )
+        .unwrap();
+        let o = doc.object(body).unwrap();
+        assert_eq!(o.features.last().unwrap().kind_tag(), "hole");
+        let made = kreate_scene::feature::body(&doc, &o.features, doc.world_transform(body));
+        let v = kreate_mesh::measure::mass_properties(&made, |p| p).volume;
+        let want = 0.04 * 0.02 * 0.01 - 2.0 * std::f64::consts::PI * 0.00275f64.powi(2) * 0.01;
+        assert!((v - want).abs() < want * 1e-2, "{v} against {want}");
+    }
+
     use super::*;
     use crate::history::History;
     use crate::operator::Mode;

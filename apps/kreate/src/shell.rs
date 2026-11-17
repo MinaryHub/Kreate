@@ -5657,6 +5657,8 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
     (
         "mech-holes",
         &[
+            // Fusion's Hole from sketch points: select the sketch first.
+            ("mech-hole-feature", "feature.hole", MechArg::None),
             ("mech-hole-simple", "object.hole", MechArg::Enum("kind", 0)),
             (
                 "mech-hole-counterbore",

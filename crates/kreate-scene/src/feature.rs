@@ -123,11 +123,25 @@ pub enum Shape {
     /// tray. Fusion's Shell.
     Shell { thickness: f64, open: u32 },
     /// The feature before it repeated `count` times in all, each `step`
-    /// further along in the body's space, joined or cut as it was.
-    Pattern { count: u32, step: [f64; 3] },
-    /// The feature before it repeated `count` times round the body's axis
-    /// (0 X, 1 Y, 2 Z) through its origin, evenly.
-    Circular { count: u32, axis: u32 },
+    /// further along in the body's space — and each of those `count2`
+    /// times `step2` along a second direction, a grid; one is a row —
+    /// joined or cut as it was.
+    Pattern {
+        count: u32,
+        step: [f64; 3],
+        count2: u32,
+        step2: [f64; 3],
+    },
+    /// The feature before it repeated `count` times round an axis: the
+    /// body's (0 X, 1 Y, 2 Z) through its origin, or the construction axis
+    /// `around` when there is one. Spread over `angle` radians: evenly all
+    /// round for a whole turn, end to end over less.
+    Circular {
+        count: u32,
+        axis: u32,
+        angle: f64,
+        around: Option<Uid>,
+    },
     /// The feature before it reflected across the body's plane through its
     /// origin square to the axis given, joined or cut as it was.
     Mirror { axis: u32 },
@@ -155,6 +169,20 @@ pub enum Shape {
         height: f64,
         edges: Vec<[f64; 2]>,
         flat: bool,
+    },
+    /// A hole at every point of the sketch — every circle's centre, where
+    /// it has no points — drilled down its Z from its plane: plain,
+    /// counterbored, countersunk or tapped (`kind`, as
+    /// `kreate_mesh::mech::HoleKind` in that order) for the ISO metric
+    /// screw `size` (an index into `kreate_mesh::mech::METRIC`), `depth`
+    /// deep or through all. `diameter` is a plain hole's, when not its
+    /// size's clearance. Fusion's Hole, from sketch points.
+    Hole {
+        kind: u32,
+        size: u32,
+        diameter: f64,
+        depth: f64,
+        through: bool,
     },
 }
 
@@ -208,6 +236,7 @@ impl Feature {
             Shape::Sweep { .. } => "sweep",
             Shape::Loft { .. } => "loft",
             Shape::SheetMetal { .. } => "sheet_metal",
+            Shape::Hole { .. } => "hole",
         }
     }
 
@@ -217,6 +246,9 @@ impl Feature {
         let mut out = vec![self.sketch];
         match &self.shape {
             Shape::Sweep { path, .. } => out.push(*path),
+            Shape::Circular {
+                around: Some(axis), ..
+            } => out.push(*axis),
             Shape::Loft { sections } => out.extend(sections.iter().copied()),
             _ => {}
         }
@@ -232,6 +264,7 @@ impl Feature {
                 | Shape::Sweep { .. }
                 | Shape::Loft { .. }
                 | Shape::SheetMetal { .. }
+                | Shape::Hole { .. }
         )
     }
 }
@@ -526,6 +559,17 @@ pub fn solid_reaching(doc: &Document, feature: &Feature, reach: Option<f64>) -> 
         }),
         _ => None,
     };
+    // Holes: a cutter at each of the sketch's points, in its own space.
+    if let Shape::Hole {
+        kind,
+        size,
+        diameter,
+        depth,
+        through,
+    } = feature.shape
+    {
+        return holes(doc, sketch, kind, size, diameter, depth, through, reach);
+    }
     // A plate is made in the sketch's own plane, as an extrude is.
     if matches!(feature.shape, Shape::SheetMetal { .. }) {
         return sheet_plate(doc, feature)
@@ -569,7 +613,8 @@ pub fn solid_reaching(doc: &Document, feature: &Feature, reach: Option<f64>) -> 
             | Shape::Mirror { .. }
             | Shape::Sweep { .. }
             | Shape::Loft { .. }
-            | Shape::SheetMetal { .. } => continue,
+            | Shape::SheetMetal { .. }
+            | Shape::Hole { .. } => continue,
         };
         out = if out.num_faces() == 0 {
             piece
@@ -645,6 +690,165 @@ pub fn sheet_plate(doc: &Document, feature: &Feature) -> Option<kreate_mesh::mec
             .collect(),
         flat: *flat,
     })
+}
+
+/// Where a pattern puts its copies, in the body's space: each copy's move
+/// from the original, the original's own left out.
+pub fn pattern_moves(doc: &Document, shape: &Shape, to_body: DAffine3) -> Vec<DAffine3> {
+    use kreate_math::{DQuat, DVec3};
+    match shape {
+        Shape::Pattern {
+            count,
+            step,
+            count2,
+            step2,
+        } => {
+            let (a, b) = (DVec3::from_array(*step), DVec3::from_array(*step2));
+            let mut out = Vec::new();
+            for j in 0..(*count2).max(1) {
+                for i in 0..(*count).max(1) {
+                    if i == 0 && j == 0 {
+                        continue;
+                    }
+                    out.push(DAffine3::from_translation(a * i as f64 + b * j as f64));
+                }
+            }
+            out
+        }
+        Shape::Circular {
+            count,
+            axis,
+            angle,
+            around,
+        } => {
+            // The axis: a construction axis's Z through its middle, in the
+            // body's space; else the body's own.
+            let (origin, dir) = match around.and_then(|u| doc.object_by_uid(u)) {
+                Some(id) => {
+                    let w = to_body * doc.world_transform(id);
+                    (
+                        w.translation,
+                        w.transform_vector3(DVec3::Z).normalize_or_zero(),
+                    )
+                }
+                None => (
+                    DVec3::ZERO,
+                    match axis {
+                        0 => DVec3::X,
+                        1 => DVec3::Y,
+                        _ => DVec3::Z,
+                    },
+                ),
+            };
+            if dir == DVec3::ZERO {
+                return Vec::new();
+            }
+            let n = (*count).max(1);
+            let whole = angle.abs() >= std::f64::consts::TAU - 1e-6 || *angle == 0.0;
+            let each = if whole {
+                std::f64::consts::TAU / n as f64
+            } else if n > 1 {
+                angle / (n - 1) as f64
+            } else {
+                0.0
+            };
+            (1..n)
+                .map(|k| {
+                    DAffine3::from_translation(origin)
+                        * DAffine3::from_quat(DQuat::from_axis_angle(dir, each * k as f64))
+                        * DAffine3::from_translation(-origin)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Where a sketch's holes go, in its own plane: its points, or with none
+/// its circles' centres.
+pub fn hole_points(doc: &Document, sketch: crate::document::ObjectId) -> Vec<DVec2> {
+    let Some(d) = doc.object(sketch).and_then(|o| o.drawing.as_deref()) else {
+        return Vec::new();
+    };
+    let points: Vec<DVec2> = d
+        .entities
+        .iter()
+        .filter_map(|e| match &e.kind {
+            crate::drawing::EntityKind::Point(p) => Some(*p),
+            _ => None,
+        })
+        .collect();
+    if !points.is_empty() {
+        return points;
+    }
+    d.entities
+        .iter()
+        .filter(|e| !e.construction)
+        .filter_map(|e| match &e.kind {
+            crate::drawing::EntityKind::Curve(kreate_geom2d::Curve2D::Circle { c, .. }) => Some(*c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The cutters of a hole feature, in the sketch's space: one at each of
+/// its points, going down its Z — through all, past `reach`, when asked.
+#[allow(clippy::too_many_arguments)]
+fn holes(
+    doc: &Document,
+    sketch: crate::document::ObjectId,
+    kind: u32,
+    size: u32,
+    diameter: f64,
+    depth: f64,
+    through: bool,
+    reach: Option<f64>,
+) -> MeshData {
+    use kreate_mesh::mech::{hole_cutter, HoleKind, METRIC};
+    let kind = match kind {
+        1 => HoleKind::Counterbore,
+        2 => HoleKind::Countersink,
+        3 => HoleKind::Tapped,
+        _ => HoleKind::Simple,
+    };
+    let Some(size) = METRIC.get(size as usize) else {
+        return MeshData::empty();
+    };
+    let depth = match (through, reach) {
+        (true, Some(reach)) => reach * 1.001 + 1e-4,
+        (true, None) => depth.max(0.1),
+        _ => depth,
+    };
+    if depth.is_nan() || depth <= 0.0 {
+        return MeshData::empty();
+    }
+    let cutter = hole_cutter(
+        kind,
+        size,
+        (diameter > 0.0).then_some(diameter),
+        depth,
+        through,
+    );
+    let points = hole_points(doc, sketch);
+    let placed: Vec<MeshData> = points
+        .iter()
+        .map(|p| {
+            mapped(&cutter, false, |q| {
+                q + kreate_math::DVec3::new(p.x, p.y, 0.0)
+            })
+        })
+        .collect();
+    let parts: Vec<kreate_mesh::edit::join::Part<'_>> = placed
+        .iter()
+        .map(|m| kreate_mesh::edit::join::Part {
+            mesh: m,
+            transform: DAffine3::IDENTITY,
+        })
+        .collect();
+    if parts.is_empty() {
+        return MeshData::empty();
+    }
+    kreate_mesh::edit::join::join(&parts).0
 }
 
 /// `piece` joined to or cut from `out`, as `op` says; the first piece
@@ -791,6 +995,7 @@ pub fn body_with_status(
                         | Shape::Sweep { .. }
                         | Shape::Loft { .. }
                         | Shape::SheetMetal { .. }
+                        | Shape::Hole { .. }
                 );
                 if from_sketch {
                     source_gone = f.suppressed;
@@ -863,29 +1068,10 @@ pub fn body_with_status(
                 }
                 continue;
             }
-            Shape::Pattern { count, step } => {
+            Shape::Pattern { .. } | Shape::Circular { .. } => {
                 if let Some((piece, op)) = &last {
-                    let step = kreate_math::DVec3::from_array(step);
-                    for k in 1..count.max(1) {
-                        let copy = mapped(piece, false, |p| p + step * k as f64);
-                        out = combine(out, copy, *op);
-                    }
-                }
-                continue;
-            }
-            Shape::Circular { count, axis } => {
-                if let Some((piece, op)) = &last {
-                    let axis = match axis {
-                        0 => kreate_math::DVec3::X,
-                        1 => kreate_math::DVec3::Y,
-                        _ => kreate_math::DVec3::Z,
-                    };
-                    for k in 1..count.max(1) {
-                        let turn = kreate_math::DQuat::from_axis_angle(
-                            axis,
-                            std::f64::consts::TAU * k as f64 / count as f64,
-                        );
-                        let copy = mapped(piece, false, |p| turn * p);
+                    for m in pattern_moves(doc, &f.shape, to_body) {
+                        let copy = mapped(piece, false, |p| m.transform_point3(p));
                         out = combine(out, copy, *op);
                     }
                 }
@@ -906,7 +1092,8 @@ pub fn body_with_status(
             | Shape::Revolve { .. }
             | Shape::Sweep { .. }
             | Shape::Loft { .. }
-            | Shape::SheetMetal { .. } => {}
+            | Shape::SheetMetal { .. }
+            | Shape::Hole { .. } => {}
         }
         let sketch_world = doc
             .object_by_uid(f.sketch)
@@ -915,6 +1102,15 @@ pub fn body_with_status(
         // Through all: how far the body so far lies from the sketch's
         // plane, in the sketch's own space, which is what it has to pass.
         let reach = match f.shape {
+            Shape::Hole { through: true, .. } if out.num_faces() > 0 => {
+                let to_sketch = (to_body * sketch_world).inverse();
+                Some(
+                    out.positions()
+                        .iter()
+                        .map(|p| to_sketch.transform_point3(p.as_dvec3()).z.abs())
+                        .fold(0.0f64, f64::max),
+                )
+            }
             Shape::Extrude { more, .. } if more.through && out.num_faces() > 0 => {
                 let to_sketch = (to_body * sketch_world).inverse();
                 Some(
@@ -1246,6 +1442,8 @@ mod tests {
             shape: Shape::Pattern {
                 count: 3,
                 step: [0.1, 0.0, 0.0],
+                count2: 1,
+                step2: [0.0; 3],
             },
             order: 3,
             ..plate.clone()
@@ -1348,6 +1546,8 @@ mod tests {
             shape: Shape::Pattern {
                 count: 2,
                 step: [0.1, 0.0, 0.0],
+                count2: 1,
+                step2: [0.0; 3],
             },
             order: 4,
             ..plate.clone()
@@ -1386,6 +1586,54 @@ mod tests {
             .map(|f| f.order)
             .collect();
         assert_eq!(orders, vec![1, 3, 4, 5]);
+    }
+
+    /// A grid of three by two copies; a ring of four over a quarter turn,
+    /// end to end; and a ring about a construction axis off the origin.
+    #[test]
+    fn patterns_go_in_grids_and_partial_rings() {
+        let mut doc = Document::new();
+        let grid = Shape::Pattern {
+            count: 3,
+            step: [0.1, 0.0, 0.0],
+            count2: 2,
+            step2: [0.0, 0.1, 0.0],
+        };
+        let moves = pattern_moves(&doc, &grid, DAffine3::IDENTITY);
+        assert_eq!(moves.len(), 5);
+        assert!(moves
+            .iter()
+            .any(|m| (m.translation - kreate_math::DVec3::new(0.2, 0.1, 0.0)).length() < 1e-12));
+        let ring = Shape::Circular {
+            count: 4,
+            axis: 2,
+            angle: std::f64::consts::FRAC_PI_2,
+            around: None,
+        };
+        let moves = pattern_moves(&doc, &ring, DAffine3::IDENTITY);
+        // The last of four is a quarter turn round: (1, 0) to (0, 1).
+        let last = moves
+            .last()
+            .unwrap()
+            .transform_point3(kreate_math::DVec3::X);
+        assert!((last - kreate_math::DVec3::Y).length() < 1e-9, "{last:?}");
+        // About an axis standing at (1, 0): a half turn takes the origin to (2, 0).
+        let mut axis = crate::document::Object::new("Axis", crate::document::ObjectData::Empty);
+        axis.transform.translation = kreate_math::DVec3::X;
+        let id = doc.add_object(axis);
+        let uid = doc.object_uid(id).unwrap();
+        let ring = Shape::Circular {
+            count: 2,
+            axis: 2,
+            angle: std::f64::consts::TAU,
+            around: Some(uid),
+        };
+        let moves = pattern_moves(&doc, &ring, DAffine3::IDENTITY);
+        let p = moves[0].transform_point3(kreate_math::DVec3::ZERO);
+        assert!(
+            (p - kreate_math::DVec3::new(2.0, 0.0, 0.0)).length() < 1e-9,
+            "{p:?}"
+        );
     }
 
     #[test]

@@ -3571,6 +3571,9 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
     use kreate_scene::feature::Shape;
     let (path, sections) = match &f.shape {
         Shape::Sweep { path, .. } => (path.raw(), Vec::new()),
+        Shape::Circular {
+            around: Some(axis), ..
+        } => (axis.raw(), Vec::new()),
         Shape::Loft { sections } => (0, sections.iter().map(|u| u.raw()).collect()),
         _ => (0, Vec::new()),
     };
@@ -3580,6 +3583,7 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
     };
     let points = match &f.shape {
         Shape::Round { edges, .. } => edges.clone(),
+        Shape::Pattern { count2, step2, .. } if *count2 > 1 => vec![*step2],
         _ => Vec::new(),
     };
     let (distance, symmetric, axis, angle, count, step, open) = match &f.shape {
@@ -3602,14 +3606,32 @@ fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {
         Shape::Revolve { axis, angle } => (0.0, false, *axis, *angle, 0, [0.0; 3], 0),
         Shape::Round { radius, .. } => (*radius, false, [0, 0], 0.0, 0, [0.0; 3], 0),
         Shape::Shell { thickness, open } => (*thickness, false, [0, 0], 0.0, 0, [0.0; 3], *open),
-        Shape::Pattern { count, step } => (0.0, false, [0, 0], 0.0, *count, *step, 0),
-        Shape::Circular { count, axis } => (0.0, false, [*axis, 0], 0.0, *count, [0.0; 3], 0),
+        // A grid's second direction: its count in `axis[0]`, its step in
+        // `points`. A ring's angle in `angle`, its axis object in `path`.
+        Shape::Pattern {
+            count,
+            step,
+            count2,
+            ..
+        } => (0.0, false, [*count2, 0], 0.0, *count, *step, 0),
+        Shape::Circular {
+            count, axis, angle, ..
+        } => (0.0, false, [*axis, 0], *angle, *count, [0.0; 3], 0),
         Shape::Mirror { axis } => (0.0, false, [*axis, 0], 0.0, 0, [0.0; 3], 0),
         // A sweep's end size in `distance`, its caps in `symmetric`.
         Shape::Sweep {
             scale_end, caps, ..
         } => (*scale_end, *caps, [0, 0], 0.0, 0, [0.0; 3], 0),
         Shape::Loft { .. } => (0.0, false, [0, 0], 0.0, 0, [0.0; 3], 0),
+        // A hole's depth in `distance`, through in `symmetric`, its kind in
+        // `open`, its size in `count`, its diameter in `angle`.
+        Shape::Hole {
+            kind,
+            size,
+            diameter,
+            depth,
+            through,
+        } => (*depth, *through, [0, 0], *diameter, *size, [0.0; 3], *kind),
         // A plate's thickness in `distance`, flat in `symmetric`, its
         // flanges' angle in `angle`; its bend radius, k-factor and flange
         // height in `step`.
@@ -3673,7 +3695,7 @@ fn features_record(object: &Object) -> Vec<FeatureRecord> {
 /// one it cannot read is damaged, not newer.
 fn known_feature(r: &FeatureRecord) -> bool {
     use kreate_scene::feature::Operation;
-    const KINDS: [&str; 11] = [
+    const KINDS: [&str; 12] = [
         "extrude",
         "revolve",
         "fillet",
@@ -3685,6 +3707,7 @@ fn known_feature(r: &FeatureRecord) -> bool {
         "sweep",
         "loft",
         "sheet_metal",
+        "hole",
     ];
     KINDS.contains(&r.kind.as_str()) && Operation::from_tag(&r.operation).is_some()
 }
@@ -3726,10 +3749,24 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
         "pattern" if r.step.iter().all(|v| v.is_finite()) => Shape::Pattern {
             count: r.count.clamp(1, 1000),
             step: r.step,
+            count2: r.axis[0].clamp(1, 1000),
+            step2: r
+                .points
+                .first()
+                .copied()
+                .filter(|p| p.iter().all(|v| v.is_finite()))
+                .unwrap_or([0.0; 3]),
         },
         "circular" => Shape::Circular {
             count: r.count.clamp(1, 1000),
             axis: r.axis[0].min(2),
+            // Written before it had one: all the way round.
+            angle: if r.angle.is_finite() && r.angle != 0.0 {
+                r.angle
+            } else {
+                std::f64::consts::TAU
+            },
+            around: (r.path != 0).then(|| kreate_scene::Uid::from_raw(r.path)),
         },
         "mirror" => Shape::Mirror {
             axis: r.axis[0].min(2),
@@ -3760,6 +3797,13 @@ fn feature_from(r: &FeatureRecord) -> Option<kreate_scene::feature::Feature> {
                 flat: r.symmetric,
             }
         }
+        "hole" if r.distance.is_finite() && r.angle.is_finite() => Shape::Hole {
+            kind: r.open.min(3),
+            size: r.count.min(kreate_mesh::mech::METRIC.len() as u32 - 1),
+            diameter: r.angle.max(0.0),
+            depth: r.distance.max(0.0),
+            through: r.symmetric,
+        },
         "loft" => Shape::Loft {
             sections: r
                 .sections

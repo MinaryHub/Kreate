@@ -12,6 +12,15 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- Patterns as Fusion's: a rectangular pattern in two directions — a grid
+  (`feature.pattern(count2=…, step2=…)`) — and a circular one spread over
+  an angle, end to end, about a construction axis
+  (`feature.circular(angle=…, around="Axis")`).
+- **Holes at sketch points**, as Fusion's Hole (Mechanical ▸ Holes ▸
+  Holes at Sketch Points, with the sketch selected): a hole at every
+  point of the sketch — at every circle's centre where it has no points
+  — plain, counterbored, countersunk or tapped, blind or through all, as
+  one step on the timeline that follows the points (`feature.hole`).
 - **Construction planes and axes** (Mechanical ▸ Construct), as Fusion's
   Construct menu has them: an offset plane off a face (its offset and
   angle set in the Adjust panel after), a midplane between two faces, a

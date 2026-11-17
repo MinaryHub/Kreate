@@ -239,29 +239,10 @@ pub fn body_solid(doc: &Document, features: &[Feature], body_world: DAffine3) ->
                 out = combine(out, &piece, f.operation)?;
                 last = Some((piece, f.operation));
             }
-            Shape::Pattern { count, step } => {
+            Shape::Pattern { .. } | Shape::Circular { .. } => {
                 if let Some((piece, op)) = &last {
-                    let step = DVec3::from_array(step);
-                    for k in 1..count.max(1) {
-                        let copy =
-                            piece.transformed(rows(DAffine3::from_translation(step * k as f64)))?;
-                        out = combine(out, &copy, *op)?;
-                    }
-                }
-            }
-            Shape::Circular { count, axis } => {
-                if let Some((piece, op)) = &last {
-                    let axis = match axis {
-                        0 => DVec3::X,
-                        1 => DVec3::Y,
-                        _ => DVec3::Z,
-                    };
-                    for k in 1..count.max(1) {
-                        let turn = DAffine3::from_axis_angle(
-                            axis,
-                            std::f64::consts::TAU * k as f64 / count as f64,
-                        );
-                        let copy = piece.transformed(rows(turn))?;
+                    for m in super::pattern_moves(doc, &f.shape, to_body) {
+                        let copy = piece.transformed(rows(m))?;
                         out = combine(out, &copy, *op)?;
                     }
                 }
@@ -279,7 +260,8 @@ pub fn body_solid(doc: &Document, features: &[Feature], body_world: DAffine3) ->
             | Shape::Shell { .. }
             | Shape::Sweep { .. }
             | Shape::Loft { .. }
-            | Shape::SheetMetal { .. } => return None,
+            | Shape::SheetMetal { .. }
+            | Shape::Hole { .. } => return None,
         }
     }
     out.filter(|s| s.is_valid())
@@ -437,6 +419,8 @@ mod tests {
                 shape: Shape::Pattern {
                     count: 2,
                     step: [0.0, 0.0, 0.01],
+                    count2: 1,
+                    step2: [0.0; 3],
                 },
                 sketch: uid,
                 seeds: Vec::new(),
