@@ -775,6 +775,9 @@ struct MeasureTool {
     /// Drawing a 3D path rather than measuring: points are taken until
     /// Enter (or a right click) makes them a path. See `begin_path3d`.
     path: bool,
+    /// Picking points for construction geometry: how many — two for an
+    /// axis, three for a plane — then it is made.
+    datum: Option<usize>,
 }
 
 struct SkinnedGpu {
@@ -1108,6 +1111,10 @@ struct App {
     /// The Fillet or Chamfer tool: the body, whether it chamfers, the
     /// edges picked (a point on each, in the world) and the radius typed.
     fillet_tool: Option<FilletTool>,
+    /// A construction plane being made from faces: an offset plane (0) or
+    /// a midplane (1), and the faces picked so far, each its middle and
+    /// normal.
+    datum_faces: Option<(u32, Vec<(DVec3, DVec3)>)>,
     /// Fusion's Joint, being made: the motion asked for, and the moving
     /// part's joint origin once it has been picked.
     joint_tool: Option<(u32, Option<(ObjectId, kreate::assembly::Origin)>)>,
@@ -1360,6 +1367,7 @@ impl App {
             asking: false,
             quitting: false,
             mate: None,
+            datum_faces: None,
             fillet_tool: None,
             joint_tool: None,
             joint_anim: None,
@@ -2369,6 +2377,35 @@ impl App {
                         row(self, t("sketch-plane-face"), "app.sketch_on_face", &[]),
                     ],
                 }];
+                // The construction planes, to draw on.
+                let datums: Vec<Entry> = self
+                    .doc
+                    .objects()
+                    .filter(|(id, o)| {
+                        self.doc.is_shown(*id)
+                            && matches!(
+                                kreate_ops::ops::datum::datum_of(o),
+                                Some(kreate_ops::ops::datum::Datum::Plane { .. })
+                            )
+                    })
+                    .map(|(_, o)| {
+                        row(
+                            self,
+                            o.name.clone(),
+                            "draft.new",
+                            &[
+                                ("plane", PropertyValue::Enum(5)),
+                                ("object", PropertyValue::Text(o.name.clone())),
+                            ],
+                        )
+                    })
+                    .collect();
+                if !datums.is_empty() {
+                    groups.push(Group {
+                        title: t("sketch-plane-datum"),
+                        entries: datums,
+                    });
+                }
                 // The sketches there already, to go back into one.
                 let open: Vec<Entry> = self
                     .doc
@@ -4837,6 +4874,52 @@ impl App {
         Some((hit.object, middle, normal.normalize_or_zero()))
     }
 
+    /// A click while making a construction plane from faces: the face under
+    /// the pointer taken, and the plane made once there are enough — off one
+    /// face (its offset in the Adjust panel after), or half way between two.
+    fn datum_face_click(&mut self) {
+        let Some((kind, mut faces)) = self.datum_faces.take() else {
+            return;
+        };
+        let Some((_, at, normal)) = self.face_under_pointer() else {
+            self.datum_faces = Some((kind, faces));
+            return;
+        };
+        faces.push((at, normal));
+        match (kind, faces.as_slice()) {
+            (0, [(at, normal)]) => {
+                self.run_op_with(
+                    "datum.plane",
+                    &[
+                        ("origin", PropertyValue::Vec3(at.to_array())),
+                        ("normal", PropertyValue::Vec3(normal.to_array())),
+                        ("offset", PropertyValue::Float(0.0)),
+                    ],
+                );
+            }
+            (1, [(a, na), (b, nb)]) => {
+                let points: Vec<f64> = [*a, *na, *b, *nb]
+                    .iter()
+                    .flat_map(|v| v.to_array())
+                    .collect();
+                self.run_op_with(
+                    "datum.plane_points",
+                    &[
+                        ("points", PropertyValue::Floats(points)),
+                        ("midplane", PropertyValue::Bool(true)),
+                    ],
+                );
+            }
+            _ => {
+                self.datum_faces = Some((kind, faces));
+                let message = self.ui.catalog.get("datum-pick-second-face");
+                self.status(&message);
+                return;
+            }
+        }
+        self.status("");
+    }
+
     /// The Fillet tool's state, in the status line.
     fn say_fillet(&mut self) {
         let Some(tool) = &self.fillet_tool else {
@@ -5240,6 +5323,7 @@ impl App {
             hover: None,
             angle: false,
             path: false,
+            datum: None,
         });
         self.status("Measure: click two points (Ctrl on the second for an angle), Esc to stop");
         self.update_measure();
@@ -5424,6 +5508,30 @@ impl App {
         };
         let Some(at) = tool.hover else { return };
         tool.points.push(at);
+        // Construction geometry: made once there are its points.
+        if let Some(need) = tool.datum {
+            if tool.points.len() >= need {
+                let points: Vec<f64> = tool.points.iter().flat_map(|p| p.to_array()).collect();
+                self.end_measure("");
+                if need == 2 {
+                    self.run_op_with(
+                        "datum.axis",
+                        &[
+                            ("a", PropertyValue::Vec3([points[0], points[1], points[2]])),
+                            ("b", PropertyValue::Vec3([points[3], points[4], points[5]])),
+                        ],
+                    );
+                } else {
+                    self.run_op_with(
+                        "datum.plane_points",
+                        &[("points", PropertyValue::Floats(points))],
+                    );
+                }
+                return;
+            }
+            self.update_measure();
+            return;
+        }
         if tool.path {
             self.update_measure();
             return;
@@ -15550,6 +15658,11 @@ impl App {
         if self.fillet_tool.is_some() && self.fillet_key(code) {
             return;
         }
+        if self.datum_faces.is_some() && code == KeyCode::Escape {
+            self.datum_faces = None;
+            self.status("");
+            return;
+        }
         if self.joint_tool.is_some() && code == KeyCode::Escape {
             self.joint_tool = None;
             self.status(&self.ui.catalog.get("joint-cancelled"));
@@ -16082,6 +16195,40 @@ impl App {
             "view.measure" => self.begin_measure(),
             "app.path3d" => self.begin_path3d(),
             "view.walk" => self.begin_walk(),
+            "app.datum_face" => {
+                let kind = action
+                    .params
+                    .get("kind")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0)
+                    .clamp(0, 1) as u32;
+                self.end_loop_cut_hover();
+                self.datum_faces = Some((kind, Vec::new()));
+                let message = self.ui.catalog.get(if kind == 0 {
+                    "datum-pick-face"
+                } else {
+                    "datum-pick-two-faces"
+                });
+                self.status(&message);
+            }
+            "app.datum_points" => {
+                let need = action
+                    .params
+                    .get("kind")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(3)
+                    .clamp(2, 3) as usize;
+                self.begin_measure();
+                if let Some(tool) = &mut self.measure {
+                    tool.datum = Some(need);
+                }
+                let message = self.ui.catalog.get(if need == 2 {
+                    "datum-pick-axis"
+                } else {
+                    "datum-pick-points"
+                });
+                self.status(&message);
+            }
             "app.fillet_edges" | "app.chamfer_edges" => {
                 let chamfer = action.op_id == "app.chamfer_edges";
                 let body = self
@@ -17246,6 +17393,21 @@ impl ApplicationHandler for App {
                         }
                         MouseButton::Right => {
                             self.finish_fillet();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Construction from faces: left picks a face, right gives up.
+                if self.datum_faces.is_some() && pressed {
+                    match button {
+                        MouseButton::Left if self.press_belongs_to_viewport() => {
+                            self.datum_face_click();
+                            return;
+                        }
+                        MouseButton::Right => {
+                            self.datum_faces = None;
+                            self.status("");
                             return;
                         }
                         _ => {}

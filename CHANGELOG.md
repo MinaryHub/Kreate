@@ -12,6 +12,13 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- **Construction planes and axes** (Mechanical ▸ Construct), as Fusion's
+  Construct menu has them: an offset plane off a face (its offset and
+  angle set in the Adjust panel after), a midplane between two faces, a
+  plane through three points, an axis through two, and an offset plane
+  from the ground. They are drawn in the view, and the sketch plane menu
+  offers each plane to draw on (`datum.plane`, `datum.plane_points`,
+  `datum.axis`, `draft.new(plane="object")`).
 - **Fillet and Chamfer on the edges you pick**, as Fusion and SolidWorks
   do (Mechanical ▸ Fillet / Chamfer): click edges of a body — a click on
   one takes the edges it runs smoothly into, a round edge whole — type

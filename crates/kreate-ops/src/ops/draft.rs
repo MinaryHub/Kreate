@@ -394,6 +394,21 @@ impl Operator for NewDrawing {
                 let d = doc.document();
                 (d.cursor, d.cursor_rotation)
             }
+            // A construction plane's, or any object's, own XY.
+            5 => {
+                let d = doc.document();
+                let id = if params.object.trim().is_empty() {
+                    d.selection.active
+                } else {
+                    d.objects()
+                        .find(|(_, o)| o.name == params.object.trim())
+                        .map(|(id, _)| id)
+                }
+                .ok_or_else(|| OpError::Failed("no such plane".into()))?;
+                let (_, rotation, translation) =
+                    d.world_transform(id).to_scale_rotation_translation();
+                (translation, rotation.normalize())
+            }
             4 => {
                 let frame = crate::ops::sketch_draw::face_plane(doc.document(), params)?;
                 host = crate::ops::sketch_draw::face_host(doc.document(), params);

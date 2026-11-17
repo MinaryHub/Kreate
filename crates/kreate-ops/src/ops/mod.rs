@@ -10,6 +10,7 @@ pub mod arch;
 pub mod armature;
 pub mod collection;
 pub mod curve;
+pub mod datum;
 pub mod design;
 pub mod draft;
 pub mod driver;
@@ -60,6 +61,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<sketch_trim::Trim>();
     registry.register::<edges_sketch::EdgesToSketch>();
     curve::register(registry);
+    datum::register(registry);
     feature::register(registry);
     render::register(registry);
     robot::register(registry);

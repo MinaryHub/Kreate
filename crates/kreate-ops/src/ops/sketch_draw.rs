@@ -167,10 +167,12 @@ fn need_sketch(doc: &Document) -> Result<ObjectId, OpError> {
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct NewSketchParams {
     /// Which plane: the ground (XY), the front (XZ), the side (YZ), the
-    /// work plane at the 3D cursor, or a flat face of a part.
-    #[param(variants("xy", "xz", "yz", "cursor", "face"))]
+    /// work plane at the 3D cursor, a flat face of a part, or a
+    /// construction plane (`datum.plane`) — any object's own XY.
+    #[param(variants("xy", "xz", "yz", "cursor", "face", "object"))]
     pub plane: u32,
-    /// For a face: the part, by name; empty for the active object.
+    /// For a face: the part, by name; empty for the active object. For an
+    /// object's plane: the object.
     pub object: String,
     /// For a face: its index in the part's mesh, as get_mesh(faces=true)
     /// lists them; −1 to find it by `at`.

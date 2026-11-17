@@ -3702,6 +3702,62 @@ fn draw_area(
                             draw_sketch_dimensions(&painter, &projector, doc);
                         }
                         draw_measurement(&painter, &projector, &state.measure_preview, true);
+                        // Construction planes and axes.
+                        for (id, o) in doc.objects() {
+                            let Some(datum) = kreate_ops::ops::datum::datum_of(o) else {
+                                continue;
+                            };
+                            if !doc.is_shown(id) {
+                                continue;
+                            }
+                            let w = doc.world_transform(id);
+                            let picked = doc.selection.contains(id);
+                            let ink = if picked {
+                                theme_accent(ui)
+                            } else {
+                                egui::Color32::from_rgb(0xe0, 0x8a, 0x2c)
+                            };
+                            match datum {
+                                kreate_ops::ops::datum::Datum::Plane { size } => {
+                                    let corners: Vec<egui::Pos2> =
+                                        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                                            .iter()
+                                            .filter_map(|(x, y)| {
+                                                projector.project(w.transform_point3(
+                                                    kreate_math::DVec3::new(
+                                                        x * size,
+                                                        y * size,
+                                                        0.0,
+                                                    ),
+                                                ))
+                                            })
+                                            .collect();
+                                    if corners.len() == 4 {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            corners.clone(),
+                                            ink.gamma_multiply(0.12),
+                                            egui::Stroke::new(1.5, ink),
+                                        ));
+                                    }
+                                }
+                                kreate_ops::ops::datum::Datum::Axis { length } => {
+                                    let ends =
+                                        [-length, length].map(|z| {
+                                            projector.project(w.transform_point3(
+                                                kreate_math::DVec3::new(0.0, 0.0, z),
+                                            ))
+                                        });
+                                    if let [Some(a), Some(b)] = ends {
+                                        painter.add(egui::Shape::dashed_line(
+                                            &[a, b],
+                                            egui::Stroke::new(1.5, ink),
+                                            10.0,
+                                            4.0,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                         // The Fillet tool's edges: picked thick, the one under
                         // the pointer thin.
                         let accent = theme_accent(ui);
@@ -5741,6 +5797,16 @@ const MECH_MENU: &[(&str, &[MechEntry])] = &[
             ("mech-contact", "assembly.contact", MechArg::None),
             ("mech-explode", "assembly.explode", MechArg::None),
             ("mech-component", "assembly.component", MechArg::None),
+        ],
+    ),
+    (
+        "mech-construct",
+        &[
+            ("mech-datum-offset", "app.datum_face", MechArg::Tool(0)),
+            ("mech-datum-midplane", "app.datum_face", MechArg::Tool(1)),
+            ("mech-datum-points", "app.datum_points", MechArg::Tool(3)),
+            ("mech-datum-axis", "app.datum_points", MechArg::Tool(2)),
+            ("mech-datum-ground", "datum.plane", MechArg::None),
         ],
     ),
     (

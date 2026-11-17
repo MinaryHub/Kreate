@@ -296,6 +296,8 @@ const APP_ACTIONS: &[&str] = &[
     "app.sketch_grab",
     "assembly.joint_tool",
     "app.fillet_edges",
+    "app.datum_face",
+    "app.datum_points",
     "app.chamfer_edges",
     "app.joint_animate",
     "app.sketch_free",
