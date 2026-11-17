@@ -7772,6 +7772,8 @@ pub struct SheetDialog {
     pub scale: usize,
     pub third_angle: bool,
     pub iso: bool,
+    /// A section A-A in the isometric view's place.
+    pub section: bool,
     pub title: String,
     pub number: String,
     pub material: String,
@@ -7789,6 +7791,7 @@ impl Default for SheetDialog {
             scale: 0,
             third_angle: true,
             iso: true,
+            section: false,
             title: String::new(),
             number: String::new(),
             material: String::new(),
@@ -7855,7 +7858,10 @@ fn draw_sheet(ctx: &egui::Context, state: &mut ShellState) {
                 });
                 ui.end_row();
                 ui.label(t("sheet-views"));
-                ui.checkbox(&mut d.iso, t("sheet-iso"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut d.iso, t("sheet-iso"));
+                    ui.checkbox(&mut d.section, t("sheet-section"));
+                });
                 ui.end_row();
                 for (key, value) in [
                     ("sheet-l-title", &mut d.title),

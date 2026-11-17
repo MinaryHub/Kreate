@@ -1118,6 +1118,11 @@ struct App {
     /// Fusion's Joint, being made: the motion asked for, and the moving
     /// part's joint origin once it has been picked.
     joint_tool: Option<(u32, Option<(ObjectId, kreate::assembly::Origin)>)>,
+    /// The rendered view denoised by Open Image Denoise: at how many
+    /// samples (nought for not yet), and whether the view's own filter was
+    /// turned off for it, to be turned back on when the view starts over.
+    view_denoised_at: u32,
+    view_filter_off: bool,
     /// A joint being played through its travel: the joint, when it began,
     /// and where it was, to put it back.
     joint_anim: Option<(ObjectId, std::time::Instant, kreate_math::DTransform)>,
@@ -1371,6 +1376,8 @@ impl App {
             fillet_tool: None,
             joint_tool: None,
             joint_anim: None,
+            view_denoised_at: 0,
+            view_filter_off: false,
             mass_cache: None,
             sectioned: Vec::new(),
             circle_radius: 40.0,
@@ -4514,6 +4521,7 @@ impl App {
             part: t("sheet-l-part"),
             quantity: t("sheet-l-qty"),
             more: c.format("sheet-l-more", kreate_i18n::TextKind::Ui, &[("n", "{n}")]),
+            section: t("sheet-l-section"),
         };
         let d = &self.ui.sheet;
         let unit = self.doc.design.length_unit;
@@ -4527,6 +4535,7 @@ impl App {
                 Projection::First
             },
             iso: d.iso,
+            section: d.section,
             title: d.title.clone(),
             number: d.number.clone(),
             material: d.material.clone(),
@@ -5209,6 +5218,58 @@ impl App {
         p.set("kind", PropertyValue::Enum(kind));
         self.run_op("assembly.joint", p);
         self.joint_tool = None;
+    }
+
+    /// The rendered view, path traced to all its samples and still: put
+    /// through Open Image Denoise once, where it is installed, as a render
+    /// is — the view's own filter keeps most of the grain at a few hundred
+    /// samples. Undone as soon as the view starts over.
+    fn denoise_still_view(&mut self) {
+        if self.render_job.is_some() || self.rendering_still {
+            return;
+        }
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        let samples = gfx.viewport.path_trace_samples();
+        // Started over: the view's own filter back, and once more to do.
+        if samples < self.view_denoised_at {
+            self.view_denoised_at = 0;
+            if self.view_filter_off {
+                gfx.viewport.path_trace_denoise = true;
+                self.view_filter_off = false;
+            }
+        }
+        if samples == 0
+            || gfx.viewport.accumulating()
+            || self.view_denoised_at != 0
+            || !gfx.viewport.path_trace_denoise
+            || !kreate_render::oidn::available()
+        {
+            return;
+        }
+        self.view_denoised_at = samples;
+        let clean = gfx
+            .viewport
+            .read_traced(&gfx.gpu.device, &gfx.gpu.queue)
+            .and_then(|gathered| {
+                let clean = kreate_render::oidn::denoise(&kreate_render::oidn::Noisy {
+                    width: gathered.width as usize,
+                    height: gathered.height as usize,
+                    color: &gathered.color,
+                    albedo: &gathered.albedo,
+                    normal: &gathered.normal,
+                })?;
+                Ok((gathered, clean))
+            });
+        match clean {
+            Ok((gathered, clean)) => {
+                gfx.viewport.path_trace_denoise = false;
+                self.view_filter_off = true;
+                gfx.viewport
+                    .show_traced_mean(&gfx.gpu.queue, &gathered, &clean);
+                self.redraw.set(RedrawReason::ACCUMULATE);
+            }
+            Err(e) => tracing::warn!("Open Image Denoise on the view: {e}"),
+        }
     }
 
     /// A joint being played through its travel: a swing out to one end,
@@ -17802,6 +17863,7 @@ impl ApplicationHandler for App {
                     // event to wake it — a mouse move — between every frame.
                     self.redraw.clear();
                     self.advance_render_job();
+                    self.denoise_still_view();
                     if self.render_job.is_some()
                         || self
                             .gfx

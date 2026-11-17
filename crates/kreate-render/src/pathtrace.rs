@@ -222,24 +222,115 @@ pub struct PtImage<'a> {
     pub color: bool,
 }
 
-/// The size every image is resampled to for the tracer: one layer each of a
-/// texture array, which is what a compute pass can index by number.
-const IMAGE_SIZE: u32 = 512;
+/// The most a tracer image layer is on a side, and the most bytes the
+/// layers of one kind take in all: every image is one layer of a texture
+/// array — what a compute pass can index by number — and so all are as big
+/// as the largest. Five hundred and twelve, nearest texel, was what labels
+/// and wood grain came out of a render at, softer than the viewport.
+const IMAGE_MAX: u32 = 2048;
+const IMAGE_BUDGET: u64 = 256 << 20;
 
-/// `image` resampled to `IMAGE_SIZE` square, nearest texel.
-fn resample(image: &PtImage<'_>) -> Vec<u8> {
+/// The side every layer of `images` is made: the largest of them to the
+/// power of two at or above it, no more than [`IMAGE_MAX`], and halved
+/// until the layers with their mips fit [`IMAGE_BUDGET`].
+fn layer_size(images: &[&PtImage<'_>]) -> u32 {
+    let largest = images
+        .iter()
+        .map(|i| i.width.max(i.height))
+        .max()
+        .unwrap_or(1)
+        .clamp(1, IMAGE_MAX);
+    // Never under five hundred and twelve: a small image is made larger
+    // texel by texel, so its texels stay sharp where it is magnified.
+    let mut size = largest.next_power_of_two().clamp(512, IMAGE_MAX);
+    let layers = images.len().max(1) as u64;
+    // A full chain of mips is a third again.
+    while size > 64 && layers * u64::from(size) * u64::from(size) * 4 * 4 / 3 > IMAGE_BUDGET {
+        size /= 2;
+    }
+    size
+}
+
+/// How many mips a layer of `size` has: down to four texels.
+fn mip_count(size: u32) -> u32 {
+    (size.max(4).ilog2() - 1).max(1)
+}
+
+/// `image` resampled to `size` square, each texel the bilinear read of the
+/// source at its middle — a mean of the four it falls between — so neither
+/// growing nor shrinking it steps its edges. In the image's own encoding:
+/// close enough for a colour's, which the mips below average the same way.
+fn resample(image: &PtImage<'_>, size: u32) -> Vec<u8> {
     let (w, h) = (image.width.max(1), image.height.max(1));
-    let mut out = vec![255u8; (IMAGE_SIZE * IMAGE_SIZE * 4) as usize];
-    for y in 0..IMAGE_SIZE {
-        let sy = (y * h / IMAGE_SIZE).min(h - 1);
-        for x in 0..IMAGE_SIZE {
-            let sx = (x * w / IMAGE_SIZE).min(w - 1);
-            let from = ((sy * w + sx) * 4) as usize;
-            let to = ((y * IMAGE_SIZE + x) * 4) as usize;
-            if let Some(src) = image.pixels.get(from..from + 4) {
-                out[to..to + 4].copy_from_slice(src);
+    let texel = |x: u32, y: u32| -> [f32; 4] {
+        let at = ((y.min(h - 1) * w + x.min(w - 1)) * 4) as usize;
+        match image.pixels.get(at..at + 4) {
+            Some(p) => [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32],
+            None => [255.0; 4],
+        }
+    };
+    let mut out = vec![255u8; (size * size * 4) as usize];
+    // Made larger: texel by texel, as the image's own texels are — a
+    // pattern of a few squares stays squares, not a blur between them.
+    if w <= size && h <= size {
+        for y in 0..size {
+            let sy = (y * h / size).min(h - 1);
+            for x in 0..size {
+                let sx = (x * w / size).min(w - 1);
+                let to = ((y * size + x) * 4) as usize;
+                let p = texel(sx, sy);
+                for k in 0..4 {
+                    out[to + k] = p[k] as u8;
+                }
             }
         }
+        return out;
+    }
+    for y in 0..size {
+        let fy = ((y as f32 + 0.5) * h as f32 / size as f32 - 0.5).max(0.0);
+        let (y0, ty) = (fy.floor() as u32, fy.fract());
+        for x in 0..size {
+            let fx = ((x as f32 + 0.5) * w as f32 / size as f32 - 0.5).max(0.0);
+            let (x0, tx) = (fx.floor() as u32, fx.fract());
+            let (a, b, c, d) = (
+                texel(x0, y0),
+                texel(x0 + 1, y0),
+                texel(x0, y0 + 1),
+                texel(x0 + 1, y0 + 1),
+            );
+            let to = ((y * size + x) * 4) as usize;
+            for k in 0..4 {
+                let top = a[k] + (b[k] - a[k]) * tx;
+                let bottom = c[k] + (d[k] - c[k]) * tx;
+                out[to + k] = (top + (bottom - top) * ty).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// The mips of a square layer, each half the last, by the mean of four.
+fn mips_of(level0: &[u8], size: u32) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let (mut prev, mut s) = (level0.to_vec(), size);
+    for _ in 1..mip_count(size) {
+        let half = (s / 2).max(1);
+        let mut next = vec![0u8; (half * half * 4) as usize];
+        for y in 0..half {
+            for x in 0..half {
+                for k in 0..4 {
+                    let at = |xx: u32, yy: u32| prev[((yy * s + xx) * 4 + k) as usize] as u32;
+                    let sum = at(2 * x, 2 * y)
+                        + at(2 * x + 1, 2 * y)
+                        + at(2 * x, 2 * y + 1)
+                        + at(2 * x + 1, 2 * y + 1);
+                    next[((y * half + x) * 4 + k) as usize] = ((sum + 2) / 4) as u8;
+                }
+            }
+        }
+        out.push(next.clone());
+        prev = next;
+        s = half;
     }
     out
 }
@@ -1142,6 +1233,10 @@ impl PathTracer {
             address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // Between mips too: a texture far off or seen edge on is its
+            // mean, not a shimmer of whichever texels a ray lands on.
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
             ..Default::default()
         });
         let env_map = wgpu::util::DeviceExt::create_buffer_init(
@@ -1458,8 +1553,11 @@ impl PathTracer {
         let mut colour_layers: Vec<Vec<u8>> = Vec::new();
         let mut data_layers: Vec<Vec<u8>> = Vec::new();
         let mut layer_of: Vec<i32> = Vec::with_capacity(images.len());
+        // One size for each kind: its largest image's, within the budget.
+        let colour_size = layer_size(&images.iter().filter(|i| i.color).collect::<Vec<_>>());
+        let data_size = layer_size(&images.iter().filter(|i| !i.color).collect::<Vec<_>>());
         for image in images {
-            let pixels = resample(image);
+            let pixels = resample(image, if image.color { colour_size } else { data_size });
             if image.color {
                 layer_of.push(colour_layers.len() as i32);
                 colour_layers.push(pixels);
@@ -1497,16 +1595,18 @@ impl PathTracer {
                 ]
             })
             .collect();
-        let array = |label, format, layers: &[Vec<u8>]| {
+        let array = |label, format, layers: &[Vec<u8>], size: u32| {
             let count = layers.len().max(1) as u32;
+            let size = if layers.is_empty() { 4 } else { size };
+            let mips = mip_count(size);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
-                    width: IMAGE_SIZE,
-                    height: IMAGE_SIZE,
+                    width: size,
+                    height: size,
                     depth_or_array_layers: count,
                 },
-                mip_level_count: 1,
+                mip_level_count: mips,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
@@ -1514,29 +1614,33 @@ impl PathTracer {
                 view_formats: &[],
             });
             for (i, pixels) in layers.iter().enumerate() {
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d {
-                            x: 0,
-                            y: 0,
-                            z: i as u32,
+                let chain = std::iter::once(pixels.clone()).chain(mips_of(pixels, size));
+                for (level, texels) in chain.enumerate() {
+                    let side = (size >> level).max(1);
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture,
+                            mip_level: level as u32,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: i as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
                         },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    pixels,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(IMAGE_SIZE * 4),
-                        rows_per_image: Some(IMAGE_SIZE),
-                    },
-                    wgpu::Extent3d {
-                        width: IMAGE_SIZE,
-                        height: IMAGE_SIZE,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                        &texels,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(side * 4),
+                            rows_per_image: Some(side),
+                        },
+                        wgpu::Extent3d {
+                            width: side,
+                            height: side,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
             }
             texture.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -1547,11 +1651,13 @@ impl PathTracer {
             "path trace colour images",
             wgpu::TextureFormat::Rgba8UnormSrgb,
             &colour_layers,
+            colour_size,
         );
         let data_images = array(
             "path trace data images",
             wgpu::TextureFormat::Rgba8Unorm,
             &data_layers,
+            data_size,
         );
         if surface_data.is_empty() {
             // Three slots a surface, as the shader reads them.
@@ -2174,5 +2280,52 @@ mod placing_tests {
         assert_eq!(layout.stored.len(), 1);
         assert_eq!(layout.placings, vec![(0, DAffine3::IDENTITY)]);
         assert_eq!(layout.triangles.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    /// Images keep their detail to two thousand texels a side, within the
+    /// budget; a smooth ramp resampled stays smooth; the mips average.
+    #[test]
+    fn tracer_images_keep_their_detail_and_their_mean() {
+        let pixels = vec![200u8; 1000 * 600 * 4];
+        let big = PtImage {
+            width: 1000,
+            height: 600,
+            pixels: &pixels,
+            color: true,
+        };
+        assert_eq!(layer_size(&[&big]), 1024);
+        // Three hundred of them do not fit at that size.
+        let many: Vec<&PtImage<'_>> = std::iter::repeat_n(&big, 300).collect();
+        assert!(layer_size(&many) < 1024);
+        // A ramp from black to white across thirty-two texels, made sixteen:
+        // shrunk smoothly.
+        let ramp: Vec<u8> = (0..32u32)
+            .flat_map(|x| {
+                let v = (x * 255 / 31) as u8;
+                [v, v, v, 255]
+            })
+            .collect();
+        let image = PtImage {
+            width: 32,
+            height: 1,
+            pixels: &ramp,
+            color: false,
+        };
+        let out = resample(&image, 16);
+        let row: Vec<u8> = (0..16).map(|x| out[x * 4]).collect();
+        assert!(row.windows(2).all(|w| w[1] >= w[0]), "{row:?}");
+        assert!(row.windows(2).all(|w| w[1] - w[0] <= 20), "{row:?}");
+        let mips = mips_of(&out, 16);
+        assert_eq!(mips.len() as u32, mip_count(16) - 1);
+        // The smallest mip's row means the ramp's mean: grey.
+        let last = mips.last().unwrap();
+        let side = (16u32 >> mips.len()) as usize;
+        let mean = (0..side).map(|x| u32::from(last[x * 4])).sum::<u32>() / side as u32;
+        assert!((mean as i32 - 128).abs() < 12, "{mean}");
     }
 }

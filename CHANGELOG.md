@@ -12,6 +12,16 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Added
 
+- A drawing sheet can have a **section**, A-A, in the isometric view's
+  place: the parts cut through their middle front to back, the cut
+  hatched at 45° with its holes left clear, the cutting line marked A–A
+  on the top view (File ▸ Drawing Sheet ▸ Section A-A).
+- The path tracer reads textures at the detail they have — to 2048
+  pixels a side, within a memory budget — filtered and with mips, where
+  it shrank every one to 512 pixels, nearest texel: labels, wood grain
+  and normal maps render as sharp as the viewport shows them.
+- The rendered view, path traced to all its samples and still, is put
+  through Open Image Denoise once where it is installed, as a render is.
 - Patterns as Fusion's: a rectangular pattern in two directions — a grid
   (`feature.pattern(count2=…, step2=…)`) — and a circular one spread over
   an angle, end to end, about a construction axis

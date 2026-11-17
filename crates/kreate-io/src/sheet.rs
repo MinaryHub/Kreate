@@ -98,6 +98,8 @@ pub struct Labels {
     pub part: String,
     pub quantity: String,
     pub more: String,
+    /// What a section view is called: "SECTION A-A".
+    pub section: String,
 }
 
 impl Default for Labels {
@@ -118,6 +120,7 @@ impl Default for Labels {
             part: s("PART"),
             quantity: s("QTY"),
             more: s("and {n} more"),
+            section: s("SECTION A-A"),
         }
     }
 }
@@ -133,6 +136,10 @@ pub struct SheetSpec {
     pub projection: Projection,
     /// An isometric view beside the three.
     pub iso: bool,
+    /// A section beside the three, in the isometric view's place: the
+    /// parts cut through their middle front to back, the cut hatched, its
+    /// line marked A–A on the top view.
+    pub section: bool,
     pub title: String,
     pub number: String,
     pub material: String,
@@ -153,6 +160,7 @@ impl Default for SheetSpec {
             scale: None,
             projection: Projection::Third,
             iso: true,
+            section: false,
             title: String::new(),
             number: String::new(),
             material: String::new(),
@@ -373,6 +381,76 @@ struct Layers {
     text: LayerId,
 }
 
+/// The parts cut by the plane square to Y at `y`, each closed loop of the
+/// cut as the front view draws it.
+fn section_loops_front(parts: &[(&MeshData, DAffine3)], y: f64) -> Vec<Vec<[f64; 2]>> {
+    let mut out = Vec::new();
+    for (mesh, place) in parts {
+        let to_local = place.inverse();
+        let point = to_local.transform_point3(DVec3::new(0.0, y, 0.0));
+        // A normal goes through the transpose of the inverse.
+        let normal = place
+            .matrix3
+            .transpose()
+            .mul_vec3(DVec3::Y)
+            .normalize_or_zero();
+        for l in kreate_mesh::section::section_loops(mesh, point.as_vec3(), normal.as_vec3()) {
+            let loop2: Vec<[f64; 2]> = l
+                .iter()
+                .map(|p| View::Front.project(place.transform_point3(p.as_dvec3())))
+                .collect();
+            if loop2.len() >= 3 {
+                out.push(loop2);
+            }
+        }
+    }
+    out
+}
+
+/// Hatching for the region `loops` bound — even-odd, so a hole is left
+/// clear — as lines at 45°, `gap` apart.
+fn hatch(loops: &[Vec<DVec2>], gap: f64) -> Vec<(DVec2, DVec2)> {
+    // Turned so the hatch runs level: rows across at every `gap`.
+    let (c, s) = (
+        std::f64::consts::FRAC_1_SQRT_2,
+        std::f64::consts::FRAC_1_SQRT_2,
+    );
+    let turn = |p: DVec2| DVec2::new(p.x * c + p.y * s, -p.x * s + p.y * c);
+    let back = |p: DVec2| DVec2::new(p.x * c - p.y * s, p.x * s + p.y * c);
+    let turned: Vec<Vec<DVec2>> = loops
+        .iter()
+        .map(|l| l.iter().map(|p| turn(*p)).collect())
+        .collect();
+    let (lo, hi) = turned
+        .iter()
+        .flatten()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(p.y), hi.max(p.y))
+        });
+    let mut out = Vec::new();
+    if !lo.is_finite() || gap <= 0.0 {
+        return out;
+    }
+    let mut y = (lo / gap).ceil() * gap;
+    while y <= hi {
+        let mut xs: Vec<f64> = Vec::new();
+        for l in &turned {
+            for k in 0..l.len() {
+                let (a, b) = (l[k], l[(k + 1) % l.len()]);
+                if (a.y <= y) != (b.y <= y) {
+                    xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+                }
+            }
+        }
+        xs.sort_by(f64::total_cmp);
+        for pair in xs.as_chunks::<2>().0 {
+            out.push((back(DVec2::new(pair[0], y)), back(DVec2::new(pair[1], y))));
+        }
+        y += gap;
+    }
+    out
+}
+
 /// The sheet of `parts` (meshes placed in the world) as `spec` asks.
 pub fn compose(parts: &[(&MeshData, DAffine3)], spec: &SheetSpec) -> Sheet {
     let (mut w, mut h) = spec.paper.size_mm();
@@ -408,10 +486,29 @@ pub fn compose(parts: &[(&MeshData, DAffine3)], spec: &SheetSpec) -> Sheet {
         (rows + 1) as f64 * ROW_H
     };
 
+    // The section, when asked for: where the cut is, and the cut itself
+    // as the front view sees it. It takes the isometric view's corner.
+    let cut_y = {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for (mesh, place) in parts {
+            for p in mesh.positions() {
+                let y = place.transform_point3(p.as_dvec3()).y;
+                lo = lo.min(y);
+                hi = hi.max(y);
+            }
+        }
+        (lo + hi) * 0.5
+    };
+    let section: Vec<Vec<[f64; 2]>> = if spec.section && cut_y.is_finite() {
+        section_loops_front(parts, cut_y)
+    } else {
+        Vec::new()
+    };
+    let show_iso = spec.iso && section.is_empty();
     // The views, each in model metres on its page.
     let mut views: Vec<(View, Vec<Line2>)> = [View::Front, View::Top, View::Right]
         .into_iter()
-        .chain(spec.iso.then_some(View::Iso))
+        .chain(show_iso.then_some(View::Iso))
         .map(|v| (v, project_drawing(parts, v, 30f64.to_radians())))
         .collect();
     views.retain(|(_, lines)| !lines.is_empty());
@@ -518,6 +615,41 @@ pub fn compose(parts: &[(&MeshData, DAffine3)], spec: &SheetSpec) -> Sheet {
                     layers.visible
                 };
                 pen.line(layer, to_paper(l.a), to_paper(l.b));
+            }
+        }
+        // The cutting line, on the top view: a chain line across at the cut,
+        // a little past the part each side, with A at each end and arrows
+        // looking the way the section is seen.
+        if v == View::Top && !section.is_empty() {
+            let y = to_paper([lo.x, cut_y]).y;
+            let (a, b) = (
+                DVec2::new(origin.x - 6.0, y),
+                DVec2::new(origin.x + size.x + 6.0, y),
+            );
+            let mut x = a.x;
+            let mut long = true;
+            while x < b.x {
+                let step = if long { 8.0 } else { 1.5 };
+                if long {
+                    pen.line(
+                        layers.dim,
+                        DVec2::new(x, y),
+                        DVec2::new((x + step).min(b.x), y),
+                    );
+                }
+                x += step + 1.5;
+                long = !long;
+            }
+            for end in [a, b] {
+                pen.arrow(layers.dim, end + DVec2::new(0.0, 4.0), DVec2::new(0.0, 1.0));
+                pen.line(layers.dim, end, end + DVec2::new(0.0, 4.0));
+                pen.text(
+                    layers.text,
+                    end + DVec2::new(0.0, 6.0),
+                    TEXT,
+                    "A",
+                    TextAlign::Center,
+                );
             }
         }
         // The overall sizes: the front's width and height, the right
@@ -656,6 +788,57 @@ pub fn compose(parts: &[(&MeshData, DAffine3)], spec: &SheetSpec) -> Sheet {
                 &length(y - lo.y),
             );
         }
+    }
+    // The section, in the corner the grid leaves: the cut outline, hatched
+    // at 45°, at the views' scale where it fits.
+    if !section.is_empty() {
+        let mut lo = DVec2::splat(f64::INFINITY);
+        let mut hi = DVec2::splat(f64::NEG_INFINITY);
+        for p in section.iter().flatten() {
+            lo = lo.min(DVec2::from(*p));
+            hi = hi.max(DVec2::from(*p));
+        }
+        let model = (hi - lo) * 1e3;
+        let (rx, ry) = match spec.projection {
+            Projection::Third => ([left + cw[0], x1], [top - ch[0], y1]),
+            Projection::First => ([x0, left + cw[0]], [y0 + band, top - ch[0]]),
+        };
+        let room = DVec2::new(rx[1] - rx[0], ry[1] - ry[0]) - DVec2::splat(2.0 * PAD + 8.0);
+        let fits = (room.x / model.x.max(1e-9)).min(room.y / model.y.max(1e-9));
+        let s = if fits >= scale {
+            scale
+        } else {
+            standard_scale(fits.max(1e-9))
+        };
+        let size = model * s;
+        let origin = DVec2::new(
+            (rx[0] + rx[1] - size.x) * 0.5,
+            (ry[0] + ry[1] - size.y) * 0.5 + 4.0,
+        );
+        let place = |p: [f64; 2]| origin + (DVec2::from(p) - lo) * 1e3 * s;
+        let paper: Vec<Vec<DVec2>> = section
+            .iter()
+            .map(|l| l.iter().map(|p| place(*p)).collect())
+            .collect();
+        for l in &paper {
+            for k in 0..l.len() {
+                pen.line(layers.visible, l[k], l[(k + 1) % l.len()]);
+            }
+        }
+        for (a, b) in hatch(&paper, 2.5) {
+            pen.line(layers.dim, a, b);
+        }
+        let mut caption = spec.labels.section.clone();
+        if s != scale {
+            caption = format!("{caption} ({})", scale_label(s));
+        }
+        pen.text(
+            layers.text,
+            DVec2::new(origin.x + size.x * 0.5, origin.y - 7.0),
+            TEXT,
+            &caption,
+            TextAlign::Center,
+        );
     }
     if let Some((_, lines)) = &iso {
         let (lo, hi) = bounds(lines);
@@ -1089,6 +1272,55 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Asked for, a section of a block with a hole through it: captioned,
+    /// hatched, the hole left clear, the cut marked A on the top view —
+    /// and no isometric view, whose place it takes.
+    #[test]
+    fn a_section_is_cut_hatched_and_marked() {
+        // A tube: a box with a box-shaped hole through it along Y, made by
+        // two closed boxes the second inside out — enough for the cut.
+        let outer = kreate_mesh::primitives::cube(1.0);
+        let mut inner = kreate_mesh::primitives::cube(1.0);
+        for p in inner.positions_mut() {
+            *p *= kreate_math::Vec3::new(0.5, 1.2, 0.5);
+        }
+        let inner = kreate_mesh::MeshData::from_faces(
+            inner.positions().to_vec(),
+            &inner
+                .faces()
+                .map(|f| f.iter().rev().copied().collect::<Vec<u32>>())
+                .collect::<Vec<_>>(),
+        );
+        let at = DAffine3::from_scale(kreate_math::DVec3::new(0.04, 0.06, 0.04));
+        let spec = SheetSpec {
+            section: true,
+            ..Default::default()
+        };
+        let sheet = compose(&[(&outer, at), (&inner, at)], &spec);
+        let words = texts(&sheet);
+        assert!(
+            words.iter().any(|w| w.starts_with("SECTION A-A")),
+            "{words:?}"
+        );
+        assert_eq!(words.iter().filter(|w| *w == "A").count(), 2);
+        assert!(!sheet.views.iter().any(|(v, _, _)| *v == View::Iso));
+        // Hatched: 45° lines; none crossing the hole's middle.
+        let loops = section_loops_front(&[(&outer, at), (&inner, at)], 0.0);
+        assert_eq!(loops.len(), 2, "the outside and the hole");
+        let paper: Vec<Vec<DVec2>> = loops
+            .iter()
+            .map(|l| l.iter().map(|p| DVec2::from(*p) * 1000.0).collect())
+            .collect();
+        let lines = hatch(&paper, 2.0);
+        assert!(!lines.is_empty());
+        let middle = DVec2::ZERO;
+        assert!(lines.iter().all(|(a, b)| {
+            let ab = *b - *a;
+            let t = ((middle - *a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+            (*a + ab * t).distance(middle) > 1.0
+        }));
     }
 
     /// A 120 × 60 × 40 mm block on A3: drawn at a standard scale, every
