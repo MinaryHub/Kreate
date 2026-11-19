@@ -113,7 +113,9 @@ impl Provider {
         let (name, var) = self.command();
         let how = match self {
             Provider::Claude => "install Claude Code from https://claude.com/claude-code",
-            Provider::Gemini => "install the Gemini CLI: npm install -g @google/gemini-cli",
+            Provider::Gemini => {
+                "install the Antigravity CLI — in PowerShell: irm https://antigravity.google/cli/install.ps1 | iex — then run `agy` once to sign in with Google"
+            }
             Provider::ChatGpt => "install the Codex CLI: npm install -g @openai/codex",
             Provider::Ollama => "install Ollama from https://ollama.com",
         };
@@ -130,7 +132,9 @@ impl Provider {
         match self {
             // Claude Code's aliases, which follow the newest of each.
             Provider::Claude => &["fable", "opus", "sonnet", "haiku"],
-            Provider::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
+            // Antigravity's names are `agy models`'s, and change: its own
+            // default, or one typed.
+            Provider::Gemini => &[],
             Provider::ChatGpt => &["gpt-5", "gpt-5-codex"],
             Provider::Ollama => &[],
         }
@@ -175,8 +179,9 @@ impl Provider {
             Provider::Claude => &["low", "medium", "high", "xhigh", "max"],
             // Codex's `model_reasoning_effort`.
             Provider::ChatGpt => &["low", "medium", "high"],
-            // The Gemini CLI takes none.
-            Provider::Gemini => &[],
+            // `agy --effort`; the Gemini CLI, kept for an API key, takes
+            // none and is not given it.
+            Provider::Gemini => &["low", "medium", "high", "xhigh", "max"],
             // A model that thinks is let think, or told not to.
             Provider::Ollama => &["low", "high"],
         }
@@ -767,6 +772,9 @@ impl Chat {
     /// to choose Login with Google there, and Kreate watches for the
     /// credentials it then saves. Elsewhere, what to do is said.
     fn sign_in_gemini(&mut self, tool: &Path) -> Result<(), String> {
+        if is_agy(tool) {
+            return self.sign_in_agy(tool);
+        }
         let advice = "Gemini signs in only in a terminal: run `gemini` and choose Login \
                       with Google — or save a Gemini API key under API keys.";
         if !cfg!(target_os = "macos") {
@@ -826,6 +834,75 @@ impl Chat {
         Ok(())
     }
 
+    /// Antigravity's sign-in: `agy` opened in a window of its own, which
+    /// signs in with Google in the browser on its first start. Closing the
+    /// window ends it; the account is asked again then.
+    fn sign_in_agy(&mut self, tool: &Path) -> Result<(), String> {
+        let dir = Provider::Gemini
+            .folder()
+            .ok_or("no settings folder to run Antigravity in")?;
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.arg("/C")
+                .arg("start")
+                .arg("Antigravity sign-in")
+                .arg("/WAIT")
+                .arg(tool);
+            c
+        } else if cfg!(target_os = "macos") {
+            let file = dir.join("sign-in.command");
+            let path = tool_path(tool).unwrap_or_default();
+            let quote =
+                |p: &std::ffi::OsStr| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
+            std::fs::write(
+                &file,
+                format!(
+                    "#!/bin/sh\nexport PATH={}\ncd {}\necho 'Kreate: sign in with Google in the browser, then type /quit.'\n{}\n",
+                    quote(&path),
+                    quote(dir.as_os_str()),
+                    quote(tool.as_os_str())
+                ),
+            )
+            .map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700));
+            }
+            let mut c = Command::new("open");
+            c.arg("-W").arg(&file);
+            c
+        } else {
+            return Err(
+                "Run `agy` in a terminal once to sign in with Google, then come back.".into(),
+            );
+        };
+        command.current_dir(&dir);
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("cannot open a window for Antigravity: {e}"))?;
+        let stop: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let (tx, wake, halt) = (
+            self.side.0.clone(),
+            Arc::clone(&self.wake),
+            Arc::clone(&stop),
+        );
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let said = halt
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(|| "cancelled".to_string());
+            let _ = tx.send(Event::SignedIn(said));
+            wake();
+        });
+        self.sign_in = Some(SignIn {
+            child: None,
+            input: None,
+            stop,
+        });
+        Ok(())
+    }
+
     /// Hands the sign-in the code the browser showed.
     pub fn sign_in_code(&mut self, code: &str) {
         if let Some(input) = self.sign_in.as_mut().and_then(|s| s.input.as_mut()) {
@@ -864,6 +941,11 @@ impl Chat {
         self.cancel_sign_in();
         let (tx, wake) = (self.side.0.clone(), Arc::clone(&self.wake));
         let tool = find_cli(provider);
+        if provider == Provider::Gemini && tool.as_deref().is_some_and(is_agy) {
+            return Err(
+                "Antigravity signs out in its own window: run `agy` and type /logout.".into(),
+            );
+        }
         std::thread::spawn(move || {
             let failed = match provider {
                 Provider::Gemini => gemini_home()
@@ -971,7 +1053,8 @@ impl Chat {
             "kreate-mcp was not found next to Kreate. Build it with `cargo build -p kreate-mcp`.",
         )?;
         let folder = provider.folder();
-        let skip_trust = provider == Provider::Gemini && gemini_knows_skip_trust(&tool);
+        let agy = provider == Provider::Gemini && is_agy(&tool);
+        let skip_trust = provider == Provider::Gemini && !agy && gemini_knows_skip_trust(&tool);
         let mut command = quiet_command(&tool);
         let parse: fn(&str) -> Vec<Event> = match provider {
             // Sent by Kreate itself, above.
@@ -1013,6 +1096,28 @@ impl Chat {
                     command.args(["--resume", session]);
                 }
                 parse_line
+            }
+            // Antigravity, signed in with Google.
+            Provider::Gemini if agy => {
+                let dir = folder
+                    .as_ref()
+                    .ok_or("no settings folder to run Antigravity in")?;
+                write_agy_folder(dir, &connector)
+                    .map_err(|e| format!("cannot set up Antigravity's folder: {e}"))?;
+                command
+                    .arg("-p")
+                    .arg(&words)
+                    .args(["--output-format", "stream-json"]);
+                if let Some(model) = &self.cli_model {
+                    command.arg("--model").arg(model);
+                }
+                if let Some(effort) = self.effort.as_deref() {
+                    command.arg("--effort").arg(effort);
+                }
+                if let Some(id) = &self.session {
+                    command.arg("--conversation").arg(id);
+                }
+                parse_agy_line
             }
             Provider::Gemini => {
                 let dir = folder
@@ -1289,7 +1394,15 @@ impl Chat {
                         self.session = Some(id.clone());
                     }
                     finished |= matches!(event, Event::Done(_));
+                    // Antigravity's sign-in cannot be read beforehand: a
+                    // turn refused for the want of one says it is signed
+                    // out, and the panel offers to sign in.
+                    let signed_out = matches!(&event, Event::Done(Some(why))
+                        if self.provider == Provider::Gemini && wants_sign_in(why));
                     out.push(event);
+                    if signed_out {
+                        out.push(Event::Account(Account::SignedOut));
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -1313,6 +1426,21 @@ impl Drop for Chat {
         self.stop();
         self.cancel_sign_in();
     }
+}
+
+/// Whether a turn's failure is for the want of a sign-in.
+fn wants_sign_in(why: &str) -> bool {
+    let why = why.to_lowercase();
+    [
+        "authentication required",
+        "not authenticated",
+        "unauthenticated",
+        "please sign in",
+        "please log in",
+        "not logged in",
+    ]
+    .iter()
+    .any(|w| why.contains(w))
 }
 
 /// Who the provider's tool is signed in as.
@@ -1348,6 +1476,14 @@ fn ask_account(provider: Provider) -> Account {
                 Err(e) => Account::Unavailable(format!("cannot start Claude Code: {e}")),
             }
         }
+        // Antigravity keeps its sign-in in the system's keyring, where it
+        // cannot be read: taken as signed in, and told otherwise by the
+        // first answer when it is not (see `Chat::poll`).
+        Provider::Gemini if is_agy(&tool) => Account::SignedIn {
+            email: "Google account (Antigravity)".into(),
+            organisation: None,
+            plan: None,
+        },
         Provider::Gemini => gemini_account(),
         // Asked through its endpoint, by `check_account`.
         Provider::Ollama => Account::Checking,
@@ -1998,6 +2134,13 @@ fn help_lists_skip_trust(help: &str) -> bool {
 }
 
 pub(crate) fn find_cli(provider: Provider) -> Option<PathBuf> {
+    // Gemini signed in with Google is Antigravity's now: `agy`, where it
+    // is installed and no API key is kept for the Gemini CLI.
+    if provider == Provider::Gemini && !gemini_keyed() {
+        if let Some(agy) = find_agy() {
+            return Some(agy);
+        }
+    }
     let (command, var) = provider.command();
     if let Some(path) = std::env::var_os(var) {
         return Some(PathBuf::from(path));
@@ -2030,6 +2173,216 @@ pub(crate) fn find_cli(provider: Provider) -> Option<PathBuf> {
     dirs.iter()
         .flat_map(|d| names.iter().map(move |n| d.join(n)))
         .find(|p| p.is_file())
+}
+
+/// Whether Gemini is to answer with an API key: one kept in Kreate, or in
+/// the environment. The Gemini CLI still takes a key; signed in with
+/// Google, it is Antigravity's `agy` that answers.
+fn gemini_keyed() -> bool {
+    std::env::var_os("GEMINI_API_KEY").is_some()
+        || crate::ai_keys::key(crate::ai_keys::Service::Google).is_some()
+}
+
+/// The Antigravity CLI: `KREATE_AGY`, else `agy` on the search path or where
+/// its installer puts it.
+pub fn find_agy() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("KREATE_AGY") {
+        return Some(PathBuf::from(path));
+    }
+    let names: &[&str] = if cfg!(windows) {
+        &["agy.exe", "agy.cmd"]
+    } else {
+        &["agy"]
+    };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .collect();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(Path::new(&local).join("agy").join("bin"));
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = Path::new(&home);
+        dirs.extend([home.join(".local/bin"), home.join(".agy/bin")]);
+    }
+    dirs.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
+    dirs.iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
+        .find(|p| p.is_file())
+}
+
+/// Whether `tool` is Antigravity's `agy`.
+fn is_agy(tool: &Path) -> bool {
+    tool.file_stem()
+        .is_some_and(|s| s.eq_ignore_ascii_case("agy"))
+}
+
+/// Antigravity's folder for Kreate: the connector as its one MCP server, in
+/// the workspace's own config, and the panel's instructions where an agent
+/// reads them. And in `agy`'s settings, the connector's tools allowed and
+/// the folder trusted — without them a headless run is refused its tools,
+/// there being nobody to approve them. Nothing else is allowed: its shell
+/// and file tools stay behind their prompts, which a headless run refuses.
+fn write_agy_folder(dir: &Path, connector: &Path) -> std::io::Result<()> {
+    let config = serde_json::json!({
+        "mcpServers": { "kreate": { "command": connector, "args": [] } },
+    });
+    std::fs::create_dir_all(dir.join(".agents"))?;
+    std::fs::write(
+        dir.join(".agents").join("mcp_config.json"),
+        serde_json::to_vec_pretty(&config)?,
+    )?;
+    std::fs::write(dir.join("AGENTS.md"), SYSTEM_PROMPT)?;
+    std::fs::write(dir.join("GEMINI.md"), SYSTEM_PROMPT)?;
+    let Some(home) = gemini_home() else {
+        return Ok(());
+    };
+    let settings_path = home.join("antigravity-cli").join("settings.json");
+    let mut settings: Value = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let before = settings.clone();
+    let push = |list: &mut Value, item: &str| {
+        if !list.is_array() {
+            *list = Value::Array(Vec::new());
+        }
+        let list = list.as_array_mut().expect("made an array");
+        if !list.iter().any(|v| v.as_str() == Some(item)) {
+            list.push(Value::String(item.to_string()));
+        }
+    };
+    let root = settings.as_object_mut().expect("an object");
+    let permissions = root
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    if !permissions.is_object() {
+        *permissions = serde_json::json!({});
+    }
+    push(
+        permissions
+            .as_object_mut()
+            .expect("an object")
+            .entry("allow")
+            .or_insert(Value::Null),
+        "mcp(kreate/*)",
+    );
+    push(
+        root.entry("trustedWorkspaces").or_insert(Value::Null),
+        &dir.to_string_lossy(),
+    );
+    if settings != before {
+        std::fs::create_dir_all(home.join("antigravity-cli"))?;
+        std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
+    }
+    Ok(())
+}
+
+/// The events in one line of `agy -p --output-format stream-json`: its
+/// conversation, its answer as it comes, the tools it runs, and the end.
+pub fn parse_agy_line(line: &str) -> Vec<Event> {
+    use std::cell::Cell;
+    thread_local! {
+        // Whether this turn's answer came in pieces: the end then carries
+        // it again whole, and is not said twice.
+        static STREAMED: Cell<bool> = const { Cell::new(false) };
+    }
+    let Ok(m) = serde_json::from_str::<Value>(line) else {
+        return Vec::new();
+    };
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    match m.get("event").and_then(Value::as_str) {
+        Some("init") => {
+            STREAMED.with(|s| s.set(false));
+            let id = text(&m, "conversation_id");
+            if id.is_empty() {
+                Vec::new()
+            } else {
+                vec![Event::Session(id)]
+            }
+        }
+        Some("step_update") => {
+            let step = m.get("step_update").unwrap_or(&Value::Null);
+            let done = text(step, "state") == "DONE";
+            match text(step, "step_type").as_str() {
+                "agent_response" => {
+                    let part = text(step, "text_delta");
+                    if part.is_empty() || (done && STREAMED.with(Cell::get)) {
+                        Vec::new()
+                    } else {
+                        STREAMED.with(|s| s.set(true));
+                        vec![Event::TextPart(part)]
+                    }
+                }
+                "tool" if done => {
+                    let info = step.get("tool_info").unwrap_or(&Value::Null);
+                    let raw = Some(text(info, "name"))
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| text(step, "tool_name"));
+                    let name = short_tool_name(&raw);
+                    let detail = tool_detail(&name, info.get("parameters").unwrap_or(&Value::Null));
+                    let mut out = vec![Event::Tool { name, detail }];
+                    if let Some(error) = info.get("error").filter(|e| !e.is_null()) {
+                        let why = error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| error.to_string());
+                        out.push(Event::ToolError(why));
+                    }
+                    out
+                }
+                _ => Vec::new(),
+            }
+        }
+        Some("result") => {
+            let r = m.get("result").unwrap_or(&Value::Null);
+            let mut out = Vec::new();
+            let id = text(r, "conversation_id");
+            if !id.is_empty() {
+                out.push(Event::Session(id));
+            }
+            let answer = text(r, "response");
+            if !answer.trim().is_empty() && !STREAMED.with(Cell::get) {
+                out.push(Event::Text(answer.trim().to_string()));
+            }
+            STREAMED.with(|s| s.set(false));
+            if let Some(usage) = r.get("usage") {
+                let count = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let (input, output) = (
+                    count("input_tokens") + count("cache_read_tokens"),
+                    count("output_tokens") + count("thinking_tokens"),
+                );
+                if input + output > 0 {
+                    out.push(Event::Usage {
+                        input,
+                        output,
+                        cost: None,
+                    });
+                }
+            }
+            let status = text(r, "status");
+            out.push(Event::Done((status != "SUCCESS").then(|| {
+                r.pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| r.get("error").and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or_else(|| {
+                        if status == "CANCELED" || status == "INTERRUPTED" {
+                            "stopped".to_string()
+                        } else {
+                            format!("Gemini did not answer ({status})")
+                        }
+                    })
+            })));
+            out
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// `kreate-mcp`, which ships next to Kreate.
@@ -2416,34 +2769,42 @@ mod tests {
         let mut chat = Chat::new(|| {});
         chat.set_provider(Provider::Gemini);
         chat.set_model_name("");
+        chat.set_provider(Provider::Claude);
+        chat.set_model_name("");
         let names = chat.model_names();
         assert_eq!(names[0], "", "the default first");
-        assert!(names.iter().any(|n| n == "gemini-2.5-flash"));
+        assert!(names.iter().any(|n| n == "sonnet"));
         assert_eq!(chat.model_index(), 0);
         assert_eq!(chat.cli_model(), None);
 
-        let flash = names.iter().position(|n| n == "gemini-2.5-flash").unwrap();
-        chat.set_model(flash);
-        assert_eq!(chat.cli_model(), Some("gemini-2.5-flash"));
-        assert_eq!(chat.model_index(), flash);
+        let sonnet = names.iter().position(|n| n == "sonnet").unwrap();
+        chat.set_model(sonnet);
+        assert_eq!(chat.cli_model(), Some("sonnet"));
+        assert_eq!(chat.model_index(), sonnet);
 
-        chat.set_model_name("  gemini-exp-1  ");
-        assert_eq!(chat.cli_model(), Some("gemini-exp-1"));
+        chat.set_model_name("  claude-exp-1  ");
+        assert_eq!(chat.cli_model(), Some("claude-exp-1"));
         assert_eq!(
             chat.model_names().last().map(String::as_str),
-            Some("gemini-exp-1")
+            Some("claude-exp-1")
         );
         assert_eq!(chat.model_index(), chat.model_names().len() - 1);
 
         // Another assistant has its own; coming back finds this one's.
-        chat.set_provider(Provider::ChatGpt);
-        chat.set_model_name("");
-        assert_eq!(chat.cli_model(), None);
+        // Gemini lists none of its own: a name is typed.
         chat.set_provider(Provider::Gemini);
-        assert_eq!(chat.cli_model(), Some("gemini-exp-1"));
+        assert_eq!(chat.cli_model(), None);
+        assert_eq!(chat.model_names(), [""]);
+        chat.set_model_name("gemini-3-pro");
+        assert_eq!(chat.model_names(), ["", "gemini-3-pro"]);
+        chat.set_provider(Provider::Claude);
+        assert_eq!(chat.cli_model(), Some("claude-exp-1"));
 
         chat.set_model(0);
         assert_eq!(chat.cli_model(), None);
+        assert_eq!(Provider::Claude.saved_model(), None);
+        chat.set_provider(Provider::Gemini);
+        chat.set_model(0);
         assert_eq!(Provider::Gemini.saved_model(), None);
     }
 
@@ -2467,10 +2828,10 @@ mod tests {
         chat.set_effort(0);
         assert_eq!(chat.effort(), None);
 
-        // An assistant whose program takes no effort offers none.
+        // Another assistant has its own list, and its own pick.
         chat.set_provider(Provider::Gemini);
-        assert!(chat.effort_names().is_empty());
-        chat.set_effort(1);
+        assert_eq!(chat.effort_names().len(), 6);
+        chat.set_effort(0);
         assert_eq!(chat.effort(), None);
 
         // Kept on a line of its own beside the assistant's model, which it
@@ -2497,6 +2858,56 @@ mod tests {
                 .filter(|e| Provider::ChatGpt.efforts().contains(&e.as_str())),
             None
         );
+    }
+
+    /// Antigravity's stream: its conversation, its answer in pieces (not
+    /// said again at the end), a tool and its failure, what it took, and
+    /// an end that failed saying why.
+    #[test]
+    fn antigravitys_stream_is_read_as_documented() {
+        let lines = [
+            r#"{"event":"init","conversation_id":"c-1","init":{"cwd":"x","tools":[],"permission_mode":"request-review"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Made "}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"a cube."}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-1","step_index":2,"state":"DONE","step_type":"tool","tool_name":"mcp_kreate_run_script","tool_info":{"name":"mcp__kreate__run_script","parameters":{"script":"kreate.ops.object.add_primitive()"},"output":"ok"}}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"c-1","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"Made a cube."}}"#,
+            r#"{"event":"result","result":{"conversation_id":"c-1","status":"SUCCESS","response":"Made a cube.","usage":{"input_tokens":100,"output_tokens":20,"thinking_tokens":5,"cache_read_tokens":50}}}"#,
+        ];
+        let events: Vec<Event> = lines.iter().flat_map(|l| parse_agy_line(l)).collect();
+        assert_eq!(
+            events,
+            vec![
+                Event::Session("c-1".into()),
+                Event::TextPart("Made ".into()),
+                Event::TextPart("a cube.".into()),
+                Event::Tool {
+                    name: "run_script".into(),
+                    detail: "kreate.ops.object.add_primitive()".into(),
+                },
+                Event::Session("c-1".into()),
+                Event::Usage {
+                    input: 150,
+                    output: 25,
+                    cost: None,
+                },
+                Event::Done(None),
+            ]
+        );
+        // An answer that came whole, at the end only, is said; a failure
+        // says why.
+        parse_agy_line(r#"{"event":"init","conversation_id":"c-2"}"#);
+        let end = parse_agy_line(
+            r#"{"event":"result","result":{"status":"ERROR","response":"","error":{"message":"authentication required"}}}"#,
+        );
+        assert_eq!(
+            end,
+            vec![Event::Done(Some("authentication required".into()))]
+        );
+        parse_agy_line(r#"{"event":"init","conversation_id":"c-3"}"#);
+        let whole = parse_agy_line(
+            r#"{"event":"result","result":{"status":"SUCCESS","response":"Hello."}}"#,
+        );
+        assert_eq!(whole, vec![Event::Text("Hello.".into()), Event::Done(None)]);
     }
 
     /// What a turn took is said once, before its end, where the program
