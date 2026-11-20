@@ -1903,9 +1903,7 @@ impl App {
         // Every operator's names and descriptions in both languages, read
         // once: a search may come every few seconds, and the catalogues
         // take most of a second to load.
-        static INDEX: std::sync::OnceLock<
-            std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
-        > = std::sync::OnceLock::new();
+        static INDEX: std::sync::OnceLock<OperatorTexts> = std::sync::OnceLock::new();
         let index = INDEX.get_or_init(|| {
             let catalogs = [
                 kreate::shell::load_catalog("en-US"),
@@ -2345,6 +2343,10 @@ fn bound_json(doc: &Document, b: &kreate_scene::design::Bound) -> serde_json::Va
         }
     }
 }
+
+/// Each operator's names and its descriptions, in every language read, by
+/// its id: what `operators_search` matches words against.
+type OperatorTexts = std::collections::HashMap<String, (Vec<String>, Vec<String>)>;
 
 fn compact_operator(op: &serde_json::Value) -> String {
     let params: Vec<String> = op["params"]
