@@ -48,7 +48,14 @@ impl App {
                 });
                 continue;
             }
-            let result = self.bridge_call(&request.method, &request.params);
+            // What the person did since the assistant last heard, said with
+            // this answer; then the mark moves past this call's own work.
+            let since = self.user_changes_since_mark();
+            let mut result = self.bridge_call(&request.method, &request.params);
+            if let (Some(since), Ok(serde_json::Value::Object(o))) = (since, &mut result) {
+                o.insert("user_changes_since_your_last_call".into(), since);
+            }
+            self.ai_mark = Some((self.history.cursor(), self.scene_snapshot()));
             // An asset asked for with `wait` is answered when it has landed.
             let waiting = request.method == "add_asset"
                 && request.params.get("wait").and_then(|v| v.as_bool()) == Some(true);
@@ -271,6 +278,27 @@ impl App {
                 let script = text("script").ok_or("`script` is required")?;
                 let flag = |name: &str| params.get(name).and_then(|v| v.as_bool()) == Some(true);
                 let (atomic, dry_run) = (flag("atomic"), flag("dry_run"));
+                // The person asked to approve the assistant's changes: tried,
+                // shown in the chat with Apply and Discard, and made only
+                // when applied (which runs them again with `approved`).
+                if self.ui.chat_approve && !dry_run && !flag("approved") {
+                    let mut tried = params.clone();
+                    tried["dry_run"] = json!(true);
+                    let mut out = self.bridge_call("run", &tried)?;
+                    if let Some(o) = out.as_object_mut() {
+                        o.remove("rolled_back");
+                    }
+                    let summary = self.change_summary(&out["changes"]);
+                    self.ui.ai_pending = Some(kreate::shell::AiPending {
+                        script: script.clone(),
+                        atomic,
+                        summary,
+                    });
+                    out["pending_approval"] = json!(
+                        "the person asked to approve each change: these lines were tried and undone, and are shown to them with Apply and Discard. Nothing is made until they apply it. Say briefly what you proposed and wait for them."
+                    );
+                    return Ok(out);
+                }
                 // Where the history and the mode stand, to come back to; and
                 // what the scene is, to say afterwards what the lines changed.
                 let start = self.history.cursor();
@@ -2140,6 +2168,109 @@ impl App {
                 ))
             })
             .collect()
+    }
+}
+
+impl App {
+    /// `changes` as the person reads it, in their language: what is added,
+    /// removed and changed, by name.
+    pub(super) fn change_summary(&self, changes: &serde_json::Value) -> String {
+        let names = |key: &str| -> Vec<String> {
+            changes[key]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().or_else(|| v["name"].as_str()))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut parts = Vec::new();
+        for (key, label) in [
+            ("added", "chat-change-added"),
+            ("removed", "chat-change-removed"),
+            ("changed", "chat-change-changed"),
+        ] {
+            let list = names(key);
+            if !list.is_empty() {
+                parts.push(self.ui.catalog.format(
+                    label,
+                    kreate_i18n::TextKind::Ui,
+                    &[("names", &list.join(", "))],
+                ));
+            }
+        }
+        if parts.is_empty() {
+            self.ui.catalog.get("chat-change-none")
+        } else {
+            parts.join(" · ")
+        }
+    }
+
+    /// What the person did since an assistant last heard from the
+    /// document: the history steps made since (or how many were undone),
+    /// and what they changed. `None` when nothing was.
+    pub(super) fn user_changes_since_mark(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let (mark, before) = self.ai_mark.as_ref()?;
+        let now = self.history.cursor();
+        let changes = scene_changes(before, &self.scene_snapshot());
+        let steps: Vec<String> = if now > *mark {
+            self.history.entries()[*mark..now]
+                .iter()
+                .map(|e| e.to_script_preview(HISTORY_LINE))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let empty = |k: &str| changes[k].as_array().is_none_or(|a| a.is_empty());
+        if steps.is_empty()
+            && now >= *mark
+            && empty("added")
+            && empty("removed")
+            && empty("changed")
+        {
+            return None;
+        }
+        let mut v = json!({ "changes": changes });
+        if !steps.is_empty() {
+            v["steps"] = json!(steps);
+        }
+        if now < *mark {
+            v["undone"] = json!(mark - now);
+        }
+        Some(v)
+    }
+
+    /// The assistant's change waiting in the chat, applied or discarded as
+    /// the person said.
+    pub(super) fn settle_ai_pending(&mut self) {
+        use kreate_ui::chat::{ChatMessage, ChatRole};
+        let Some(apply) = self.ui.ai_pending_decision.take() else {
+            return;
+        };
+        let Some(pending) = self.ui.ai_pending.take() else {
+            return;
+        };
+        let said = if apply {
+            let _ = self.bridge_call(
+                "run",
+                &serde_json::json!({
+                    "script": pending.script,
+                    "atomic": pending.atomic,
+                    "approved": true,
+                }),
+            );
+            "chat-applied"
+        } else {
+            "chat-discarded"
+        };
+        self.ui.chat_log.push(ChatMessage {
+            role: ChatRole::Note,
+            text: self.ui.catalog.get(said),
+        });
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
 }
 

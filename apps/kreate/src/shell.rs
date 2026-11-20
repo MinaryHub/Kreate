@@ -179,6 +179,13 @@ pub struct ShellState {
     /// beside it.
     pub viewport_only: bool,
     pub chat_busy: bool,
+    /// The assistant's changes wait for a yes: each script it runs is tried,
+    /// shown here as what it would change, and run only when applied.
+    pub chat_approve: bool,
+    /// The assistant's change waiting for a yes or a no.
+    pub ai_pending: Option<AiPending>,
+    /// The answer given this frame: apply (true) or discard (false).
+    pub ai_pending_decision: Option<bool>,
     /// Which assistant the chat panel talks to: an index into
     /// `kreate::claude::Provider::ALL`.
     pub chat_provider: usize,
@@ -923,6 +930,9 @@ impl Default for ShellState {
             touch: false,
             viewport_only: false,
             chat_busy: false,
+            chat_approve: false,
+            ai_pending: None,
+            ai_pending_decision: None,
             chat_provider: 0,
             chat_models: Vec::new(),
             chat_model: 0,
@@ -9222,7 +9232,54 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
 }
 
 /// The Claude panel: the conversation, and a box to say the next thing.
+/// A script the assistant asked to run while its changes wait for a yes:
+/// the lines, and what trying them changed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AiPending {
+    pub script: String,
+    pub atomic: bool,
+    /// What the lines would change, in a line or a few.
+    pub summary: String,
+}
+
+/// Over the chat: whether the assistant's changes wait for a yes, and the
+/// one waiting, with Apply and Discard.
+fn draw_ai_approval(ui: &mut Ui, state: &mut ShellState) {
+    let theme = kreate_ui::theme::from_ui(ui);
+    ui.checkbox(&mut state.chat_approve, state.catalog.get("chat-approve"))
+        .on_hover_text(state.catalog.get("chat-approve-hint"));
+    let Some(pending) = state.ai_pending.clone() else {
+        return;
+    };
+    egui::Frame::new()
+        .fill(theme.raised)
+        .stroke(egui::Stroke::new(1.0, theme.accent))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(state.catalog.get("chat-proposal")).strong());
+            ui.label(&pending.summary);
+            egui::CollapsingHeader::new(state.catalog.get("chat-proposal-lines"))
+                .id_salt("ai-pending-lines")
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(&pending.script).monospace().small());
+                });
+            ui.horizontal(|ui| {
+                if ui
+                    .button(egui::RichText::new(state.catalog.get("chat-apply")).strong())
+                    .clicked()
+                {
+                    state.ai_pending_decision = Some(true);
+                }
+                if ui.button(state.catalog.get("chat-discard")).clicked() {
+                    state.ai_pending_decision = Some(false);
+                }
+            });
+        });
+}
+
 fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    draw_ai_approval(ui, state);
     let text = kreate_ui::chat::ChatText {
         attach: l.chat_attach.clone(),
         attach_hint: l.chat_attach_hint.clone(),

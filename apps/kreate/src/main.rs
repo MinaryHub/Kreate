@@ -794,6 +794,13 @@ struct SkinnedGpu {
 struct App {
     /// The connector's socket. See `kreate::bridge`.
     bridge: Option<kreate::bridge::Bridge>,
+    /// Where the history stood and what the scene was when an assistant
+    /// last heard from the document: what the person has done since is
+    /// said with its next answer. See `serve_bridge`.
+    ai_mark: Option<(
+        usize,
+        std::collections::BTreeMap<u64, connector::ObjectSnap>,
+    )>,
     /// The release the update check downloaded, once it has; said in the
     /// status bar, then forgotten. See `kreate::update`.
     update_ready: Option<Arc<std::sync::Mutex<Option<String>>>>,
@@ -1253,6 +1260,7 @@ impl App {
     fn empty(doc: Document, locale: &str, registry: OperatorRegistry) -> Self {
         Self {
             bridge: None,
+            ai_mark: None,
             update_ready: None,
             update_check: None,
             chat: None,
@@ -9116,6 +9124,7 @@ impl App {
 
     /// Applies the commands the panels queued this frame.
     fn drain_ui_commands(&mut self) {
+        self.settle_ai_pending();
         // What opened Android's file picker, kept to be done again when the
         // file comes (see `kreate::android`); checked once each is done.
         let mut last: Option<Command> = None;
@@ -19938,6 +19947,49 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
             .as_str()
             .unwrap()
             .contains("set_transform"));
+    }
+
+    /// With approval asked for, an assistant's script is tried and waits
+    /// in the chat; applied it is made, discarded nothing stays.
+    #[test]
+    fn an_assistants_change_waits_for_the_person_when_asked() {
+        let mut app = app();
+        app.ui.chat_approve = true;
+        let add =
+            serde_json::json!({ "script": "kreate.ops.object.add_primitive(shape=\"cube\")" });
+        let out = app.bridge_call("run", &add).unwrap();
+        assert!(out["pending_approval"].is_string(), "{out}");
+        assert_eq!(out["changes"]["added"].as_array().unwrap().len(), 1);
+        assert_eq!(app.doc.objects().count(), 0, "not made yet");
+        assert!(app.ui.ai_pending.as_ref().unwrap().summary.contains("Cube"));
+        app.ui.ai_pending_decision = Some(true);
+        app.settle_ai_pending();
+        assert_eq!(app.doc.objects().count(), 1);
+        assert!(app.ui.ai_pending.is_none());
+        // Discarded: nothing.
+        app.bridge_call("run", &add).unwrap();
+        app.ui.ai_pending_decision = Some(false);
+        app.settle_ai_pending();
+        assert_eq!(app.doc.objects().count(), 1);
+    }
+
+    /// What the person did between an assistant's calls is said with the
+    /// next answer; with nothing done, nothing is said.
+    #[test]
+    fn the_person_s_own_changes_are_told_to_the_assistant() {
+        let mut app = app();
+        app.ai_mark = Some((app.history.cursor(), app.scene_snapshot()));
+        assert!(app.user_changes_since_mark().is_none());
+        app.run_op("object.add_primitive", two_metre_cube());
+        let since = app.user_changes_since_mark().expect("a change");
+        assert_eq!(since["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(since["changes"]["added"].as_array().unwrap().len(), 1);
+        // The chat's message carries where things stand.
+        let context = app.chat_context();
+        assert!(
+            context.contains("mode object") && context.contains("active Cube"),
+            "{context}"
+        );
     }
 
     /// A script with names and a loop runs as its unrolled lines, and

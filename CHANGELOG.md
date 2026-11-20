@@ -28,6 +28,12 @@ use; `scripts/release.sh` turns that section into the next release.
 - list_operators finds operators by words in English or Korean ("fillet",
   "구멍", "mirror"), best first, each with an example line; a misspelt
   operator or parameter is answered with the near ones and what it takes.
+- The chat can ask before the assistant changes anything: each change is
+  tried and shown with what it would add, remove or change, and made only
+  when you press Apply.
+- The assistant hears what you did yourself since it last looked — the
+  steps and what they changed — with its next answer, and each chat
+  message carries the mode, the selection and the file.
 - mesh.select_named picks faces and edges by what they are: the top,
   bottom, front, back, left or right faces, the largest face, the open,
   sharp or longest edges.
