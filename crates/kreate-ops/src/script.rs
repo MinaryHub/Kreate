@@ -32,10 +32,14 @@ pub struct Call {
 pub enum ScriptError {
     #[error("expected `kreate.ops.<operator>(...)`: {0}")]
     Syntax(String),
-    #[error("no operator called `{0}`")]
-    UnknownOperator(String),
-    #[error("`{op}` has no parameter `{name}`")]
-    UnknownParameter { op: String, name: String },
+    #[error("no operator called `{id}`{near}")]
+    UnknownOperator { id: String, near: String },
+    #[error("`{op}` has no parameter `{name}`{near}")]
+    UnknownParameter {
+        op: String,
+        name: String,
+        near: String,
+    },
     #[error("`{name}` wants {wanted}, not `{got}`")]
     WrongType {
         name: String,
@@ -76,7 +80,11 @@ pub fn parse_call(registry: &OperatorRegistry, line: &str) -> Result<Call, Scrip
     }
     let info = registry
         .get(id)
-        .ok_or_else(|| ScriptError::UnknownOperator(id.to_string()))?;
+        .ok_or_else(|| ScriptError::UnknownOperator {
+            id: id.to_string(),
+            near: did_you_mean(id, registry.iter().map(|i| i.id))
+                + "; list_operators(search=\"...\") finds one by what it does",
+        })?;
     let args = &body[open + 1..body.len() - 1];
 
     let mut params = PropertyMap::new();
@@ -89,6 +97,16 @@ pub fn parse_call(registry: &OperatorRegistry, line: &str) -> Result<Call, Scrip
             ScriptError::UnknownParameter {
                 op: id.to_string(),
                 name: name.to_string(),
+                near: {
+                    let names: Vec<&str> = info
+                        .schema
+                        .iter()
+                        .filter(|d| !d.hidden)
+                        .map(|d| d.name)
+                        .collect();
+                    let close = did_you_mean(name, names.iter().copied());
+                    format!("{close}; it takes {}", names.join(", "))
+                },
             }
         })?;
         let value = parse_value(raw.trim())?;
@@ -100,6 +118,51 @@ pub fn parse_call(registry: &OperatorRegistry, line: &str) -> Result<Call, Scrip
         op_id: info.id,
         params,
     })
+}
+
+/// The candidates nearest `wanted` — by edit distance on the whole name and
+/// on its last part, so `mesh.extrude` finds `mesh.extrude_region` and
+/// `object.fillet` finds `feature.round` only when nothing closer does —
+/// said as ": did you mean a, b?", or nothing when none is near.
+pub fn did_you_mean<'a>(wanted: &str, candidates: impl Iterator<Item = &'a str>) -> String {
+    fn distance(a: &str, b: &str) -> usize {
+        let b: Vec<char> = b.chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut prev = row[0];
+            row[0] = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let here = row[j + 1];
+                row[j + 1] = (prev + usize::from(ca != *cb))
+                    .min(row[j] + 1)
+                    .min(here + 1);
+                prev = here;
+            }
+        }
+        row[b.len()]
+    }
+    let last = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+    let w = wanted.to_lowercase();
+    let mut scored: Vec<(usize, &str)> = candidates
+        .map(|c| {
+            let lc = c.to_lowercase();
+            let whole = distance(&w, &lc);
+            let tail = distance(&last(&w), &last(&lc));
+            let contains = lc.contains(&last(&w)) || last(&w).contains(&last(&lc));
+            let score = whole
+                .min(tail + 2)
+                .min(if contains { 1 } else { usize::MAX });
+            (score, c)
+        })
+        .filter(|(d, _)| *d <= (w.len() / 3).max(2))
+        .collect();
+    scored.sort();
+    let near: Vec<&str> = scored.iter().take(3).map(|(_, c)| *c).collect();
+    if near.is_empty() {
+        String::new()
+    } else {
+        format!(": did you mean {}?", near.join(", "))
+    }
 }
 
 /// The comma-separated arguments, respecting parentheses, brackets and quotes.
@@ -496,6 +559,24 @@ impl History {
 }
 
 #[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    #[test]
+    fn a_wrong_name_says_the_near_ones() {
+        let ids = [
+            "mesh.extrude_region",
+            "mesh.inset",
+            "object.translate",
+            "feature.round",
+        ];
+        assert!(did_you_mean("mesh.extrude", ids.iter().copied()).contains("mesh.extrude_region"));
+        assert!(did_you_mean("object.translat", ids.iter().copied()).contains("object.translate"));
+        assert_eq!(did_you_mean("zzzzzz.qqqqqq", ids.iter().copied()), "");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     /// `object="Name"` comes off a line for the caller to select by, unless
     /// the operator has an `object` of its own.
@@ -648,7 +729,7 @@ mod tests {
         let r = registry();
         assert!(matches!(
             parse_call(&r, "mesh.nothing()"),
-            Err(ScriptError::UnknownOperator(id)) if id == "mesh.nothing"
+            Err(ScriptError::UnknownOperator { id, .. }) if id == "mesh.nothing"
         ));
         assert!(matches!(
             parse_call(&r, "mesh.translate(offset=(1.0, 0.0, 0.0))"),
@@ -687,7 +768,7 @@ mod tests {
         assert!(outcomes[1].result.is_ok());
         assert!(matches!(
             outcomes[2].result,
-            Err(ScriptError::UnknownOperator(_))
+            Err(ScriptError::UnknownOperator { .. })
         ));
         assert_eq!(
             doc.object_count(),

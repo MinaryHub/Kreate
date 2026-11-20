@@ -2469,3 +2469,5 @@ render-environment-sunset = Sunset
 light-profile = Measured shape (IES)
 light-profile-pick = Load IES…
 light-profile-clear = Take the measured shape off
+op-mesh-select-named = Select by Name
+op-mesh-select-named-desc = Selects the elements of a kind: the top, bottom, front, back, left or right faces, the largest face, the open edges, the sharp edges or the longest edge.

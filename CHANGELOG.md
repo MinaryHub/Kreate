@@ -22,6 +22,15 @@ use; `scripts/release.sh` turns that section into the next release.
   for each one changed its location, size, faces or features from what to
   what — and takes atomic (a failed line undoes the lines before it) and
   dry_run (run, report, and undo everything).
+- Scripts take names, loops and arithmetic — `d = 6mm`, `for i in
+  range(6):`, `location=(i * d, r * cos(a), 0)` — unrolled into one undo
+  step a line, and `$last` names the object made last.
+- list_operators finds operators by words in English or Korean ("fillet",
+  "구멍", "mirror"), best first, each with an example line; a misspelt
+  operator or parameter is answered with the near ones and what it takes.
+- mesh.select_named picks faces and edges by what they are: the top,
+  bottom, front, back, left or right faces, the largest face, the open,
+  sharp or longest edges.
 
 ### Changed
 

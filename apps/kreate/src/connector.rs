@@ -240,7 +240,10 @@ impl App {
                 );
                 Ok(self.overlaps_json(tolerance, exact, scope.as_deref(), limit))
             }
-            "operators" => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
+            "operators" => match text("search").filter(|w| !w.trim().is_empty()) {
+                Some(words) => Ok(self.operators_search(&words)),
+                None => Ok(self.operators_json(text("filter").as_deref().unwrap_or(""))),
+            },
             "sketch" => self.sketch_json(text("object").as_deref()),
             "drawing" => self.drawing_json(text("object").as_deref()),
             "measure" => {
@@ -1890,6 +1893,117 @@ impl App {
 
     /// The operators a script can call, with their parameters: the grammar
     /// `run` speaks.
+    /// The operators that answer to `words` — in their ids, their names
+    /// and descriptions in English and in Korean, and their parameters'
+    /// names — best first, each with a line to run it by: "구멍", "round
+    /// the edges", "fillet" all find their way.
+    pub(super) fn operators_search(&self, words: &str) -> serde_json::Value {
+        use serde_json::json;
+        const MOST: usize = 12;
+        // Every operator's names and descriptions in both languages, read
+        // once: a search may come every few seconds, and the catalogues
+        // take most of a second to load.
+        static INDEX: std::sync::OnceLock<
+            std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+        > = std::sync::OnceLock::new();
+        let index = INDEX.get_or_init(|| {
+            let catalogs = [
+                kreate::shell::load_catalog("en-US"),
+                kreate::shell::load_catalog("ko-KR"),
+            ];
+            let text_of = |key: &str| -> Vec<String> {
+                catalogs
+                    .iter()
+                    .filter(|c| c.has(key))
+                    .map(|c| c.get(key))
+                    .collect()
+            };
+            self.registry
+                .iter()
+                .map(|info| {
+                    (
+                        info.id.to_string(),
+                        (
+                            text_of(&kreate_ui::command_info::name_key(info.id)),
+                            text_of(&kreate_ui::command_info::description_key(info.id)),
+                        ),
+                    )
+                })
+                .collect()
+        });
+        let words: Vec<String> = words
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        let none = (Vec::new(), Vec::new());
+        let mut found: Vec<(u32, &kreate_ops::operator::OperatorInfo)> = self
+            .registry
+            .iter()
+            .filter_map(|info| {
+                let id = info.id.to_lowercase();
+                let (names, descs) = index.get(info.id).unwrap_or(&none);
+                let names: Vec<String> = names
+                    .iter()
+                    .map(|n| n.to_lowercase())
+                    .chain([info.label.to_lowercase()])
+                    .collect();
+                let descs: Vec<String> = descs.iter().map(|d| d.to_lowercase()).collect();
+                let params: Vec<&str> = info
+                    .schema
+                    .iter()
+                    .filter(|d| !d.hidden)
+                    .map(|d| d.name)
+                    .collect();
+                let mut score = 0;
+                for w in &words {
+                    let mut s = 0;
+                    if id.contains(w.as_str()) {
+                        s = s.max(4);
+                    }
+                    if names.iter().any(|n| n.contains(w.as_str())) {
+                        s = s.max(4);
+                    }
+                    if descs.iter().any(|d| d.contains(w.as_str())) {
+                        s = s.max(2);
+                    }
+                    if params.iter().any(|p| p.contains(w.as_str())) {
+                        s = s.max(1);
+                    }
+                    score += s;
+                }
+                (score > 0).then_some((score, info))
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(b.1.id)));
+        let total = found.len();
+        let ops: Vec<_> = found
+            .into_iter()
+            .take(MOST)
+            .map(|(score, info)| {
+                let mut v = self.operators_json(info.id)["operators"]
+                    .as_array()
+                    .and_then(|a| a.iter().find(|o| o["id"] == info.id).cloned())
+                    .unwrap_or_else(|| json!({ "id": info.id }));
+                v["score"] = json!(score);
+                if let Some(desc) = index.get(info.id).and_then(|(_, d)| d.first()) {
+                    v["description"] = json!(desc);
+                }
+                v["example"] = json!(info.defaults().to_script_call(info.id));
+                v
+            })
+            .collect();
+        json!({
+            "operators": ops,
+            "matched": total,
+            "note": if total > MOST {
+                Some(format!("the {MOST} best of {total}; more words narrow it"))
+            } else {
+                None
+            },
+        })
+    }
+
     pub(super) fn operators_json(&self, filter: &str) -> serde_json::Value {
         use kreate_reflect::PropertyKind;
         use serde_json::json;

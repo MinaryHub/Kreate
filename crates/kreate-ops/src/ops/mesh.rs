@@ -3704,7 +3704,187 @@ impl Operator for SelectWhere {
     }
 }
 
+/// What `mesh.select_named` picks out.
+pub const NAMED_ELEMENTS: [&str; 10] = [
+    "top", "bottom", "front", "back", "left", "right", "largest", "boundary", "sharp", "longest",
+];
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SelectNamedParams {
+    /// top, bottom, front (−Y), back (+Y), left (−X), right (+X): the
+    /// outermost faces facing that way. largest: the face of most area.
+    /// boundary: the open edges, a hole's or a sheet's rim. sharp: the
+    /// edges where the faces meet at more than 30°. longest: the longest
+    /// edge.
+    #[param(variants(
+        "top", "bottom", "front", "back", "left", "right", "largest", "boundary", "sharp",
+        "longest"
+    ))]
+    pub which: u32,
+    /// Add to the selection instead of replacing it.
+    pub extend: bool,
+}
+
+impl Default for SelectNamedParams {
+    fn default() -> Self {
+        Self {
+            which: 0,
+            extend: false,
+        }
+    }
+}
+
+/// Selects elements by what they are rather than where: the top face, the
+/// open edges, the sharp ones — what an assistant means when it says "round
+/// the top edges", without reading off coordinates first. Every mesh in
+/// edit mode, in the world.
+pub struct SelectNamed;
+
+impl Operator for SelectNamed {
+    type Params = SelectNamedParams;
+    fn id() -> &'static str {
+        "mesh.select_named"
+    }
+    fn label() -> &'static str {
+        "Select by Name"
+    }
+    fn poll(ctx: &Context, doc: &Document) -> bool {
+        can_edit(ctx, doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use glam::DVec3;
+        let which = params.which.min(NAMED_ELEMENTS.len() as u32 - 1);
+        let direction = match which {
+            0 => Some(DVec3::Z),
+            1 => Some(-DVec3::Z),
+            2 => Some(-DVec3::Y),
+            3 => Some(DVec3::Y),
+            4 => Some(-DVec3::X),
+            5 => Some(DVec3::X),
+            _ => None,
+        };
+        let faces = which <= 6;
+        let mode = if faces {
+            SelectMode::Face
+        } else {
+            SelectMode::Edge
+        };
+        let mut matched = 0usize;
+        for_each_edit_mesh(doc, |target, mesh| {
+            let world = target.to_world;
+            let to_world_normal = world.matrix3.inverse().transpose();
+            let at = |p: glam::Vec3| world.transform_point3(p.as_dvec3());
+            let positions: Vec<DVec3> = mesh.positions().iter().map(|p| at(*p)).collect();
+            let normals: Vec<DVec3> = mesh
+                .compute_face_normals()
+                .iter()
+                .map(|n| (to_world_normal * n.as_dvec3()).normalize_or_zero())
+                .collect();
+            let ring = |f: u32| -> Vec<DVec3> {
+                mesh.face_verts(f)
+                    .iter()
+                    .map(|v| positions[*v as usize])
+                    .collect()
+            };
+            let size = {
+                let (lo, hi) = positions.iter().fold(
+                    (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+                    |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+                );
+                (hi - lo).length().max(1e-9)
+            };
+            let tol = size * 1e-4;
+            let hits: Vec<u32> = if let Some(dir) = direction {
+                // Facing the way, then the outermost of those.
+                let facing: Vec<(u32, f64)> = (0..mesh.num_faces())
+                    .filter(|f| normals[*f as usize].dot(dir) > 0.94)
+                    .map(|f| {
+                        let r = ring(f);
+                        let c = r.iter().copied().sum::<DVec3>() / r.len() as f64;
+                        (f, c.dot(dir))
+                    })
+                    .collect();
+                let most = facing.iter().map(|(_, d)| *d).fold(f64::MIN, f64::max);
+                facing
+                    .into_iter()
+                    .filter(|(_, d)| *d >= most - tol)
+                    .map(|(f, _)| f)
+                    .collect()
+            } else if which == 6 {
+                let area = |f: u32| {
+                    let r = ring(f);
+                    (1..r.len().saturating_sub(1))
+                        .map(|i| (r[i] - r[0]).cross(r[i + 1] - r[0]).length() * 0.5)
+                        .sum::<f64>()
+                };
+                let areas: Vec<f64> = (0..mesh.num_faces()).map(area).collect();
+                let most = areas.iter().copied().fold(0.0, f64::max);
+                (0..mesh.num_faces())
+                    .filter(|f| areas[*f as usize] >= most * (1.0 - 1e-6))
+                    .collect()
+            } else {
+                // The faces each edge borders.
+                let mut sides: std::collections::HashMap<(u32, u32), Vec<u32>> =
+                    std::collections::HashMap::new();
+                for f in 0..mesh.num_faces() {
+                    let r = mesh.face_verts(f);
+                    for i in 0..r.len() {
+                        let (a, b) = (r[i], r[(i + 1) % r.len()]);
+                        sides.entry((a.min(b), a.max(b))).or_default().push(f);
+                    }
+                }
+                let edges = mesh.edges();
+                let length =
+                    |e: &[u32; 2]| positions[e[0] as usize].distance(positions[e[1] as usize]);
+                let longest = edges.iter().map(length).fold(0.0, f64::max);
+                edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        let around = sides.get(&(e[0].min(e[1]), e[0].max(e[1])));
+                        match which {
+                            7 => around.is_none_or(|s| s.len() == 1),
+                            8 => around.is_some_and(|s| {
+                                s.len() == 2
+                                    && normals[s[0] as usize].dot(normals[s[1] as usize])
+                                        < 30f64.to_radians().cos()
+                            }),
+                            _ => length(e) >= longest - tol,
+                        }
+                    })
+                    .map(|(i, _)| i as u32)
+                    .collect()
+            };
+            if !params.extend {
+                selection::select_none(mesh);
+            }
+            for index in &hits {
+                selection::set_selected(mesh, mode.domain(), *index, true);
+            }
+            selection::flush(mesh, mode);
+            matched += hits.len();
+            !hits.is_empty() || !params.extend
+        })?;
+        if matched == 0 {
+            return Err(OpError::Failed(format!(
+                "nothing is {}: no such element on the meshes being edited",
+                NAMED_ELEMENTS[which as usize]
+            )));
+        }
+        crate::report::say(format!(
+            "{matched} {} selected",
+            if faces { "faces" } else { "edges" }
+        ));
+        Ok(OpResult::Finished)
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
+    registry.register::<SelectNamed>();
     registry.register::<SelectWhere>();
     registry.register::<Crease>();
     registry.register::<DeleteElements>();
@@ -4565,6 +4745,56 @@ mod tests {
 
     /// A box that misses a face by a rounding still catches it; one that
     /// misses by more says what tolerance would, and takes it when given.
+    #[test]
+    fn select_named_picks_elements_by_what_they_are() {
+        let r = registry();
+        let mut h = History::new();
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::cube(0.04));
+        let obj = doc.add_object(Object::new("Box", ObjectData::Mesh(mesh)));
+        doc.selection.add(obj);
+        doc.selection.active = Some(obj);
+        let ctx = Context {
+            mode: Mode::EditMesh,
+        };
+        let pick = |h: &mut History, doc: &mut Document, which: u32| {
+            h.dispatch(
+                &r,
+                doc,
+                &ctx,
+                "mesh.select_named",
+                &params(&[("which", PropertyValue::Enum(which))]),
+            )
+            .map(|_| ())
+        };
+        let selected = |doc: &Document, domain| {
+            kreate_mesh::selection::selected(doc.mesh(mesh).unwrap(), domain)
+        };
+        use kreate_mesh::attribute::Domain;
+        // The top: one face, its centre at the top.
+        pick(&mut h, &mut doc, 0).unwrap();
+        let top = selected(&doc, Domain::Face);
+        assert_eq!(top.len(), 1);
+        let m = doc.mesh(mesh).unwrap();
+        let z = m
+            .face_verts(top[0])
+            .iter()
+            .map(|v| m.positions()[*v as usize].z)
+            .sum::<f32>()
+            / 4.0;
+        assert!((z - 0.02).abs() < 1e-6, "{z}");
+        // A box's faces are all the largest; all twelve edges are sharp.
+        pick(&mut h, &mut doc, 6).unwrap();
+        assert_eq!(selected(&doc, Domain::Face).len(), 6);
+        pick(&mut h, &mut doc, 8).unwrap();
+        assert_eq!(selected(&doc, Domain::Edge).len(), 12);
+        // A closed box has no open edge, and says so.
+        assert!(pick(&mut h, &mut doc, 7)
+            .unwrap_err()
+            .to_string()
+            .contains("boundary"));
+    }
+
     #[test]
     fn select_where_allows_a_little_slack() {
         let r = registry();

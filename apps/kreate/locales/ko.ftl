@@ -2841,3 +2841,6 @@ param-with-key = 키와 함께
 param-x = X
 param-y = Y
 param-z = Z
+param-which = 고를 것
+op-mesh-select-named = 이름으로 선택
+op-mesh-select-named-desc = 종류로 요소를 고릅니다: 위·아래·앞·뒤·왼쪽·오른쪽 면, 가장 큰 면, 열린 모서리, 날카로운 모서리, 가장 긴 모서리.

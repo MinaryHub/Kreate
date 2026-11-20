@@ -13526,8 +13526,40 @@ impl App {
         let mut report = Vec::new();
         let mut errors = 0;
         let mut skipped = 0;
+        // Names, loops and arithmetic unrolled into one call a line first
+        // (see `kreate_ops::program`); a script with none goes as it is.
+        let unrolled;
+        let source = if kreate_ops::program::needs_unrolling(source) {
+            match kreate_ops::program::unroll(source) {
+                Ok(lines) => {
+                    unrolled = lines.join("\n");
+                    unrolled.as_str()
+                }
+                Err(e) => {
+                    self.ui.console_log.push(ConsoleLine {
+                        text: e.clone(),
+                        kind: LineKind::Error,
+                    });
+                    return vec![ScriptLine {
+                        text: source.lines().next().unwrap_or("").trim().to_string(),
+                        result: Err(e),
+                        created: Vec::new(),
+                        materials: Vec::new(),
+                        images: Vec::new(),
+                    }];
+                }
+            }
+        } else {
+            source
+        };
+        // The last object a line made, for `$last` in the lines after it.
+        let mut last_made: Option<String> = None;
         for text in source.lines() {
-            let trimmed = text.trim();
+            let with_last = match &last_made {
+                Some(name) if text.contains("$last") => text.replace("$last", name),
+                _ => text.to_string(),
+            };
+            let trimmed = with_last.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
@@ -13628,7 +13660,7 @@ impl App {
                     });
                 }
             }
-            let created = self
+            let created: Vec<(String, u64)> = self
                 .doc
                 .objects()
                 .filter_map(|(id, o)| {
@@ -13636,6 +13668,9 @@ impl App {
                     (!before.contains(&uid)).then(|| (o.name.clone(), uid.raw()))
                 })
                 .collect();
+            if let Some((name, _)) = created.last() {
+                last_made = Some(name.clone());
+            }
             let made_materials = self
                 .doc
                 .materials()
@@ -19903,6 +19938,75 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
             .as_str()
             .unwrap()
             .contains("set_transform"));
+    }
+
+    /// A script with names and a loop runs as its unrolled lines, and
+    /// `$last` names the object the line before made.
+    #[test]
+    fn a_script_loops_and_names_what_it_made_last() {
+        let mut app = app();
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": "pitch = 30mm\n\
+                    for i in range(3):\n\
+                    \x20   kreate.ops.object.add_primitive(shape=\"cube\", size=10mm, location=(i * pitch, 0, 0))\n\
+                    kreate.ops.object.set_transform(object=\"$last\", scale=(2, 2, 2))" }),
+            )
+            .unwrap();
+        let lines = out["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 4, "{out}");
+        assert!(lines.iter().all(|l| l["ok"] == true), "{out}");
+        assert_eq!(app.doc.objects().count(), 3);
+        let far = app
+            .doc
+            .objects()
+            .max_by(|a, b| {
+                a.1.transform
+                    .translation
+                    .x
+                    .total_cmp(&b.1.transform.translation.x)
+            })
+            .unwrap()
+            .1;
+        assert!((far.transform.translation.x - 0.06).abs() < 1e-9);
+        assert!(
+            (far.transform.scale.x - 2.0).abs() < 1e-9,
+            "the last made was scaled"
+        );
+        // A mistake in the program says its line and runs nothing.
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": "for i in range(2)\n    x" }),
+            )
+            .unwrap();
+        assert!(out["lines"][0]["error"].as_str().unwrap().contains("colon"));
+        assert_eq!(app.doc.objects().count(), 3);
+    }
+
+    /// Operators found by words, in English or Korean, best first, each
+    /// with a line that runs it.
+    #[test]
+    fn operators_are_found_by_words_in_either_language() {
+        let app = app();
+        let found = |words: &str| app.operators_search(words);
+        let hole = found("구멍");
+        let ids: Vec<&str> = hole["operators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
+        assert!(ids.iter().any(|id| id.contains("hole")), "{ids:?}");
+        let mirror = found("mirror");
+        assert!(mirror["operators"][0]["id"]
+            .as_str()
+            .unwrap()
+            .contains("mirror"));
+        let example = mirror["operators"][0]["example"].as_str().unwrap();
+        assert!(example.starts_with("kreate.ops."), "{example}");
+        assert_eq!(found("zzzz-nothing")["matched"], 0);
     }
 
     /// A script's answer says what it changed; a dry run says so and
