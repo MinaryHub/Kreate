@@ -10,6 +10,54 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- Assistants change a design as a designer would. get_scene now gives each
+  body's features (kind, amount and what it means, operation, whether it
+  is bound to a parameter, and the feature.set line to change it), each
+  drawing's degrees of freedom, each part's mate, and the design's
+  parameters, bindings and measurements — so "make the hole 2 mm deeper"
+  edits the feature instead of building the part again.
+- run_script answers with what changed — objects added and removed, and
+  for each one changed its location, size, faces or features from what to
+  what — and takes atomic (a failed line undoes the lines before it) and
+  dry_run (run, report, and undo everything).
+- Scripts take names, loops and arithmetic — `d = 6mm`, `for i in
+  range(6):`, `location=(i * d, r * cos(a), 0)` — unrolled into one undo
+  step a line, and `$last` names the object made last.
+- list_operators finds operators by words in English or Korean ("fillet",
+  "구멍", "mirror"), best first, each with an example line; a misspelt
+  operator or parameter is answered with the near ones and what it takes.
+- The chat can ask before the assistant changes anything: each change is
+  tried and shown with what it would add, remove or change, and made only
+  when you press Apply.
+- The assistant hears what you did yourself since it last looked — the
+  steps and what they changed — with its next answer, and each chat
+  message carries the mode, the selection and the file.
+- mesh.select_named picks faces and edges by what they are: the top,
+  bottom, front, back, left or right faces, the largest face, the open,
+  sharp or longest edges.
+
+### Changed
+
+- Easier to read and to find your way: text is larger (14 pt, nothing under
+  11), and Preferences ▸ Interface Size scales the whole interface from 90%
+  to 175%. The mode tabs are full-size, the open one filled in its mode's
+  colour, and outside object mode the viewport is framed in that colour.
+  Fields and dialog buttons are outlined at 3:1 so a value field no longer
+  looks like a label; menus and toolbars stay flat.
+- Korean names for every operator parameter (위치, 회전, 크기…) where the
+  panels showed the English field name.
+- The toolbar's Add and drawing tools are drawn in the text colour: orange
+  is only for what is selected or in hand, so the sketch tool held shows.
+- Toolbar groups that do not fit go behind » instead of being cut off, and a
+  header row that is clipped shows ‹ › to scroll it.
+- The status bar says what the mouse does in the mode (click, Shift+click,
+  drag); a sketch tool's instruction is in its banner at the top of the
+  view rather than also in the corner; the properties panel names its tab
+  and shows a scroll bar and a fade when there is more below; the history
+  strip says what it is for while it is empty.
+
 ## [0.14.0] - 2026-11-17
 
 ### Added

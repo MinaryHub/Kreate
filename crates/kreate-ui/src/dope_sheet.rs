@@ -276,7 +276,7 @@ pub fn dope_sheet(
             Pos2::new(x, rect.min.y + 3.0),
             egui::Align2::CENTER_TOP,
             f.to_string(),
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(11.0),
             theme.text_faint,
         );
         f += step as i64;

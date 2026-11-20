@@ -179,6 +179,13 @@ pub struct ShellState {
     /// beside it.
     pub viewport_only: bool,
     pub chat_busy: bool,
+    /// The assistant's changes wait for a yes: each script it runs is tried,
+    /// shown here as what it would change, and run only when applied.
+    pub chat_approve: bool,
+    /// The assistant's change waiting for a yes or a no.
+    pub ai_pending: Option<AiPending>,
+    /// The answer given this frame: apply (true) or discard (false).
+    pub ai_pending_decision: Option<bool>,
     /// Which assistant the chat panel talks to: an index into
     /// `kreate::claude::Provider::ALL`.
     pub chat_provider: usize,
@@ -363,6 +370,9 @@ pub struct ShellState {
     adjust_seen: Option<(usize, String)>,
     /// The chrome's appearance, as the preferences set it.
     pub appearance: kreate_ui::Appearance,
+    /// The whole interface drawn this much larger than the screen's own
+    /// size (egui's zoom), as the preferences set it.
+    pub ui_scale: f32,
     /// Whether the remapping panel is open.
 
     /// The binding waiting for a keystroke, if any.
@@ -920,6 +930,9 @@ impl Default for ShellState {
             touch: false,
             viewport_only: false,
             chat_busy: false,
+            chat_approve: false,
+            ai_pending: None,
+            ai_pending_decision: None,
             chat_provider: 0,
             chat_models: Vec::new(),
             chat_model: 0,
@@ -978,6 +991,7 @@ impl Default for ShellState {
             adjust_dismissed: None,
             adjust_seen: None,
             appearance: kreate_ui::Appearance::Dark,
+            ui_scale: 1.0,
             capturing: None,
             keymap_editor_shown: false,
             palette: Default::default(),
@@ -2660,6 +2674,7 @@ pub fn draw(
     // Object menu as the one in Layout because the menu is *its own*.
     Panel::top("menu").show(ui, |ui| {
         ui.horizontal(|ui| {
+            flat_buttons(ui);
             // File and Edit, from the same tree F3 searches. Undo and redo
             // live under Edit rather than as buttons on the row, which is
             // both Blender's arrangement and the honest one: they are reached
@@ -2731,6 +2746,27 @@ pub fn draw(
                 | kreate_ops::mode::ActsOn::Sculpt
                 | kreate_ops::mode::ActsOn::Texture => &[],
             };
+            // What the mouse does here, ahead of the keys: the first thing a
+            // newcomer reaches for, and the one thing no menu says.
+            let mouse: &[&str] = match mode.acts_on() {
+                kreate_ops::mode::ActsOn::Objects
+                | kreate_ops::mode::ActsOn::MeshElements
+                | kreate_ops::mode::ActsOn::Bones
+                | kreate_ops::mode::ActsOn::BoneJoints => &[
+                    "status-click-select",
+                    "status-shift-click",
+                    "status-drag-box",
+                ],
+                kreate_ops::mode::ActsOn::Weights
+                | kreate_ops::mode::ActsOn::Sculpt
+                | kreate_ops::mode::ActsOn::Texture => &["status-drag-brush"],
+                // The sketch's tool says what it wants at the top of the view.
+                kreate_ops::mode::ActsOn::Sketch => &[],
+            };
+            for key in mouse {
+                ui.add_space(6.0);
+                ui.weak(egui::RichText::new(state.catalog.get(key)).small());
+            }
             for id in hints {
                 if let Some(info) = state
                     .command_info
@@ -3988,6 +4024,24 @@ fn draw_area(
                         }
                     });
                     ui.horizontal(|ui| {
+                        ui.label(state.catalog.get("prefs-ui-scale"));
+                        for scale in crate::prefs::UI_SCALES {
+                            // i18n-exempt: a percentage
+                            let label = format!("{:.0}%", scale * 100.0);
+                            if ui
+                                .selectable_label((state.ui_scale - scale).abs() < 1e-3, label)
+                                .on_hover_text(state.catalog.get("prefs-ui-scale-desc"))
+                                .clicked()
+                            {
+                                state.ui_scale = scale;
+                                ui.ctx().set_zoom_factor(scale);
+                                if let Some(path) = crate::prefs::interface_path() {
+                                    let _ = crate::prefs::save_ui_scale(&path, scale);
+                                }
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
                         ui.label(state.catalog.get("prefs-resolution-scale"));
                         let mut scale = state.resolution_scale;
                         if ui
@@ -4086,6 +4140,7 @@ fn draw_area_header(
     mode: kreate_ops::operator::Mode,
 ) {
     ui.horizontal(|ui| {
+        flat_buttons(ui);
         // From the registry, so an editor an add-on registered appears in the
         // dropdown without the shell being told about it. A variant list here
         // was the other half of what made registration impossible.
@@ -4134,7 +4189,7 @@ fn draw_area_header(
             0.0
         };
         let left_width = (ui.available_width() - right_width).max(0.0);
-        egui::ScrollArea::horizontal()
+        let scrolled = egui::ScrollArea::horizontal()
             .id_salt(("header-menus", area.id.0))
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .max_width(left_width)
@@ -4216,6 +4271,7 @@ fn draw_area_header(
                     }
                 });
             });
+        header_overflow(ui, scrolled);
 
         if is_viewport {
             // The right-hand group: how the picture is made. Right-aligned
@@ -4229,6 +4285,66 @@ fn draw_area_header(
             });
         }
     });
+}
+
+/// A header row clipped at its edge says so: an arrow on each side that
+/// has more, over a fade, that scrolls the row along when clicked.
+fn header_overflow(ui: &Ui, out: egui::scroll_area::ScrollAreaOutput<()>) {
+    let rect = out.inner_rect;
+    let hidden = out.content_size.x - rect.width();
+    if hidden <= 1.0 {
+        return;
+    }
+    let theme = kreate_ui::theme::from_ui(ui);
+    let mut state = out.state;
+    let offset = state.offset.x;
+    let step = (rect.width() * 0.6).max(60.0);
+    let mut moved = false;
+    for (left, more) in [(true, offset > 1.0), (false, offset < hidden - 1.0)] {
+        if !more {
+            continue;
+        }
+        let w = 20.0;
+        let edge = if left {
+            egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height()))
+        } else {
+            egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - w, rect.min.y),
+                egui::vec2(w, rect.height()),
+            )
+        };
+        let id = out.id.with(if left { "more-left" } else { "more-right" });
+        let response = ui.interact(edge, id, egui::Sense::click());
+        let painter = ui.painter().with_clip_rect(edge);
+        painter.rect_filled(
+            edge,
+            0.0,
+            if response.hovered() {
+                theme.border
+            } else {
+                theme.base
+            },
+        );
+        painter.text(
+            edge.center(),
+            egui::Align2::CENTER_CENTER,
+            if left { "‹" } else { "›" },
+            egui::FontId::proportional(18.0),
+            theme.text,
+        );
+        if response.clicked() {
+            state.offset.x = if left {
+                (offset - step).max(0.0)
+            } else {
+                (offset + step).min(hidden)
+            };
+            moved = true;
+        }
+    }
+    if moved {
+        state.store(ui.ctx(), out.id);
+        ui.ctx().request_repaint();
+    }
 }
 
 /// A brush mode's brush, in its header — first after the mode, ahead of the
@@ -6610,7 +6726,7 @@ fn ribbon_button_width(ui: &Ui, name: &str, least: f32) -> f32 {
         .painter()
         .layout_no_wrap(
             name.to_string(),
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(11.0),
             egui::Color32::WHITE,
         )
         .size()
@@ -6647,7 +6763,7 @@ fn ribbon_tool(
     );
     paint(ui, picture, if active { theme.accent } else { theme.text });
     // The name, cut to the button's width.
-    let font = egui::FontId::proportional(10.0);
+    let font = egui::FontId::proportional(11.0);
     let fits = |t: &str| {
         ui.painter()
             .layout_no_wrap(t.to_string(), font.clone(), theme.text)
@@ -7051,6 +7167,14 @@ fn draw_sculpt_ribbon(ui: &mut Ui, state: &mut ShellState) {
     });
 }
 
+/// Buttons in this scope drawn without an outline: the menu bar, the
+/// toolbar and the area headers, where every word is a button and an
+/// outline on each was clutter. Fields and dialog buttons keep theirs (see
+/// `Theme::control_edge`).
+fn flat_buttons(ui: &mut Ui) {
+    ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
+}
+
 /// The view information in the viewport's top-left corner.
 ///
 /// Two lines, as Blender writes them: how the scene is being looked at, and
@@ -7075,6 +7199,18 @@ fn draw_view_info(
     } else {
         &l.view_user_perspective
     };
+    // Outside object mode, the viewport framed in the mode's tint: which
+    // mode the clicks in it will act in, seen without looking away from the
+    // model.
+    let tint = kreate_ui::theme::from_ui(ui).mode_tint(mode.tag());
+    if let Some((_, colour)) = tint {
+        painter.rect_stroke(
+            viewport.shrink(1.0),
+            0.0,
+            egui::Stroke::new(2.0, colour.gamma_multiply(0.85)),
+            egui::StrokeKind::Inside,
+        );
+    }
     let mode_name = state.catalog.format(mode.label_key(), TextKind::Ui, &[]);
     let active = doc
         .selection
@@ -7101,7 +7237,13 @@ fn draw_view_info(
         viewport.min.x + 12.0
     };
     let mut y = viewport.min.y + 10.0;
-    let mut lines = vec![(view.clone(), theme.text), (second.clone(), theme.text_dim)];
+    let mut lines = vec![
+        (view.clone(), theme.text),
+        (
+            second.clone(),
+            tint.map_or(theme.text_dim, |(_, text)| text),
+        ),
+    ];
     if state.show_stats {
         for line in statistics(doc, mode, l) {
             lines.push((line, theme.text));
@@ -9090,7 +9232,54 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
 }
 
 /// The Claude panel: the conversation, and a box to say the next thing.
+/// A script the assistant asked to run while its changes wait for a yes:
+/// the lines, and what trying them changed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AiPending {
+    pub script: String,
+    pub atomic: bool,
+    /// What the lines would change, in a line or a few.
+    pub summary: String,
+}
+
+/// Over the chat: whether the assistant's changes wait for a yes, and the
+/// one waiting, with Apply and Discard.
+fn draw_ai_approval(ui: &mut Ui, state: &mut ShellState) {
+    let theme = kreate_ui::theme::from_ui(ui);
+    ui.checkbox(&mut state.chat_approve, state.catalog.get("chat-approve"))
+        .on_hover_text(state.catalog.get("chat-approve-hint"));
+    let Some(pending) = state.ai_pending.clone() else {
+        return;
+    };
+    egui::Frame::new()
+        .fill(theme.raised)
+        .stroke(egui::Stroke::new(1.0, theme.accent))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(state.catalog.get("chat-proposal")).strong());
+            ui.label(&pending.summary);
+            egui::CollapsingHeader::new(state.catalog.get("chat-proposal-lines"))
+                .id_salt("ai-pending-lines")
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(&pending.script).monospace().small());
+                });
+            ui.horizontal(|ui| {
+                if ui
+                    .button(egui::RichText::new(state.catalog.get("chat-apply")).strong())
+                    .clicked()
+                {
+                    state.ai_pending_decision = Some(true);
+                }
+                if ui.button(state.catalog.get("chat-discard")).clicked() {
+                    state.ai_pending_decision = Some(false);
+                }
+            });
+        });
+}
+
 fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
+    draw_ai_approval(ui, state);
     let text = kreate_ui::chat::ChatText {
         attach: l.chat_attach.clone(),
         attach_hint: l.chat_attach_hint.clone(),
@@ -12193,7 +12382,21 @@ fn draw_properties(
         });
         ui.separator();
         ui.vertical(|ui| {
-            egui::ScrollArea::vertical()
+            let theme = kreate_ui::theme::from_ui(ui);
+            // The tab's name over it: the column beside is pictures alone.
+            // The modifier stack heads itself.
+            if current != PropertiesTab::Modifiers {
+                ui.label(
+                    egui::RichText::new(state.catalog.get(current.label_key()))
+                        .strong()
+                        .color(theme.text_dim),
+                );
+            }
+            // A solid scroll bar, shown whenever there is more, rather than
+            // one that appears only under the pointer: a panel cut off at
+            // the bottom has to say so.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            let out = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match current {
                     PropertiesTab::Tool => draw_adjust_panel(ui, state, registry, history),
@@ -12209,6 +12412,25 @@ fn draw_properties(
                     PropertiesTab::Render => draw_render_tab(ui, state, doc, registry, l),
                     PropertiesTab::Physics => draw_physics_tab(ui, state, doc, registry),
                 });
+            // More below: the bottom edge fades into the panel.
+            let rect = out.inner_rect;
+            let below = out.content_size.y - rect.height() - out.state.offset.y;
+            if below > 1.0 {
+                let steps = 8;
+                let depth = 24.0;
+                for i in 0..steps {
+                    let t = i as f32 / steps as f32;
+                    let band = egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.bottom() - depth * (1.0 - t)),
+                        egui::pos2(
+                            rect.right() - 10.0,
+                            rect.bottom() - depth * (1.0 - t) + depth / steps as f32,
+                        ),
+                    );
+                    ui.painter()
+                        .rect_filled(band, 0.0, theme.base.gamma_multiply(t * 0.9));
+                }
+            }
         });
     });
 }
@@ -14947,8 +15169,10 @@ impl RibbonIcon {
         })
     }
 
-    /// Making things is the accent's; changing a shape the informational
-    /// blue; the rest the text's own colour.
+    /// Changing a shape is the informational blue; making things, and the
+    /// rest, the text's own colour. Never the accent: orange is the one
+    /// colour for what is selected or in hand, and a toolbar of orange
+    /// pictures hid which sketch tool was held.
     fn colour(self, theme: &kreate_ui::Theme) -> egui::Color32 {
         match self {
             Self::Plane
@@ -14966,7 +15190,7 @@ impl RibbonIcon {
             | Self::SkArc
             | Self::SkArcCentre
             | Self::SkPoint
-            | Self::SkPattern => theme.accent,
+            | Self::SkPattern => theme.text,
             Self::SkSelect => theme.text,
             Self::SkDimension | Self::SkCoincident | Self::SkPerpendicular | Self::SkHorizontal => {
                 theme.info
@@ -14986,7 +15210,6 @@ impl RibbonIcon {
             | Self::Chamfer
             | Self::Shell
             | Self::Remesh => theme.info,
-            Self::NewTexture | Self::VertexGroup | Self::Ik => theme.accent,
             _ => theme.text,
         }
     }
@@ -15885,6 +16108,7 @@ fn draw_ribbon(
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                flat_buttons(ui);
                 draw_workspace_switcher(ui, state);
                 ui.separator();
                 ui.vertical(|ui| {
@@ -15898,19 +16122,27 @@ fn draw_ribbon(
                             .copied()
                             .filter(|k| *k == mode || k.offered(has))
                         {
-                            let name = state
-                                .catalog
-                                .format(kind.label_key(), TextKind::Ui, &[])
-                                .to_uppercase();
+                            let name = state.catalog.format(kind.label_key(), TextKind::Ui, &[]);
                             let open = kind == mode;
-                            let colour = if open { theme.text } else { theme.text_dim };
+                            // The open mode as a chip in its own tint (object
+                            // mode, the resting state, on the raised step):
+                            // the one state everything else depends on,
+                            // readable at a glance.
+                            let (fill, colour) = match (open, theme.mode_tint(kind.tag())) {
+                                (true, Some((fill, text))) => (fill, text),
+                                (true, None) => (theme.raised, theme.text),
+                                (false, _) => (egui::Color32::TRANSPARENT, theme.text_dim),
+                            };
+                            let mut text = egui::RichText::new(name).size(13.0).color(colour);
+                            if open {
+                                text = text.strong();
+                            }
                             let response = ui.add_enabled(
                                 kind.can_enter(has),
-                                egui::Button::new(
-                                    egui::RichText::new(name).small().strong().color(colour),
-                                )
-                                .frame(false)
-                                .min_size(egui::vec2(0.0, 20.0)),
+                                egui::Button::new(text)
+                                    .fill(fill)
+                                    .stroke(egui::Stroke::NONE)
+                                    .min_size(egui::vec2(0.0, 24.0)),
                             );
                             let r = response.rect;
                             if open {
@@ -15928,7 +16160,7 @@ fn draw_ribbon(
                             if response.clicked() && !open {
                                 state.queue.push(Command::SetMode(kind.tag().to_string()));
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(4.0);
                         }
                     });
                     // The groups, the tools first.
@@ -15954,11 +16186,39 @@ fn draw_ribbon(
                             ui.separator();
                         }
                         let menus = viewport_menus(l, mode, state.select_mode);
+                        // The groups that fit; the rest behind "»" rather
+                        // than cut off at the window's edge.
+                        let more_width = 36.0;
+                        let mut room = ui.available_width();
+                        let mut shown = 0;
                         for (i, menu) in menus.iter().enumerate() {
+                            let w = tool_group_width(ui, l, menu) + 12.0;
+                            let rest_fit = menus[i..]
+                                .iter()
+                                .map(|m| tool_group_width(ui, l, m) + 12.0)
+                                .sum::<f32>()
+                                <= room;
+                            if !rest_fit && w > room - more_width {
+                                break;
+                            }
                             if i > 0 {
                                 ui.separator();
                             }
                             draw_tool_group(ui, state, l, menu, &theme);
+                            room -= w;
+                            shown += 1;
+                        }
+                        if shown < menus.len() {
+                            ui.separator();
+                            ui.menu_button(egui::RichText::new("»").size(18.0), |ui| {
+                                for menu in &menus[shown..] {
+                                    ui.menu_button(&menu.label, |ui| {
+                                        draw_nodes(ui, state, l, &menu.nodes)
+                                    });
+                                }
+                            })
+                            .response
+                            .on_hover_text(state.catalog.get("ribbon-more"));
                         }
                     });
                 });
@@ -15968,13 +16228,8 @@ fn draw_ribbon(
 
 /// One group of the toolbar: up to three of its entries as buttons, and its
 /// name, which opens the whole menu.
-fn draw_tool_group(
-    ui: &mut Ui,
-    state: &mut ShellState,
-    l: &Labels,
-    menu: &TopMenu,
-    theme: &kreate_ui::Theme,
-) {
+/// The entries a toolbar group shows as buttons, with their pictures.
+fn ribbon_buttons<'a>(l: &Labels, menu: &'a TopMenu) -> Vec<(&'a MenuEntry, RibbonIcon)> {
     fn featured<'a>(
         nodes: &'a [MenuNode],
         most: usize,
@@ -16005,6 +16260,26 @@ fn draw_tool_group(
     };
     let mut buttons = Vec::new();
     featured(&menu.nodes, most, &mut buttons);
+    buttons
+}
+
+/// How wide a toolbar group is drawn: its buttons, or its name alone.
+fn tool_group_width(ui: &Ui, l: &Labels, menu: &TopMenu) -> f32 {
+    ribbon_buttons(l, menu)
+        .iter()
+        .map(|(entry, _)| ribbon_button_width(ui, &entry.label, 52.0))
+        .sum::<f32>()
+        .max(56.0)
+}
+
+fn draw_tool_group(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    l: &Labels,
+    menu: &TopMenu,
+    theme: &kreate_ui::Theme,
+) {
+    let buttons = ribbon_buttons(l, menu);
     // The sketch tool in hand, lit, so it is plain whether a click draws.
     let in_hand = state.sketch_view.as_ref().map(|v| v.tool);
     let held = |entry: &MenuEntry| {
@@ -16059,7 +16334,7 @@ fn draw_tool_group(
                 };
                 icon.paint(ui.painter(), picture, colour);
                 // The name under it, cut to the button's width.
-                let font = egui::FontId::proportional(10.0);
+                let font = egui::FontId::proportional(11.0);
                 let mut text = entry.label.clone();
                 let fits = |t: &str| {
                     ui.painter()
@@ -16139,6 +16414,15 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                             let first = total.saturating_sub(SHOWN);
                             if at == first && first == 0 {
                                 marker(ui, &theme);
+                            }
+                            // Empty, it says what it is for, rather than
+                            // being a bare strip nobody can place.
+                            if total == 0 {
+                                ui.label(
+                                    egui::RichText::new(state.catalog.get("history-empty"))
+                                        .small()
+                                        .color(theme.text_faint),
+                                );
                             }
                             for (i, label) in state.history_steps.iter().enumerate().skip(first) {
                                 let applied = i + 1;
@@ -16783,9 +17067,10 @@ fn draw_sketches(
     if let Some(p) = view.snap.as_ref().and_then(project) {
         painter.circle_stroke(p, 6.0, egui::Stroke::new(1.5, theme.accent));
     }
-    // What the tool asks for, by the pointer's corner of the view.
+    // A number being typed, by the pointer's corner of the view; what the
+    // tool asks for is in its badge at the top.
     let prompt = if view.typed.is_empty() {
-        view.prompt.clone()
+        String::new()
     } else {
         // i18n-exempt: a number being typed, and its unit
         format!("{} {}", view.typed, view.unit.1)
@@ -16888,10 +17173,21 @@ fn draw_tool_badge(ui: &Ui, state: &ShellState, view: &SketchView, inner: egui::
     let theme = kreate_ui::theme::from_ui(ui).over_viewport();
     let selecting = view.tool == "select";
     let name = tool_label(state, view.tool);
-    let text = if selecting {
-        name
+    // The tool and what it asks for, in the one place: where the eye is,
+    // not a second line down in the corner.
+    let asks = if view.prompt.is_empty() || view.prompt.starts_with(&name) {
+        if view.prompt.is_empty() {
+            name.clone()
+        } else {
+            view.prompt.clone()
+        }
     } else {
-        format!("{name}   ·   {}", state.catalog.get("sketch-badge-back"))
+        format!("{name} — {}", view.prompt)
+    };
+    let text = if selecting {
+        asks
+    } else {
+        format!("{asks}   ·   {}", state.catalog.get("sketch-badge-back"))
     };
     let ink = if selecting {
         theme.text
@@ -19681,4 +19977,34 @@ pub fn choose_environment_file(state: &mut ShellState, file: Option<std::path::P
 /// The theme's accent, from a `Ui`.
 fn theme_accent(ui: &Ui) -> egui::Color32 {
     kreate_ui::theme::from_ui(ui).accent
+}
+
+#[cfg(test)]
+mod parameter_labels {
+    /// Every operator parameter a panel shows has a Korean label: its own
+    /// (`op-…-param-…-name`) or the shared one for its name (`param-…`).
+    /// Without either the panel falls back to the English field name, which
+    /// left a Korean interface reading "Location" and "Rotation".
+    #[test]
+    fn every_parameter_has_a_korean_label() {
+        let catalog = super::load_catalog("ko-KR");
+        let mut registry = kreate_ops::OperatorRegistry::new();
+        kreate_ops::register_builtin(&mut registry);
+        let mut missing: Vec<&str> = registry
+            .iter()
+            .flat_map(|op| op.schema.iter().map(move |p| (op.id, p)))
+            .filter(|(id, p)| {
+                !p.hidden && !catalog.has(&p.name_key(id)) && !catalog.has(&p.shared_name_key())
+            })
+            .map(|(_, p)| p.name)
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "{} without a label: {}",
+            missing.len(),
+            missing.join(" ")
+        );
+    }
 }

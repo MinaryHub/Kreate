@@ -275,7 +275,42 @@ pub fn save_appearance(
     path: &Path,
     appearance: kreate_ui::Appearance,
 ) -> Result<(), std::io::Error> {
-    write_atomic(path, &format!("theme = {}\n", appearance.tag()))
+    set_interface_line(path, "theme", appearance.tag())
+}
+
+/// The interface's scales on offer: everything — text, controls, panels —
+/// drawn this much larger than the screen's own size.
+pub const UI_SCALES: [f32; 6] = [0.9, 1.0, 1.1, 1.25, 1.5, 1.75];
+
+/// The interface's scale, from the interface file; 1 when it is missing or
+/// out of reason.
+pub fn load_ui_scale(path: &Path) -> f32 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|l| {
+                let (key, value) = l.split_once('=')?;
+                (key.trim() == "scale").then(|| value.trim().parse::<f32>().ok())?
+            })
+        })
+        .filter(|s| s.is_finite() && (0.5..=3.0).contains(s))
+        .unwrap_or(1.0)
+}
+
+pub fn save_ui_scale(path: &Path, scale: f32) -> Result<(), std::io::Error> {
+    set_interface_line(path, "scale", &format!("{scale}"))
+}
+
+/// The interface file with `key = value` in it, the other lines kept.
+fn set_interface_line(path: &Path, key: &str, value: &str) -> Result<(), std::io::Error> {
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<String> = old
+        .lines()
+        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != key))
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("{key} = {value}"));
+    write_atomic(path, &(lines.join("\n") + "\n"))
 }
 
 /// Where the welcome card's closing is remembered: a file that is there
@@ -679,8 +714,15 @@ mod recent_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("interface.txt");
         assert_eq!(load_appearance(&path), kreate_ui::Appearance::Dark);
+        assert_eq!(load_ui_scale(&path), 1.0);
         save_appearance(&path, kreate_ui::Appearance::Light).unwrap();
         assert_eq!(load_appearance(&path), kreate_ui::Appearance::Light);
+        // The scale and the theme share the file, and each keeps the other.
+        save_ui_scale(&path, 1.25).unwrap();
+        assert_eq!(load_ui_scale(&path), 1.25);
+        assert_eq!(load_appearance(&path), kreate_ui::Appearance::Light);
+        save_appearance(&path, kreate_ui::Appearance::Light).unwrap();
+        assert_eq!(load_ui_scale(&path), 1.25);
         std::fs::write(&path, "theme = sepia\n").unwrap();
         assert_eq!(load_appearance(&path), kreate_ui::Appearance::Dark);
         let _ = std::fs::remove_dir_all(&dir);

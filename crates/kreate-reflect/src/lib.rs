@@ -411,6 +411,12 @@ impl PropertyDesc {
     pub fn desc_key(&self, op_id: &str) -> String {
         i18n_key(&["op", op_id, "param", self.name, "desc"])
     }
+
+    /// The label every parameter of this name shares, where its operator
+    /// gives it none of its own: `param-bevel-depth` for `bevel_depth`.
+    pub fn shared_name_key(&self) -> String {
+        format!("param-{}", self.name.replace('_', "-"))
+    }
 }
 
 /// Builds an i18n key from parts, in a form a Fluent identifier accepts.

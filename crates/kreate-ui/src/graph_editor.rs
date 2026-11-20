@@ -448,7 +448,7 @@ fn graph_plot(
             Pos2::new(x, rect.min.y + 3.0),
             egui::Align2::CENTER_TOP,
             format!("{}", f as i64),
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(11.0),
             theme.text_faint,
         );
         f += fstep;
@@ -482,7 +482,7 @@ fn graph_plot(
             Pos2::new(layout.plot.min.x - 4.0, y),
             egui::Align2::RIGHT_CENTER,
             label,
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(11.0),
             theme.text_faint,
         );
         v += vstep;

@@ -257,6 +257,10 @@ impl App {
     /// Says something to Claude from the Claude panel.
     pub(super) fn chat_send(&mut self, text: String) {
         use kreate_ui::chat::{ChatMessage, ChatRole};
+        // What the person is looking at, sent with the words so "this" and
+        // "the selected one" mean something without a question first; the
+        // log shows the words alone.
+        let context = self.chat_context();
         let Some(chat) = &mut self.chat else { return };
         // The message as the log keeps it: the words, then what went with
         // them, by name.
@@ -272,7 +276,7 @@ impl App {
             role: ChatRole::User,
             text: shown,
         });
-        match chat.send(&text, &self.chat_attachments) {
+        match chat.send(&format!("{text}\n\n{context}"), &self.chat_attachments) {
             Ok(()) => {
                 self.chat_attachments.clear();
                 self.chat_sent = Some(std::time::Instant::now());
@@ -292,6 +296,46 @@ impl App {
         self.ui.chat_busy = chat.busy();
         self.publish_chat_attachments();
         self.save_chat();
+    }
+
+    /// The document as the person sees it now, in a line for the assistant:
+    /// the mode, the active object, what is selected, the file, and whether
+    /// changes wait for their approval.
+    pub(super) fn chat_context(&self) -> String {
+        let doc = &self.doc;
+        let active = doc
+            .selection
+            .active
+            .and_then(|id| doc.object(id))
+            .map(|o| o.name.clone());
+        let selected: Vec<String> = doc
+            .objects()
+            .filter(|(id, _)| doc.selection.contains(*id))
+            .take(12)
+            .map(|(_, o)| o.name.clone())
+            .collect();
+        let more = doc.selection.objects.len().saturating_sub(selected.len());
+        // i18n-exempt: written for the assistant, not shown to the person
+        let mut line = format!(
+            "[Kreate now: mode {}, active {}, selected [{}{}], {} objects, file {}",
+            self.op_ctx.mode.tag(),
+            active.as_deref().unwrap_or("none"),
+            selected.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            },
+            doc.objects().count(),
+            self.file
+                .path()
+                .map_or("unsaved".to_string(), |p| p.display().to_string()),
+        );
+        if self.ui.chat_approve {
+            line.push_str(", changes wait for the person's approval");
+        }
+        line.push(']');
+        line
     }
 
     /// The panel's view of what goes with the next message.

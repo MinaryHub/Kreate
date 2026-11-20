@@ -91,6 +91,25 @@ pub fn install(ctx: &egui::Context) {
         .insert(0, family::MONO.to_owned());
 
     ctx.set_fonts(fonts);
+
+    let mut style = (*ctx.global_style()).clone();
+    for (text, font) in style.text_styles.iter_mut() {
+        font.size = text_size(text, font.size);
+    }
+    ctx.set_global_style(style);
+}
+
+/// The size a text style is drawn at, in points: larger than egui's own
+/// (12.5 for the body, 9 for small), which Hangul — denser than Latin at
+/// the same size — is hard to read at. Nothing is under 11.
+pub fn text_size(style: &egui::TextStyle, egui_size: f32) -> f32 {
+    match style {
+        egui::TextStyle::Small => 11.0,
+        egui::TextStyle::Body | egui::TextStyle::Button => 14.0,
+        egui::TextStyle::Monospace => 13.0,
+        egui::TextStyle::Heading => 19.0,
+        egui::TextStyle::Name(_) => egui_size.max(11.0),
+    }
 }
 
 /// Characters worth rasterising before the user can see a hitch.

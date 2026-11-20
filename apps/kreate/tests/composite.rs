@@ -1198,9 +1198,10 @@ fn the_chrome_is_graphite_and_darker_than_the_viewport() {
         panel_light = panel_light.max(i32::from(p[1]));
     }
 
-    // And an empty corner of the viewport, away from the cube and the axis
-    // lines, which are deliberately coloured.
-    let x = (vr.min.x + vr.width() * 0.08) as u32;
+    // And an empty stretch of the viewport, away from the cube, the axis
+    // lines, which are deliberately coloured, and the view information in
+    // the corner, whose text reaches further since it was enlarged.
+    let x = (vr.min.x + vr.width() * 0.4) as u32;
     let y = (vr.min.y + vr.height() * 0.08) as u32;
     let p = c.at(x, y);
     let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));

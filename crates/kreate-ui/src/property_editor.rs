@@ -87,10 +87,16 @@ impl UnitDisplay {
 /// Labels for one parameter, translated where a translation exists.
 fn labels(catalog: &Catalog, op_id: &str, desc: &PropertyDesc) -> (String, String) {
     let name = catalog.format(&desc.name_key(op_id), TextKind::Ui, &[]);
-    // The key coming back means there is no translation; fall back to the field
-    // name rather than showing `op-mesh-bevel-param-width-name` in the panel.
+    // The key coming back means there is no translation; then the label
+    // every parameter of this name shares, and failing that the field name
+    // rather than `op-mesh-bevel-param-width-name` in the panel.
     let name = if name == desc.name_key(op_id) {
-        prettify(desc.name)
+        let shared = desc.shared_name_key();
+        if catalog.has(&shared) {
+            catalog.format(&shared, TextKind::Ui, &[])
+        } else {
+            prettify(desc.name)
+        }
     } else {
         name
     };

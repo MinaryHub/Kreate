@@ -794,6 +794,13 @@ struct SkinnedGpu {
 struct App {
     /// The connector's socket. See `kreate::bridge`.
     bridge: Option<kreate::bridge::Bridge>,
+    /// Where the history stood and what the scene was when an assistant
+    /// last heard from the document: what the person has done since is
+    /// said with its next answer. See `serve_bridge`.
+    ai_mark: Option<(
+        usize,
+        std::collections::BTreeMap<u64, connector::ObjectSnap>,
+    )>,
     /// The release the update check downloaded, once it has; said in the
     /// status bar, then forgotten. See `kreate::update`.
     update_ready: Option<Arc<std::sync::Mutex<Option<String>>>>,
@@ -1237,6 +1244,8 @@ impl App {
         app.ui.appearance = kreate::prefs::interface_path()
             .map(|p| kreate::prefs::load_appearance(&p))
             .unwrap_or_default();
+        app.ui.ui_scale =
+            kreate::prefs::interface_path().map_or(1.0, |p| kreate::prefs::load_ui_scale(&p));
         app.ui.recent_files = kreate::prefs::recent_path()
             .map(|p| kreate::prefs::load_recent(&p))
             .unwrap_or_default();
@@ -1251,6 +1260,7 @@ impl App {
     fn empty(doc: Document, locale: &str, registry: OperatorRegistry) -> Self {
         Self {
             bridge: None,
+            ai_mark: None,
             update_ready: None,
             update_check: None,
             chat: None,
@@ -9114,6 +9124,7 @@ impl App {
 
     /// Applies the commands the panels queued this frame.
     fn drain_ui_commands(&mut self) {
+        self.settle_ai_pending();
         // What opened Android's file picker, kept to be done again when the
         // file comes (see `kreate::android`); checked once each is done.
         let mut last: Option<Command> = None;
@@ -13524,8 +13535,40 @@ impl App {
         let mut report = Vec::new();
         let mut errors = 0;
         let mut skipped = 0;
+        // Names, loops and arithmetic unrolled into one call a line first
+        // (see `kreate_ops::program`); a script with none goes as it is.
+        let unrolled;
+        let source = if kreate_ops::program::needs_unrolling(source) {
+            match kreate_ops::program::unroll(source) {
+                Ok(lines) => {
+                    unrolled = lines.join("\n");
+                    unrolled.as_str()
+                }
+                Err(e) => {
+                    self.ui.console_log.push(ConsoleLine {
+                        text: e.clone(),
+                        kind: LineKind::Error,
+                    });
+                    return vec![ScriptLine {
+                        text: source.lines().next().unwrap_or("").trim().to_string(),
+                        result: Err(e),
+                        created: Vec::new(),
+                        materials: Vec::new(),
+                        images: Vec::new(),
+                    }];
+                }
+            }
+        } else {
+            source
+        };
+        // The last object a line made, for `$last` in the lines after it.
+        let mut last_made: Option<String> = None;
         for text in source.lines() {
-            let trimmed = text.trim();
+            let with_last = match &last_made {
+                Some(name) if text.contains("$last") => text.replace("$last", name),
+                _ => text.to_string(),
+            };
+            let trimmed = with_last.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
@@ -13626,7 +13669,7 @@ impl App {
                     });
                 }
             }
-            let created = self
+            let created: Vec<(String, u64)> = self
                 .doc
                 .objects()
                 .filter_map(|(id, o)| {
@@ -13634,6 +13677,9 @@ impl App {
                     (!before.contains(&uid)).then(|| (o.name.clone(), uid.raw()))
                 })
                 .collect();
+            if let Some((name, _)) = created.last() {
+                last_made = Some(name.clone());
+            }
             let made_materials = self
                 .doc
                 .materials()
@@ -17159,6 +17205,7 @@ impl ApplicationHandler for App {
         // be a silent ordering trap for the next person.
         kreate_ui::Theme::new(self.ui.appearance, kreate_ui::Density::default())
             .install(&self.egui_ctx);
+        self.egui_ctx.set_zoom_factor(self.ui.ui_scale);
         self.egui_state = Some(egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -19900,6 +19947,247 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
             .as_str()
             .unwrap()
             .contains("set_transform"));
+    }
+
+    /// With approval asked for, an assistant's script is tried and waits
+    /// in the chat; applied it is made, discarded nothing stays.
+    #[test]
+    fn an_assistants_change_waits_for_the_person_when_asked() {
+        let mut app = app();
+        app.ui.chat_approve = true;
+        let add =
+            serde_json::json!({ "script": "kreate.ops.object.add_primitive(shape=\"cube\")" });
+        let out = app.bridge_call("run", &add).unwrap();
+        assert!(out["pending_approval"].is_string(), "{out}");
+        assert_eq!(out["changes"]["added"].as_array().unwrap().len(), 1);
+        assert_eq!(app.doc.objects().count(), 0, "not made yet");
+        assert!(app.ui.ai_pending.as_ref().unwrap().summary.contains("Cube"));
+        app.ui.ai_pending_decision = Some(true);
+        app.settle_ai_pending();
+        assert_eq!(app.doc.objects().count(), 1);
+        assert!(app.ui.ai_pending.is_none());
+        // Discarded: nothing.
+        app.bridge_call("run", &add).unwrap();
+        app.ui.ai_pending_decision = Some(false);
+        app.settle_ai_pending();
+        assert_eq!(app.doc.objects().count(), 1);
+    }
+
+    /// What the person did between an assistant's calls is said with the
+    /// next answer; with nothing done, nothing is said.
+    #[test]
+    fn the_person_s_own_changes_are_told_to_the_assistant() {
+        let mut app = app();
+        app.ai_mark = Some((app.history.cursor(), app.scene_snapshot()));
+        assert!(app.user_changes_since_mark().is_none());
+        app.run_op("object.add_primitive", two_metre_cube());
+        let since = app.user_changes_since_mark().expect("a change");
+        assert_eq!(since["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(since["changes"]["added"].as_array().unwrap().len(), 1);
+        // The chat's message carries where things stand.
+        let context = app.chat_context();
+        assert!(
+            context.contains("mode object") && context.contains("active Cube"),
+            "{context}"
+        );
+    }
+
+    /// A script with names and a loop runs as its unrolled lines, and
+    /// `$last` names the object the line before made.
+    #[test]
+    fn a_script_loops_and_names_what_it_made_last() {
+        let mut app = app();
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": "pitch = 30mm\n\
+                    for i in range(3):\n\
+                    \x20   kreate.ops.object.add_primitive(shape=\"cube\", size=10mm, location=(i * pitch, 0, 0))\n\
+                    kreate.ops.object.set_transform(object=\"$last\", scale=(2, 2, 2))" }),
+            )
+            .unwrap();
+        let lines = out["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 4, "{out}");
+        assert!(lines.iter().all(|l| l["ok"] == true), "{out}");
+        assert_eq!(app.doc.objects().count(), 3);
+        let far = app
+            .doc
+            .objects()
+            .max_by(|a, b| {
+                a.1.transform
+                    .translation
+                    .x
+                    .total_cmp(&b.1.transform.translation.x)
+            })
+            .unwrap()
+            .1;
+        assert!((far.transform.translation.x - 0.06).abs() < 1e-9);
+        assert!(
+            (far.transform.scale.x - 2.0).abs() < 1e-9,
+            "the last made was scaled"
+        );
+        // A mistake in the program says its line and runs nothing.
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": "for i in range(2)\n    x" }),
+            )
+            .unwrap();
+        assert!(out["lines"][0]["error"].as_str().unwrap().contains("colon"));
+        assert_eq!(app.doc.objects().count(), 3);
+    }
+
+    /// Operators found by words, in English or Korean, best first, each
+    /// with a line that runs it.
+    #[test]
+    fn operators_are_found_by_words_in_either_language() {
+        let app = app();
+        let found = |words: &str| app.operators_search(words);
+        let hole = found("구멍");
+        let ids: Vec<&str> = hole["operators"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
+        assert!(ids.iter().any(|id| id.contains("hole")), "{ids:?}");
+        let mirror = found("mirror");
+        assert!(mirror["operators"][0]["id"]
+            .as_str()
+            .unwrap()
+            .contains("mirror"));
+        let example = mirror["operators"][0]["example"].as_str().unwrap();
+        assert!(example.starts_with("kreate.ops."), "{example}");
+        assert_eq!(found("zzzz-nothing")["matched"], 0);
+    }
+
+    /// A script's answer says what it changed; a dry run says so and
+    /// leaves nothing; an atomic batch whose line fails takes back the lines
+    /// before it too.
+    #[test]
+    fn a_script_says_what_it_changed_and_can_be_tried_or_taken_back() {
+        let mut app = app();
+        let run = |app: &mut App, script: &str, extra: serde_json::Value| {
+            let mut params = serde_json::json!({ "script": script });
+            for (k, v) in extra.as_object().unwrap() {
+                params[k] = v.clone();
+            }
+            app.bridge_call("run", &params).unwrap()
+        };
+        let out = run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"cube\", size=2.0)",
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            out["changes"]["added"].as_array().unwrap().len(),
+            1,
+            "{out}"
+        );
+        let name = out["changes"]["added"][0].as_str().unwrap().to_string();
+
+        // Moved: from where to where.
+        let out = run(
+            &mut app,
+            &format!(
+                "kreate.ops.object.set_transform(object=\"{name}\", location=(1.0, 0.0, 0.0))"
+            ),
+            serde_json::json!({}),
+        );
+        let changed = &out["changes"]["changed"][0];
+        assert_eq!(changed["name"], name.as_str());
+        assert_eq!(changed["location"][1][0], 1.0);
+
+        // A dry run reports and leaves nothing.
+        let objects = app.doc.objects().count();
+        let out = run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"uv_sphere\")",
+            serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(out["changes"]["added"].as_array().unwrap().len(), 1);
+        assert!(out["rolled_back"].as_str().unwrap().starts_with("dry run"));
+        assert_eq!(app.doc.objects().count(), objects);
+
+        // Atomic: the second line fails, so the first is taken back too.
+        let cursor = app.history.cursor();
+        let out = run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"cube\")\nkreate.ops.no_such.operator()",
+            serde_json::json!({ "atomic": true }),
+        );
+        assert!(out["rolled_back"].is_string(), "{out}");
+        assert_eq!(app.doc.objects().count(), objects);
+        assert_eq!(app.history.cursor(), cursor);
+        // Without it, the line that worked stays.
+        run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"cube\")\nkreate.ops.no_such.operator()",
+            serde_json::json!({}),
+        );
+        assert_eq!(app.doc.objects().count(), objects + 1);
+    }
+
+    /// The scene says a body's design history — its features with what
+    /// `feature.set` edits and a line to do it — the parameters and what is
+    /// bound to them, and a sketch's freedom, so an assistant changes a
+    /// design rather than making it again.
+    #[test]
+    fn the_scene_tells_an_assistant_the_design_history() {
+        let mut app = app();
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": "kreate.ops.sketch.new()\n\
+                    kreate.ops.sketch.rectangle(a=(0, 0, 0), b=(0.1, 0.06, 0))\n\
+                    kreate.ops.feature.extrude(seeds=[0.05, 0.03], distance=0.02)\n\
+                    kreate.ops.design.parameter_set(name=\"h\", expression=\"30\")" }),
+            )
+            .unwrap();
+        for line in out["lines"].as_array().unwrap() {
+            assert_eq!(line["ok"], true, "{line}");
+        }
+        let scene = app.bridge_call("scene", &serde_json::json!({})).unwrap();
+        let body = scene["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o.get("features").is_some())
+            .expect("a body with features");
+        let f = &body["features"][0];
+        assert_eq!(f["kind"], "extrude");
+        assert!((f["amount"].as_f64().unwrap() - 0.02).abs() < 1e-12);
+        assert!(f["edit"].as_str().unwrap().contains("feature.set(body="));
+        assert_eq!(scene["parameters"][0]["name"], "h");
+        assert_eq!(scene["parameters"][0]["expression"], "30");
+        assert!(scene["parameters"][0]["value"].as_f64().unwrap() > 0.0);
+
+        // Bound to the parameter: the feature says so, and the binding
+        // names the body and the feature.
+        let name = body["name"].as_str().unwrap().to_string();
+        let order = f["order"].as_u64().unwrap();
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": format!(
+                    "kreate.ops.design.bind(kind=\"feature\", object=\"{name}\", index={order}, expression=\"h\")"
+                ) }),
+            )
+            .unwrap();
+        assert_eq!(out["lines"][0]["ok"], true, "{out}");
+        let scene = app.bridge_call("scene", &serde_json::json!({})).unwrap();
+        let body = scene["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == name.as_str())
+            .unwrap();
+        assert_eq!(body["features"][0]["bound_to"], "h");
+        assert_eq!(
+            scene["bindings"][0]["target"]["feature"]["body"],
+            name.as_str()
+        );
+        assert_eq!(scene["bindings"][0]["target"]["feature"]["index"], 0);
     }
 
     /// The scene listed in part: by name, by prefix, by selection, a few,
