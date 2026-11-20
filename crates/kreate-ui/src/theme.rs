@@ -104,6 +104,9 @@ pub struct Theme {
     pub border: Color32,
     /// Focus rings and anything that has to read as an edge.
     pub border_strong: Color32,
+    /// The outline of a field or a button: 3:1 against the panel and the
+    /// field, as WCAG asks of what tells a control from its surroundings.
+    pub control_edge: Color32,
 
     /// Values and names.
     pub text: Color32,
@@ -184,6 +187,7 @@ impl Theme {
             raised: hex(0x00FF_FFFF),
             border: hex(0x00D2_D6DC),
             border_strong: hex(0x00B4_BAC3),
+            control_edge: hex(0x007E_848E),
 
             text: hex(0x001C_1F24),
             text_dim: hex(0x0047_4D57),
@@ -213,6 +217,7 @@ impl Theme {
             raised: hex(0x0023_252A),
             border: hex(0x002E_3137),
             border_strong: hex(0x003A_3D44),
+            control_edge: hex(0x006B_707A),
 
             text: hex(0x00E6_E7EA),
             text_dim: hex(0x00A3_A7AF),
@@ -341,10 +346,11 @@ impl Theme {
 
         visuals.widgets.noninteractive = widget(self.base, self.base, self.border, self.text_dim);
         visuals.widgets.inactive = widget(self.raised, self.raised, self.border, self.text);
-        visuals.widgets.hovered = widget(self.border, self.border, self.border_strong, self.text);
-        // Fields and buttons sit on the panel as raised shapes with no
-        // outline: the step in shade is the edge, as the design draws it.
-        visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+        // Fields and buttons outlined at 3:1: the step in shade from the
+        // panel alone (about 1.1:1) left a value field indistinguishable
+        // from a label beside it. Hovered, the outline brightens.
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, self.control_edge);
+        visuals.widgets.hovered = widget(self.border, self.border, self.text_dim, self.text);
         // An engaged control wears the accent, because that is the same thing
         // the accent means in the viewport: this is what you are acting on.
         visuals.widgets.active = widget(
@@ -507,6 +513,50 @@ mod tests {
         // second palette.
         assert_eq!(compact.accent, comfortable.accent);
         assert_eq!(compact.base, comfortable.base);
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let l = |c: Color32| {
+            let f = |v: u8| {
+                let x = v as f32 / 255.0;
+                if x <= 0.039_28 {
+                    x / 12.92
+                } else {
+                    ((x + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+        };
+        let (a, b) = (l(a), l(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// WCAG's levels, in both appearances: text 4.5:1 on what it sits on
+    /// (the faint labels too), a control's outline 3:1 against the panel
+    /// and the field.
+    #[test]
+    fn text_and_controls_stand_out_enough() {
+        for t in [
+            Theme::studio(Density::Compact),
+            Theme::light(Density::Compact),
+        ] {
+            for bg in [t.base, t.raised] {
+                for fg in [t.text, t.text_dim, t.text_faint] {
+                    assert!(
+                        contrast(fg, bg) >= 4.5,
+                        "{:?} text {fg:?} on {bg:?}",
+                        t.appearance
+                    );
+                }
+                assert!(
+                    contrast(t.control_edge, bg) >= 3.0,
+                    "{:?} edge on {bg:?}",
+                    t.appearance
+                );
+            }
+            let v = t.visuals();
+            assert_eq!(v.widgets.inactive.bg_stroke.color, t.control_edge);
+        }
     }
 
     #[test]

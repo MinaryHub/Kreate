@@ -10,6 +10,26 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Changed
+
+- Easier to read and to find your way: text is larger (14 pt, nothing under
+  11), and Preferences ▸ Interface Size scales the whole interface from 90%
+  to 175%. The mode tabs are full-size, the open one filled in its mode's
+  colour, and outside object mode the viewport is framed in that colour.
+  Fields and dialog buttons are outlined at 3:1 so a value field no longer
+  looks like a label; menus and toolbars stay flat.
+- Korean names for every operator parameter (위치, 회전, 크기…) where the
+  panels showed the English field name.
+- The toolbar's Add and drawing tools are drawn in the text colour: orange
+  is only for what is selected or in hand, so the sketch tool held shows.
+- Toolbar groups that do not fit go behind » instead of being cut off, and a
+  header row that is clipped shows ‹ › to scroll it.
+- The status bar says what the mouse does in the mode (click, Shift+click,
+  drag); a sketch tool's instruction is in its banner at the top of the
+  view rather than also in the corner; the properties panel names its tab
+  and shows a scroll bar and a fade when there is more below; the history
+  strip says what it is for while it is empty.
+
 ## [0.14.0] - 2026-11-17
 
 ### Added

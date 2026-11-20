@@ -315,7 +315,7 @@ pub fn asset_browser(
                             for badge in &tile.badges {
                                 let galley = ui.painter().layout_no_wrap(
                                     badge.clone(),
-                                    egui::FontId::proportional(10.0),
+                                    egui::FontId::proportional(11.0),
                                     egui::Color32::WHITE,
                                 );
                                 let back = egui::Rect::from_min_size(

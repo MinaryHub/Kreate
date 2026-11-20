@@ -285,7 +285,7 @@ pub fn timeline(
             Pos2::new(x, track.min.y + 2.0),
             egui::Align2::CENTER_TOP,
             f.to_string(),
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(11.0),
             theme.text_faint,
         );
         f += step as i64;
@@ -344,7 +344,7 @@ pub fn timeline(
             Pos2::new(x + 7.0, foot),
             egui::Align2::LEFT_BOTTOM,
             &marker.name,
-            egui::FontId::proportional(10.0),
+            egui::FontId::proportional(11.0),
             ink,
         );
     }

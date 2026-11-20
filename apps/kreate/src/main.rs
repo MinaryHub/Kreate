@@ -1237,6 +1237,8 @@ impl App {
         app.ui.appearance = kreate::prefs::interface_path()
             .map(|p| kreate::prefs::load_appearance(&p))
             .unwrap_or_default();
+        app.ui.ui_scale =
+            kreate::prefs::interface_path().map_or(1.0, |p| kreate::prefs::load_ui_scale(&p));
         app.ui.recent_files = kreate::prefs::recent_path()
             .map(|p| kreate::prefs::load_recent(&p))
             .unwrap_or_default();
@@ -17159,6 +17161,7 @@ impl ApplicationHandler for App {
         // be a silent ordering trap for the next person.
         kreate_ui::Theme::new(self.ui.appearance, kreate_ui::Density::default())
             .install(&self.egui_ctx);
+        self.egui_ctx.set_zoom_factor(self.ui.ui_scale);
         self.egui_state = Some(egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
