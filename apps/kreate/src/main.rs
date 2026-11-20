@@ -19905,6 +19905,135 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
             .contains("set_transform"));
     }
 
+    /// A script's answer says what it changed; a dry run says so and
+    /// leaves nothing; an atomic batch whose line fails takes back the lines
+    /// before it too.
+    #[test]
+    fn a_script_says_what_it_changed_and_can_be_tried_or_taken_back() {
+        let mut app = app();
+        let run = |app: &mut App, script: &str, extra: serde_json::Value| {
+            let mut params = serde_json::json!({ "script": script });
+            for (k, v) in extra.as_object().unwrap() {
+                params[k] = v.clone();
+            }
+            app.bridge_call("run", &params).unwrap()
+        };
+        let out = run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"cube\", size=2.0)",
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            out["changes"]["added"].as_array().unwrap().len(),
+            1,
+            "{out}"
+        );
+        let name = out["changes"]["added"][0].as_str().unwrap().to_string();
+
+        // Moved: from where to where.
+        let out = run(
+            &mut app,
+            &format!(
+                "kreate.ops.object.set_transform(object=\"{name}\", location=(1.0, 0.0, 0.0))"
+            ),
+            serde_json::json!({}),
+        );
+        let changed = &out["changes"]["changed"][0];
+        assert_eq!(changed["name"], name.as_str());
+        assert_eq!(changed["location"][1][0], 1.0);
+
+        // A dry run reports and leaves nothing.
+        let objects = app.doc.objects().count();
+        let out = run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"uv_sphere\")",
+            serde_json::json!({ "dry_run": true }),
+        );
+        assert_eq!(out["changes"]["added"].as_array().unwrap().len(), 1);
+        assert!(out["rolled_back"].as_str().unwrap().starts_with("dry run"));
+        assert_eq!(app.doc.objects().count(), objects);
+
+        // Atomic: the second line fails, so the first is taken back too.
+        let cursor = app.history.cursor();
+        let out = run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"cube\")\nkreate.ops.no_such.operator()",
+            serde_json::json!({ "atomic": true }),
+        );
+        assert!(out["rolled_back"].is_string(), "{out}");
+        assert_eq!(app.doc.objects().count(), objects);
+        assert_eq!(app.history.cursor(), cursor);
+        // Without it, the line that worked stays.
+        run(
+            &mut app,
+            "kreate.ops.object.add_primitive(shape=\"cube\")\nkreate.ops.no_such.operator()",
+            serde_json::json!({}),
+        );
+        assert_eq!(app.doc.objects().count(), objects + 1);
+    }
+
+    /// The scene says a body's design history — its features with what
+    /// `feature.set` edits and a line to do it — the parameters and what is
+    /// bound to them, and a sketch's freedom, so an assistant changes a
+    /// design rather than making it again.
+    #[test]
+    fn the_scene_tells_an_assistant_the_design_history() {
+        let mut app = app();
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": "kreate.ops.sketch.new()\n\
+                    kreate.ops.sketch.rectangle(a=(0, 0, 0), b=(0.1, 0.06, 0))\n\
+                    kreate.ops.feature.extrude(seeds=[0.05, 0.03], distance=0.02)\n\
+                    kreate.ops.design.parameter_set(name=\"h\", expression=\"30\")" }),
+            )
+            .unwrap();
+        for line in out["lines"].as_array().unwrap() {
+            assert_eq!(line["ok"], true, "{line}");
+        }
+        let scene = app.bridge_call("scene", &serde_json::json!({})).unwrap();
+        let body = scene["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o.get("features").is_some())
+            .expect("a body with features");
+        let f = &body["features"][0];
+        assert_eq!(f["kind"], "extrude");
+        assert!((f["amount"].as_f64().unwrap() - 0.02).abs() < 1e-12);
+        assert!(f["edit"].as_str().unwrap().contains("feature.set(body="));
+        assert_eq!(scene["parameters"][0]["name"], "h");
+        assert_eq!(scene["parameters"][0]["expression"], "30");
+        assert!(scene["parameters"][0]["value"].as_f64().unwrap() > 0.0);
+
+        // Bound to the parameter: the feature says so, and the binding
+        // names the body and the feature.
+        let name = body["name"].as_str().unwrap().to_string();
+        let order = f["order"].as_u64().unwrap();
+        let out = app
+            .bridge_call(
+                "run",
+                &serde_json::json!({ "script": format!(
+                    "kreate.ops.design.bind(kind=\"feature\", object=\"{name}\", index={order}, expression=\"h\")"
+                ) }),
+            )
+            .unwrap();
+        assert_eq!(out["lines"][0]["ok"], true, "{out}");
+        let scene = app.bridge_call("scene", &serde_json::json!({})).unwrap();
+        let body = scene["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == name.as_str())
+            .unwrap();
+        assert_eq!(body["features"][0]["bound_to"], "h");
+        assert_eq!(
+            scene["bindings"][0]["target"]["feature"]["body"],
+            name.as_str()
+        );
+        assert_eq!(scene["bindings"][0]["target"]["feature"]["index"], 0);
+    }
+
     /// The scene listed in part: by name, by prefix, by selection, a few,
     /// and in short past a size — each said with how many there are.
     #[test]

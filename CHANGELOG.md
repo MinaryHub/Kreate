@@ -10,6 +10,19 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- Assistants change a design as a designer would. get_scene now gives each
+  body's features (kind, amount and what it means, operation, whether it
+  is bound to a parameter, and the feature.set line to change it), each
+  drawing's degrees of freedom, each part's mate, and the design's
+  parameters, bindings and measurements — so "make the hole 2 mm deeper"
+  edits the feature instead of building the part again.
+- run_script answers with what changed — objects added and removed, and
+  for each one changed its location, size, faces or features from what to
+  what — and takes atomic (a failed line undoes the lines before it) and
+  dry_run (run, report, and undo everything).
+
 ### Changed
 
 - Easier to read and to find your way: text is larger (14 pt, nothing under

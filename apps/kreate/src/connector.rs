@@ -266,6 +266,13 @@ impl App {
             }
             "run" => {
                 let script = text("script").ok_or("`script` is required")?;
+                let flag = |name: &str| params.get(name).and_then(|v| v.as_bool()) == Some(true);
+                let (atomic, dry_run) = (flag("atomic"), flag("dry_run"));
+                // Where the history and the mode stand, to come back to; and
+                // what the scene is, to say afterwards what the lines changed.
+                let start = self.history.cursor();
+                let mode_before = self.op_ctx.mode;
+                let before = self.scene_snapshot();
                 // Said, so a person reading the console knows whose lines
                 // these are.
                 self.ui.console_log.push(kreate_ui::console::ConsoleLine {
@@ -334,8 +341,33 @@ impl App {
                         )
                     })
                     .collect();
-                let mut out =
-                    json!({ "lines": lines, "mode": self.op_ctx.mode.tag(), "active": active });
+                let changes = scene_changes(&before, &self.scene_snapshot());
+                let failed = lines.iter().any(|l| l["ok"] == false);
+                // A trial, or an all-or-nothing batch that failed: every step
+                // these lines took is undone, and the mode put back.
+                let rolled_back = dry_run || (atomic && failed);
+                if rolled_back {
+                    self.forget_sketch_picks();
+                    while self.history.cursor() > start && self.history.undo(&mut self.doc) {}
+                    self.collab_after_undo();
+                    if self.op_ctx.mode != mode_before {
+                        self.set_mode(mode_before);
+                    }
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                }
+                let mut out = json!({
+                    "lines": lines,
+                    "mode": self.op_ctx.mode.tag(),
+                    "active": active,
+                    "changes": changes,
+                });
+                if rolled_back {
+                    out["rolled_back"] = json!(if dry_run {
+                        "dry run: the changes above were made and then undone; nothing stays"
+                    } else {
+                        "a line failed, so every line of this call was undone"
+                    });
+                }
                 if !warnings.is_empty() {
                     out["warnings"] = json!(warnings);
                 }
@@ -1739,6 +1771,29 @@ impl App {
                     }
                     _ => {}
                 }
+                // A body's design history, a sketch's state and a part's
+                // mate: what an assistant changes a design through, rather
+                // than making its shape again.
+                if !o.features.is_empty() {
+                    v["features"] = features_json(doc, id, &o.name);
+                }
+                if let Some(d) = o.drawing.as_deref() {
+                    let free = d.freedom();
+                    v["drawing"] = json!({
+                        "entities": d.entities.len(),
+                        "constraints": d.constraints.len(),
+                        "free": free,
+                        "fully_defined": free == 0,
+                        "detail": "get_drawing for its entities, constraints and dimensions",
+                    });
+                }
+                if let Some(m) = &o.mate {
+                    v["mate"] = json!({
+                        "to": doc.object_by_uid(m.target).and_then(|t| doc.object(t)).map(|t| t.name.clone()),
+                        "offset": m.offset,
+                        "angle": m.angle,
+                    });
+                }
                 v
             })
             .collect();
@@ -1794,6 +1849,25 @@ impl App {
                 None
             },
             "materials": materials,
+            // The design's named numbers, what is held to them, the
+            // measurements left on it, and where the timeline is rolled back
+            // to: change a parameter with design.parameter_set and every
+            // dimension and feature bound to it follows.
+            "parameters": doc.design.parameters.iter().map(|p| json!({
+                "name": p.name,
+                "expression": p.expression,
+                "value": p.value,
+            })).collect::<Vec<_>>(),
+            "bindings": doc.design.bindings.iter().map(|b| json!({
+                "target": bound_json(doc, &b.target),
+                "expression": b.expression,
+            })).collect::<Vec<_>>(),
+            "measurements": doc.design.measurements.iter().enumerate().map(|(i, m)| json!({
+                "index": i,
+                "length": m.length(),
+                "angle": m.angle(),
+            })).collect::<Vec<_>>(),
+            "rollback": doc.design.rollback,
             "images": doc
                 .images()
                 .map(|(iid, i)| json!({ "name": i.name, "uid": doc.image_uid(iid).map(|u| u.raw()), "width": i.width(), "height": i.height() }))
@@ -1895,6 +1969,269 @@ impl App {
 const FULL_LISTING: usize = 12;
 
 /// One operator as a line: `id(name: kind, choice: a|b|c, ...)`.
+/// What an object is, for saying what a script changed.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ObjectSnap {
+    name: String,
+    location: [f64; 3],
+    rotation: [f64; 3],
+    scale: [f64; 3],
+    dimensions: Option<[f64; 3]>,
+    vertices: u32,
+    faces: u32,
+    features: usize,
+    visible: bool,
+    parent: Option<u64>,
+}
+
+impl App {
+    /// Every object as `ObjectSnap`s, by uid.
+    pub(super) fn scene_snapshot(&self) -> std::collections::BTreeMap<u64, ObjectSnap> {
+        let doc = &self.doc;
+        doc.objects()
+            .filter_map(|(id, o)| {
+                let uid = doc.object_uid(id)?.raw();
+                let t = o.transform;
+                let r = kreate_scene::animation::to_euler(t.rotation);
+                let shown = o.mesh().and_then(|m| {
+                    if o.features.is_empty() && o.curve.is_none() {
+                        doc.mesh_arc(m).cloned()
+                    } else {
+                        kreate_scene::modifier::shown_base(doc, id)
+                    }
+                });
+                let (dimensions, vertices, faces) = match shown.as_deref() {
+                    Some(m) => {
+                        let b = m.bounds();
+                        let dims = (b.min.x <= b.max.x).then(|| {
+                            let d = (b.max - b.min).as_dvec3() * t.scale;
+                            [d.x.abs(), d.y.abs(), d.z.abs()]
+                        });
+                        (dims, m.num_verts(), m.num_faces())
+                    }
+                    None => (None, 0, 0),
+                };
+                Some((
+                    uid,
+                    ObjectSnap {
+                        name: o.name.clone(),
+                        location: t.translation.to_array(),
+                        rotation: r.to_array(),
+                        scale: t.scale.to_array(),
+                        dimensions,
+                        vertices,
+                        faces,
+                        features: o.features.len(),
+                        visible: doc.is_shown(id),
+                        parent: o.parent.and_then(|p| doc.object_uid(p)).map(|u| u.raw()),
+                    },
+                ))
+            })
+            .collect()
+    }
+}
+
+/// What changed between two snapshots, said briefly: objects added and
+/// removed, and for each one that changed, what did and from what to what.
+pub(super) fn scene_changes(
+    before: &std::collections::BTreeMap<u64, ObjectSnap>,
+    after: &std::collections::BTreeMap<u64, ObjectSnap>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let near = |a: &[f64; 3], b: &[f64; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9);
+    let round = |v: &[f64; 3]| v.map(|x| (x * 1e6).round() / 1e6);
+    let added: Vec<&str> = after
+        .iter()
+        .filter(|(uid, _)| !before.contains_key(uid))
+        .map(|(_, s)| s.name.as_str())
+        .collect();
+    let removed: Vec<&str> = before
+        .iter()
+        .filter(|(uid, _)| !after.contains_key(uid))
+        .map(|(_, s)| s.name.as_str())
+        .collect();
+    let mut changed = Vec::new();
+    for (uid, b) in before {
+        let Some(a) = after.get(uid) else { continue };
+        if a == b {
+            continue;
+        }
+        let mut what = serde_json::Map::new();
+        if a.name != b.name {
+            what.insert("renamed".into(), json!([b.name, a.name]));
+        }
+        if !near(&a.location, &b.location) {
+            what.insert(
+                "location".into(),
+                json!([round(&b.location), round(&a.location)]),
+            );
+        }
+        if !near(&a.rotation, &b.rotation) {
+            what.insert(
+                "rotation".into(),
+                json!([round(&b.rotation), round(&a.rotation)]),
+            );
+        }
+        if !near(&a.scale, &b.scale) {
+            what.insert("scale".into(), json!([round(&b.scale), round(&a.scale)]));
+        }
+        match (&b.dimensions, &a.dimensions) {
+            (Some(x), Some(y)) if !near(x, y) => {
+                what.insert("dimensions".into(), json!([round(x), round(y)]));
+            }
+            (x, y) if x.is_some() != y.is_some() => {
+                what.insert(
+                    "dimensions".into(),
+                    json!([x.map(|v| round(&v)), y.map(|v| round(&v))]),
+                );
+            }
+            _ => {}
+        }
+        if (a.vertices, a.faces) != (b.vertices, b.faces) {
+            what.insert("vertices".into(), json!([b.vertices, a.vertices]));
+            what.insert("faces".into(), json!([b.faces, a.faces]));
+        }
+        if a.features != b.features {
+            what.insert("features".into(), json!([b.features, a.features]));
+        }
+        if a.visible != b.visible {
+            what.insert("visible".into(), json!(a.visible));
+        }
+        if a.parent != b.parent {
+            what.insert(
+                "parent".into(),
+                json!(a.parent.and_then(|p| after.get(&p)).map(|p| p.name.clone())),
+            );
+        }
+        if !what.is_empty() {
+            what.insert("name".into(), json!(a.name));
+            changed.push(serde_json::Value::Object(what));
+        }
+    }
+    json!({ "added": added, "removed": removed, "changed": changed })
+}
+
+/// A body's features in their order, each with what `feature.set` edits —
+/// its `amount` means a different thing for each kind, said in
+/// `amount_is` — and a ready line to change it.
+fn features_json(doc: &Document, id: kreate_scene::ObjectId, body: &str) -> serde_json::Value {
+    use kreate_scene::feature::Shape;
+    use serde_json::json;
+    let Some(o) = doc.object(id) else {
+        return json!([]);
+    };
+    let uid = doc.object_uid(id);
+    o.features
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let (amount, amount_is): (Option<f64>, &str) = match &f.shape {
+                Shape::Extrude { distance, .. } => (Some(*distance), "distance in metres"),
+                Shape::Revolve { angle, .. } => (Some(*angle), "angle in radians"),
+                Shape::Round { radius, .. } => (Some(*radius), "radius in metres"),
+                Shape::Shell { thickness, .. } => (Some(*thickness), "wall thickness in metres"),
+                Shape::Pattern { count, .. } | Shape::Circular { count, .. } => {
+                    (Some(f64::from(*count)), "count")
+                }
+                Shape::Sweep { scale_end, .. } => (Some(*scale_end), "the profile's scale at the end"),
+                Shape::SheetMetal { height, .. } => (Some(*height), "flange height in metres"),
+                Shape::Hole { depth, .. } => (Some(*depth), "depth in metres"),
+                Shape::Mirror { .. } | Shape::Loft { .. } => (None, "nothing: not edited by amount"),
+            };
+            let mut v = json!({
+                "index": i,
+                // Its place on the document's timeline: what design.bind
+                // (kind="feature") takes as its index.
+                "order": f.order,
+                "kind": f.kind_tag(),
+                "name": f.name,
+                "operation": f.operation.tag(),
+                "suppressed": f.suppressed,
+                "sketch": doc.object_by_uid(f.sketch).and_then(|s| doc.object(s)).map(|s| s.name.clone()),
+                "regions": f.seeds.len(),
+                "amount": amount,
+                "amount_is": amount_is,
+            });
+            match &f.shape {
+                Shape::Extrude { symmetric, more, .. } => {
+                    v["symmetric"] = json!(symmetric);
+                    v["second"] = json!(more.second);
+                    v["offset"] = json!(more.offset);
+                    v["taper"] = json!(more.taper);
+                    v["through"] = json!(more.through);
+                }
+                Shape::Round { chamfer, edges, .. } => {
+                    v["chamfer"] = json!(chamfer);
+                    v["edges"] = json!(edges.len());
+                }
+                Shape::Shell { open, .. } => {
+                    v["open_side"] = json!(kreate_scene::feature::SHELL_SIDES.get(*open as usize));
+                }
+                Shape::Pattern { count2, step, step2, .. } => {
+                    v["step"] = json!(step);
+                    v["count2"] = json!(count2);
+                    v["step2"] = json!(step2);
+                }
+                Shape::Circular { axis, angle, .. } => {
+                    v["axis"] = json!(axis);
+                    v["angle"] = json!(angle);
+                }
+                Shape::Hole { diameter, through, .. } => {
+                    v["diameter"] = json!(diameter);
+                    v["through"] = json!(through);
+                }
+                Shape::SheetMetal { thickness, radius, angle, flat, .. } => {
+                    v["thickness"] = json!(thickness);
+                    v["bend_radius"] = json!(radius);
+                    v["bend_angle"] = json!(angle);
+                    v["flat"] = json!(flat);
+                }
+                _ => {}
+            }
+            // Held to an expression: changing the amount by hand would be
+            // undone by the next evaluation; change the parameter instead.
+            if let Some(b) = doc.design.bindings.iter().find(|b| {
+                matches!(b.target, kreate_scene::design::Bound::FeatureAmount { body, order }
+                    if Some(body) == uid && order == f.order)
+            }) {
+                v["bound_to"] = json!(b.expression);
+            }
+            if amount.is_some() {
+                v["edit"] = json!(format!(
+                    "kreate.ops.feature.set(body=\"{body}\", index={i}, amount=...)"
+                ));
+            }
+            v
+        })
+        .collect()
+}
+
+/// What a binding holds, by names an assistant can find in the scene.
+fn bound_json(doc: &Document, b: &kreate_scene::design::Bound) -> serde_json::Value {
+    use kreate_scene::design::Bound;
+    use serde_json::json;
+    let name = |uid| {
+        doc.object_by_uid(uid)
+            .and_then(|o| doc.object(o))
+            .map(|o| o.name.clone())
+    };
+    match b {
+        Bound::SketchDimension { sketch, index } => {
+            json!({ "sketch_dimension": { "sketch": name(*sketch), "constraint": index } })
+        }
+        Bound::FeatureAmount { body, order } => {
+            let index = doc
+                .object_by_uid(*body)
+                .and_then(|o| doc.object(o))
+                .and_then(|o| o.features.iter().position(|f| f.order == *order));
+            json!({ "feature": { "body": name(*body), "index": index } })
+        }
+        Bound::DrawingDimension { drawing, dim } => {
+            json!({ "drawing_dimension": { "drawing": name(*drawing), "dimension": dim } })
+        }
+    }
+}
+
 fn compact_operator(op: &serde_json::Value) -> String {
     let params: Vec<String> = op["params"]
         .as_array()
