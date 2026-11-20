@@ -517,14 +517,7 @@ mod tests {
 
     fn contrast(a: Color32, b: Color32) -> f32 {
         let l = |c: Color32| {
-            let f = |v: u8| {
-                let x = v as f32 / 255.0;
-                if x <= 0.039_28 {
-                    x / 12.92
-                } else {
-                    ((x + 0.055) / 1.055).powf(2.4)
-                }
-            };
+            let f = |v: u8| kreate_math::srgb_to_linear(v as f32 / 255.0);
             0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
         };
         let (a, b) = (l(a), l(b));
