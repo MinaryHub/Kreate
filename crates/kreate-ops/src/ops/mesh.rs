@@ -3709,7 +3709,7 @@ pub const NAMED_ELEMENTS: [&str; 10] = [
     "top", "bottom", "front", "back", "left", "right", "largest", "boundary", "sharp", "longest",
 ];
 
-#[derive(Clone, Debug, PartialEq, OpParams)]
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct SelectNamedParams {
     /// top, bottom, front (−Y), back (+Y), left (−X), right (+X): the
     /// outermost faces facing that way. largest: the face of most area.
@@ -3723,15 +3723,6 @@ pub struct SelectNamedParams {
     pub which: u32,
     /// Add to the selection instead of replacing it.
     pub extend: bool,
-}
-
-impl Default for SelectNamedParams {
-    fn default() -> Self {
-        Self {
-            which: 0,
-            extend: false,
-        }
-    }
 }
 
 /// Selects elements by what they are rather than where: the top face, the
