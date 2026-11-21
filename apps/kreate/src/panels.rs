@@ -1,5 +1,5 @@
 //! The side panels that talk to the outside: the asset browser's library,
-//! downloads and imports, Help ▸ Contact's outbox, and the chat panel's
+//! downloads and imports, and the chat panel's
 //! conversation and the turns it can undo.
 
 use super::*;
@@ -177,21 +177,6 @@ impl App {
             self.status(&format!(
                 "made the material {name}; select a mesh and choose it in the Material tab"
             ));
-        }
-    }
-
-    /// What became of the messages Help ▸ Contact sent.
-    pub(super) fn serve_outbox(&mut self) {
-        use kreate_ui::contact::ContactStatus;
-        let Some(outbox) = &self.outbox else { return };
-        for answer in outbox.poll() {
-            self.ui.contact.status = match answer {
-                Ok(()) => ContactStatus::Sent,
-                Err(why) => ContactStatus::Failed(why),
-            };
-        }
-        if let Some(w) = &self.window {
-            w.request_redraw();
         }
     }
 

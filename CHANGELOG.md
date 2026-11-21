@@ -40,6 +40,11 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ### Changed
 
+- Help ▸ Report an Issue and Help ▸ Ask a Question replace the contact
+  form's e-mail: what you write opens on GitHub, filled in — a bug report
+  issue, or a discussion in Q&A or Ideas — with the version, platform and
+  graphics card if you like, and you post it there signed in. Answers come
+  back to you on GitHub. Nothing is sent from Kreate itself.
 - Easier to read and to find your way: text is larger (14 pt, nothing under
   11), and Preferences ▸ Interface Size scales the whole interface from 90%
   to 175%. The mode tabs are full-size, the open one filled in its mode's

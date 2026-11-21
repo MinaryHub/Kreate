@@ -1,0 +1,28 @@
+# Kreate's Help ▸ Report an Issue opens this form with its fields filled in,
+# by their ids (apps/kreate/src/feedback.rs): keep the ids as they are.
+name: Bug report
+description: Something in Kreate is wrong.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen again
+      description: The steps from a new document, if you know them. A .kreate file or a screenshot helps.
+  - type: input
+    id: version
+    attributes:
+      label: Kreate version
+      description: Help ▸ About Kreate.
+  - type: textarea
+    id: platform
+    attributes:
+      label: Platform and graphics card
+      description: The operating system, and the graphics card Kreate draws with.

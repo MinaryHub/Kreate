@@ -829,8 +829,6 @@ struct App {
     /// What goes with the next chat message: files picked or pasted. The
     /// panel shows `ui.chat_attachments`, made from this.
     chat_attachments: Vec<kreate::attach::Attachment>,
-    /// Help ▸ Contact's messages on their way. See `kreate::contact`.
-    outbox: Option<kreate::contact::Outbox>,
     /// Scene files read on threads of their own, and what wakes the loop
     /// when one is ready. See `import_into`.
     imports: (
@@ -1272,7 +1270,6 @@ impl App {
             asset_wishes: std::collections::HashMap::new(),
             import_wishes: std::collections::HashMap::new(),
             chat_attachments: Vec::new(),
-            outbox: None,
             imports: std::sync::mpsc::channel(),
             import_wake: None,
             importing: Vec::new(),
@@ -9273,7 +9270,7 @@ impl App {
                         chat.cancel_sign_in();
                     }
                 }
-                Command::OpenContact => self.ui.contact.open(),
+                Command::OpenContact { kind } => self.ui.contact.open(kind),
                 Command::OpenCollab => self.open_collab(),
                 Command::CollabHost { name, port, key } => self.collab_host(name, port, key),
                 Command::CollabJoin { name, address, key } => self.collab_join(name, address, key),
@@ -9300,27 +9297,23 @@ impl App {
                 }
                 Command::ContactSend {
                     kind,
-                    name,
-                    email,
+                    title,
                     message,
                     include_details,
                 } => {
-                    let details = include_details
-                        .then(|| (kreate::version::describe(), kreate::version::platform()));
-                    match &self.outbox {
-                        Some(outbox) => outbox.send(&kreate::contact::Message {
-                            kind,
-                            name,
-                            email,
-                            message,
-                            details,
+                    let gpu = self.ui.gpu_name.clone();
+                    let url = kreate::feedback::url(&kreate::feedback::Feedback {
+                        kind: kreate::feedback::Kind::from_index(kind),
+                        title,
+                        message,
+                        details: include_details.then(|| kreate::feedback::Details {
+                            version: kreate::version::describe(),
+                            platform: kreate::version::platform(),
+                            gpu,
                         }),
-                        None => {
-                            self.ui.contact.status = kreate_ui::contact::ContactStatus::Failed(
-                                "messages cannot be sent from here".into(),
-                            )
-                        }
-                    }
+                    });
+                    kreate::desktop::open_url(&url);
+                    self.ui.contact.status = kreate_ui::contact::ContactStatus::Opened(url);
                 }
                 Command::ChatNew => {
                     if let Some(chat) = &mut self.chat {
@@ -17149,7 +17142,6 @@ impl ApplicationHandler for App {
             }
         }
         self.serve_chat();
-        self.serve_outbox();
         self.serve_arrivals();
     }
 
@@ -17193,6 +17185,7 @@ impl ApplicationHandler for App {
         let gpu = pollster::block_on(kreate_render::Gpu::new(instance, &opts, Some(&surface)))
             .expect("initialise GPU");
         println!("GPU: {}\n", gpu.info.describe());
+        self.ui.gpu_name = gpu.info.describe();
 
         let size = window.inner_size();
         let config =
@@ -18691,12 +18684,6 @@ pub fn run(event_loop: EventLoop<()>, args: Vec<String>) {
     app.chat = Some(chat);
     app.publish_chat_choices();
     app.restore_chat();
-    let outbox_proxy = std::sync::Mutex::new(event_loop.create_proxy());
-    app.outbox = Some(kreate::contact::Outbox::new(move || {
-        if let Ok(proxy) = outbox_proxy.lock() {
-            let _ = proxy.send_event(());
-        }
-    }));
     let import_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     app.import_wake = Some(std::sync::Arc::new(move || {
         if let Ok(proxy) = import_proxy.lock() {

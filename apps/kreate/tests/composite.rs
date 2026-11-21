@@ -2171,17 +2171,19 @@ fn shot_sculpt_mask_and_face_sets() {
     shot.dump("sculpt-overlay");
 }
 
-/// Help ▸ Contact's form, with a message being written, and About.
+/// Help ▸ Report an Issue's form, written and opened on GitHub, and About.
 #[test]
 fn shot_contact() {
     let doc = doc_with_cube();
     let Some(shot) = composite_with(&doc, "ko-KR", false, |state| {
-        state.contact.open();
-        state.contact.kind = 1;
-        state.contact.email = "artist@studio.kr".into();
-        state.contact.message = "회전체 단면을 곡선으로 그릴 수 있으면 좋겠습니다.".into();
-        state.contact.status =
-            kreate_ui::contact::ContactStatus::Failed("the contact service is not set up".into());
+        state.contact.open(0);
+        state.contact.title = "필렛이 실패합니다".into();
+        state.contact.message =
+            "모서리 4개를 고르고 2 mm 필렛을 주면 아무것도 바뀌지 않습니다.".into();
+        state.gpu_name = "llvmpipe".into();
+        state.contact.status = kreate_ui::contact::ContactStatus::Opened(
+            "https://github.com/MinaryHub/Kreate/issues/new".into(),
+        );
     }) else {
         eprintln!("no GPU; skipping");
         return;

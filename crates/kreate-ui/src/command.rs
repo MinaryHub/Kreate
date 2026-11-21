@@ -261,8 +261,11 @@ pub enum Command {
     },
     /// Leave the session; the scene stays as it was.
     CollabLeave,
-    /// Help ▸ Contact.
-    OpenContact,
+    /// Help ▸ Report an Issue (0) or Ask a Question (1): the form, at that
+    /// kind of `contact::KINDS`.
+    OpenContact {
+        kind: usize,
+    },
     /// Help ▸ About Kreate.
     OpenAbout,
     /// Help ▸ Check for Updates: look for a newer release now.
@@ -287,12 +290,11 @@ pub enum Command {
     ObjectPickConfirm,
     /// Picking objects in the viewport is given up.
     ObjectPickCancel,
-    /// From the contact form: send this to the developers. `kind` is one of
+    /// From the form: open GitHub with this written in. `kind` indexes
     /// `contact::KINDS`.
     ContactSend {
-        kind: String,
-        name: String,
-        email: String,
+        kind: usize,
+        title: String,
         message: String,
         include_details: bool,
     },

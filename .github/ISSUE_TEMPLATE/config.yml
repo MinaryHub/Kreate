@@ -1,0 +1,10 @@
+# Questions and ideas belong in Discussions; Kreate's Help ▸ Ask a Question
+# opens them there (categories "Q&A" and "Ideas").
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question
+    url: https://github.com/MinaryHub/Kreate/discussions/new?category=q-a
+    about: How to do something in Kreate — answered in Discussions.
+  - name: Suggest an idea
+    url: https://github.com/MinaryHub/Kreate/discussions/new?category=ideas
+    about: A feature you would like — discussed and voted on in Discussions.

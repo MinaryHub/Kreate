@@ -201,9 +201,11 @@ pub struct ShellState {
     /// Who Claude Code is signed in as, and the code box for signing in.
     pub chat_account: kreate_ui::chat::ChatAccount,
     pub chat_code: String,
-    /// Help ▸ Contact's form, kept while closed so a half-written message
+    /// Help ▸ Report an Issue / Ask a Question's form, kept while closed so a half-written message
     /// survives, and whether Help ▸ About is showing.
     pub contact: kreate_ui::contact::ContactForm,
+    /// The graphics card, as the report form says it.
+    pub gpu_name: String,
     /// File ▸ Shared Session: what was typed, and how the session stands.
     pub collab: kreate_ui::collab::CollabForm,
     pub collab_view: Option<kreate_ui::collab::CollabView>,
@@ -942,6 +944,7 @@ impl Default for ShellState {
             chat_account: kreate_ui::chat::ChatAccount::Checking,
             chat_code: String::new(),
             contact: kreate_ui::contact::ContactForm::new(),
+            gpu_name: String::new(),
             collab: Default::default(),
             collab_view: None,
             about_open: false,
@@ -1944,27 +1947,15 @@ struct Labels {
     menu_file: String,
     menu_edit: String,
     menu_help: String,
-    help_contact: String,
+    help_report_issue: String,
+    help_ask: String,
     help_donate: String,
     file_collab: String,
     help_about: String,
     help_updates: String,
     help_welcome: String,
     contact_title: String,
-    contact_intro: String,
-    contact_kind_bug: String,
-    contact_kind_feature: String,
-    contact_kind_question: String,
-    contact_kind_other: String,
-    contact_name: String,
-    contact_email: String,
-    contact_email_hint: String,
-    contact_message_hint: String,
-    contact_details: String,
-    contact_send: String,
     contact_close: String,
-    contact_sending: String,
-    contact_sent: String,
     about_title: String,
     about_version: String,
     menu_view: String,
@@ -2368,27 +2359,15 @@ impl Labels {
             menu_file: t("menu-file"),
             menu_edit: t("menu-edit"),
             menu_help: t("menu-help"),
-            help_contact: t("help-contact"),
+            help_report_issue: t("help-report-issue"),
+            help_ask: t("help-ask"),
             help_donate: t("help-donate"),
             file_collab: t("menu-file-collab"),
             help_about: t("help-about"),
             help_updates: t("help-updates"),
             help_welcome: t("help-welcome"),
             contact_title: t("contact-title"),
-            contact_intro: t("contact-intro"),
-            contact_kind_bug: t("contact-kind-bug"),
-            contact_kind_feature: t("contact-kind-feature"),
-            contact_kind_question: t("contact-kind-question"),
-            contact_kind_other: t("contact-kind-other"),
-            contact_name: t("contact-name"),
-            contact_email: t("contact-email"),
-            contact_email_hint: t("contact-email-hint"),
-            contact_message_hint: t("contact-message-hint"),
-            contact_details: t("contact-details"),
-            contact_send: t("contact-send"),
             contact_close: t("contact-close"),
-            contact_sending: t("contact-sending"),
-            contact_sent: t("contact-sent"),
             about_title: t("about-title"),
             about_version: t("about-version"),
             menu_view: t("menu-view"),
@@ -4901,9 +4880,14 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                 MenuNode::ConnectApps,
                 Separator,
                 entry(
-                    "help.contact",
-                    &l.help_contact,
-                    Run::Command(Command::OpenContact),
+                    "help.report_issue",
+                    &l.help_report_issue,
+                    Run::Command(Command::OpenContact { kind: 0 }),
+                ),
+                entry(
+                    "help.ask",
+                    &l.help_ask,
+                    Run::Command(Command::OpenContact { kind: 1 }),
                 ),
                 entry("help.donate", &l.help_donate, Run::Command(Command::Donate)),
                 entry(
@@ -7766,30 +7750,34 @@ fn draw_console(ui: &mut Ui, state: &mut ShellState, history: &History, l: &Labe
 
 /// Help's two windows: the contact form and About.
 fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
+    let t = |key: &str| state.catalog.get(key);
     let text = kreate_ui::contact::ContactText {
         title: l.contact_title.clone(),
-        intro: l.contact_intro.clone(),
-        kinds: [
-            l.contact_kind_bug.clone(),
-            l.contact_kind_feature.clone(),
-            l.contact_kind_question.clone(),
-            l.contact_kind_other.clone(),
+        intros: [
+            t("contact-intro-issue"),
+            t("contact-intro-question"),
+            t("contact-intro-idea"),
         ],
-        name: l.contact_name.clone(),
-        email: l.contact_email.clone(),
-        email_hint: l.contact_email_hint.clone(),
-        message_hint: l.contact_message_hint.clone(),
-        details: l.contact_details.clone(),
-        send: l.contact_send.clone(),
+        kinds: [
+            t("contact-kind-issue"),
+            t("contact-kind-question"),
+            t("contact-kind-idea"),
+        ],
+        subject: t("contact-subject"),
+        subject_hint: t("contact-subject-hint"),
+        message_hint: t("contact-message-hint"),
+        details: t("contact-details"),
+        send: t("contact-open-github"),
         close: l.contact_close.clone(),
-        sending: l.contact_sending.clone(),
-        sent: l.contact_sent.clone(),
+        opened: t("contact-opened"),
+        copy: t("contact-copy-link"),
     };
-    // i18n-exempt: a version and a platform
+    // i18n-exempt: a version, a platform and a graphics card
     let details = format!(
-        "Kreate {} · {}",
+        "Kreate {} · {} · {}",
         crate::version::describe(),
-        crate::version::platform()
+        crate::version::platform(),
+        state.gpu_name
     );
     kreate_ui::contact::contact_window(ctx, &text, &mut state.contact, &details, &mut state.queue);
     let t = |key: &str| state.catalog.get(key);
@@ -19192,7 +19180,8 @@ mod tests {
             "chat-cancel",
             "sculpt-coarse",
             "menu-help",
-            "help-contact",
+            "help-report-issue",
+            "help-ask",
             "help-donate",
             "help-logs",
             "chat-history",

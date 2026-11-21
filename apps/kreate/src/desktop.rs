@@ -21,9 +21,11 @@ pub const SPONSORS_URL: &str = "https://github.com/sponsors/MinaryHub";
 
 /// Opens a web address in the system's browser.
 pub fn open_url(url: &str) {
+    // Not `cmd /C start`: cmd reads the `&` between a link's parameters as
+    // the end of the command, and opened GitHub with only the first one.
     let mut command = if cfg!(windows) {
-        let mut c = crate::claude::quiet_command("cmd");
-        c.args(["/C", "start", ""]);
+        let mut c = crate::claude::quiet_command("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
         c
     } else if cfg!(target_os = "macos") {
         crate::claude::quiet_command("open")
