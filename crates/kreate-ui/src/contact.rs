@@ -1,27 +1,28 @@
-//! Help ▸ Contact and Help ▸ About: writing to the developers, and saying
-//! which Kreate this is.
+//! Help ▸ Report an Issue, Help ▸ Ask a Question, and Help ▸ About.
 //!
-//! The crate draws the forms; the application sends. What is typed lives in a
+//! The crate draws the forms; the application opens GitHub with what was
+//! written (see `kreate::feedback`). What is typed lives in a
 //! [`ContactForm`] the application keeps, so a message half written survives
-//! closing the window, and the send comes back as a [`Command::ContactSend`].
+//! closing the window, and "Open on GitHub" comes back as a
+//! [`Command::ContactSend`].
 
 use egui::Ui;
 
 use crate::{Command, CommandQueue};
 
-/// What a message is about, in the order the form offers them.
-pub const KINDS: [&str; 4] = ["bug", "feature", "question", "other"];
+/// What is being written, in the order the form offers them: a problem (a
+/// GitHub issue), a question or an idea (a GitHub discussion).
+pub const KINDS: [&str; 3] = ["issue", "question", "idea"];
 
-/// The contact form and where its message has got to.
+/// The form and where its message has got to.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContactForm {
     pub open: bool,
     /// An index into [`KINDS`].
     pub kind: usize,
-    pub name: String,
-    pub email: String,
+    pub title: String,
     pub message: String,
-    /// Send the version and the platform with it.
+    /// Put the version, the platform and the graphics card with it.
     pub include_details: bool,
     pub status: ContactStatus,
 }
@@ -30,10 +31,8 @@ pub struct ContactForm {
 pub enum ContactStatus {
     #[default]
     Writing,
-    Sending,
-    Sent,
-    /// Why it did not go.
-    Failed(String),
+    /// GitHub was opened in the browser at this address.
+    Opened(String),
 }
 
 impl ContactForm {
@@ -44,34 +43,37 @@ impl ContactForm {
         }
     }
 
-    /// Opens the form, ready for a new message if the last one went.
-    pub fn open(&mut self) {
-        if self.status == ContactStatus::Sent {
+    /// Opens the form at `kind`, ready for a new message if the last one
+    /// went to GitHub.
+    pub fn open(&mut self, kind: usize) {
+        if matches!(self.status, ContactStatus::Opened(_)) {
+            self.title.clear();
             self.message.clear();
             self.status = ContactStatus::Writing;
         }
+        self.kind = kind.min(KINDS.len() - 1);
         self.open = true;
     }
 }
 
-/// The contact form's translated strings.
+/// The form's translated strings.
 pub struct ContactText {
     pub title: String,
-    pub intro: String,
-    pub kinds: [String; 4],
-    pub name: String,
-    pub email: String,
-    pub email_hint: String,
+    /// What each kind is for, said under the choice.
+    pub intros: [String; 3],
+    pub kinds: [String; 3],
+    pub subject: String,
+    pub subject_hint: String,
     pub message_hint: String,
     pub details: String,
     pub send: String,
     pub close: String,
-    pub sending: String,
-    pub sent: String,
+    pub opened: String,
+    pub copy: String,
 }
 
-/// Draws the contact window when it is open. `details` is what "include the
-/// version" sends, shown so the user sees exactly what goes.
+/// Draws the form when it is open. `details` is what "include the
+/// version" puts with it, shown so the person sees exactly what goes.
 pub fn contact_window(
     ctx: &egui::Context,
     text: &ContactText,
@@ -88,7 +90,7 @@ pub fn contact_window(
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width(440.0)
+        .default_width(460.0)
         // In the middle of the window, clear of the menus it was opened from.
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.content_rect().center())
@@ -106,56 +108,45 @@ fn draw_form(
     queue: &mut CommandQueue,
 ) {
     let theme = crate::theme::from_ui(ui);
-    let sending = form.status == ContactStatus::Sending;
-    ui.add(egui::Label::new(egui::RichText::new(&text.intro).color(theme.text_dim)).wrap());
-    ui.add_space(6.0);
-    ui.add_enabled_ui(!sending, |ui| {
-        ui.horizontal(|ui| {
-            for (i, label) in text.kinds.iter().enumerate() {
-                ui.selectable_value(&mut form.kind, i, label);
-            }
-        });
-        ui.add_space(4.0);
-        egui::Grid::new("contact-fields")
-            .num_columns(2)
-            .spacing([8.0, 6.0])
-            .show(ui, |ui| {
-                ui.label(&text.name);
-                ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(f32::INFINITY));
-                ui.end_row();
-                ui.label(&text.email);
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.email)
-                        .hint_text(&text.email_hint)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.end_row();
-            });
-        ui.add_space(4.0);
-        ui.add(
-            egui::TextEdit::multiline(&mut form.message)
-                .hint_text(&text.message_hint)
-                .desired_rows(8)
-                .desired_width(f32::INFINITY),
-        );
-        ui.checkbox(&mut form.include_details, &text.details);
-        if form.include_details {
-            // i18n-exempt: the version and platform, as sent
-            ui.label(egui::RichText::new(details).small().color(theme.text_faint));
+    ui.horizontal(|ui| {
+        for (i, label) in text.kinds.iter().enumerate() {
+            ui.selectable_value(&mut form.kind, i, label);
         }
     });
+    let kind = form.kind.min(KINDS.len() - 1);
+    ui.add(egui::Label::new(egui::RichText::new(&text.intros[kind]).color(theme.text_dim)).wrap());
+    ui.add_space(6.0);
+    ui.add(
+        egui::TextEdit::singleline(&mut form.title)
+            .hint_text(&text.subject_hint)
+            .desired_width(f32::INFINITY),
+    )
+    .on_hover_text(&text.subject);
+    ui.add_space(4.0);
+    ui.add(
+        egui::TextEdit::multiline(&mut form.message)
+            .hint_text(&text.message_hint)
+            .desired_rows(8)
+            .desired_width(f32::INFINITY),
+    );
+    ui.checkbox(&mut form.include_details, &text.details);
+    if form.include_details {
+        // i18n-exempt: the version, platform and graphics card, as sent
+        ui.label(egui::RichText::new(details).small().color(theme.text_faint));
+    }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let ready = !sending && !form.message.trim().is_empty();
+        let ready = !form.title.trim().is_empty() && !form.message.trim().is_empty();
         if ui
-            .add_enabled(ready, egui::Button::new(&text.send))
+            .add_enabled(
+                ready,
+                egui::Button::new(egui::RichText::new(&text.send).strong()),
+            )
             .clicked()
         {
-            form.status = ContactStatus::Sending;
             queue.push(Command::ContactSend {
-                kind: KINDS[form.kind.min(KINDS.len() - 1)].to_string(),
-                name: form.name.trim().to_string(),
-                email: form.email.trim().to_string(),
+                kind,
+                title: form.title.trim().to_string(),
                 message: form.message.trim().to_string(),
                 include_details: form.include_details,
             });
@@ -163,21 +154,15 @@ fn draw_form(
         if ui.button(&text.close).clicked() {
             form.open = false;
         }
-        match &form.status {
-            ContactStatus::Writing => {}
-            ContactStatus::Sending => {
-                ui.spinner();
-                ui.label(egui::RichText::new(&text.sending).color(theme.text_dim));
-            }
-            ContactStatus::Sent => {
-                ui.label(egui::RichText::new(&text.sent).color(theme.text));
-            }
-            ContactStatus::Failed(why) => {
-                // i18n-exempt: the service's own explanation
-                ui.add(egui::Label::new(egui::RichText::new(why).color(theme.accent)).wrap());
-            }
-        }
     });
+    if let ContactStatus::Opened(url) = &form.status {
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(egui::RichText::new(&text.opened).color(theme.text)).wrap());
+        // The address too, for a computer whose browser did not come up.
+        if ui.small_button(&text.copy).clicked() {
+            ui.ctx().copy_text(url.clone());
+        }
+    }
 }
 
 /// The About window's translated strings.
