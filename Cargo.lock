@@ -1579,6 +1579,7 @@ dependencies = [
  "kreate-io",
  "kreate-math",
  "kreate-mesh",
+ "kreate-occt",
  "kreate-ops",
  "kreate-reflect",
  "kreate-render",

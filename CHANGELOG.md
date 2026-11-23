@@ -10,6 +10,12 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Android build: the shell's STEP export needs kreate-occt, which the
+  Android library did not depend on, so 0.15.0's release stopped there and
+  published nothing.
+
 ## [0.15.0] - 2026-11-23
 
 ### Added
