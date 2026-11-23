@@ -1511,7 +1511,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kreate"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ahash",
  "arboard",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-android"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "base64 0.13.1",
  "bytes",
@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-collab"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "kreate-io",
  "kreate-math",
@@ -1612,21 +1612,21 @@ dependencies = [
 
 [[package]]
 name = "kreate-fonts"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ttf-parser",
 ]
 
 [[package]]
 name = "kreate-geom2d"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "glam",
 ]
 
 [[package]]
 name = "kreate-i18n"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "fluent-bundle",
  "fluent-syntax",
@@ -1639,14 +1639,14 @@ dependencies = [
 
 [[package]]
 name = "kreate-input"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "kreate-reflect",
 ]
 
 [[package]]
 name = "kreate-io"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-math"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "bytemuck",
  "glam",
@@ -1678,14 +1678,14 @@ dependencies = [
 
 [[package]]
 name = "kreate-mcp"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "kreate-mesh"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1699,14 +1699,14 @@ dependencies = [
 
 [[package]]
 name = "kreate-occt"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "kreate-ops"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "glam",
  "kreate-geom2d",
@@ -1723,22 +1723,22 @@ dependencies = [
 
 [[package]]
 name = "kreate-ops-derive"
-version = "0.15.0"
+version = "0.15.1"
 
 [[package]]
 name = "kreate-reflect"
-version = "0.15.0"
+version = "0.15.1"
 
 [[package]]
 name = "kreate-relay"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "kreate-collab",
 ]
 
 [[package]]
 name = "kreate-render"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-scene"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "glam",
  "kreate-geom2d",
@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-shader"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "kreate-math",
  "kreate-scene",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-testkit"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "glam",
  "kreate-math",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "kreate-ui"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "ab_glyph",
  "egui",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "kreatec"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "glam",
  "kreate-io",
