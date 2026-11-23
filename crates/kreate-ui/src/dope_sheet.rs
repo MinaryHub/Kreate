@@ -106,6 +106,8 @@ pub struct SheetState {
     /// Object rows folded shut, by target: their property rows are hidden and
     /// their summary row stands for them, as in Blender.
     collapsed: std::collections::BTreeSet<String>,
+    /// Vertical scroll offset in points.
+    pub scroll_y: f32,
 }
 
 /// How wide the column of row names is.
@@ -121,13 +123,19 @@ const KEY_RADIUS: f32 = 5.0;
 pub struct Layout {
     pub keys: Rect,
     pub range: (f64, f64),
+    pub scroll_y: f32,
 }
 
 impl Layout {
     pub fn new(rect: Rect, range: (f64, f64)) -> Self {
+        Self::with_scroll(rect, range, 0.0)
+    }
+
+    pub fn with_scroll(rect: Rect, range: (f64, f64), scroll_y: f32) -> Self {
         Self {
             keys: Rect::from_min_max(Pos2::new(rect.min.x + NAMES, rect.min.y + RULER), rect.max),
             range,
+            scroll_y,
         }
     }
 
@@ -140,11 +148,12 @@ impl Layout {
     }
 
     pub fn row_y(&self, row: usize) -> f32 {
-        self.keys.min.y + (row as f32 + 0.5) * ROW
+        self.keys.min.y + (row as f32 + 0.5) * ROW - self.scroll_y
     }
 
     pub fn row_at(&self, y: f32) -> Option<usize> {
-        (y >= self.keys.min.y).then(|| ((y - self.keys.min.y) / ROW) as usize)
+        (y >= self.keys.min.y)
+            .then(|| ((y - self.keys.min.y + self.scroll_y).max(0.0) / ROW) as usize)
     }
 
     /// Points a frame is wide on screen.
@@ -216,29 +225,39 @@ pub fn dope_sheet(
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 0.0, theme.sunken);
 
+    let body_h = (rect.height() - RULER).max(ROW);
+    let max_scroll = (view.rows.len() as f32 * ROW - body_h).max(0.0);
+    state.scroll_y = state.scroll_y.clamp(0.0, max_scroll);
+
     let range = state.range.unwrap_or_else(|| visible(view.start, view.end));
-    let layout = Layout::new(rect, range);
+    let layout = Layout::with_scroll(rect, range, state.scroll_y);
     let hovered = ui.rect_contains_pointer(rect);
     let pointer = ui.input(|i| i.pointer.interact_pos());
 
     // --- zoom and pan ------------------------------------------------------------
     if hovered {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        let (scroll, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.shift));
         if scroll != 0.0 {
             if let Some(p) = pointer {
-                let anchor = layout.frame(p.x);
-                let k = (1.0 - scroll as f64 * 0.0015).clamp(0.5, 2.0);
-                let (a, b) = range;
-                state.range = Some((anchor + (a - anchor) * k, anchor + (b - anchor) * k));
+                if p.x < layout.keys.min.x || shift {
+                    state.scroll_y = (state.scroll_y - scroll).clamp(0.0, max_scroll);
+                } else {
+                    let anchor = layout.frame(p.x);
+                    let k = (1.0 - scroll as f64 * 0.0015).clamp(0.5, 2.0);
+                    let (a, b) = range;
+                    state.range = Some((anchor + (a - anchor) * k, anchor + (b - anchor) * k));
+                }
             }
         }
     }
     if response.dragged_by(egui::PointerButton::Middle) {
-        let df = -(response.drag_delta().x / layout.frame_width()) as f64;
+        let delta = response.drag_delta();
+        let df = -(delta.x / layout.frame_width()) as f64;
         state.range = Some((range.0 + df, range.1 + df));
+        state.scroll_y = (state.scroll_y - delta.y).clamp(0.0, max_scroll);
     }
     let range = state.range.unwrap_or(range);
-    let layout = Layout::new(rect, range);
+    let layout = Layout::with_scroll(rect, range, state.scroll_y);
 
     // --- the grid ----------------------------------------------------------------
     let ruler = Rect::from_min_max(
@@ -300,10 +319,15 @@ pub fn dope_sheet(
 
     // --- rows ----------------------------------------------------------------------
     painter.rect_filled(names, 0.0, theme.base);
+    let rows_clip = Rect::from_min_max(Pos2::new(rect.min.x, layout.keys.min.y), rect.max);
+    let rows_painter = ui.painter().with_clip_rect(rows_clip);
     for (i, row) in view.rows.iter().enumerate() {
         let y = layout.row_y(i);
+        if y + ROW * 0.5 < layout.keys.min.y || y - ROW * 0.5 > rect.max.y {
+            continue;
+        }
         if row.depth == 0 {
-            painter.rect_filled(
+            rows_painter.rect_filled(
                 Rect::from_center_size(
                     Pos2::new(rect.center().x, y),
                     Vec2::new(rect.width(), ROW - 1.0),
@@ -329,13 +353,13 @@ pub fn dope_sheet(
                     c + Vec2::new(0.0, 3.5),
                 ]
             };
-            painter.add(egui::Shape::convex_polygon(
+            rows_painter.add(egui::Shape::convex_polygon(
                 points,
                 theme.text_dim,
                 Stroke::NONE,
             ));
         }
-        painter.text(
+        rows_painter.text(
             Pos2::new(names.min.x + 18.0 + row.depth as f32 * 12.0, y),
             egui::Align2::LEFT_CENTER,
             &row.label,
@@ -361,7 +385,7 @@ pub fn dope_sheet(
             } else {
                 KEY_RADIUS - 1.0
             };
-            painter.add(egui::Shape::convex_polygon(
+            rows_painter.add(egui::Shape::convex_polygon(
                 vec![
                     Pos2::new(x, y - r),
                     Pos2::new(x + r, y),
@@ -376,6 +400,19 @@ pub fn dope_sheet(
                 Stroke::new(1.0, Color32::BLACK),
             ));
         }
+    }
+    if max_scroll > 0.0 {
+        let total_h = view.rows.len() as f32 * ROW;
+        let thumb_h = (body_h * (body_h / total_h)).clamp(18.0, body_h);
+        let thumb_y = layout.keys.min.y + (state.scroll_y / max_scroll) * (body_h - thumb_h);
+        painter.rect_filled(
+            Rect::from_min_size(
+                Pos2::new(rect.max.x - 5.0, thumb_y),
+                Vec2::new(3.5, thumb_h),
+            ),
+            2.0,
+            theme.text_faint,
+        );
     }
 
     // The clock.
@@ -495,7 +532,7 @@ pub fn dope_sheet(
     // --- keys ------------------------------------------------------------------------
     if hovered && !ui.ctx().egui_wants_keyboard_input() && state.drag == Drag::None {
         let (alt, ctrl) = ui.input(|i| (i.modifiers.alt, i.modifiers.command));
-        let pressed = |k: Key| ui.input(|i| i.key_pressed(k));
+        let pressed = |k: Key| ui.input(|i| crate::text::physical_key_pressed(i, k));
         if pressed(Key::A) {
             out.push(SheetEdit::SelectAll(if alt { 1 } else { 0 }));
         }

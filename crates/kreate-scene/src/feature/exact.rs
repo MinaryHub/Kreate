@@ -267,6 +267,32 @@ pub fn body_solid(doc: &Document, features: &[Feature], body_world: DAffine3) ->
     out.filter(|s| s.is_valid())
 }
 
+/// An object's active feature body as an exact B-rep solid placed in world
+/// space, ready for analytic STEP export (`kreate_occt::write_step`).
+/// Returns `None` if the kernel is unavailable, the object has modifiers or
+/// no features, or any active feature falls back to the mesh kernel.
+pub fn world_solid(doc: &Document, id: crate::document::ObjectId) -> Option<Solid> {
+    if !enabled() {
+        return None;
+    }
+    let o = doc.object(id)?;
+    if o.features.is_empty() || o.modifiers.iter().any(|m| m.enabled) {
+        return None;
+    }
+    let active: Vec<Feature> = o
+        .features
+        .iter()
+        .filter(|f| !f.suppressed && doc.design.rollback.is_none_or(|r| f.order <= r))
+        .cloned()
+        .collect();
+    if active.is_empty() {
+        return None;
+    }
+    let world = doc.world_transform(id);
+    let local = body_solid(doc, &active, world)?;
+    local.transformed(rows(world))
+}
+
 /// A body built exactly and meshed for the screen, its faces' shared
 /// corners welded so the surface is closed where the solid is. `None` when
 /// it cannot be (see [`body_solid`]).

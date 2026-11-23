@@ -58,6 +58,16 @@ impl Budget {
         let bytes = self.read(entry)?;
         String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
+
+    /// Charges `bytes` against the archive's remaining allowance without copying
+    /// an uncompressed (`STORED`) slice into a second `Vec<u8>`.
+    pub fn claim(&mut self, name: &str, bytes: u64) -> io::Result<()> {
+        if bytes > self.left {
+            return Err(too_large(name));
+        }
+        self.left -= bytes;
+        Ok(())
+    }
 }
 
 impl Default for Budget {

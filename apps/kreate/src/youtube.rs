@@ -15,9 +15,6 @@
 //! caption addresses the web page gives out answer with nothing unless the
 //! asker proves it is a browser playing the video, which `curl` cannot.
 
-use std::io::Write;
-use std::process::Stdio;
-
 use serde_json::Value;
 
 /// The most of a video's captions sent, in characters: about an hour of talk.
@@ -83,31 +80,6 @@ pub fn video_ids(text: &str) -> Vec<String> {
     out
 }
 
-/// `curl`, its body on its input, its answer as text.
-fn curl(args: &[&str], body: Option<&str>) -> Result<String, String> {
-    let program = if cfg!(windows) { "curl.exe" } else { "curl" };
-    let mut child = crate::claude::quiet_command(program)
-        .args(["-s", "-S", "-L", "-m", "30"])
-        .args(args)
-        .stdin(if body.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot start curl: {e}"))?;
-    if let (Some(body), Some(mut input)) = (body, child.stdin.take()) {
-        let _ = input.write_all(body.as_bytes());
-    }
-    let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 /// Reads a video: its details and, if it has any, its captions —
 /// `languages` tried in order, captions someone wrote before YouTube's own.
 pub fn fetch(id: &str, languages: &[&str]) -> Result<Video, String> {
@@ -121,17 +93,18 @@ pub fn fetch(id: &str, languages: &[&str]) -> Result<Video, String> {
         "videoId": id,
     })
     .to_string();
-    let answer = curl(
+    let answer = crate::http::post_text(
+        "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
         &[
-            "-H",
-            "Content-Type: application/json",
-            "-A",
-            "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
-            "--data-binary",
-            "@-",
-            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+            ("Content-Type", "application/json"),
+            (
+                "User-Agent",
+                "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
+            ),
         ],
-        Some(&body),
+        body.as_bytes(),
+        std::time::Duration::from_secs(30),
+        8 * 1024 * 1024,
     )?;
     let player: Value = serde_json::from_str(&answer)
         .map_err(|_| "YouTube answered with something else".to_string())?;
@@ -170,7 +143,9 @@ pub fn fetch(id: &str, languages: &[&str]) -> Result<Video, String> {
     if let Some(track) = pick_track(&tracks, languages) {
         let url = track.get("baseUrl").and_then(Value::as_str).unwrap_or("");
         if !url.is_empty() {
-            if let Ok(xml) = curl(&[url], None) {
+            if let Ok(xml) =
+                crate::http::get_text(url, std::time::Duration::from_secs(30), 8 * 1024 * 1024)
+            {
                 let lines = parse_captions(&xml);
                 if !lines.is_empty() {
                     video.captions = Some(Captions {

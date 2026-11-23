@@ -687,7 +687,7 @@ fn graph_plot(
     if hovered && !ui.ctx().egui_wants_keyboard_input() && state.drag == Drag::None {
         let (alt, ctrl, shift) =
             ui.input(|i| (i.modifiers.alt, i.modifiers.command, i.modifiers.shift));
-        let pressed = |k: Key| ui.input(|i| i.key_pressed(k));
+        let pressed = |k: Key| ui.input(|i| crate::text::physical_key_pressed(i, k));
         if pressed(Key::A) {
             out.push(GraphEdit::SelectAll(if alt { 1 } else { 0 }));
         }

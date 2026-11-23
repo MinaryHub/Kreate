@@ -12,7 +12,7 @@
 //! `http://localhost:11434`. Requests go through `curl`, as every other
 //! request in Kreate does.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,27 +111,16 @@ pub fn host() -> String {
     with_scheme.replace("://0.0.0.0", "://localhost")
 }
 
-fn curl() -> &'static str {
-    if cfg!(windows) {
-        "curl.exe"
-    } else {
-        "curl"
-    }
-}
-
 /// The models Ollama has, or why it could not be asked.
 pub fn models() -> Result<Vec<Model>, String> {
     let host = host();
-    let out = quiet_command(curl())
-        .args(["-sS", "-m", "5"])
-        .arg(format!("{host}/api/tags"))
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run curl: {e}"))?;
-    if !out.status.success() {
-        return Err(not_running(&host));
-    }
-    parse_models(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| not_running(&host))
+    let body = crate::http::get_text(
+        &format!("{host}/api/tags"),
+        std::time::Duration::from_secs(5),
+        8 * 1024 * 1024,
+    )
+    .map_err(|_| not_running(&host))?;
+    parse_models(&body).ok_or_else(|| not_running(&host))
 }
 
 fn not_running(host: &str) -> String {
@@ -201,22 +190,16 @@ pub fn pick(models: &[Model], saved: Option<&str>) -> Option<usize> {
         .or(if models.is_empty() { None } else { Some(0) })
 }
 
-/// A turn's way to be stopped: the flag the loop looks at between steps,
-/// and the request it is waiting on.
+/// A turn's way to be stopped: the flag the loop looks at between steps
+/// and streamed chunks.
 #[derive(Default)]
 pub struct Stop {
     stopped: AtomicBool,
-    waiting: Mutex<Option<Child>>,
 }
 
 impl Stop {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
-        if let Ok(mut child) = self.waiting.lock() {
-            if let Some(child) = child.as_mut() {
-                let _ = child.kill();
-            }
-        }
     }
 
     fn stopped(&self) -> bool {
@@ -580,33 +563,22 @@ fn run(
 /// One request to `/api/chat`, its words streamed out as they come.
 fn ask(body: &Value, stop: &Stop, say: &dyn Fn(Event)) -> Result<(String, Vec<Value>), String> {
     let host = host();
-    let mut child = quiet_command(curl())
-        .args(["-sS", "-N", "-X", "POST"])
-        .arg(format!("{host}/api/chat"))
-        .args([
-            "-H",
-            "Content-Type: application/json",
-            "--data-binary",
-            "@-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run curl: {e}"))?;
-    let mut input = child.stdin.take().expect("piped");
-    let stdout = child.stdout.take().expect("piped");
-    let mut stderr = child.stderr.take().expect("piped");
     let request = body.to_string();
-    // A conversation with pictures is more than a pipe holds.
-    let writer = std::thread::spawn(move || {
-        let _ = input.write_all(request.as_bytes());
-    });
-    *stop.waiting.lock().map_err(|_| "stopped")? = Some(child);
+    let stream = crate::http::post_stream(
+        &format!("{host}/api/chat"),
+        &[("Content-Type", "application/json")],
+        request.as_bytes(),
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(600),
+    )
+    .map_err(|e| format!("{} ({e})", not_running(&host)))?;
     let mut text = String::new();
     let mut calls = Vec::new();
     let mut error = None;
-    for line in BufReader::new(stdout).lines() {
+    for line in stream.lines() {
+        if stop.stopped() {
+            return Err("stopped".into());
+        }
         let Ok(line) = line else { break };
         let chunk = parse_chunk(&line);
         if !chunk.text.is_empty() {
@@ -621,24 +593,11 @@ fn ask(body: &Value, stop: &Stop, say: &dyn Fn(Event)) -> Result<(String, Vec<Va
             break;
         }
     }
-    let _ = writer.join();
-    let mut child = stop
-        .waiting
-        .lock()
-        .map_err(|_| "stopped")?
-        .take()
-        .expect("put there above");
-    let status = child.wait();
     if stop.stopped() {
         return Err("stopped".into());
     }
     if let Some(error) = error {
         return Err(format!("Ollama: {error}"));
-    }
-    if !status.is_ok_and(|s| s.success()) {
-        let mut why = String::new();
-        let _ = stderr.read_to_string(&mut why);
-        return Err(format!("{} ({})", not_running(&host), why.trim()));
     }
     Ok((text, calls))
 }

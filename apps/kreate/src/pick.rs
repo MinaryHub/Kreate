@@ -98,10 +98,11 @@ impl PickCache {
     pub fn retain_live(&mut self, scene: &[(ObjectId, Arc<MeshData>)]) {
         // A tree whose mesh has only moved its vertices is kept for the mesh
         // that replaced it: `entry` refits it rather than building anew.
+        let live: ahash::AHashSet<usize> =
+            scene.iter().map(|(_, m)| Arc::as_ptr(m) as usize).collect();
         self.entries.retain(|e| {
-            scene.iter().any(|(_, m)| {
-                Arc::ptr_eq(m, &e.mesh) || (e.replaceable() && m.same_topology(&e.mesh))
-            })
+            live.contains(&(Arc::as_ptr(&e.mesh) as usize))
+                || (e.replaceable() && scene.iter().any(|(_, m)| m.same_topology(&e.mesh)))
         });
     }
 

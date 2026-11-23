@@ -301,6 +301,101 @@ pub fn save_ui_scale(path: &Path, scale: f32) -> Result<(), std::io::Error> {
     set_interface_line(path, "scale", &format!("{scale}"))
 }
 
+/// Detects the operating system's preferred UI locale (`"ko-KR"` or `"en-US"`).
+pub fn detect_system_locale() -> &'static str {
+    for var in ["KREATE_LANG", "LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(val) = std::env::var(var) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() && trimmed != "C" && trimmed != "POSIX" {
+                if trimmed
+                    .get(..2)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("ko"))
+                {
+                    return "ko-KR";
+                }
+                return "en-US";
+            }
+        }
+    }
+    "en-US"
+}
+
+/// Explicit language override from `interface.txt` (`None` means follow system locale).
+pub fn load_language(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().find_map(|l| {
+        let (key, value) = l.split_once('=')?;
+        if key.trim() != "language" {
+            return None;
+        }
+        let v = value.trim();
+        if v.is_empty() || v.eq_ignore_ascii_case("auto") {
+            None
+        } else if v.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("ko")) {
+            Some("ko-KR".to_string())
+        } else if v.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("en")) {
+            Some("en-US".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Saves the chosen language (`None` for `"auto"`).
+pub fn save_language(path: &Path, lang: Option<&str>) -> Result<(), std::io::Error> {
+    set_interface_line(path, "language", lang.unwrap_or("auto"))
+}
+
+/// Resolves the startup locale from CLI `--lang`, saved preference, or OS locale.
+pub fn effective_locale(cli_lang: Option<&str>, interface_path: Option<&Path>) -> String {
+    if let Some(cli) = cli_lang.filter(|s| !s.trim().is_empty()) {
+        return cli.to_string();
+    }
+    if let Some(saved) = interface_path.and_then(load_language) {
+        return saved;
+    }
+    detect_system_locale().to_string()
+}
+
+/// Loads partial-translation options (`translate_ui`, `translate_tooltips`, `translate_new_data`).
+pub fn load_translation_options(path: &Path) -> kreate_i18n::TranslationOptions {
+    let mut opts = kreate_i18n::TranslationOptions::default();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return opts;
+    };
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let v = value.trim();
+        match key.trim() {
+            "translate_ui" => opts.ui = v != "false",
+            "translate_tooltips" => opts.tooltips = v != "false",
+            "translate_new_data" => opts.new_data_names = v == "true",
+            _ => {}
+        }
+    }
+    opts
+}
+
+/// Saves partial-translation options into `interface.txt`.
+pub fn save_translation_options(
+    path: &Path,
+    opts: kreate_i18n::TranslationOptions,
+) -> Result<(), std::io::Error> {
+    set_interface_line(path, "translate_ui", if opts.ui { "true" } else { "false" })?;
+    set_interface_line(
+        path,
+        "translate_tooltips",
+        if opts.tooltips { "true" } else { "false" },
+    )?;
+    set_interface_line(
+        path,
+        "translate_new_data",
+        if opts.new_data_names { "true" } else { "false" },
+    )
+}
+
 /// The interface file with `key = value` in it, the other lines kept.
 fn set_interface_line(path: &Path, key: &str, value: &str) -> Result<(), std::io::Error> {
     let old = std::fs::read_to_string(path).unwrap_or_default();
@@ -739,6 +834,39 @@ mod recent_tests {
         assert_eq!(load_resolution_scale(&path), 0.5);
         save_resolution_scale(&path, 0.01).unwrap();
         assert_eq!(load_resolution_scale(&path), MIN_RESOLUTION_SCALE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn language_and_translation_options_round_trip_with_theme() {
+        let dir = std::env::temp_dir().join(format!("kreate-lang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("interface.txt");
+
+        assert_eq!(load_language(&path), None);
+        assert_eq!(
+            load_translation_options(&path),
+            kreate_i18n::TranslationOptions::default()
+        );
+
+        save_appearance(&path, kreate_ui::Appearance::Light).unwrap();
+        save_language(&path, Some("ko-KR")).unwrap();
+        let custom = kreate_i18n::TranslationOptions {
+            ui: false,
+            tooltips: true,
+            new_data_names: true,
+        };
+        save_translation_options(&path, custom).unwrap();
+
+        assert_eq!(load_appearance(&path), kreate_ui::Appearance::Light);
+        assert_eq!(load_language(&path).as_deref(), Some("ko-KR"));
+        assert_eq!(load_translation_options(&path), custom);
+        assert_eq!(effective_locale(None, Some(&path)), "ko-KR");
+        assert_eq!(effective_locale(Some("en-US"), Some(&path)), "en-US");
+
+        save_language(&path, None).unwrap();
+        assert_eq!(load_language(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -177,8 +177,14 @@ impl DocumentFile {
     /// Reads a document from a `.kreate` archive.
     pub fn open(path: &Path) -> Result<(Document, Self), String> {
         let file = std::fs::File::open(path).map_err(|e| format!("cannot open: {e}"))?;
-        let loaded = container::read(std::io::BufReader::new(file))
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        // SAFETY: `file` is read synchronously into owned scene and mesh buffers
+        // inside `read_slice`; no borrowed slice outlives `mmap`.
+        let loaded = match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(mmap) => container::read_slice(&mmap)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?,
+            Err(_) => container::read(std::io::BufReader::new(file))
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?,
+        };
         for entry in &loaded.unknown {
             tracing::info!(entry = %entry.name, "kept an entry this build does not understand");
         }

@@ -51,6 +51,10 @@ flate2 = "1"
 base64 = "0.13"
 # Unpacking an update's release zip. See `update`.
 zip.workspace = true
+memmap2.workspace = true
+ahash.workspace = true
+ureq.workspace = true
+kreate-occt.workspace = true
 
 # A file dialog and the clipboard: neither crate builds for Android, where
 # `kreate::android` stands in for them.
@@ -66,4 +70,4 @@ winresource = "0.1"
 
 [features]
 # Feature bodies built exactly by OpenCASCADE: see kreate-occt.
-occt = ["kreate-scene/occt"]
+occt = ["kreate-scene/occt", "kreate-occt/occt"]

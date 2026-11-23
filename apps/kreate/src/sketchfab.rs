@@ -77,32 +77,19 @@ pub fn signed_in_as() -> Option<String> {
 
 /// `url` from Sketchfab's API, signed in.
 fn get(url: &str, token: &str) -> Result<Value, String> {
-    use std::io::Write;
-    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-    let mut child = crate::claude::quiet_command(curl)
-        .args(["--silent", "--show-error", "--location"])
-        .args(["--max-time", "60", "--max-filesize", "16777216"])
-        .args(["--write-out", "\n%{http_code}"])
-        .args(["--header", "@-"])
-        .arg(url)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot start curl: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = writeln!(stdin, "Authorization: Token {token}");
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let (body, code) = text.rsplit_once('\n').unwrap_or((&text, ""));
-    match code.trim() {
-        "200" => serde_json::from_str(body).map_err(|e| format!("Sketchfab's answer: {e}")),
-        "401" => Err(TOKEN_REFUSED.into()),
-        "403" => Err("Sketchfab does not let this model be downloaded".into()),
-        "404" => Err("Sketchfab has no such model".into()),
-        "429" => Err("Sketchfab asks to wait a moment; try again shortly".into()),
-        "" => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    let auth = format!("Token {token}");
+    let (code, body) = crate::http::get_status_and_text(
+        url,
+        &[("Authorization", &auth)],
+        std::time::Duration::from_secs(60),
+        16 * 1024 * 1024,
+    )?;
+    match code {
+        200 => serde_json::from_str(&body).map_err(|e| format!("Sketchfab's answer: {e}")),
+        401 => Err(TOKEN_REFUSED.into()),
+        403 => Err("Sketchfab does not let this model be downloaded".into()),
+        404 => Err("Sketchfab has no such model".into()),
+        429 => Err("Sketchfab asks to wait a moment; try again shortly".into()),
         other => Err(format!("Sketchfab answered {other}")),
     }
 }

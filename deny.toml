@@ -41,6 +41,7 @@ allow = [
     "MPL-2.0",          # file-level copyleft only; safe to link
     "CC0-1.0",
     "BSL-1.0",          # Boost: permissive, like MIT (clipboard-win, error-code)
+    "CDLA-Permissive-2.0", # Linux Foundation permissive data licence (webpki-root-certs)
 ]
 confidence-threshold = 0.9
 

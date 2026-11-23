@@ -596,11 +596,54 @@ struct Scene {
     instances: wgpu::Buffer,
     /// The device's acceleration structure, where it traces with one.
     hardware: Option<HardwareScene>,
+    layer_of: Vec<i32>,
+    surface_count: usize,
+    value_count: usize,
     emitter_count: u32,
     emitter_total: f32,
     /// The lowest point of the scene: where its floor is, when it is below
     /// the ground.
     lowest: f32,
+}
+
+fn pack_surface_data(surfaces: &[PtSurface], layer_of: &[i32]) -> Vec<[f32; 4]> {
+    let layer = |i: Option<usize>| i.and_then(|i| layer_of.get(i).copied()).unwrap_or(-1) as f32;
+    let mut surface_data: Vec<[f32; 4]> = surfaces
+        .iter()
+        .flat_map(|s| {
+            [
+                [
+                    s.base_color[0],
+                    s.base_color[1],
+                    s.base_color[2],
+                    s.metallic,
+                ],
+                [
+                    s.roughness,
+                    layer(s.base_color_image),
+                    layer(s.metallic_roughness_image),
+                    s.transmission,
+                ],
+                [s.emission[0], s.emission[1], s.emission[2], s.ior.max(1.0)],
+                [
+                    if s.one_sided { 1.0 } else { 0.0 },
+                    // One past the material, so zero is none.
+                    s.material.map_or(0.0, |m| m as f32 + 1.0),
+                    s.alpha_clip.clamp(0.0, 1.0),
+                    0.0,
+                ],
+            ]
+        })
+        .collect();
+    if surface_data.is_empty() {
+        surface_data.extend([
+            [0.8, 0.8, 0.8, 0.0],
+            [0.5, -1.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.5],
+            [0.0; 4],
+        ]);
+    }
+    surface_data
 }
 
 /// The glowing triangles, for the path tracer to aim at: each one's index
@@ -1566,35 +1609,7 @@ impl PathTracer {
                 data_layers.push(pixels);
             }
         }
-        let layer =
-            |i: Option<usize>| i.and_then(|i| layer_of.get(i).copied()).unwrap_or(-1) as f32;
-        let mut surface_data: Vec<[f32; 4]> = surfaces
-            .iter()
-            .flat_map(|s| {
-                [
-                    [
-                        s.base_color[0],
-                        s.base_color[1],
-                        s.base_color[2],
-                        s.metallic,
-                    ],
-                    [
-                        s.roughness,
-                        layer(s.base_color_image),
-                        layer(s.metallic_roughness_image),
-                        s.transmission,
-                    ],
-                    [s.emission[0], s.emission[1], s.emission[2], s.ior.max(1.0)],
-                    [
-                        if s.one_sided { 1.0 } else { 0.0 },
-                        // One past the material, so zero is none.
-                        s.material.map_or(0.0, |m| m as f32 + 1.0),
-                        s.alpha_clip.clamp(0.0, 1.0),
-                        0.0,
-                    ],
-                ]
-            })
-            .collect();
+        let surface_data = pack_surface_data(surfaces, &layer_of);
         let array = |label, format, layers: &[Vec<u8>], size: u32| {
             let count = layers.len().max(1) as u32;
             let size = if layers.is_empty() { 4 } else { size };
@@ -1659,15 +1674,6 @@ impl PathTracer {
             &data_layers,
             data_size,
         );
-        if surface_data.is_empty() {
-            // Three slots a surface, as the shader reads them.
-            surface_data.extend([
-                [0.8, 0.8, 0.8, 0.0],
-                [0.5, -1.0, -1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.5],
-                [0.0; 4],
-            ]);
-        }
         let (emitter_data, emitter_total) = emitters_of(&layout, surfaces);
         let emitter_count = emitter_data.len() as u32;
         // The lowest point, for where the floor goes when the scene reaches
@@ -1697,7 +1703,7 @@ impl PathTracer {
             ..
         } = layout;
         let positions: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 1.0]).collect();
-        let upload = |label, bytes: &[u8]| {
+        let upload_with = |label, bytes: &[u8], extra: wgpu::BufferUsages| {
             let bytes = if bytes.is_empty() {
                 &[0u8; 16][..]
             } else {
@@ -1708,10 +1714,11 @@ impl PathTracer {
                 &wgpu::util::BufferInitDescriptor {
                     label: Some(label),
                     contents: bytes,
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE | extra,
                 },
             )
         };
+        let upload = |label, bytes: &[u8]| upload_with(label, bytes, wgpu::BufferUsages::empty());
         self.scene = Some(Scene {
             uvs: upload("path trace uvs", bytemuck::cast_slice(&uvs)),
             colors: upload(
@@ -1729,15 +1736,23 @@ impl PathTracer {
             triangles: upload("path trace triangles", bytemuck::cast_slice(&triangles)),
             nodes: upload("path trace nodes", bytemuck::cast_slice(&nodes)),
             order: upload("path trace order", bytemuck::cast_slice(&order)),
-            surfaces: upload("path trace surfaces", bytemuck::cast_slice(&surface_data)),
+            surfaces: upload_with(
+                "path trace surfaces",
+                bytemuck::cast_slice(&surface_data),
+                wgpu::BufferUsages::COPY_DST,
+            ),
             emitters: upload("path trace emitters", bytemuck::cast_slice(&emitter_data)),
-            values: upload(
+            values: upload_with(
                 "path trace material values",
                 bytemuck::cast_slice(materials.values),
+                wgpu::BufferUsages::COPY_DST,
             ),
             local: upload("path trace local", bytemuck::cast_slice(&local)),
             instances: upload("path trace placings", bytemuck::cast_slice(&instances)),
             hardware,
+            layer_of,
+            surface_count: surfaces.len(),
+            value_count: materials.values.len(),
             emitter_count,
             emitter_total,
             lowest: if lowest.is_finite() { lowest } else { 0.0 },
@@ -1747,10 +1762,74 @@ impl PathTracer {
         self.history_ok = false;
     }
 
+    /// Rewrites surface parameters and compiled material scalar constants in
+    /// place without rebuilding BVH/BLAS geometry or resampling textures.
+    #[must_use]
+    pub fn update_surfaces(
+        &mut self,
+        queue: &wgpu::Queue,
+        surfaces: &[PtSurface],
+        values: &[[f32; 4]],
+    ) -> bool {
+        let Some(scene) = &self.scene else {
+            return false;
+        };
+        if surfaces.len() != scene.surface_count || values.len() != scene.value_count {
+            return false;
+        }
+        let surface_data = pack_surface_data(surfaces, &scene.layer_of);
+        queue.write_buffer(&scene.surfaces, 0, bytemuck::cast_slice(&surface_data));
+        if !values.is_empty() {
+            queue.write_buffer(&scene.values, 0, bytemuck::cast_slice(values));
+        }
+        self.sample = 0;
+        self.history_ok = false;
+        true
+    }
+
     /// Nothing from before carries over to the next view: the scene's
     /// lights or materials changed, and the picture with them.
     pub fn forget_history(&mut self) {
         self.history_ok = false;
+    }
+
+    /// Shrinks the per-pixel accumulation buffers (`sum`, `aux`, `prev` — 160 B/px)
+    /// back to single-pixel placeholders when path tracing is turned off.
+    pub fn release_framebuffers(&mut self, device: &wgpu::Device) {
+        if self.sum_pixels <= 1 {
+            return;
+        }
+        let per_pixel = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
+        let buffer = |label, size: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: per_pixel,
+                mapped_at_creation: false,
+            })
+        };
+        self.sum = buffer("path trace sum", 32);
+        self.aux = buffer("path trace aux", 48);
+        self.prev = buffer("path trace previous", 80);
+        self.sum_pixels = 1;
+        self.size = (0, 0);
+        self.scene_bind = None;
+        self.resolve_bind = None;
+        self.previous = None;
+        self.sample = 0;
+        self.history_ok = false;
+    }
+
+    /// Releases both the uploaded path-tracing scene (BVH, geometry, textures)
+    /// and the per-pixel accumulation buffers.
+    pub fn clear_scene(&mut self, device: &wgpu::Device) {
+        self.scene = None;
+        self.scene_bind = None;
+        self.sample = 0;
+        self.history_ok = false;
+        self.release_framebuffers(device);
     }
 
     /// The environment's importance map, or none for a flat world.

@@ -18,12 +18,12 @@ struct PtNode {
 @group(0) @binding(4) var<storage, read> pt_nodes: array<PtNode>;
 @group(0) @binding(5) var<storage, read> pt_order: array<u32>;
 
-fn pt_box(origin: vec3<f32>, inv_dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, limit: f32) -> bool {
+fn pt_box_near(origin: vec3<f32>, inv_dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, limit: f32) -> f32 {
     let a = (lo - origin) * inv_dir;
     let b = (hi - origin) * inv_dir;
     let near = max(max(min(a.x, b.x), min(a.y, b.y)), min(a.z, b.z));
     let far = min(min(max(a.x, b.x), max(a.y, b.y)), max(a.z, b.z));
-    return far >= max(near, 0.0) && near < limit;
+    return select(1e30, max(near, 0.0), far >= max(near, 0.0) && near < limit);
 }
 
 fn pt_inverse_dir(dir: vec3<f32>) -> vec3<f32> {
@@ -44,16 +44,31 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: vec2
         }
         top -= 1;
         let node = pt_nodes[stack[top]];
-        if (!pt_box(origin, inv_dir, node.min, node.max, nearest)) {
+        if (pt_box_near(origin, inv_dir, node.min, node.max, nearest) >= 1e29) {
             continue;
         }
         if (node.count == 0u) {
             // A child is never the root: a link to node 0 is the empty
             // scene's placeholder, and following it would not end.
             if (node.first != 0u && top < 46) {
-                stack[top] = node.first;
-                stack[top + 1] = node.first + 1u;
-                top += 2;
+                let c0 = node.first;
+                let c1 = node.first + 1u;
+                let n0 = pt_nodes[c0];
+                let n1 = pt_nodes[c1];
+                let t0 = pt_box_near(origin, inv_dir, n0.min, n0.max, nearest);
+                let t1 = pt_box_near(origin, inv_dir, n1.min, n1.max, nearest);
+                if (t0 < 1e29 && t1 < 1e29) {
+                    // Push farther first so nearer is popped first.
+                    stack[top] = select(c0, c1, t0 <= t1);
+                    stack[top + 1] = select(c1, c0, t0 <= t1);
+                    top += 2;
+                } else if (t0 < 1e29) {
+                    stack[top] = c0;
+                    top += 1;
+                } else if (t1 < 1e29) {
+                    stack[top] = c1;
+                    top += 1;
+                }
             }
             continue;
         }
@@ -72,14 +87,28 @@ fn pt_trace(origin: vec3<f32>, dir: vec3<f32>, limit: f32, any: bool, skip: vec2
                 }
                 depth -= 1;
                 let mesh_node = pt_nodes[inner[depth]];
-                if (!pt_box(o, inv_d, mesh_node.min, mesh_node.max, nearest)) {
+                if (pt_box_near(o, inv_d, mesh_node.min, mesh_node.max, nearest) >= 1e29) {
                     continue;
                 }
                 if (mesh_node.count == 0u) {
                     if (mesh_node.first != 0u && depth < 46) {
-                        inner[depth] = mesh_node.first;
-                        inner[depth + 1] = mesh_node.first + 1u;
-                        depth += 2;
+                        let mc0 = mesh_node.first;
+                        let mc1 = mesh_node.first + 1u;
+                        let mn0 = pt_nodes[mc0];
+                        let mn1 = pt_nodes[mc1];
+                        let mt0 = pt_box_near(o, inv_d, mn0.min, mn0.max, nearest);
+                        let mt1 = pt_box_near(o, inv_d, mn1.min, mn1.max, nearest);
+                        if (mt0 < 1e29 && mt1 < 1e29) {
+                            inner[depth] = select(mc0, mc1, mt0 <= mt1);
+                            inner[depth + 1] = select(mc1, mc0, mt0 <= mt1);
+                            depth += 2;
+                        } else if (mt0 < 1e29) {
+                            inner[depth] = mc0;
+                            depth += 1;
+                        } else if (mt1 < 1e29) {
+                            inner[depth] = mc1;
+                            depth += 1;
+                        }
                     }
                     continue;
                 }

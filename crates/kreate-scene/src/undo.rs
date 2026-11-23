@@ -102,14 +102,11 @@ impl UndoPayload {
     /// process reaches 16 GB and starts thrashing.
     pub fn bytes(&self) -> usize {
         match self {
-            // A snapshot's arrays are shared with the live document, so what it
-            // *holds* is the structure, not the geometry. Charging it the full
-            // mesh size would make the budget useless; charging nothing would
-            // make it a lie. The structure is what a snapshot uniquely owns.
-            UndoPayload::Snapshot(d) => {
-                std::mem::size_of::<Document>()
-                    + d.object_count() * std::mem::size_of::<usize>() * 8
-            }
+            // While a snapshot's arrays are still shared with the live document
+            // it holds only the document's structure; as soon as a later edit
+            // replaces an array, `uniquely_held_bytes` charges the private copy
+            // that this snapshot alone now keeps alive.
+            UndoPayload::Snapshot(d) => d.uniquely_held_bytes(),
             UndoPayload::PositionDelta {
                 indices, values, ..
             } => indices.len() * 4 + values.len() * 12,
@@ -741,6 +738,26 @@ mod tests {
             delta.bytes() < 1_000,
             "a four-vertex edit held {} bytes",
             delta.bytes()
+        );
+    }
+
+    #[test]
+    fn a_snapshot_charges_arrays_once_no_longer_shared() {
+        let mut doc = Document::new();
+        let mesh = doc.add_mesh(kreate_mesh::primitives::grid(100.0, 200, 200));
+        let verts = doc.mesh(mesh).unwrap().num_verts() as usize;
+
+        let mut edit = DocMut::new(&mut doc);
+        // Takes a snapshot, then replaces the positions array via CoW.
+        edit.document_mut().mesh_mut(mesh).unwrap().positions_mut()[0].z += 1.0;
+        let snap = edit.finish();
+
+        // The old positions array (~40,401 * 12 B ≈ 484 KB) is now uniquely
+        // owned by `snap`, while topology arrays remain shared with `doc`.
+        assert!(
+            snap.bytes() >= verts * 12,
+            "snapshot under-reported private mesh bytes: {}",
+            snap.bytes()
         );
     }
 }

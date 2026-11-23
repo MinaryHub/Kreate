@@ -703,6 +703,18 @@ fn common() -> Vec<Binding> {
             Context::Sketch,
             Action::new("app.sketch_tool").with("tool", PropertyValue::Text("revolve".into())),
         ),
+        key(
+            "sketch.tool_offset",
+            "O",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("offset".into())),
+        ),
+        key(
+            "sketch.tool_spline",
+            "S",
+            Context::Sketch,
+            Action::new("app.sketch_tool").with("tool", PropertyValue::Text("spline".into())),
+        ),
         // Over the timeline, Blender's marker keys: M adds one on the
         // current frame, Ctrl+B binds the active camera to it, X or Delete
         // takes it away.

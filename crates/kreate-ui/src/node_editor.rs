@@ -726,19 +726,15 @@ pub fn node_editor(
     if hovered && !ui.ctx().egui_wants_keyboard_input() {
         let (delete, add, home) = ui.input(|i| {
             (
-                i.key_pressed(egui::Key::X) || i.key_pressed(egui::Key::Delete),
-                i.modifiers.shift && i.key_pressed(egui::Key::A),
-                i.key_pressed(egui::Key::Home),
+                crate::text::physical_key_pressed(i, egui::Key::X)
+                    || crate::text::physical_key_pressed(i, egui::Key::Delete),
+                crate::text::physical_key_pressed_with(i, egui::Key::A, |m| m.shift),
+                crate::text::physical_key_pressed(i, egui::Key::Home),
             )
         });
         // By the key event's own modifiers: a press arrives with them.
         let pressed_with = |key: egui::Key, want: fn(egui::Modifiers) -> bool| {
-            ui.input(|i| {
-                i.events.iter().any(|e| {
-                    matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. }
-                        if *k == key && want(*modifiers))
-                })
-            })
+            ui.input(|i| crate::text::physical_key_pressed_with(i, key, want))
         };
         let all = pressed_with(egui::Key::A, |m| !m.shift && !m.alt && !m.command);
         let none = pressed_with(egui::Key::A, |m| m.alt);

@@ -157,6 +157,104 @@ pub fn wrap_tooltip(ui: &Ui, text: &str) -> String {
 /// Reading width for tooltip prose, in points.
 pub const TOOLTIP_WIDTH: f32 = 320.0;
 
+fn ascii_letter_of_key(key: egui::Key) -> Option<&'static str> {
+    use egui::Key;
+    Some(match key {
+        Key::A => "a",
+        Key::B => "b",
+        Key::C => "c",
+        Key::D => "d",
+        Key::E => "e",
+        Key::F => "f",
+        Key::G => "g",
+        Key::H => "h",
+        Key::I => "i",
+        Key::J => "j",
+        Key::K => "k",
+        Key::L => "l",
+        Key::M => "m",
+        Key::N => "n",
+        Key::O => "o",
+        Key::P => "p",
+        Key::Q => "q",
+        Key::R => "r",
+        Key::S => "s",
+        Key::T => "t",
+        Key::U => "u",
+        Key::V => "v",
+        Key::W => "w",
+        Key::X => "x",
+        Key::Y => "y",
+        Key::Z => "z",
+        _ => return None,
+    })
+}
+
+fn korean_2beolsik_pressed(input: &egui::InputState, key: egui::Key) -> bool {
+    let Some(letter) = ascii_letter_of_key(key) else {
+        return false;
+    };
+    for event in &input.events {
+        let text = match event {
+            egui::Event::Text(s) => Some(s.as_str()),
+            egui::Event::Ime(
+                egui::ImeEvent::Preedit { text: s, .. } | egui::ImeEvent::Commit(s),
+            ) => Some(s.as_str()),
+            _ => None,
+        };
+        if let Some(s) = text {
+            if s.chars().count() == 1 && kreate_i18n::to_2beolsik_keys(s) == letter {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Checks whether `key` was pressed on `input` with `want(modifiers)`, matching
+/// logical `key`, hardware `physical_key`, and single-keystroke Korean 2-beolsik
+/// IME jamo/text events (`ㅎ` -> `G`, `ㅌ` -> `X`, `ㅁ` -> `A`, `ㄸ` -> `E`).
+pub fn physical_key_pressed_with(
+    input: &egui::InputState,
+    key: egui::Key,
+    want: impl Fn(egui::Modifiers) -> bool,
+) -> bool {
+    for event in &input.events {
+        if let egui::Event::Key {
+            key: k,
+            physical_key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        {
+            if (*k == key || *physical_key == Some(key)) && want(*modifiers) {
+                return true;
+            }
+        }
+    }
+    want(input.modifiers) && korean_2beolsik_pressed(input, key)
+}
+
+/// Checks whether `key` was pressed on `input` regardless of active Korean/Latin IME mode.
+pub fn physical_key_pressed(input: &egui::InputState, key: egui::Key) -> bool {
+    for event in &input.events {
+        if let egui::Event::Key {
+            key: k,
+            physical_key,
+            pressed: true,
+            repeat: false,
+            ..
+        } = event
+        {
+            if *k == key || *physical_key == Some(key) {
+                return true;
+            }
+        }
+    }
+    korean_2beolsik_pressed(input, key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +383,24 @@ mod tests {
             let rejoined: String = wrapped.lines().collect();
             assert_eq!(rejoined, KOREAN, "at width {width}");
         }
+    }
+
+    #[test]
+    fn korean_ime_and_physical_keys_trigger_editor_shortcuts() {
+        let mut input = egui::InputState::default();
+        input.events.push(egui::Event::Text("ㅎ".to_string()));
+        assert!(physical_key_pressed(&input, egui::Key::G));
+        assert!(!physical_key_pressed(&input, egui::Key::X));
+
+        let mut shift_a = egui::InputState::default();
+        shift_a.modifiers = egui::Modifiers::SHIFT;
+        shift_a
+            .events
+            .push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: "ㅁ".to_string(),
+                active_range_chars: None,
+            }));
+        assert!(physical_key_pressed_with(&shift_a, egui::Key::A, |m| m.shift));
+        assert!(!physical_key_pressed_with(&shift_a, egui::Key::A, |m| !m.shift));
     }
 }

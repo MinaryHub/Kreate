@@ -77,6 +77,9 @@ pub struct ChatText {
     /// The button that picks files to attach, and what hovering it says.
     pub attach: String,
     pub attach_hint: String,
+    /// The button that attaches the current 3D selection, and its tooltip.
+    pub attach_selection: String,
+    pub attach_selection_hint: String,
     /// What hovering an attachment's remove button says.
     pub remove: String,
     /// Shown in the empty input box.
@@ -438,6 +441,14 @@ pub fn chat(
                         .clicked()
                     {
                         queue.push(Command::ChatAttach);
+                    }
+                    if !text.attach_selection.is_empty()
+                        && ui
+                            .add(egui::Button::new(&text.attach_selection).frame(false))
+                            .on_hover_text(&text.attach_selection_hint)
+                            .clicked()
+                    {
+                        queue.push(Command::ChatAttachSelection);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let send = if busy {

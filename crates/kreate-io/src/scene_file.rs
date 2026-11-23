@@ -112,20 +112,33 @@ pub fn read_scene_file_with(
     progress: &ReadProgress,
 ) -> Result<(Document, Vec<BuildNote>), String> {
     progress.start(ReadStage::Reading, 0);
+    if progress.cancelled() {
+        return Err(CANCELLED.to_string());
+    }
     let lower = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     if lower == "kreate" {
-        let file = std::fs::File::open(path).map_err(|e| format!("cannot open: {e}"))?;
-        let mut document = crate::container::read(std::io::BufReader::new(file))
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot open: {e}"))?;
+        if progress.cancelled() {
+            return Err(CANCELLED.to_string());
+        }
+        progress.start(ReadStage::Building, 0);
+        let mut document = crate::container::read_slice(&bytes)
             .map_err(|e| e.to_string())?
             .document;
+        if progress.cancelled() {
+            return Err(CANCELLED.to_string());
+        }
         let directory = path.parent().unwrap_or(Path::new("."));
         let _ = crate::library::refresh_links(&mut document, directory);
         return Ok((document, Vec::new()));
     }
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read: {e}"))?;
+    if progress.cancelled() {
+        return Err(CANCELLED.to_string());
+    }
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -135,10 +148,11 @@ pub fn read_scene_file_with(
     // circles stay circles a dimension can take hold of. Read lossily, as a
     // drafting program's text is often in its own code page.
     if lower == "dxf" {
-        progress.start(ReadStage::Building, 0);
-        let doc = crate::dxf_read::parse_dxf(&String::from_utf8_lossy(&bytes), &name)?;
+        let doc =
+            crate::dxf_read::parse_dxf_with(&String::from_utf8_lossy(&bytes), &name, progress)?;
         return Ok((doc, Vec::new()));
     }
+    progress.start(ReadStage::Parsing, 0);
     let scene = match lower.as_str() {
         // A texture an FBX names but does not carry is looked for beside it:
         // where it says, then by its file name alone — what a model copied
@@ -146,6 +160,9 @@ pub fn read_scene_file_with(
         "fbx" => {
             let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
             crate::parse_fbx(&bytes, &|named: &str| {
+                if progress.cancelled() {
+                    return None;
+                }
                 let named = named.replace('\\', "/");
                 let bare = named.rsplit('/').next().map(|n| dir.join(n));
                 std::fs::read(dir.join(&named))
@@ -155,15 +172,17 @@ pub fn read_scene_file_with(
             .map_err(|e| e.to_string())?
         }
         "3mf" => crate::parse_3mf(&bytes).map_err(|e| e.to_string())?,
-        "ply" => crate::parse_ply(&bytes, &name).map_err(|e| e.to_string())?,
+        "ply" => crate::ply::parse_ply_with(&bytes, &name, progress).map_err(|e| e.to_string())?,
         "off" => crate::parse_off(&text(bytes)?, &name).map_err(|e| e.to_string())?,
         // glTF declares its own units and orientation, so there is nothing
         // for an option to override: second-guessing the one format that
         // bothers to say would be the wrong kind of helpful.
         "gltf" | "glb" => crate::gltf_import::parse_gltf_file(path, &Default::default())
             .map_err(|e| e.to_string())?,
-        "stl" => crate::stl::parse_stl(&bytes, &Default::default()).map_err(|e| e.to_string())?,
-        "obj" => crate::parse_obj(&text(bytes)?, Default::default()).map_err(|e| e.to_string())?,
+        "stl" => crate::stl::parse_stl_with(&bytes, &Default::default(), progress)
+            .map_err(|e| e.to_string())?,
+        "obj" => crate::obj::parse_obj_with(&text(bytes)?, Default::default(), progress)
+            .map_err(|e| e.to_string())?,
         "dae" => crate::dae::parse_dae_file(path).map_err(|e| e.to_string())?,
         // Read lossily: a CAD program's names are often in its own code page.
         "step" | "stp" => {
@@ -379,5 +398,50 @@ mod robots_and_stages {
         assert!((far - 0.5).abs() < 1e-6, "{far}");
         assert!(stage.objects().any(|(_, o)| o.name == "Box"));
         assert!(is_scene_file(Path::new("x.usdz")) && is_scene_file(Path::new("x.URDF")));
+    }
+
+    #[test]
+    fn cancelled_progress_stops_mesh_and_drawing_imports() {
+        let p = ReadProgress::default();
+        p.cancel();
+        assert_eq!(
+            crate::obj::parse_obj_with(
+                "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+                Default::default(),
+                &p
+            )
+            .unwrap_err()
+            .to_string(),
+            CANCELLED
+        );
+        assert_eq!(
+            crate::stl::parse_stl_with(
+                b"solid s\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid s\n",
+                &Default::default(),
+                &p,
+            )
+            .unwrap_err()
+            .to_string(),
+            CANCELLED
+        );
+        assert_eq!(
+            crate::ply::parse_ply_with(
+                b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n",
+                "mesh",
+                &p,
+            )
+            .unwrap_err()
+            .to_string(),
+            CANCELLED
+        );
+        assert_eq!(
+            crate::dxf_read::parse_dxf_with(
+                "0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n",
+                "d",
+                &p
+            )
+            .unwrap_err(),
+            CANCELLED
+        );
     }
 }

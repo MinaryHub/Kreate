@@ -225,8 +225,17 @@ pub struct Noisy<'a> {
     pub normal: &'a [[f32; 3]],
 }
 
-/// Owns OIDN objects for the length of one filtering, and releases them
-/// whichever way it ends.
+struct CachedDevice {
+    device: Device,
+}
+
+// SAFETY: guarded by `SHARED_DEVICE` mutex so only one caller uses `device` at a time.
+unsafe impl Send for CachedDevice {}
+
+static SHARED_DEVICE: std::sync::Mutex<Option<CachedDevice>> = std::sync::Mutex::new(None);
+
+/// Owns per-call OIDN filter and buffers, releasing them when the call ends
+/// while keeping the expensive committed `Device` alive for the next frame.
 struct Held<'a> {
     api: &'a Api,
     device: Device,
@@ -236,16 +245,13 @@ struct Held<'a> {
 
 impl Drop for Held<'_> {
     fn drop(&mut self) {
-        // SAFETY: each handle came from this API and is released once.
+        // SAFETY: each filter/buffer handle came from this API and is released once.
         unsafe {
             if !self.filter.is_null() {
                 (self.api.release_filter)(self.filter);
             }
             for b in &self.buffers {
                 (self.api.release_buffer)(*b);
-            }
-            if !self.device.is_null() {
-                (self.api.release_device)(self.device);
             }
         }
     }
@@ -280,25 +286,42 @@ pub fn denoise(noisy: &Noisy<'_>) -> Result<Vec<[f32; 3]>, String> {
         return Err("the images are not the size they say".into());
     }
     let bytes = n * std::mem::size_of::<[f32; 3]>();
+    let mut guard = SHARED_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: every call below is OIDN's C API used as `oidn.h` documents
-    // it, on handles created here and released by `Held`.
+    // it, serialized under `SHARED_DEVICE`, with per-call buffers/filters freed by `Held`.
     unsafe {
+        let device = match guard.as_ref() {
+            Some(c) => c.device,
+            None => {
+                let mut dev = (api.new_device)(DEVICE_TYPE_DEFAULT);
+                if dev.is_null() {
+                    dev = (api.new_device)(DEVICE_TYPE_CPU);
+                }
+                if dev.is_null() {
+                    return Err("Open Image Denoise has no device here".into());
+                }
+                (api.commit_device)(dev);
+                let mut message: *const c_char = std::ptr::null();
+                let code = (api.device_error)(dev, &mut message);
+                if code != 0 {
+                    let err = if message.is_null() {
+                        format!("OIDN error {code}")
+                    } else {
+                        CStr::from_ptr(message).to_string_lossy().into_owned()
+                    };
+                    (api.release_device)(dev);
+                    return Err(err);
+                }
+                *guard = Some(CachedDevice { device: dev });
+                dev
+            }
+        };
         let mut held = Held {
             api,
-            device: (api.new_device)(DEVICE_TYPE_DEFAULT),
+            device,
             buffers: Vec::new(),
             filter: std::ptr::null_mut(),
         };
-        if held.device.is_null() {
-            held.device = (api.new_device)(DEVICE_TYPE_CPU);
-        }
-        if held.device.is_null() {
-            return Err("Open Image Denoise has no device here".into());
-        }
-        (api.commit_device)(held.device);
-        if let Some(e) = held.error() {
-            return Err(e);
-        }
         let mut image = |data: Option<&[[f32; 3]]>| -> Result<Buffer, String> {
             let buffer = (api.new_buffer)(held.device, bytes);
             if buffer.is_null() {

@@ -273,46 +273,13 @@ pub fn save_folders(folders: &[PathBuf]) -> Result<(), std::io::Error> {
 
 // --- the network ------------------------------------------------------------
 
-/// What every request says it is: Poly Haven asks for a name it can tell
-/// apart from others.
-fn user_agent() -> String {
-    format!(
-        "Kreate/{} (+https://github.com/MinaryHub/Kreate)",
-        crate::version::VERSION
-    )
-}
-
 /// The most one download may be. Poly Haven's 4k models are well under it.
-const MAX_BYTES: &str = "1073741824";
+const MAX_BYTES: u64 = 1_073_741_824;
 
 /// Fetches `url` into `dest`, through a temporary file renamed into place —
 /// so an interrupted download is never mistaken for a finished one.
 pub(crate) fn download(url: &str, dest: &Path) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let partial = dest.with_extension("part");
-    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-    let out = crate::claude::quiet_command(curl)
-        .args(["--silent", "--show-error", "--fail", "--location"])
-        .args(["--max-time", "600", "--max-filesize", MAX_BYTES])
-        .arg("--user-agent")
-        .arg(user_agent())
-        .arg("--output")
-        .arg(&partial)
-        .arg(url)
-        .output()
-        .map_err(|e| format!("cannot start curl: {e}"))?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&partial);
-        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if why.is_empty() {
-            format!("could not fetch {url}")
-        } else {
-            why
-        });
-    }
-    std::fs::rename(&partial, dest).map_err(|e| e.to_string())
+    crate::http::download_to_file(url, dest, MAX_BYTES)
 }
 
 /// `url` as text, cached at `dest` for a day: an asset list changes when
@@ -1337,36 +1304,17 @@ pub const KEY_REFUSED: &str = "Poly Pizza did not accept the key";
 pub const KEY_MISSING: &str = "Poly Pizza needs a key";
 
 /// `url` from Poly Pizza's API, with the key.
-///
-/// The key goes to curl on its standard input, not its command line, where
-/// any process on the machine could read it.
 fn pizza_get(url: &str, key: &str) -> Result<String, String> {
-    use std::io::Write;
-    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-    let mut child = crate::claude::quiet_command(curl)
-        .args(["--silent", "--show-error", "--location"])
-        .args(["--max-time", "60", "--max-filesize", "16777216"])
-        .args(["--write-out", "\n%{http_code}"])
-        .arg("--user-agent")
-        .arg(user_agent())
-        .args(["--header", "@-"])
-        .arg(url)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot start curl: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = writeln!(stdin, "X-Auth-Token: {key}");
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let (body, code) = text.rsplit_once('\n').unwrap_or((&text, ""));
-    match code.trim() {
-        "200" => Ok(body.to_string()),
-        "401" | "403" => Err(KEY_REFUSED.into()),
-        "429" => Err("Poly Pizza asks to wait a moment; try again shortly".into()),
-        "" => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    let (code, body) = crate::http::get_status_and_text(
+        url,
+        &[("X-Auth-Token", key)],
+        std::time::Duration::from_secs(60),
+        16 * 1024 * 1024,
+    )?;
+    match code {
+        200 => Ok(body),
+        401 | 403 => Err(KEY_REFUSED.into()),
+        429 => Err("Poly Pizza asks to wait a moment; try again shortly".into()),
         other => Err(format!("Poly Pizza answered {other}")),
     }
 }

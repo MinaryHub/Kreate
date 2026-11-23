@@ -979,17 +979,17 @@ impl Operator for MirrorWeights {
 /// corner. The document's mesh is not touched — its real UVs are its own.
 pub fn weight_display(mesh: &kreate_mesh::MeshData, group: Option<&str>) -> kreate_mesh::MeshData {
     let n = mesh.num_verts() as usize;
-    let w: Vec<f32> = match group
+    let w = match group
         .and_then(|g| mesh.attributes().get(&weight_layer(g)))
         .map(|l| &l.data)
     {
-        Some(AttrData::F32(w)) if w.len() == n => w.to_vec(),
-        _ => vec![0.0; n],
+        Some(AttrData::F32(w)) if w.len() == n => Some(w.as_slice()),
+        _ => None,
     };
     let uv: Vec<glam::Vec2> = mesh
         .corner_verts()
         .iter()
-        .map(|v| glam::Vec2::new(w[*v as usize], 0.0))
+        .map(|v| glam::Vec2::new(w.map_or(0.0, |s| s[*v as usize]), 0.0))
         .collect();
     let mut out = mesh.clone();
     out.attributes_mut().insert(

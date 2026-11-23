@@ -282,6 +282,12 @@ impl App {
                 // shown in the chat with Apply and Discard, and made only
                 // when applied (which runs them again with `approved`).
                 if self.ui.chat_approve && !dry_run && !flag("approved") {
+                    if let Some((before, _, shown)) = self.ai_preview_docs.take() {
+                        if shown {
+                            self.doc = before;
+                        }
+                    }
+                    let before_doc = self.doc.clone();
                     let mut tried = params.clone();
                     tried["dry_run"] = json!(true);
                     let mut out = self.bridge_call("run", &tried)?;
@@ -289,10 +295,14 @@ impl App {
                         o.remove("rolled_back");
                     }
                     let summary = self.change_summary(&out["changes"]);
+                    if let Some(after_doc) = self.ai_trial_after.take() {
+                        self.ai_preview_docs = Some((before_doc, after_doc, false));
+                    }
                     self.ui.ai_pending = Some(kreate::shell::AiPending {
                         script: script.clone(),
                         atomic,
                         summary,
+                        previewing: false,
                     });
                     out["pending_approval"] = json!(
                         "the person asked to approve each change: these lines were tried and undone, and are shown to them with Apply and Discard. Nothing is made until they apply it. Say briefly what you proposed and wait for them."
@@ -302,6 +312,7 @@ impl App {
                 // Where the history and the mode stand, to come back to; and
                 // what the scene is, to say afterwards what the lines changed.
                 let start = self.history.cursor();
+                let saved_redo = self.history.take_redo_tail();
                 let mode_before = self.op_ctx.mode;
                 let before = self.scene_snapshot();
                 // Said, so a person reading the console knows whose lines
@@ -374,12 +385,16 @@ impl App {
                     .collect();
                 let changes = scene_changes(&before, &self.scene_snapshot());
                 let failed = lines.iter().any(|l| l["ok"] == false);
+                if dry_run {
+                    self.ai_trial_after = Some(self.doc.clone());
+                }
                 // A trial, or an all-or-nothing batch that failed: every step
-                // these lines took is undone, and the mode put back.
+                // these lines took is undone, and the mode and redo tail put back.
                 let rolled_back = dry_run || (atomic && failed);
                 if rolled_back {
                     self.forget_sketch_picks();
                     while self.history.cursor() > start && self.history.undo(&mut self.doc) {}
+                    self.history.restore_redo_tail(start, saved_redo);
                     self.collab_after_undo();
                     if self.op_ctx.mode != mode_before {
                         self.set_mode(mode_before);
@@ -1717,13 +1732,7 @@ impl App {
                         "selected": doc.selection.contains(id),
                         "parent": o.parent.and_then(|p| doc.object(p)).map(|p| p.name.clone()),
                     });
-                    let shown = o.mesh().and_then(|_| {
-                        if o.features.is_empty() && o.curve.is_none() {
-                            o.mesh().and_then(|m| doc.mesh_arc(m)).cloned()
-                        } else {
-                            kreate_scene::modifier::shown_base(doc, id)
-                        }
-                    });
+                    let shown = self.evaluated_mesh_for(id);
                     if let Some(m) = shown.as_deref() {
                         let local = m.bounds();
                         if local.min.x <= local.max.x {
@@ -1753,7 +1762,8 @@ impl App {
                 });
                 match o.data {
                     ObjectData::Mesh(mesh) => {
-                        if let Some(m) = doc.mesh(mesh) {
+                        let evaluated = self.evaluated_mesh_for(id);
+                        if let Some(m) = evaluated.as_deref().or_else(|| doc.mesh(mesh)) {
                             v["vertices"] = json!(m.num_verts());
                             v["faces"] = json!(m.num_faces());
                             // Blender's Dimensions: the mesh's own extent times
@@ -1763,9 +1773,21 @@ impl App {
                             if local.min.x <= local.max.x {
                                 let size = (local.max - local.min).as_dvec3() * t.scale;
                                 v["dimensions"] = json!(size.abs().to_array());
-                                if let Some((lo, hi)) = doc.object_world_bounds(id) {
-                                    v["bounds"] = json!({ "min": lo.to_array(), "max": hi.to_array() });
+                                let world = doc.world_transform(id);
+                                let mut lo = glam::DVec3::splat(f64::INFINITY);
+                                let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
+                                for &x in &[local.min.x, local.max.x] {
+                                    for &y in &[local.min.y, local.max.y] {
+                                        for &z in &[local.min.z, local.max.z] {
+                                            let p = world.transform_point3(glam::DVec3::new(
+                                                x as f64, y as f64, z as f64,
+                                            ));
+                                            lo = lo.min(p);
+                                            hi = hi.max(p);
+                                        }
+                                    }
                                 }
+                                v["bounds"] = json!({ "min": lo.to_array(), "max": hi.to_array() });
                             }
                         }
                         let slots: Vec<_> = (0..32)
@@ -2125,6 +2147,27 @@ pub(super) struct ObjectSnap {
 }
 
 impl App {
+    /// Cached evaluated mesh for `id` (unwrapping section cuts), falling back to
+    /// base/feature evaluation only when `id` is hidden or not yet evaluated.
+    pub(super) fn evaluated_mesh_for(&self, id: ObjectId) -> Option<Arc<MeshData>> {
+        if let Some((_, mesh)) = self.evaluated.iter().find(|(eid, _)| *eid == id) {
+            let whole = self
+                .sectioned
+                .iter()
+                .find(|(_, _, out)| Arc::ptr_eq(out, mesh))
+                .map(|(input, _, _)| input.clone())
+                .unwrap_or_else(|| mesh.clone());
+            return Some(whole);
+        }
+        let o = self.doc.object(id)?;
+        let m = o.mesh()?;
+        if o.features.is_empty() && o.curve.is_none() {
+            self.doc.mesh_arc(m).cloned()
+        } else {
+            kreate_scene::modifier::shown_base(&self.doc, id)
+        }
+    }
+
     /// Every object as `ObjectSnap`s, by uid.
     pub(super) fn scene_snapshot(&self) -> std::collections::BTreeMap<u64, ObjectSnap> {
         let doc = &self.doc;
@@ -2133,13 +2176,7 @@ impl App {
                 let uid = doc.object_uid(id)?.raw();
                 let t = o.transform;
                 let r = kreate_scene::animation::to_euler(t.rotation);
-                let shown = o.mesh().and_then(|m| {
-                    if o.features.is_empty() && o.curve.is_none() {
-                        doc.mesh_arc(m).cloned()
-                    } else {
-                        kreate_scene::modifier::shown_base(doc, id)
-                    }
-                });
+                let shown = self.evaluated_mesh_for(id);
                 let (dimensions, vertices, faces) = match shown.as_deref() {
                     Some(m) => {
                         let b = m.bounds();
@@ -2243,13 +2280,29 @@ impl App {
         Some(v)
     }
 
-    /// The assistant's change waiting in the chat, applied or discarded as
-    /// the person said.
+    /// The assistant's change waiting in the chat: syncs live 3D Before/After
+    /// viewport preview, and applies or discards the proposal when decided.
     pub(super) fn settle_ai_pending(&mut self) {
         use kreate_ui::chat::{ChatMessage, ChatRole};
+        if self.ui.ai_pending_decision.is_none() {
+            let want = self.ui.ai_pending.as_ref().is_some_and(|p| p.previewing);
+            if let Some((before, after, shown)) = &mut self.ai_preview_docs {
+                if want != *shown {
+                    *shown = want;
+                    self.doc = if want { after.clone() } else { before.clone() };
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                }
+            }
+            return;
+        }
         let Some(apply) = self.ui.ai_pending_decision.take() else {
             return;
         };
+        if let Some((before, _, shown)) = self.ai_preview_docs.take() {
+            if shown {
+                self.doc = before;
+            }
+        }
         let Some(pending) = self.ui.ai_pending.take() else {
             return;
         };

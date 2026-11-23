@@ -1091,6 +1091,18 @@ pub struct GeoGraph {
 }
 
 impl GeoGraph {
+    /// Whether `other` evaluates to the exact same geometry (ignoring visual
+    /// node canvas coordinates `GeoNode::position`).
+    pub fn same_evaluation(&self, other: &Self) -> bool {
+        self.links == other.links
+            && self.nodes.len() == other.nodes.len()
+            && self
+                .nodes
+                .iter()
+                .zip(&other.nodes)
+                .all(|(a, b)| a.kind == b.kind && a.name == b.name)
+    }
+
     /// Group Input straight into Group Output: the mesh as it was, which is
     /// what turning geometry nodes on must look like before anything is added.
     pub fn passthrough() -> Self {

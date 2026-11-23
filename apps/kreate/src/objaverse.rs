@@ -70,24 +70,7 @@ pub fn licence_allows(label: &str) -> bool {
 
 /// `url` as text.
 fn get(url: &str) -> Result<String, String> {
-    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-    let out = crate::claude::quiet_command(curl)
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--location",
-            "--max-time",
-            "60",
-        ])
-        .arg(url)
-        .output()
-        .map_err(|e| format!("cannot start curl: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
+    crate::http::get_text(url, std::time::Duration::from_secs(60), 16 * 1024 * 1024)
 }
 
 /// One Sketchfab model, as an entry — if the dataset has it and its licence

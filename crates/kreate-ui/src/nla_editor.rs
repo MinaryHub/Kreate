@@ -104,6 +104,8 @@ pub struct NlaState {
     drag: Drag,
     /// The strip picked, by its object and place.
     picked: Option<(String, usize)>,
+    /// Vertical scroll offset in points.
+    pub scroll_y: f32,
 }
 
 /// How wide the column of row names is.
@@ -135,13 +137,19 @@ fn rows(view: &NlaView) -> Vec<Row<'_>> {
 pub struct Layout {
     pub body: Rect,
     pub range: (f64, f64),
+    pub scroll_y: f32,
 }
 
 impl Layout {
     pub fn new(rect: Rect, range: (f64, f64)) -> Self {
+        Self::with_scroll(rect, range, 0.0)
+    }
+
+    pub fn with_scroll(rect: Rect, range: (f64, f64), scroll_y: f32) -> Self {
         Self {
             body: Rect::from_min_max(Pos2::new(rect.min.x + NAMES, rect.min.y + RULER), rect.max),
             range,
+            scroll_y,
         }
     }
 
@@ -154,11 +162,12 @@ impl Layout {
     }
 
     pub fn row_y(&self, row: usize) -> f32 {
-        self.body.min.y + (row as f32 + 0.5) * ROW
+        self.body.min.y + (row as f32 + 0.5) * ROW - self.scroll_y
     }
 
     pub fn row_at(&self, y: f32) -> Option<usize> {
-        (y >= self.body.min.y).then(|| ((y - self.body.min.y) / ROW) as usize)
+        (y >= self.body.min.y)
+            .then(|| ((y - self.body.min.y + self.scroll_y).max(0.0) / ROW) as usize)
     }
 
     pub fn frame_width(&self) -> f32 {
@@ -213,27 +222,37 @@ pub fn nla_editor(
         }
     }
 
+    let body_h = (rect.height() - RULER).max(ROW);
+    let max_scroll = (rows.len() as f32 * ROW - body_h).max(0.0);
+    state.scroll_y = state.scroll_y.clamp(0.0, max_scroll);
+
     let range = state.range.unwrap_or_else(|| visible(view.start, view.end));
-    let layout = Layout::new(rect, range);
+    let layout = Layout::with_scroll(rect, range, state.scroll_y);
     let hovered = ui.rect_contains_pointer(rect);
     let pointer = ui.input(|i| i.pointer.interact_pos());
 
     // --- zoom and pan ------------------------------------------------------------
     if hovered {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        let (scroll, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.shift));
         if let (true, Some(p)) = (scroll != 0.0, pointer) {
-            let anchor = layout.frame(p.x);
-            let k = (1.0 - scroll as f64 * 0.0015).clamp(0.5, 2.0);
-            let (a, b) = range;
-            state.range = Some((anchor + (a - anchor) * k, anchor + (b - anchor) * k));
+            if p.x < layout.body.min.x || shift {
+                state.scroll_y = (state.scroll_y - scroll).clamp(0.0, max_scroll);
+            } else {
+                let anchor = layout.frame(p.x);
+                let k = (1.0 - scroll as f64 * 0.0015).clamp(0.5, 2.0);
+                let (a, b) = range;
+                state.range = Some((anchor + (a - anchor) * k, anchor + (b - anchor) * k));
+            }
         }
     }
     if response.dragged_by(egui::PointerButton::Middle) {
-        let df = -(response.drag_delta().x / layout.frame_width()) as f64;
+        let delta = response.drag_delta();
+        let df = -(delta.x / layout.frame_width()) as f64;
         state.range = Some((range.0 + df, range.1 + df));
+        state.scroll_y = (state.scroll_y - delta.y).clamp(0.0, max_scroll);
     }
     let range = state.range.unwrap_or(range);
-    let layout = Layout::new(rect, range);
+    let layout = Layout::with_scroll(rect, range, state.scroll_y);
 
     // --- the grid ----------------------------------------------------------------
     let ruler = Rect::from_min_max(
@@ -294,12 +313,17 @@ pub fn nla_editor(
 
     // --- rows ----------------------------------------------------------------------
     painter.rect_filled(names, 0.0, theme.base);
+    let rows_clip = Rect::from_min_max(Pos2::new(rect.min.x, layout.body.min.y), rect.max);
+    let rows_painter = ui.painter().with_clip_rect(rows_clip);
     let font = egui::FontId::proportional(12.0);
     for (i, row) in rows.iter().enumerate() {
         let y = layout.row_y(i);
+        if y + ROW * 0.5 < layout.body.min.y || y - ROW * 0.5 > rect.max.y {
+            continue;
+        }
         match row {
             Row::Object(track) => {
-                painter.rect_filled(
+                rows_painter.rect_filled(
                     Rect::from_center_size(
                         Pos2::new(rect.center().x, y),
                         Vec2::new(rect.width(), ROW - 1.0),
@@ -307,7 +331,7 @@ pub fn nla_editor(
                     0.0,
                     Color32::from_white_alpha(6),
                 );
-                painter.text(
+                rows_painter.text(
                     Pos2::new(names.min.x + 8.0, y),
                     egui::Align2::LEFT_CENTER,
                     &track.object,
@@ -316,8 +340,8 @@ pub fn nla_editor(
                 );
                 if let Some((name, a, b)) = &track.action {
                     let bar = layout.bar(i, *a, *b);
-                    painter.rect_filled(bar, 3.0, Color32::from_rgb(150, 120, 60));
-                    painter.text(
+                    rows_painter.rect_filled(bar, 3.0, Color32::from_rgb(150, 120, 60));
+                    rows_painter.text(
                         bar.left_center() + Vec2::new(5.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         name,
@@ -327,7 +351,7 @@ pub fn nla_editor(
                     // Push Down: a downward arrow at the end of the name.
                     let b = layout.push_button(i);
                     let over = pointer.is_some_and(|p| b.contains(p));
-                    painter.rect_filled(
+                    rows_painter.rect_filled(
                         b,
                         3.0,
                         if over {
@@ -337,7 +361,7 @@ pub fn nla_editor(
                         },
                     );
                     let c = b.center();
-                    painter.add(egui::Shape::convex_polygon(
+                    rows_painter.add(egui::Shape::convex_polygon(
                         vec![
                             c + Vec2::new(-4.0, -3.0),
                             c + Vec2::new(4.0, -3.0),
@@ -349,7 +373,7 @@ pub fn nla_editor(
                 }
             }
             Row::Strip(track, strip) => {
-                painter.text(
+                rows_painter.text(
                     Pos2::new(names.min.x + 20.0, y),
                     egui::Align2::LEFT_CENTER,
                     &strip.label,
@@ -368,16 +392,16 @@ pub fn nla_editor(
                 } else {
                     Color32::from_rgb(70, 110, 160)
                 };
-                painter.rect_filled(bar, 3.0, fill);
+                rows_painter.rect_filled(bar, 3.0, fill);
                 if picked {
-                    painter.rect_stroke(
+                    rows_painter.rect_stroke(
                         bar,
                         3.0,
                         Stroke::new(2.0, theme.accent),
                         egui::StrokeKind::Inside,
                     );
                 }
-                painter.text(
+                rows_painter.text(
                     bar.left_center() + Vec2::new(5.0, 0.0),
                     egui::Align2::LEFT_CENTER,
                     &strip.label,
@@ -390,6 +414,19 @@ pub fn nla_editor(
                 );
             }
         }
+    }
+    if max_scroll > 0.0 {
+        let total_h = rows.len() as f32 * ROW;
+        let thumb_h = (body_h * (body_h / total_h)).clamp(18.0, body_h);
+        let thumb_y = layout.body.min.y + (state.scroll_y / max_scroll) * (body_h - thumb_h);
+        painter.rect_filled(
+            Rect::from_min_size(
+                Pos2::new(rect.max.x - 5.0, thumb_y),
+                Vec2::new(3.5, thumb_h),
+            ),
+            2.0,
+            theme.text_faint,
+        );
     }
 
     // The clock.

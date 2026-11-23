@@ -243,3 +243,43 @@ fn the_cull_buffers_scale_with_clusters_not_with_the_viewport() {
          scene of this size"
     );
 }
+
+#[test]
+fn viewport_keeps_lit_and_denoise_targets_lazy_in_studio_mode() {
+    let opts = kreate_render::GpuOptions::default();
+    let instance = kreate_render::Gpu::create_instance(&opts);
+    let Ok(gpu) = pollster::block_on(kreate_render::Gpu::new(instance, &opts, None)) else {
+        return;
+    };
+    let mut vp =
+        kreate_render::Viewport::new(&gpu.device, wgpu::TextureFormat::Rgba8UnormSrgb, 1920, 1080);
+    assert_eq!(vp.lit_target_size(), (1, 1));
+    assert_eq!(vp.denoise_target_size(), (1, 1));
+    assert_eq!(vp.depth_pyramid().size(), (1, 1));
+
+    let cam = kreate_render::Camera::default();
+    vp.prepare(&gpu.device, &gpu.queue, &cam, &mut []);
+    assert_eq!(
+        vp.lit_target_size(),
+        (1, 1),
+        "Studio mode must not allocate full-screen HDR/SSR/contact-depth/glass targets"
+    );
+    assert_eq!(vp.denoise_target_size(), (1, 1));
+
+    vp.shading = kreate_render::ShadingMode::Material;
+    vp.prepare(&gpu.device, &gpu.queue, &cam, &mut []);
+    assert_eq!(vp.lit_target_size(), (1920, 1080));
+    assert_eq!(
+        vp.denoise_target_size(),
+        (1, 1),
+        "Denoiser stays 1x1 until path tracing actually runs"
+    );
+
+    vp.shading = kreate_render::ShadingMode::Studio;
+    vp.prepare(&gpu.device, &gpu.queue, &cam, &mut []);
+    assert_eq!(
+        vp.lit_target_size(),
+        (1, 1),
+        "Returning to Studio mode releases lit-only render targets"
+    );
+}

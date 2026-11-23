@@ -37,6 +37,28 @@ use; `scripts/release.sh` turns that section into the next release.
 - mesh.select_named picks faces and edges by what they are: the top,
   bottom, front, back, left or right faces, the largest face, the open,
   sharp or longest edges.
+- On-canvas 3D Move, Rotate and Scale gizmos in the viewport, and
+  multi-object relative transform editing in the Transform panel (hold Alt
+  or check Apply to all selected).
+- Korean initial-consonant (초성) search and 2-beolsik Korean↔English key
+  matching in the F3 Command Palette and Keymap Editor, Korean IME parity
+  for single-key shortcuts across the Node Editor, Dope Sheet and Graph
+  Editor, and automatic OS Korean locale detection with Preferences
+  language and translation-scope selectors.
+- A CAD command bar (`/` or `:`) in 2D sketch and drawing modes with
+  drafting aliases (`REC`, `CHA`, `TR`, `EX`, `PL`, `EL`, `POL`, `F`, `O`,
+  `MI`, `DIM`), dynamic `@dx,dy`, `#x,y` and `distance<angle` coordinate
+  entry, and sweep-and-prune intersection snapping on large drawings.
+- A **3D Preview** toggle on pending assistant changes (preserving your
+  redo history), a one-click `@Selection` context chip in chat, script
+  conditionals (`if`/`elif`/`else`), `f"..."` formatting, tuple indexing,
+  live scene queries (`bbox`, `size`, `pos`, `param`), and a multi-line
+  console (`Shift+Enter`).
+- **Save Selection as Asset…** in the Asset Browser, workspace Duplicate,
+  Rename and Delete in the workspace switcher, `kreatec` conversion and
+  Git `diff`/`textconv` across all 18 supported 3D/CAD/2D formats
+  (including STEP, 3MF and DXF drawings), and a built-in native HTTPS
+  client with no external `curl` dependency.
 
 ### Changed
 
@@ -62,6 +84,30 @@ use; `scripts/release.sh` turns that section into the next release.
   view rather than also in the corner; the properties panel names its tab
   and shows a scroll bar and a fade when there is more below; the history
   strip says what it is for while it is empty.
+- Faster `.kreate` opening and saving via memory-mapped zero-copy slicing
+  and multicore mesh encoding/decoding, multicore normal calculation on
+  large meshes, longest-prefix caching in the modifier stack, and shared
+  BVH + parallel hidden-line removal for 4-view drawing sheets.
+- Lower viewport VRAM (~65% less in Studio mode) with lazy render targets
+  and immediate Path Tracer BVH release on leaving Rendered mode,
+  1,024-vertex dirty-chunk GPU uploads during sculpting, in-place material
+  uniform updates in the path tracer without rebuilding the BVH, base-mesh
+  reuse during modal topology drags, and compressed sparse vertex deltas in
+  live collaboration.
+
+### Fixed
+
+- Ribbon tool buttons activate immediately on click, and the Adjust Last
+  Operation panel stays open while orbiting (`MMB`/`Alt`) and reopens with
+  `F9`.
+- `File ▸ Link` and link refresh now carry and update mesh materials,
+  shader-graph textures and material overrides alongside geometry.
+- Undo snapshots count uniquely held mesh bytes accurately so the 2 GiB
+  history budget holds on sculpted million-face scenes, and recovered crash
+  backups remain on disk until saving succeeds.
+- Analytic OCCT B-rep feature bodies write exact NURBS surfaces to STEP
+  when the exact kernel is enabled, and Android S-Pen stylus pressure
+  reaches sculpt and paint strokes.
 
 ## [0.14.0] - 2026-11-17
 

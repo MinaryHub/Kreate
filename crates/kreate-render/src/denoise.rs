@@ -224,6 +224,11 @@ impl Denoise {
         ((raw, raw_view), ping)
     }
 
+    /// Currently allocated target dimensions.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
     /// Follows the viewport's allocation.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let size = (width.max(1), height.max(1));

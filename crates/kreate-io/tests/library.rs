@@ -494,3 +494,46 @@ fn a_whole_library_links_and_follows_its_file() {
         "{problems:?}"
     );
 }
+
+#[test]
+fn linking_and_refreshing_carry_the_mesh_materials() {
+    let dir = scratch("link-materials");
+    let library = dir.join("painted.kreate");
+
+    let mut lib = Document::new();
+    let chair = lib.add_mesh_object("Chair", triangle(1.0));
+    let chair_mesh = lib.object(chair).unwrap().mesh().unwrap();
+    let mut brass = kreate_scene::Material {
+        name: "Brass".to_string(),
+        ..Default::default()
+    };
+    brass.roughness = 0.22;
+    let brass_id = lib.add_material(brass);
+    lib.set_mesh_slots(chair_mesh, vec![Some(brass_id)]);
+    std::fs::write(
+        &library,
+        container::write(&lib, &Manifest::default(), &[]).unwrap(),
+    )
+    .unwrap();
+
+    let mut shot = Document::new();
+    let reference = library.display().to_string();
+    let linked = library::link_all(&mut shot, &dir, &reference).expect("linked");
+    assert_eq!(linked.len(), 1);
+    let mat = shot
+        .material_at(linked[0], 0)
+        .expect("linked material slot");
+    assert_eq!(mat.name, "Brass");
+    assert!((mat.roughness - 0.22).abs() < 1e-6);
+
+    // Updating the material in the library updates the linked slot on refresh.
+    lib.material_mut(brass_id).unwrap().roughness = 0.65;
+    std::fs::write(
+        &library,
+        container::write(&lib, &Manifest::default(), &[]).unwrap(),
+    )
+    .unwrap();
+    assert!(library::refresh_links(&mut shot, &dir).is_empty());
+    let refreshed = shot.material_at(linked[0], 0).expect("refreshed slot");
+    assert!((refreshed.roughness - 0.65).abs() < 1e-6);
+}

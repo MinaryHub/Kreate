@@ -382,6 +382,29 @@ impl MeshData {
             && Arc::ptr_eq(&self.edges, &other.edges)
     }
 
+    /// Re-attaches `prev`'s `Arc` allocations wherever connectivity or attribute
+    /// arrays are bitwise equal, so a deserialized collaboration patch preserves
+    /// `same_topology` and `only_positions_differ` pointer fast paths.
+    pub fn share_unchanged_from(&mut self, prev: &MeshData) {
+        if self.num_verts != prev.num_verts {
+            return;
+        }
+        if !Arc::ptr_eq(&self.face_offsets, &prev.face_offsets)
+            && *self.face_offsets == *prev.face_offsets
+        {
+            self.face_offsets = prev.face_offsets.clone();
+        }
+        if !Arc::ptr_eq(&self.corner_verts, &prev.corner_verts)
+            && *self.corner_verts == *prev.corner_verts
+        {
+            self.corner_verts = prev.corner_verts.clone();
+        }
+        if !Arc::ptr_eq(&self.edges, &prev.edges) && *self.edges == *prev.edges {
+            self.edges = prev.edges.clone();
+        }
+        self.attributes.share_unchanged_from(&prev.attributes);
+    }
+
     /// Whether `other` differs from this mesh in nothing but its selection.
     ///
     /// The question a renderer has to be able to answer cheaply. Selection is
@@ -426,6 +449,19 @@ impl MeshData {
     /// not a layer this asks about — the renderer derives them either way.
     pub fn only_positions_differ(&self, other: &MeshData) -> bool {
         self.only_these_layers_differ(other, |name| name == names::POSITION)
+    }
+
+    /// Whether `other` differs from this mesh only in its UV coordinates (and
+    /// non-rendered source layers such as `uv_pin`, `.sculpt_mask`,
+    /// `.sculpt_face_set`, or `weight:*` whose visual effect travels through
+    /// `uv` alone).
+    pub fn only_uvs_differ(&self, other: &MeshData) -> bool {
+        self.only_these_layers_differ(other, |name| {
+            matches!(
+                name,
+                names::UV | names::UV_PIN | crate::sculpt::MASK | crate::sculpt::FACE_SET
+            ) || name.starts_with("weight:")
+        })
     }
 
     /// The shared shape of both predicates: identical connectivity, and no
@@ -482,6 +518,25 @@ impl MeshData {
             + self.attributes.memory_bytes()
     }
 
+    /// Heap bytes owned exclusively by this `MeshData` (`Arc::strong_count == 1`
+    /// on each topology or attribute array).
+    pub fn uniquely_held_bytes(&self) -> usize {
+        let mut total = 0usize;
+        if Arc::strong_count(&self.face_offsets) == 1 {
+            total += self.face_offsets.len() * 4;
+        }
+        if Arc::strong_count(&self.corner_verts) == 1 {
+            total += self.corner_verts.len() * 4;
+        }
+        if Arc::strong_count(&self.edges) == 1 {
+            total += self.edges.len() * 8;
+        }
+        for layer in self.attributes.iter() {
+            total += layer.data.uniquely_held_bytes();
+        }
+        total
+    }
+
     // --- topology -----------------------------------------------------------
 
     #[inline]
@@ -491,6 +546,11 @@ impl MeshData {
 
     #[inline]
     pub fn corner_verts(&self) -> &[u32] {
+        &self.corner_verts
+    }
+
+    #[inline]
+    pub fn corner_verts_arc(&self) -> &Arc<Vec<u32>> {
         &self.corner_verts
     }
 
@@ -660,29 +720,26 @@ impl MeshData {
     /// and it is what makes normals stable when a mesh has one huge face meeting
     /// several slivers.
     pub fn compute_vertex_normals(&self) -> Vec<Vec3> {
-        let pos = self.positions();
+        use rayon::prelude::*;
+        let face_normals = self.compute_face_normals();
         let mut normals = vec![Vec3::ZERO; self.num_verts as usize];
-        for f in 0..self.num_faces() {
-            let verts = self.face_verts(f);
+        for (f, &n) in face_normals.iter().enumerate() {
+            let verts = self.face_verts(f as u32);
             if verts.len() < 3 {
                 continue;
             }
-            // Newell's method: correct for non-planar n-gons, where any single
-            // cross product would depend on which corner you happened to pick.
-            let mut n = Vec3::ZERO;
-            for i in 0..verts.len() {
-                let a = pos[verts[i] as usize];
-                let b = pos[verts[(i + 1) % verts.len()] as usize];
-                n += (a - b).cross(a + b);
-            }
-            // n is twice the area-weighted normal; the factor is uniform across
-            // faces, so it cancels on normalisation and is not worth removing.
             for &v in verts {
                 normals[v as usize] += n;
             }
         }
-        for n in &mut normals {
-            *n = n.normalize_or_zero();
+        if normals.len() >= 4096 {
+            normals.par_iter_mut().for_each(|n| {
+                *n = n.normalize_or_zero();
+            });
+        } else {
+            for n in &mut normals {
+                *n = n.normalize_or_zero();
+            }
         }
         normals
     }
@@ -693,19 +750,26 @@ impl MeshData {
     /// on which corner happened to be sampled. Left unnormalised: the magnitude
     /// is twice the area, which is exactly the weight wanted when averaging.
     pub fn compute_face_normals(&self) -> Vec<Vec3> {
+        use rayon::prelude::*;
         let pos = self.positions();
-        (0..self.num_faces())
-            .map(|f| {
-                let verts = self.face_verts(f);
-                let mut n = Vec3::ZERO;
-                for i in 0..verts.len() {
-                    let a = pos[verts[i] as usize];
-                    let b = pos[verts[(i + 1) % verts.len()] as usize];
-                    n += (a - b).cross(a + b);
-                }
-                n
-            })
-            .collect()
+        let face_normal = |f: u32| {
+            let verts = self.face_verts(f);
+            let mut n = Vec3::ZERO;
+            for i in 0..verts.len() {
+                let a = pos[verts[i] as usize];
+                let b = pos[verts[(i + 1) % verts.len()] as usize];
+                n += (a - b).cross(a + b);
+            }
+            n
+        };
+        if self.num_faces() >= 4096 {
+            (0..self.num_faces())
+                .into_par_iter()
+                .map(face_normal)
+                .collect()
+        } else {
+            (0..self.num_faces()).map(face_normal).collect()
+        }
     }
 
     /// Per-corner normals, splitting shading across sharp edges.
@@ -767,8 +831,16 @@ impl MeshData {
     /// this kind do, and a non-manifold edge is usually a mistake the user
     /// wants to see rather than have smoothed over.
     pub fn compute_corner_normals(&self, angle_threshold: f32) -> Vec<Vec3> {
+        use rayon::prelude::*;
         let face_normals = self.compute_face_normals();
-        let unit: Vec<Vec3> = face_normals.iter().map(|n| n.normalize_or_zero()).collect();
+        let unit: Vec<Vec3> = if face_normals.len() >= 4096 {
+            face_normals
+                .par_iter()
+                .map(|n| n.normalize_or_zero())
+                .collect()
+        } else {
+            face_normals.iter().map(|n| n.normalize_or_zero()).collect()
+        };
         let cos_threshold = angle_threshold.cos();
         let smooth = self.attributes.get_bool(names::SHADE_SMOOTH);
         // Read straight off the edge domain. The old version rebuilt a sorted

@@ -82,6 +82,12 @@ pub struct SyncPlan {
     /// rewritten — the two buffers a drag actually changes. Like `reflags`,
     /// these also appear in `keep`.
     pub repositions: Vec<(usize, Arc<MeshData>)>,
+    /// Slots whose mesh differs only in its UV coordinates (including sculpt
+    /// mask/face-set and weight-paint display overlays).
+    ///
+    /// Keeps the slot's geometry buffers and rewrites `uvs` in place whenever
+    /// existing vertex splits remain compatible.
+    pub reuvs: Vec<(usize, Arc<MeshData>)>,
     /// Meshes that are not on the GPU yet.
     pub uploads: Vec<Arc<MeshData>>,
 }
@@ -95,6 +101,7 @@ impl SyncPlan {
         !self.uploads.is_empty()
             || !self.reflags.is_empty()
             || !self.repositions.is_empty()
+            || !self.reuvs.is_empty()
             || self.keep.len() != cached
     }
 
@@ -117,16 +124,25 @@ pub fn plan_sync(cached: &[Arc<MeshData>], scene: &[(ObjectId, Arc<MeshData>)]) 
     // Deduplicated by handle identity, so instances of one mesh — linked
     // duplicates, or objects that happen to share a modifier stack — are one
     // entry rather than one each.
-    let mut wanted: Vec<&Arc<MeshData>> = Vec::new();
+    let mut seen: ahash::AHashSet<usize> = ahash::AHashSet::with_capacity(scene.len());
+    let mut cached_by_ptr: ahash::AHashMap<usize, usize> =
+        ahash::AHashMap::with_capacity(cached.len());
+    for (slot, held) in cached.iter().enumerate() {
+        cached_by_ptr
+            .entry(Arc::as_ptr(held) as usize)
+            .or_insert(slot);
+    }
+    let mut claimed = vec![false; cached.len()];
 
     for (_, mesh) in scene {
-        if wanted.iter().any(|m| Arc::ptr_eq(m, mesh)) {
+        let ptr = Arc::as_ptr(mesh) as usize;
+        if !seen.insert(ptr) {
             continue;
         }
-        wanted.push(mesh);
 
-        // The whole mechanism, in one comparison.
-        if let Some(slot) = cached.iter().position(|held| Arc::ptr_eq(held, mesh)) {
+        // The whole mechanism, in one lookup.
+        if let Some(&slot) = cached_by_ptr.get(&ptr) {
+            claimed[slot] = true;
             plan.keep.push(slot);
             continue;
         }
@@ -136,12 +152,12 @@ pub fn plan_sync(cached: &[Arc<MeshData>], scene: &[(ObjectId, Arc<MeshData>)]) 
         // stack diverged is a genuinely different mesh that happens to share most
         // of its arrays, and adopting it into the original's slot would leave
         // both objects drawing the same thing.
-        let unclaimed = |slot: &usize| !plan.keep.contains(slot);
         let selection_only = cached
             .iter()
             .enumerate()
-            .find(|(slot, held)| unclaimed(slot) && held.only_selection_differs(mesh));
+            .find(|(slot, held)| !claimed[*slot] && held.only_selection_differs(mesh));
         if let Some((slot, _)) = selection_only {
+            claimed[slot] = true;
             plan.keep.push(slot);
             plan.reflags.push((slot, mesh.clone()));
             continue;
@@ -149,11 +165,22 @@ pub fn plan_sync(cached: &[Arc<MeshData>], scene: &[(ObjectId, Arc<MeshData>)]) 
         let moved_only = cached
             .iter()
             .enumerate()
-            .find(|(slot, held)| unclaimed(slot) && held.only_positions_differ(mesh));
-        match moved_only {
+            .find(|(slot, held)| !claimed[*slot] && held.only_positions_differ(mesh));
+        if let Some((slot, _)) = moved_only {
+            claimed[slot] = true;
+            plan.keep.push(slot);
+            plan.repositions.push((slot, mesh.clone()));
+            continue;
+        }
+        let uvs_only = cached
+            .iter()
+            .enumerate()
+            .find(|(slot, held)| !claimed[*slot] && held.only_uvs_differ(mesh));
+        match uvs_only {
             Some((slot, _)) => {
+                claimed[slot] = true;
                 plan.keep.push(slot);
-                plan.repositions.push((slot, mesh.clone()));
+                plan.reuvs.push((slot, mesh.clone()));
             }
             None => plan.uploads.push(mesh.clone()),
         }
@@ -740,5 +767,39 @@ mod tests {
         let held = apply(&[], &plan_sync(&[], &scene));
         let plan = plan_sync(&held, &scene);
         assert_eq!(plan.keep, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_uv_or_sculpt_mask_edit_rewrites_uvs_rather_than_uploading() {
+        let mut doc = doc_with(1);
+        let mut cache = ModifierCache::new();
+        let mut sculpt = crate::sculptview::SculptDisplay::default();
+        let mut scene = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
+        scene[0].1 = sculpt.show(&scene[0].1).unwrap();
+        let held = apply(&[], &plan_sync(&[], &scene));
+
+        let id = doc.meshes().next().unwrap().0;
+        {
+            let m = doc.mesh_mut(id).unwrap();
+            let n = m.num_verts() as usize;
+            m.attributes_mut().insert(
+                kreate_mesh::sculpt::MASK,
+                kreate_mesh::attribute::Domain::Point,
+                kreate_mesh::attribute::AttrData::F32(Arc::new(vec![0.5; n])),
+            );
+        }
+        let mut after = cache.evaluate_scene(&doc, &kreate_scene::modifier::EvalCtx::still());
+        after[0].1 = sculpt.show(&after[0].1).unwrap();
+        let plan = plan_sync(&held, &after);
+        assert!(
+            plan.uploads.is_empty(),
+            "mask paint must not re-upload geometry"
+        );
+        assert_eq!(
+            plan.reuvs.len(),
+            1,
+            "mask paint schedules an in-place UV rewrite"
+        );
+        assert_eq!(plan.reuvs[0].0, 0);
     }
 }

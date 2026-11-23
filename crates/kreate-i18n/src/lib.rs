@@ -8,4 +8,7 @@ pub mod catalog;
 pub mod korean;
 
 pub use catalog::{Catalog, CatalogError, TextKind, TranslationOptions};
-pub use korean::{batchim_of, normalize, particle, wrap, Batchim};
+pub use korean::{
+    batchim_of, choseong, is_choseong_only, is_normalized, normalize, particle, to_2beolsik_keys,
+    wrap, Batchim,
+};

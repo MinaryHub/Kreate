@@ -23,7 +23,7 @@ use kreate_math::{DAffine3, DVec3};
 use kreate_mesh::MeshData;
 use kreate_scene::drawing::{ColorRef, Drawing, EntityKind, LayerId, Lineweight, Text, TextAlign};
 
-use crate::drawing::{project_drawing, Line2, View};
+use crate::drawing::{Line2, View};
 
 /// A sheet of the ISO A series.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -505,11 +505,18 @@ pub fn compose(parts: &[(&MeshData, DAffine3)], spec: &SheetSpec) -> Sheet {
         Vec::new()
     };
     let show_iso = spec.iso && section.is_empty();
-    // The views, each in model metres on its page.
+    // The views, each in model metres on its page — sharing one world BVH.
+    let prepared = crate::drawing::PreparedDrawing::new(parts);
     let mut views: Vec<(View, Vec<Line2>)> = [View::Front, View::Top, View::Right]
         .into_iter()
         .chain(show_iso.then_some(View::Iso))
-        .map(|v| (v, project_drawing(parts, v, 30f64.to_radians())))
+        .map(|v| {
+            let lines = prepared
+                .as_ref()
+                .map(|p| p.project(v, 30f64.to_radians()))
+                .unwrap_or_default();
+            (v, lines)
+        })
         .collect();
     views.retain(|(_, lines)| !lines.is_empty());
     let bounds = |lines: &[Line2]| {

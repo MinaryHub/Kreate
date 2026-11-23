@@ -1171,19 +1171,46 @@ pub fn take_order(doc: &mut Document) -> u64 {
     r + 1
 }
 
+/// Streams `fmt::Debug` bytes straight into a `Hasher` without allocating a `String`.
+struct HashStream<'a, H>(&'a mut H);
+
+impl<H: std::hash::Hasher> std::fmt::Write for HashStream<'_, H> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.write(s.as_bytes());
+        Ok(())
+    }
+}
+
 /// What a body's shape depends on, for the cache: its features, each
 /// sketch's points and place, and its own place.
 pub fn key(doc: &Document, features: &[Feature], body_world: DAffine3) -> u64 {
+    use std::fmt::Write as _;
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!("{features:?}").hash(&mut h);
+    for f in features {
+        let _ = write!(HashStream(&mut h), "{:?}", f.shape);
+        f.sketch.hash(&mut h);
+        for s in &f.seeds {
+            s[0].to_bits().hash(&mut h);
+            s[1].to_bits().hash(&mut h);
+        }
+        f.operation.hash(&mut h);
+        f.order.hash(&mut h);
+        f.suppressed.hash(&mut h);
+    }
     doc.design.rollback.hash(&mut h);
     // Where each thing it is made from stands *from the body*, to a
     // nanometre: a body moved with its sketches is the same body, and
     // built again at every step of a drag it was a boolean per frame.
     let to_body = body_world.inverse();
+    let mut seen_refs = Vec::new();
     for uid in features.iter().flat_map(Feature::references) {
+        if seen_refs.contains(&uid) {
+            continue;
+        }
+        seen_refs.push(uid);
         if let Some(id) = doc.object_by_uid(uid) {
+            uid.hash(&mut h);
             for v in (to_body * doc.world_transform(id)).to_cols_array() {
                 ((v * 1e9).round() as i64).hash(&mut h);
             }
@@ -1194,10 +1221,12 @@ pub fn key(doc: &Document, features: &[Feature], body_world: DAffine3) -> u64 {
                 }
                 o.sketch_lines.hash(&mut h);
                 // Which of its lines are construction: they bound no region.
-                format!("{:?}", o.sketch).hash(&mut h);
-                // A drawing is its own geometry, not a mesh's.
+                if !o.sketch.is_empty() {
+                    let _ = write!(HashStream(&mut h), "{:?}", o.sketch);
+                }
+                // A drawing's geometry (curves & points, ignoring text/labels/colours).
                 if let Some(d) = o.drawing.as_deref() {
-                    format!("{d:?}").hash(&mut h);
+                    d.geometry_hash(&mut h);
                 }
             }
             if let Some(mesh) = doc

@@ -158,6 +158,59 @@ impl Tool {
             "fixed" => Tool::Constrain("fixed"),
             "midpoint" => Tool::Constrain("midpoint"),
             "symmetric" => Tool::Constrain("symmetric"),
+            _ => return Self::from_cad_alias(name),
+        })
+    }
+
+    /// Resolves standard 2D CAD command-line aliases (AutoCAD / Fusion / SolidWorks
+    /// shorthand, case-insensitive) into a sketch [`Tool`].
+    pub fn from_cad_alias(cmd: &str) -> Option<Self> {
+        let upper = cmd.trim().to_ascii_uppercase();
+        Some(match upper.as_str() {
+            "S" | "SEL" | "SELECT" => Tool::Select,
+            "L" | "LINE" => Tool::Line,
+            "PL" | "PLINE" | "SPL" | "SPLINE" => Tool::Spline,
+            "CV" | "SPLINECV" => Tool::ControlSpline,
+            "REC" | "RECT" | "RECTANGLE" => Tool::Rectangle,
+            "RC" | "CREC" => Tool::RectangleCentre,
+            "R3" => Tool::Rectangle3,
+            "C" | "CI" | "CIRCLE" => Tool::Circle,
+            "C2" => Tool::Circle2,
+            "C3" => Tool::Circle3,
+            "A" | "ARC" => Tool::Arc,
+            "AC" => Tool::ArcCentre,
+            "TA" | "TARC" => Tool::TangentArc,
+            "EL" | "ELLIPSE" => Tool::Ellipse,
+            "POL" | "PGP" | "POLYGON" => Tool::Polygon,
+            "SL" | "SLOT" => Tool::Slot,
+            "PT" | "PO" | "POINT" => Tool::Point,
+            "F" | "FIL" | "FILLET" => Tool::Fillet,
+            "CHA" | "CHAM" | "CHAMFER" => Tool::Chamfer,
+            "TR" | "TRIM" => Tool::Trim,
+            "EX" | "EXT" | "EXTEND" => Tool::Extend,
+            "BR" | "BREAK" => Tool::Break,
+            "O" | "OFF" | "OFFSET" => Tool::Offset,
+            "MI" | "MIR" | "MIRROR" => Tool::Mirror,
+            "M" | "MOVE" | "RO" | "ROT" | "ROTATE" | "SC" | "SCALE" | "TRFM" => Tool::Transform,
+            "AR" | "ARRAY" | "PAT" | "PATTERN" => Tool::Pattern,
+            "D" | "DIM" | "DLI" | "DAL" | "DIMENSION" => Tool::Dimension,
+            "E" | "EXTRUDE" => Tool::Extrude,
+            "REV" | "REVOLVE" => Tool::Revolve,
+            "PRJ" | "PROJ" | "PROJECT" => Tool::Project,
+            "INT" | "INTERSECT" => Tool::Intersect,
+            "TXT" | "TEXT" => Tool::Text,
+            "H" | "HOR" => Tool::Constrain("horizontal"),
+            "V" | "VER" => Tool::Constrain("vertical"),
+            "CO" | "COIN" => Tool::Constrain("coincident"),
+            "TAN" => Tool::Constrain("tangent"),
+            "PER" | "PERP" => Tool::Constrain("perpendicular"),
+            "PAR" => Tool::Constrain("parallel"),
+            "EQ" | "EQUAL" => Tool::Constrain("equal"),
+            "CON" | "CONC" => Tool::Constrain("concentric"),
+            "COL" => Tool::Constrain("collinear"),
+            "MID" => Tool::Constrain("midpoint"),
+            "SYM" => Tool::Constrain("symmetric"),
+            "FIX" => Tool::Constrain("fixed"),
             _ => return None,
         })
     }
@@ -521,15 +574,42 @@ impl Geometry {
                 map.snaps.push(c.point((lo + hi) / 2.0));
             }
         }
-        // Crossings, pair by pair, as a sketch's are: a drawing past a few
-        // hundred curves is spared the cost.
-        if curves.len() <= 400 {
-            for (i, a) in curves.iter().enumerate() {
-                for b in &curves[i + 1..] {
-                    for hit in kreate_geom2d::intersect(a, b) {
-                        if let kreate_geom2d::Intersection::Point { p, .. } = hit {
-                            map.snaps.push(p);
-                        }
+        // Crossings via 2D bounding-box sweep-and-prune (`O(N log N + K)`),
+        // keeping exact intersection snaps active on large CAD/DXF drawings
+        // well past the former 400-curve cutoff while capping pathological
+        // pile-ups per curve.
+        let mut boxed: Vec<(DVec2, DVec2, usize)> = curves
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, c)| {
+                let (lo, hi) = c.bounds();
+                (lo.is_finite() && hi.is_finite() && lo.x <= hi.x && lo.y <= hi.y)
+                    .then_some((lo, hi, idx))
+            })
+            .collect();
+        boxed.sort_unstable_by(|a, b| a.0.x.total_cmp(&b.0.x));
+        let eps = 1e-7;
+        for (i, &(alo, ahi, ai)) in boxed.iter().enumerate() {
+            let mut candidates = 0usize;
+            for &(blo, bhi, bi) in &boxed[i + 1..] {
+                if blo.x > ahi.x + eps {
+                    break;
+                }
+                if blo.y > ahi.y + eps || bhi.y < alo.y - eps {
+                    continue;
+                }
+                candidates += 1;
+                if candidates > 256 {
+                    break;
+                }
+                let (first, second) = if ai < bi {
+                    (curves[ai], curves[bi])
+                } else {
+                    (curves[bi], curves[ai])
+                };
+                for hit in kreate_geom2d::intersect(first, second) {
+                    if let kreate_geom2d::Intersection::Point { p, .. } = hit {
+                        map.snaps.push(p);
                     }
                 }
             }
@@ -794,14 +874,35 @@ impl Geometry {
         };
         let segments: Vec<(DVec2, DVec2)> = self.lines.iter().filter_map(seg).collect();
         let mut out: Vec<DVec2> = segments.iter().map(|(a, b)| (*a + *b) * 0.5).collect();
-        // Crossings, pair by pair: a sketch is drawn by hand, a few hundred
-        // lines at the most, and a sketch past that is spared the cost.
-        if segments.len() <= 600 {
-            for (i, (p0, p1)) in segments.iter().enumerate() {
-                for (q0, q1) in &segments[i + 1..] {
-                    if let Some(x) = crossing(*p0, *p1, *q0, *q1) {
-                        out.push(x);
-                    }
+        // Crossings via 2D segment bounding-box sweep-and-prune (`O(N log N + K)`),
+        // keeping exact line-intersection snaps active even on large sketches
+        // well past the former 600-segment cutoff.
+        let mut boxed: Vec<(DVec2, DVec2, usize)> = segments
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (a, b))| {
+                (a.is_finite() && b.is_finite()).then_some((a.min(*b), a.max(*b), idx))
+            })
+            .collect();
+        boxed.sort_unstable_by(|a, b| a.0.x.total_cmp(&b.0.x));
+        let eps = 1e-7;
+        for (i, &(alo, ahi, ai)) in boxed.iter().enumerate() {
+            let (p0, p1) = segments[ai];
+            let mut candidates = 0usize;
+            for &(blo, bhi, bi) in &boxed[i + 1..] {
+                if blo.x > ahi.x + eps {
+                    break;
+                }
+                if blo.y > ahi.y + eps || bhi.y < alo.y - eps {
+                    continue;
+                }
+                candidates += 1;
+                if candidates > 256 {
+                    break;
+                }
+                let (q0, q1) = segments[bi];
+                if let Some(x) = crossing(p0, p1, q0, q1) {
+                    out.push(x);
                 }
             }
         }
@@ -1136,20 +1237,86 @@ pub fn infer_segment(d: &Drawing, from: DVec2, to: DVec2) -> Option<(DVec2, &'st
     Some((from + dir * run.dot(dir), best.1))
 }
 
-/// A typed length in the scene's unit, as metres: "40", "12.5", or "40,20"
-/// for two. Commas and spaces separate.
+/// A typed length in the scene's unit, as metres: "40", "12.5", "2cm", or
+/// "40,20" for two. Commas and spaces separate.
 pub fn typed_lengths(text: &str, unit_metres: f64) -> Vec<f64> {
     text.split([',', ' ', ';'])
         .filter(|t| !t.trim().is_empty())
-        .filter_map(|t| t.trim().parse::<f64>().ok())
+        .filter_map(|t| typed_with_unit(t.trim(), unit_metres).map(|v| v * unit_metres))
         .filter(|v| v.is_finite())
-        .map(|v| v * unit_metres)
         .collect()
 }
 
-/// Whether a key's text belongs in a typed number.
+/// Structured 2D CAD coordinate entry: absolute (`#x,y`), relative (`@dx,dy`),
+/// or polar (`dist<angle_deg` / `@dist<angle_deg`), with components in metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CadCoord {
+    Absolute(DVec2),
+    Relative(DVec2),
+    Polar { length: f64, angle_deg: f64 },
+}
+
+impl CadCoord {
+    /// Resolves this coordinate relative to `base` (ignored for `Absolute`).
+    pub fn resolve(self, base: DVec2) -> DVec2 {
+        match self {
+            Self::Absolute(p) => p,
+            Self::Relative(d) => base + d,
+            Self::Polar { length, angle_deg } => {
+                let rad = angle_deg.to_radians();
+                base + DVec2::new(rad.cos(), rad.sin()) * length
+            }
+        }
+    }
+}
+
+/// Parses CAD coordinate notation (`@dx,dy`, `#x,y`, or `length<angle_deg`)
+/// into metres. Plain bare numbers without `@`, `#`, or `<` return `None` so
+/// tool-specific dimension semantics (`typed_lengths`) continue unchanged.
+pub fn parse_cad_coord(text: &str, unit_metres: f64) -> Option<CadCoord> {
+    let s = text.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let metres = |part: &str| typed_with_unit(part.trim(), unit_metres).map(|v| v * unit_metres);
+    if let Some((dist_s, ang_s)) = s.strip_prefix('@').unwrap_or(s).split_once('<') {
+        let length = metres(dist_s)?;
+        let angle_deg = ang_s
+            .trim()
+            .trim_end_matches("deg")
+            .trim_end_matches('°')
+            .trim()
+            .parse::<f64>()
+            .ok()?;
+        if length.is_finite() && angle_deg.is_finite() {
+            return Some(CadCoord::Polar { length, angle_deg });
+        }
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix('#') {
+        let (xs, ys) = rest.split_once([',', ' ', ';'])?;
+        let x = metres(xs)?;
+        let y = metres(ys)?;
+        if x.is_finite() && y.is_finite() {
+            return Some(CadCoord::Absolute(DVec2::new(x, y)));
+        }
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix('@') {
+        let (xs, ys) = rest.split_once([',', ' ', ';'])?;
+        let dx = metres(xs)?;
+        let dy = metres(ys)?;
+        if dx.is_finite() && dy.is_finite() {
+            return Some(CadCoord::Relative(DVec2::new(dx, dy)));
+        }
+        return None;
+    }
+    None
+}
+
+/// Whether a key's text belongs in a typed number or CAD coordinate.
 pub fn typing(ch: char) -> bool {
-    ch.is_ascii_digit() || matches!(ch, '.' | '-' | ',' | ' ')
+    ch.is_ascii_digit() || matches!(ch, '.' | '-' | ',' | ' ' | '@' | '#' | '<')
 }
 
 /// Where the next point of a line goes when a length is typed: from the
@@ -1186,6 +1353,8 @@ pub struct SketchUi {
     pub picks: Vec<Pick>,
     /// What has been typed since the last click.
     pub typed: String,
+    /// Active CAD command-line input buffer (opened with `/` or `:`), e.g. `REC`, `CHA`, `TR`.
+    pub command: Option<String>,
     /// The regions picked for an extrude or a revolve: a point in each.
     pub seeds: Vec<DVec2>,
     /// The revolve's axis: a line's two points.
@@ -1947,7 +2116,10 @@ fn overlay(
                 }
             }
             (Tool::Line, [.., last]) => {
-                let next = typed.first().map(|l| along(*last, h, *l)).unwrap_or(h);
+                let next = parse_cad_coord(&ui.typed, unit)
+                    .map(|c| c.resolve(*last))
+                    .or_else(|| typed.first().map(|l| along(*last, h, *l)))
+                    .unwrap_or(h);
                 let mut pts = clicks.clone();
                 pts.push(next);
                 view.preview.push(polyline(pts));
@@ -2097,9 +2269,14 @@ fn overlay(
         // A first point typed from a point: the line from that point to
         // where it lands, and the place caught there.
         if let (Some(from), true) = (ui.from, ui.clicks.is_empty()) {
-            let across = typed.first().copied().unwrap_or(0.0);
-            let up = typed.get(1).copied().unwrap_or(0.0);
-            let to = from + DVec2::new(across, up);
+            let to = parse_cad_coord(&ui.typed, unit)
+                .map(|c| c.resolve(from))
+                .unwrap_or_else(|| {
+                    let across = typed.first().copied().unwrap_or(0.0);
+                    let up = typed.get(1).copied().unwrap_or(0.0);
+                    from + DVec2::new(across, up)
+                });
+            let delta = to - from;
             view.preview
                 .push(polyline(vec![from, DVec2::new(to.x, from.y), to]));
             view.snap = Some(to_world(to));
@@ -2109,8 +2286,15 @@ fn overlay(
             };
             view.glyphs.push((
                 to_world(to),
-                format!("{}, {} {}", show(across), show(up), view.unit.1),
+                format!("{}, {} {}", show(delta.x), show(delta.y), view.unit.1),
             ));
+        }
+        if let Some(cmd) = &ui.command {
+            let hint = Tool::from_cad_alias(cmd)
+                .map(|t| format!(" → {}", t.name()))
+                .unwrap_or_default();
+            view.glyphs
+                .push((to_world(h), format!(":{}{hint}", cmd.to_ascii_uppercase())));
         }
         if let (Tool::Trim, Some((line, on))) = (ui.tool, ui.trim) {
             match drawing {
@@ -3148,5 +3332,91 @@ mod tests {
         assert!((p - DVec2::new(0.0, 0.02)).length() < 1e-12);
         let c = corner(DVec2::ZERO, DVec2::new(-1.0, 1.0), 0.04, 0.02);
         assert_eq!(c, DVec2::new(-0.04, 0.02));
+    }
+
+    #[test]
+    fn cad_aliases_and_coordinates_resolve_cleanly() {
+        assert_eq!(Tool::from_cad_alias("rec"), Some(Tool::Rectangle));
+        assert_eq!(Tool::from_cad_alias("CHA"), Some(Tool::Chamfer));
+        assert_eq!(Tool::from_cad_alias("tr"), Some(Tool::Trim));
+        assert_eq!(Tool::from_cad_alias("EX"), Some(Tool::Extend));
+        assert_eq!(Tool::from_cad_alias("pl"), Some(Tool::Spline));
+        assert_eq!(Tool::from_cad_alias("EL"), Some(Tool::Ellipse));
+        assert_eq!(Tool::from_cad_alias("POL"), Some(Tool::Polygon));
+        assert_eq!(Tool::from_cad_alias("O"), Some(Tool::Offset));
+        assert_eq!(Tool::from_cad_alias("F"), Some(Tool::Fillet));
+        assert_eq!(Tool::from_cad_alias("MI"), Some(Tool::Mirror));
+        assert_eq!(Tool::from_cad_alias("DIM"), Some(Tool::Dimension));
+        assert_eq!(Tool::from_name("rec"), Some(Tool::Rectangle));
+
+        let mm = 0.001;
+        let base = DVec2::new(0.1, 0.2);
+        let rel = parse_cad_coord("@30,-10", mm).unwrap().resolve(base);
+        assert!((rel - DVec2::new(0.13, 0.19)).length() < 1e-12);
+        let rel_units = parse_cad_coord("@3cm,-10mm", mm).unwrap().resolve(base);
+        assert!((rel_units - DVec2::new(0.13, 0.19)).length() < 1e-12);
+        assert!((typed_lengths("2cm", mm)[0] - 0.02).abs() < 1e-12);
+
+        let abs = parse_cad_coord("#50,25", mm).unwrap().resolve(base);
+        assert!((abs - DVec2::new(0.05, 0.025)).length() < 1e-12);
+
+        let polar = parse_cad_coord("100<60", mm).unwrap().resolve(DVec2::ZERO);
+        assert!((polar.x - 0.05).abs() < 1e-9);
+        assert!((polar.y - 0.1 * 60.0f64.to_radians().sin()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn large_drawings_keep_intersection_snaps_past_six_hundred_segments() {
+        let mut points = vec![DVec2::ZERO];
+        let mut lines = Vec::new();
+        // 700 non-overlapping vertical ticks along X = 10..710, plus two crossing
+        // diagonals at X in 0..2 that intersect at (1.0, 1.0).
+        for k in 0..700 {
+            let x = 10.0 + k as f64;
+            let a = points.len() as u32;
+            points.push(DVec2::new(x, 0.0));
+            points.push(DVec2::new(x, 1.0));
+            lines.push([a, a + 1]);
+        }
+        let a = points.len() as u32;
+        points.push(DVec2::new(0.0, 0.0));
+        points.push(DVec2::new(2.0, 2.0));
+        points.push(DVec2::new(0.0, 2.0));
+        points.push(DVec2::new(2.0, 0.0));
+        lines.push([a, a + 1]);
+        lines.push([a + 2, a + 3]);
+
+        let g = Geometry::new(points, lines, &[], |p| Some(p * 100.0));
+        let snaps = g.snap_points();
+        assert!(
+            snaps
+                .iter()
+                .any(|q| q.distance(DVec2::new(1.0, 1.0)) < 1e-9),
+            "crossing snap must stay active past 600 segments"
+        );
+
+        let mut drawing = Drawing::new();
+        for k in 0..450 {
+            let x = 10.0 + k as f64;
+            drawing.add_curve(Curve2D::Line {
+                a: DVec2::new(x, 0.0),
+                b: DVec2::new(x, 1.0),
+            });
+        }
+        drawing.add_curve(Curve2D::Line {
+            a: DVec2::new(0.0, 0.0),
+            b: DVec2::new(2.0, 2.0),
+        });
+        drawing.add_curve(Curve2D::Line {
+            a: DVec2::new(0.0, 2.0),
+            b: DVec2::new(2.0, 0.0),
+        });
+        let gd = Geometry::from_drawing(&drawing, 0.001, |p| Some(p * 100.0));
+        assert!(
+            gd.snap_points()
+                .iter()
+                .any(|q| q.distance(DVec2::new(1.0, 1.0)) < 1e-9),
+            "drawing crossing snap must stay active past 400 curves"
+        );
     }
 }

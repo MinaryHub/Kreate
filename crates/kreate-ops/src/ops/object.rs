@@ -2896,6 +2896,10 @@ pub struct SetTransformParams {
     pub autokey: bool,
     #[param(hidden)]
     pub key_frame: f64,
+    /// When true, applies the active object's transform delta across every
+    /// other selected object as part of the same undo step.
+    #[param(hidden)]
+    pub all_selected: bool,
 }
 
 impl Default for SetTransformParams {
@@ -2906,6 +2910,7 @@ impl Default for SetTransformParams {
             scale: [1.0; 3],
             autokey: false,
             key_frame: 1.0,
+            all_selected: false,
         }
     }
 }
@@ -2921,9 +2926,9 @@ impl Default for SetTransformParams {
 /// which is a subtraction the user did not ask for, in a place where a rounding
 /// error becomes a nudge.
 ///
-/// The active object alone, not the selection. Typing a location means "put
-/// *this* here"; applying it to everything selected would stack them all on one
-/// point, which nobody has ever wanted.
+/// The active object alone by default; when `all_selected` is set (Alt-edit or
+/// multi-edit toggle), the active object's delta is also applied to the rest of
+/// the selection.
 pub struct SetTransform;
 
 impl Operator for SetTransform {
@@ -2971,22 +2976,43 @@ impl Operator for SetTransform {
             scale: DVec3::from_array(params.scale),
         };
         let d = doc.document_mut();
-        let Some(object) = d.object_mut(active) else {
+        let Some(old_active) = d.object(active).map(|o| o.transform) else {
             return Ok(OpResult::Cancelled);
         };
         // Nothing to record if nothing moved. An operator that reports success
         // for a no-op puts an entry in the history that undoes to the same
         // scene — and this one runs on every keystroke in a coordinate field,
         // where the value is usually the one already there.
-        if object.transform == wanted {
+        if old_active == wanted {
             crate::report::say("the object is already at that transform");
             return Ok(OpResult::Cancelled);
         }
-        object.transform = wanted;
+        d.object_mut(active).unwrap().transform = wanted;
+        let mut keyed_targets = vec![active];
+        if params.all_selected && d.selection.objects.len() > 1 {
+            let delta_pos = wanted.translation - old_active.translation;
+            let delta_rot = (wanted.rotation * old_active.rotation.inverse()).normalize();
+            let delta_scale = wanted.scale - old_active.scale;
+            let others: Vec<_> = d
+                .selection
+                .objects
+                .iter()
+                .copied()
+                .filter(|&id| id != active)
+                .collect();
+            for other_id in others {
+                if let Some(other) = d.object_mut(other_id) {
+                    other.transform.translation += delta_pos;
+                    other.transform.rotation = (delta_rot * other.transform.rotation).normalize();
+                    other.transform.scale += delta_scale;
+                    keyed_targets.push(other_id);
+                }
+            }
+        }
         if params.autokey {
             crate::ops::anim::key_objects(
                 d,
-                &[active],
+                &keyed_targets,
                 params.key_frame,
                 crate::ops::anim::KEYING_SETS[0],
             );
@@ -5252,6 +5278,37 @@ mod tests {
             doc.object(cube).expect("there").transform,
             before,
             "undo did not put it back"
+        );
+    }
+
+    #[test]
+    fn setting_transform_with_all_selected_moves_the_whole_selection_by_delta() {
+        let (r, mut h, mut doc, ctx, a, b) = two_cubes();
+        doc.object_mut(a).unwrap().transform.translation = DVec3::new(10.0, 0.0, 0.0);
+        doc.object_mut(b).unwrap().transform.translation = DVec3::new(2.0, 0.0, 0.0);
+        doc.selection.active = Some(b);
+
+        let mut fields = placed([5.0, 1.0, 0.0], [0.0; 3], [2.0, 1.0, 1.0]);
+        fields.push(("all_selected", PropertyValue::Bool(true)));
+        run(&r, &mut h, &mut doc, &ctx, "object.set_transform", &fields);
+
+        assert_eq!(
+            doc.object(b).unwrap().transform.translation,
+            DVec3::new(5.0, 1.0, 0.0)
+        );
+        // `a` moved by the same (+3, +1, 0) delta and scaled X by +1.0!
+        assert_eq!(
+            doc.object(a).unwrap().transform.translation,
+            DVec3::new(13.0, 1.0, 0.0)
+        );
+        assert_eq!(
+            doc.object(a).unwrap().transform.scale,
+            DVec3::new(2.0, 1.0, 1.0)
+        );
+        assert!(h.undo(&mut doc));
+        assert_eq!(
+            doc.object(a).unwrap().transform.translation,
+            DVec3::new(10.0, 0.0, 0.0)
         );
     }
 

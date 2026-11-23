@@ -184,6 +184,10 @@ pub enum Command {
     },
     /// From the chat panel: pick files to attach to the next message.
     ChatAttach,
+    /// From the chat panel: attach a structured summary of the current 3D
+    /// selection (objects, mesh elements, world bounds, CAD features) to the
+    /// next message.
+    ChatAttachSelection,
     /// From the chat panel: take an attachment off the next message — an
     /// index into the list the panel was given.
     ChatDetach {
@@ -389,6 +393,9 @@ pub enum Command {
     },
     /// From the asset browser: ask for a folder to read.
     AssetAddFolder,
+    /// From the asset browser: save the selected objects (with their meshes,
+    /// materials, textures, and CAD features) into the local asset library.
+    AssetSaveSelection,
     /// From the asset browser: stop reading this folder.
     AssetRemoveFolder {
         index: usize,

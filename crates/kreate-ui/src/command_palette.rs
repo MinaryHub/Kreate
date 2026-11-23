@@ -91,18 +91,60 @@ fn word_score(word: &str, hay: &str) -> Option<i32> {
     word.chars().all(|c| letters.any(|h| h == c)).then_some(10)
 }
 
+/// Contiguous substring score only (no scattered fallback), used for
+/// keyboard-layout typo recovery where scattered single-key hits would be noisy.
+fn contiguous_score(word: &str, hay: &str) -> Option<i32> {
+    let at = hay.find(word)?;
+    let starts_word = at == 0
+        || hay[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_alphanumeric());
+    Some(90 - (at as i32).min(50) + if starts_word { 35 } else { 0 })
+}
+
 /// How well `query` matches an entry, or `None` if some word is missing.
 ///
 /// Words found in the title count double: "delete" should find Delete before
-/// it finds an entry whose description mentions deleting.
+/// it finds an entry whose description mentions deleting. Also matches Korean
+/// initial consonants (`ㄷㅊ` -> `돌출`) and 2-beolsik IME mismatches
+/// (`ㄷㅌㅅ경ㄷ` -> `extrude`, `ehfcnf` -> `돌출`).
 pub fn score(query: &str, item: &PaletteItem) -> Option<i32> {
+    let normalized;
+    let query = if kreate_i18n::is_normalized(query) {
+        query
+    } else {
+        normalized = kreate_i18n::normalize(query);
+        &normalized
+    };
     let title = item.title.to_lowercase();
     let rest = format!("{} {}", item.path, item.keywords).to_lowercase();
     let mut total = 0;
     for word in query.to_lowercase().split_whitespace() {
-        let in_title = word_score(word, &title).map(|s| s * 2);
-        let elsewhere = word_score(word, &rest);
-        total += in_title.max(elsewhere)?;
+        let mut best = word_score(word, &title)
+            .map(|s| s * 2)
+            .max(word_score(word, &rest));
+
+        if best.is_none() && kreate_i18n::is_choseong_only(word) {
+            let title_cho = kreate_i18n::choseong(&title);
+            let rest_cho = kreate_i18n::choseong(&rest);
+            best = word_score(word, &title_cho)
+                .map(|s| s * 2)
+                .max(word_score(word, &rest_cho));
+        }
+
+        if best.is_none() && word.chars().count() >= 2 {
+            let word_keys = kreate_i18n::to_2beolsik_keys(word);
+            if word_keys.len() >= 2 {
+                let title_keys = kreate_i18n::to_2beolsik_keys(&title);
+                let rest_keys = kreate_i18n::to_2beolsik_keys(&rest);
+                best = contiguous_score(&word_keys, &title_keys)
+                    .map(|s| s * 2)
+                    .max(contiguous_score(&word_keys, &rest_keys));
+            }
+        }
+
+        total += best?;
     }
     Some(total)
 }
@@ -184,6 +226,9 @@ pub fn command_palette(
                     state.focus = false;
                 }
                 if field.changed() {
+                    if !kreate_i18n::is_normalized(&state.query) {
+                        state.query = kreate_i18n::normalize(&state.query);
+                    }
                     state.selected = 0;
                 }
                 ui.separator();
@@ -191,48 +236,53 @@ pub fn command_palette(
                     ui.weak(&text.nothing);
                     return;
                 }
-                egui::ScrollArea::vertical()
+                let row_height = ui.text_style_height(&egui::TextStyle::Button)
+                    + ui.spacing().button_padding.y * 2.0;
+                let mut scroll = egui::ScrollArea::vertical()
                     .max_height(360.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for (row, &index) in order.iter().enumerate() {
-                            let item = &items[index];
-                            let highlighted = row == state.selected;
-                            let response = ui
-                                .add_enabled_ui(item.enabled, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let label = if item.path.is_empty() {
-                                            item.title.clone()
-                                        } else {
-                                            // A slash rather than `›`: the bundled
-                                            // font has no glyph for the arrow, and a
-                                            // box where a separator belongs reads as
-                                            // a broken string.
-                                            format!("{}  /  {}", item.path, item.title)
-                                        };
-                                        let r = ui.selectable_label(highlighted, label);
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(&item.shortcut)
-                                                        .color(theme.text_faint),
-                                                );
-                                            },
-                                        );
-                                        r
-                                    })
-                                    .inner
+                    .auto_shrink([false, true]);
+                if up || down {
+                    let target_y =
+                        state.selected as f32 * (row_height + ui.spacing().item_spacing.y);
+                    scroll = scroll.vertical_scroll_offset((target_y - 160.0).max(0.0));
+                }
+                scroll.show_rows(ui, row_height, order.len(), |ui, row_range| {
+                    for row in row_range {
+                        let index = order[row];
+                        let item = &items[index];
+                        let highlighted = row == state.selected;
+                        let response = ui
+                            .add_enabled_ui(item.enabled, |ui| {
+                                ui.horizontal(|ui| {
+                                    let label = if item.path.is_empty() {
+                                        item.title.clone()
+                                    } else {
+                                        // A slash rather than `›`: the bundled
+                                        // font has no glyph for the arrow, and a
+                                        // box where a separator belongs reads as
+                                        // a broken string.
+                                        format!("{}  /  {}", item.path, item.title)
+                                    };
+                                    let r = ui.selectable_label(highlighted, label);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                egui::RichText::new(&item.shortcut)
+                                                    .color(theme.text_faint),
+                                            );
+                                        },
+                                    );
+                                    r
                                 })
-                                .inner;
-                            if highlighted && (up || down) {
-                                response.scroll_to_me(None);
-                            }
-                            if response.clicked() && item.enabled {
-                                chosen = Some(index);
-                            }
+                                .inner
+                            })
+                            .inner;
+                        if response.clicked() && item.enabled {
+                            chosen = Some(index);
                         }
-                    });
+                    }
+                });
                 if let Some(item) = order.get(state.selected).map(|i| &items[*i]) {
                     if !item.detail.is_empty() {
                         ui.separator();
@@ -350,5 +400,24 @@ mod tests {
             state.remember(&i.to_string());
         }
         assert_eq!(state.recent.len(), 10, "the list grows without bound");
+    }
+
+    #[test]
+    fn korean_choseong_and_ime_mismatch_find_the_command() {
+        let mut list = items();
+        list[1].title = "돌출".into();
+        list[3].title = "베벨".into();
+
+        // Choseong search: ㄷㅊ -> 돌출
+        let order = ranked(&list, "ㄷㅊ", &[]);
+        assert_eq!(list[order[0]].key, "extrude");
+
+        // Korean IME left on while typing "extrude" (ㄷㅌㅅ경ㄷ)
+        let order = ranked(&list, "ㄷㅌㅅ경ㄷ", &[]);
+        assert_eq!(list[order[0]].key, "extrude");
+
+        // English mode left on while typing "돌출" (ehfcnf)
+        let order = ranked(&list, "ehfcnf", &[]);
+        assert_eq!(list[order[0]].key, "extrude");
     }
 }

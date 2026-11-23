@@ -314,4 +314,13 @@ impl Bloom {
             false,
         );
     }
+
+    /// Drops the mip chain when leaving the rendered view so unlit modes hold no
+    /// HDR blur targets.
+    pub fn release(&mut self) {
+        self.levels.clear();
+        self.level_binds.clear();
+        self.picture_bind = None;
+        self.made_for = ((0, 0), (0, 0));
+    }
 }

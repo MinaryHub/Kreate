@@ -609,6 +609,13 @@ fn align_up(n: usize) -> usize {
 }
 
 fn read_u32(bytes: &[u8]) -> Vec<u32> {
+    #[cfg(target_endian = "little")]
+    {
+        let usable = bytes.len() & !3;
+        if let Ok(slice) = bytemuck::try_cast_slice::<u8, u32>(&bytes[..usable]) {
+            return slice.to_vec();
+        }
+    }
     bytes
         .as_chunks::<4>()
         .0
@@ -633,6 +640,38 @@ fn attr_bytes(data: &AttrData) -> Vec<u8> {
 }
 
 fn read_attr(ty: AttrType, bytes: &[u8], count: usize) -> AttrData {
+    #[cfg(target_endian = "little")]
+    {
+        let wanted = count.saturating_mul(ty.size()).min(bytes.len());
+        match ty {
+            AttrType::F32 => {
+                if let Ok(s) = bytemuck::try_cast_slice::<u8, f32>(&bytes[..wanted & !3]) {
+                    return AttrData::F32(Arc::new(s.to_vec()));
+                }
+            }
+            AttrType::F32x2 => {
+                if let Ok(s) = bytemuck::try_cast_slice::<u8, Vec2>(&bytes[..wanted & !7]) {
+                    return AttrData::F32x2(Arc::new(s.to_vec()));
+                }
+            }
+            AttrType::F32x3 => {
+                if let Ok(s) = bytemuck::try_cast_slice::<u8, Vec3>(&bytes[..(wanted / 12) * 12]) {
+                    return AttrData::F32x3(Arc::new(s.to_vec()));
+                }
+            }
+            AttrType::F32x4 => {
+                if let Ok(s) = bytemuck::try_cast_slice::<u8, Vec4>(&bytes[..wanted & !15]) {
+                    return AttrData::F32x4(Arc::new(s.to_vec()));
+                }
+            }
+            AttrType::I32 => {
+                if let Ok(s) = bytemuck::try_cast_slice::<u8, i32>(&bytes[..wanted & !3]) {
+                    return AttrData::I32(Arc::new(s.to_vec()));
+                }
+            }
+            AttrType::Bool | AttrType::U8x4 => {}
+        }
+    }
     match ty {
         AttrType::F32 => AttrData::F32(Arc::new(
             bytes

@@ -392,6 +392,9 @@ pub struct GpuMesh {
     cluster_draw_bind: wgpu::BindGroup,
     /// How many clusters this mesh has.
     pub cluster_count: u32,
+    /// Corner-to-render-vertex mapping from upload time, enabling O(corners)
+    /// in-place UV buffer rewrites when vertex splits have not changed.
+    corner_render: Box<[u32]>,
 }
 
 /// The per-mesh bind group layouts a `GpuMesh` needs.
@@ -648,6 +651,7 @@ impl GpuMesh {
             cluster_bind,
             cluster_draw_bind,
             cluster_count,
+            corner_render: cpu.corner_render.clone().into_boxed_slice(),
             vert_flags,
             edge_flags,
             face_flags,
@@ -685,6 +689,25 @@ impl GpuMesh {
     pub fn update_positions(&self, queue: &wgpu::Queue, cpu: &RenderMeshCpu) {
         queue.write_buffer(&self.positions, 0, bytemuck::cast_slice(&cpu.positions));
         queue.write_buffer(&self.normals, 0, bytemuck::cast_slice(&cpu.normals));
+    }
+
+    /// Rewrites only the UV buffer when the mesh's new UVs remain compatible
+    /// with the existing render-vertex split. Returns `false` when a new seam or
+    /// sculpt face-set border requires re-splitting.
+    pub fn update_uvs(&self, queue: &wgpu::Queue, mesh: &kreate_mesh::MeshData) -> bool {
+        if mesh.num_verts() != self.counts.verts
+            || mesh.num_edges() != self.counts.edges
+            || mesh.num_faces() != self.counts.faces
+        {
+            return false;
+        }
+        let Some(uvs) =
+            RenderMeshCpu::extract_compatible_uvs(mesh, &self.corner_render, self.render_verts)
+        else {
+            return false;
+        };
+        queue.write_buffer(&self.uvs, 0, padded(bytemuck::cast_slice(&uvs)));
+        true
     }
 
     /// Rewrites only the three flag buffers.
@@ -1726,6 +1749,9 @@ pub struct Viewport {
     depth: wgpu::TextureView,
     /// Allocated size of the render targets.
     size: (u32, u32),
+    /// Allocated size of the lit-mode render targets (`hdr`, `ssr`, `contact_depth`, `behind`),
+    /// kept at `(1, 1)` while shading in Studio/Flat/Wireframe modes.
+    lit_size: (u32, u32),
     /// The sub-rectangle actually drawn into.
     ///
     /// The offscreen target is allocated in coarse steps so a panel drag does not
@@ -2301,8 +2327,8 @@ impl Viewport {
             mapped_at_creation: false,
         });
         let environment_0 = crate::environment::Environment::placeholder(device);
-        let contact_depth_0 = gpu::create_depth_texture(device, width, height);
-        let behind_0 = behind_texture(device, width, height);
+        let contact_depth_0 = gpu::create_depth_texture(device, 1, 1);
+        let behind_0 = behind_texture(device, 1, 1);
         let shading_bind = shading_bind_group(
             device,
             &shading_layout,
@@ -2438,7 +2464,7 @@ impl Viewport {
             width.max(1),
             height.max(1),
         );
-        let hdr_0 = crate::display::HdrTarget::new(device, width.max(1), height.max(1));
+        let hdr_0 = crate::display::HdrTarget::new(device, 1, 1);
         let screen_0 = crate::display::ScreenResolve::new(device, color_format);
         let screen_params_buf = wgpu::util::DeviceExt::create_buffer_init(
             device,
@@ -2855,7 +2881,7 @@ impl Viewport {
             cluster_generation: cluster_cull.generation(),
             color_format,
             cull: cluster_cull,
-            hiz: HiZ::new(device, width.max(1), height.max(1)),
+            hiz: HiZ::new(device, 1, 1),
             occlusion_culling: false,
             cluster_solid,
             cluster_globals_layout,
@@ -2872,11 +2898,11 @@ impl Viewport {
             pathtracer: pathtracer_0,
             path_trace: false,
             path_trace_lens: None,
-            denoise: crate::denoise::Denoise::new(device, width.max(1), height.max(1)),
+            denoise: crate::denoise::Denoise::new(device, 1, 1),
             path_trace_denoise: true,
             path_trace_bounces: 4,
             path_trace_noise_threshold: 0.01,
-            ssr: crate::ssr::Ssr::new(device, width.max(1), height.max(1)),
+            ssr: crate::ssr::Ssr::new(device, 1, 1),
             show_reflections: true,
             bloom: crate::bloom::Bloom::new(device),
             show_bloom: true,
@@ -2903,6 +2929,7 @@ impl Viewport {
             show_outline: true,
             antialias: true,
             size: (width.max(1), height.max(1)),
+            lit_size: (1, 1),
             render_size: (width.max(1), height.max(1)),
             shading: ShadingMode::Studio,
             background: palette::clear(palette::VIEWPORT),
@@ -2942,25 +2969,58 @@ impl Viewport {
         if size != self.size {
             self.size = size;
             self.depth = gpu::create_depth_texture(device, size.0, size.1);
-            self.contact_depth = gpu::create_depth_texture(device, size.0, size.1);
-            self.behind = behind_texture(device, size.0, size.1);
-            self.rebuild_shading_bind(device);
             self.aa.resize(device, size.0, size.1);
             self.outline.resize(device, size.0, size.1);
             self.accum.resize(device, size.0, size.1);
-            self.ssr.resize(device, size.0, size.1);
-            self.denoise.resize(device, size.0, size.1);
             self.ao.resize(device, &self.depth, size.0, size.1);
-            // The linear intermediate is the same size as the depth it shares
-            // a pass with. Remade only on a real change, because a texture
-            // reallocated every frame is a stall — and the bind group holds
-            // the old view, so it is remade with it.
-            self.hdr.resize(device, size.0, size.1);
+        }
+        self.render_size = self.render_size.fit_within(size);
+    }
+
+    /// Currently allocated dimensions of the lit-mode render targets (`(1, 1)` when
+    /// shading in Studio, Flat, or Wireframe mode).
+    pub fn lit_target_size(&self) -> (u32, u32) {
+        self.lit_size
+    }
+
+    /// Currently allocated dimensions of the path-tracer denoiser (`(1, 1)` when
+    /// not actively path-tracing with denoising).
+    pub fn denoise_target_size(&self) -> (u32, u32) {
+        self.denoise.size()
+    }
+
+    /// Allocates lit-mode and path-tracing targets on demand and shrinks them back
+    /// to `(1, 1)` placeholders when the active shading mode does not use them.
+    fn sync_lazy_targets(&mut self, device: &wgpu::Device) {
+        let want_lit = if self.shading.lit() {
+            self.size
+        } else {
+            (1, 1)
+        };
+        if want_lit != self.lit_size {
+            self.lit_size = want_lit;
+            self.contact_depth = gpu::create_depth_texture(device, want_lit.0, want_lit.1);
+            self.behind = behind_texture(device, want_lit.0, want_lit.1);
+            if !self.shading.lit() {
+                self.bloom.release();
+                let _ = self.tiles.resize(device, 1, 1);
+            }
+            self.rebuild_shading_bind(device);
+            self.ssr.resize(device, want_lit.0, want_lit.1);
+            self.hdr.resize(device, want_lit.0, want_lit.1);
             self.screen_bind = self
                 .screen
                 .bind_group(device, self.hdr.view(), &self.screen_params);
         }
-        self.render_size = self.render_size.fit_within(size);
+        let want_denoise = if self.path_tracing() && self.path_trace_denoise {
+            self.size
+        } else {
+            (1, 1)
+        };
+        self.denoise.resize(device, want_denoise.0, want_denoise.1);
+        if self.shading != ShadingMode::Rendered || !self.wants_path_trace_scene() {
+            self.pathtracer.release_framebuffers(device);
+        }
     }
 
     /// Sets the exact region of the target that is drawn into.
@@ -3187,6 +3247,7 @@ impl Viewport {
         }
         let unnudged = camera.view_projection(aspect);
         let view_proj = self.next_sample(unnudged, camera.eye(), draws);
+        self.sync_lazy_targets(device);
         // The temporal pass: on while moving — the mean's first frame — when
         // the last picture is of the same size and shading to carry over.
         let key = (self.render_size, self.shading as u8);
@@ -5236,6 +5297,35 @@ impl Viewport {
         self.accum_samples = 0;
     }
 
+    /// Updates path-tracer surface parameters and scalar material constants in
+    /// place when geometry, transforms, shader code, and textures have not changed.
+    #[must_use]
+    pub fn update_path_trace_surfaces(
+        &mut self,
+        queue: &wgpu::Queue,
+        surfaces: &[crate::pathtrace::PtSurface],
+        values: &[[f32; 4]],
+    ) -> bool {
+        if !self.path_trace_allowed {
+            return true;
+        }
+        if self.pathtracer.update_surfaces(queue, surfaces, values) {
+            self.accum_samples = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Releases the path tracer's uploaded scene (BVH, geometry, textures),
+    /// per-pixel accumulation buffers, and denoiser targets when leaving path
+    /// tracing.
+    pub fn clear_path_trace(&mut self, device: &wgpu::Device) {
+        self.pathtracer.clear_scene(device);
+        self.denoise.resize(device, 1, 1);
+        self.auto_trace = false;
+    }
+
     /// Samples the path tracer has summed, for the header.
     pub fn path_trace_samples(&self) -> u32 {
         if self.path_tracing() {
@@ -5286,7 +5376,9 @@ impl Viewport {
             self.path_trace,
         )
             .hash(&mut h);
-        format!("{:?}", self.path_trace_lens).hash(&mut h);
+        self.path_trace_lens
+            .map(|l| (l.radius.to_bits(), l.focus.to_bits()))
+            .hash(&mut h);
         // The lighting inputs since the last frame, folded together, and
         // started afresh for the next: the same calls with the same values
         // give the same number.

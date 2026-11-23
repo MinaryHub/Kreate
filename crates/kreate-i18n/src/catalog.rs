@@ -155,6 +155,16 @@ impl Catalog {
     /// Looks up a key of a specific kind, honouring the toggles.
     pub fn format(&self, key: &str, kind: TextKind, args: &[(&str, &str)]) -> String {
         if !self.wants(kind) {
+            if let Some(source) = self
+                .locales
+                .iter()
+                .rev()
+                .find(|l| l.id.language.as_str() == "en")
+            {
+                if let Some(text) = format_from(&source.bundle, key, args) {
+                    return text;
+                }
+            }
             return key.to_string();
         }
         for locale in &self.locales {
@@ -346,13 +356,27 @@ deleted-object = { $name }{ PARTICLE($name, "을/를") } 삭제했습니다.
         c.options.ui = false;
         assert_eq!(
             c.format("op-object-delete", TextKind::Ui, &[]),
-            "op-object-delete",
-            "UI translation is off, so the key comes back"
+            "Delete Objects",
+            "UI translation is off, so the English source text comes back"
         );
         assert_eq!(
             c.format("op-object-delete", TextKind::Tooltip, &[]),
             "오브젝트 삭제",
             "tooltips are still translated"
+        );
+    }
+
+    #[test]
+    fn a_suppressed_kind_with_no_english_bundle_returns_the_key() {
+        // Callers with a partial single-locale catalog (such as property_editor
+        // falling back to a Rust doc comment) rely on getting the key back when
+        // no English bundle is loaded.
+        let mut c = Catalog::new();
+        c.add("ko-KR", KO).expect("ko");
+        c.options.tooltips = false;
+        assert_eq!(
+            c.format("op-object-delete", TextKind::Tooltip, &[]),
+            "op-object-delete"
         );
     }
 
@@ -372,12 +396,12 @@ deleted-object = { $name }{ PARTICLE($name, "을/를") } 삭제했습니다.
     #[test]
     fn new_data_names_are_not_translated_by_default() {
         // A translated default name ends up inside saved files and exported
-        // assets, where it is a liability.
+        // assets, where it is a liability: English stays the default there.
         let c = catalog();
         assert!(!c.options.new_data_names);
         assert_eq!(
             c.format("op-object-delete", TextKind::NewDataName, &[]),
-            "op-object-delete"
+            "Delete Objects"
         );
     }
 

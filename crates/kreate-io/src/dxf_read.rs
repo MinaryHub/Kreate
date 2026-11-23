@@ -23,13 +23,29 @@ use kreate_scene::Document;
 /// Reads a DXF into a document holding one drawing, named `name`, lying in
 /// the ground plane.
 pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
+    parse_dxf_with(text, name, &crate::scene_file::ReadProgress::default())
+}
+
+/// [`parse_dxf`] reporting progress and honouring cancellation.
+pub fn parse_dxf_with(
+    text: &str,
+    name: &str,
+    progress: &crate::scene_file::ReadProgress,
+) -> Result<Document, String> {
     if text.starts_with("AutoCAD Binary DXF") {
         return Err("a binary DXF: save it as ASCII DXF".into());
     }
-    let pairs = pairs(text)?;
+    progress.start(crate::scene_file::ReadStage::Parsing, text.len() as u64);
+    let pairs = pairs_with(text, progress)?;
+    if progress.cancelled() {
+        return Err(crate::scene_file::CANCELLED.to_string());
+    }
     let mut file = DxfFile::default();
     let mut i = 0;
     while i < pairs.len() {
+        if progress.cancelled() {
+            return Err(crate::scene_file::CANCELLED.to_string());
+        }
         if pairs[i] == (0, "SECTION") && i + 1 < pairs.len() && pairs[i + 1].0 == 2 {
             let section = pairs[i + 1].1;
             let end = (i + 2..pairs.len())
@@ -49,6 +65,10 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
         }
     }
 
+    progress.start(
+        crate::scene_file::ReadStage::Building,
+        file.entities.len() as u64,
+    );
     let mut drawing = Drawing::new();
     let mut layers: HashMap<String, LayerId> = HashMap::new();
     for (lname, color, on, linetype, frozen) in &file.layers {
@@ -74,7 +94,13 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
         blocks: &file.blocks,
         budget: MAX_ENTITIES,
     };
-    for record in &file.entities {
+    for (idx, record) in file.entities.iter().enumerate() {
+        if idx & 1023 == 0 {
+            if progress.cancelled() {
+                return Err(crate::scene_file::CANCELLED.to_string());
+            }
+            progress.advance(idx as u64);
+        }
         out.entity(record, &Place::identity(), 0);
     }
     if drawing.entities.is_empty() {
@@ -92,10 +118,16 @@ pub fn parse_dxf(text: &str, name: &str) -> Result<Document, String> {
 }
 
 /// The file as group-code and value pairs.
-fn pairs(text: &str) -> Result<Vec<(i32, &str)>, String> {
+fn pairs_with<'a>(
+    text: &'a str,
+    progress: &crate::scene_file::ReadProgress,
+) -> Result<Vec<(i32, &'a str)>, String> {
     let mut lines = text.lines();
     let mut out = Vec::new();
+    let mut seen_bytes = 0u64;
+    let mut count = 0usize;
     while let Some(code) = lines.next() {
+        seen_bytes += code.len() as u64 + 1;
         let code = code.trim();
         if code.is_empty() {
             continue;
@@ -103,6 +135,14 @@ fn pairs(text: &str) -> Result<Vec<(i32, &str)>, String> {
         let Some(value) = lines.next() else {
             break;
         };
+        seen_bytes += value.len() as u64 + 1;
+        count += 1;
+        if count & 4095 == 0 {
+            if progress.cancelled() {
+                return Err(crate::scene_file::CANCELLED.to_string());
+            }
+            progress.advance(seen_bytes);
+        }
         let code: i32 = code
             .parse()
             .map_err(|_| format!("not a DXF: `{code}` where a group code was expected"))?;

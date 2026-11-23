@@ -79,7 +79,7 @@ impl Replica {
         if changes.is_empty() {
             return None;
         }
-        let bytes = sync::encode(doc, &changes).ok()?;
+        let bytes = sync::encode_since(&self.base, doc, &changes).ok()?;
         self.sent(doc, changes);
         Some(bytes)
     }
@@ -118,7 +118,7 @@ impl Replica {
         from: u16,
         bytes: &[u8],
     ) -> Result<Option<Changes>, sync::SyncError> {
-        let (patch, mut changes) = sync::decode(bytes)?;
+        let (patch, mut changes) = sync::decode_for(doc, bytes)?;
         let mine_changed: BTreeSet<BlockKey> = self
             .in_flight
             .iter()

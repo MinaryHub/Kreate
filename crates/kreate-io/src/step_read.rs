@@ -1304,19 +1304,32 @@ fn invert_spline(s: &Nurbs, grid: &[(DVec2, DVec3)], p: DVec3, hint: Option<DVec
         let q = DVec2::new(s.fold(0, q.x), s.fold(1, q.y));
         (s.eval(q.x, q.y).distance_squared(p), q)
     };
+    // Try the continuity hint first: consecutive points along a trim curve lie
+    // right beside the previous answer, so converging near `p` skips scanning
+    // the 625-sample grid and running Newton a second time.
+    if let Some(h) = hint {
+        let tried = newton(DVec2::new(s.fold(0, h.x), s.fold(1, h.y)));
+        if tried.0 <= 1e-14 {
+            return tried.1;
+        }
+        let start = grid
+            .iter()
+            .min_by(|a, b| a.1.distance_squared(p).total_cmp(&b.1.distance_squared(p)))
+            .map(|g| g.0)
+            .unwrap_or(DVec2::new(ulo, vlo));
+        let best = newton(start);
+        return if tried.0 <= best.0 * (1.0 + 1e-9) {
+            tried.1
+        } else {
+            best.1
+        };
+    }
     let start = grid
         .iter()
         .min_by(|a, b| a.1.distance_squared(p).total_cmp(&b.1.distance_squared(p)))
         .map(|g| g.0)
         .unwrap_or(DVec2::new(ulo, vlo));
-    let mut best = newton(start);
-    if let Some(h) = hint {
-        let other = newton(DVec2::new(s.fold(0, h.x), s.fold(1, h.y)));
-        if other.0 <= best.0 * (1.0 + 1e-9) {
-            best = other;
-        }
-    }
-    best.1
+    newton(start).1
 }
 
 // ---------------------------------------------------------------------------

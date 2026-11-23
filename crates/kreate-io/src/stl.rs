@@ -98,6 +98,8 @@ pub enum StlError {
     },
     #[error("line {line}: {what}")]
     Ascii { line: usize, what: String },
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Parses either form, choosing between them by structure rather than by the
@@ -110,9 +112,18 @@ pub enum StlError {
 /// because a binary STL is exactly `84 + 50n` bytes and an ASCII one almost
 /// never is.
 pub fn parse_stl(bytes: &[u8], options: &StlOptions) -> Result<ImportScene, StlError> {
+    parse_stl_with(bytes, options, &crate::scene_file::ReadProgress::default())
+}
+
+/// [`parse_stl`] reporting progress and honouring cancellation.
+pub fn parse_stl_with(
+    bytes: &[u8],
+    options: &StlOptions,
+    progress: &crate::scene_file::ReadProgress,
+) -> Result<ImportScene, StlError> {
     match classify(bytes) {
-        Form::Binary => parse_binary(bytes, options),
-        Form::Ascii => parse_ascii(bytes, options),
+        Form::Binary => parse_binary(bytes, options, progress),
+        Form::Ascii => parse_ascii(bytes, options, progress),
     }
 }
 
@@ -162,7 +173,11 @@ fn classify(bytes: &[u8]) -> Form {
     }
 }
 
-fn parse_binary(bytes: &[u8], options: &StlOptions) -> Result<ImportScene, StlError> {
+fn parse_binary(
+    bytes: &[u8],
+    options: &StlOptions,
+    progress: &crate::scene_file::ReadProgress,
+) -> Result<ImportScene, StlError> {
     if bytes.len() < HEADER_BYTES + 4 {
         return Err(StlError::Truncated {
             expected: HEADER_BYTES + 4,
@@ -190,8 +205,15 @@ fn parse_binary(bytes: &[u8], options: &StlOptions) -> Result<ImportScene, StlEr
         });
     }
 
+    progress.start(crate::scene_file::ReadStage::Parsing, u64::from(claimed));
     let mut triangles = Vec::with_capacity(claimed as usize);
     for i in 0..claimed as usize {
+        if i & 4095 == 0 {
+            if progress.cancelled() {
+                return Err(StlError::Cancelled);
+            }
+            progress.advance(i as u64);
+        }
         let at = HEADER_BYTES + 4 + i * TRIANGLE_BYTES;
         let f = |k: usize| -> f32 {
             let o = at + k * 4;
@@ -206,16 +228,32 @@ fn parse_binary(bytes: &[u8], options: &StlOptions) -> Result<ImportScene, StlEr
             ],
         });
     }
+    if progress.cancelled() {
+        return Err(StlError::Cancelled);
+    }
     Ok(assemble(triangles, "stl", options))
 }
 
-fn parse_ascii(bytes: &[u8], options: &StlOptions) -> Result<ImportScene, StlError> {
+fn parse_ascii(
+    bytes: &[u8],
+    options: &StlOptions,
+    progress: &crate::scene_file::ReadProgress,
+) -> Result<ImportScene, StlError> {
+    progress.start(crate::scene_file::ReadStage::Parsing, bytes.len() as u64);
     let text = String::from_utf8_lossy(bytes);
     let mut triangles = Vec::new();
     let mut normal = Vec3::ZERO;
     let mut corners: Vec<Vec3> = Vec::new();
+    let mut seen_bytes = 0u64;
 
     for (number, source_line) in text.lines().enumerate() {
+        seen_bytes += source_line.len() as u64 + 1;
+        if number & 4095 == 0 {
+            if progress.cancelled() {
+                return Err(StlError::Cancelled);
+            }
+            progress.advance(seen_bytes);
+        }
         let line = number + 1;
         let mut words = source_line.split_whitespace();
         let Some(keyword) = words.next() else {
@@ -256,6 +294,9 @@ fn parse_ascii(bytes: &[u8], options: &StlOptions) -> Result<ImportScene, StlErr
             }
             _ => {}
         }
+    }
+    if progress.cancelled() {
+        return Err(StlError::Cancelled);
     }
     Ok(assemble(triangles, "stl", options))
 }

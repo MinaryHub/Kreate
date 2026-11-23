@@ -39,6 +39,9 @@ pub struct ModalSession {
     label: String,
     /// The document before the operator ran at all.
     before: UndoPayload,
+    /// Pre-gesture `BMesh` edit sessions for topology modal operators, avoiding
+    /// repeated `MeshData -> BMesh` + `corner_edges` rebuilds on every drag frame.
+    sessions_before: Option<crate::EditSessions>,
     /// The last parameters that were applied successfully.
     params: PropertyMap,
     /// What the last successful apply recorded, which becomes the history
@@ -208,6 +211,25 @@ impl History {
         self.cursor.checked_sub(1).and_then(|i| self.entries.get(i))
     }
 
+    /// Detaches any undone entries above [`History::cursor`] so a speculative
+    /// dry-run can execute and roll back without destroying the user's Redo stack.
+    pub fn take_redo_tail(&mut self) -> Vec<HistoryEntry> {
+        if self.cursor < self.entries.len() {
+            self.entries.split_off(self.cursor)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Discards speculative entries above `cursor` and restores a previously
+    /// saved redo tail.
+    pub fn restore_redo_tail(&mut self, cursor: usize, tail: Vec<HistoryEntry>) {
+        let keep = cursor.min(self.entries.len());
+        self.entries.truncate(keep);
+        self.cursor = keep;
+        self.entries.extend(tail);
+    }
+
     /// Dispatches an operator and records it if it finished.
     ///
     /// The single entry point for anything that changes the document. `Running`,
@@ -350,18 +372,35 @@ impl History {
         // every array is behind an `Arc` — the same property that makes snapshot
         // undo affordable at all.
         let before = UndoPayload::Snapshot(Box::new(doc.clone()));
+        let sessions_before = if !matches!(
+            op_id,
+            "mesh.translate" | "mesh.rotate" | "mesh.scale" | "uv.transform"
+        ) {
+            sessions.as_deref().filter(|s| !s.is_empty()).cloned()
+        } else {
+            None
+        };
 
         let mut full = info.defaults();
         full.overlay(params);
         let mut edit = DocMut::with_sessions(doc, sessions);
-        let result = registry.execute(op_id, &full, &mut edit, ctx);
+        let result = execute_guarded(registry, op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
+
+        let result = match (result, mesh_problems(doc, op_id)) {
+            (Ok(OpResult::Finished), Some(problem)) => {
+                tracing::error!("{problem}");
+                Err(OpError::Failed(problem))
+            }
+            (result, _) => result,
+        };
 
         match result {
             Ok(OpResult::Finished) => Ok(Some(ModalSession {
                 op_id: op_id.to_string(),
                 label,
                 before,
+                sessions_before,
                 quiet: quiet_names(info, &full),
                 params: full,
                 payload,
@@ -397,12 +436,24 @@ impl History {
         &mut self,
         registry: &OperatorRegistry,
         doc: &mut Document,
-        sessions: Option<&mut crate::EditSessions>,
+        mut sessions: Option<&mut crate::EditSessions>,
         ctx: &Context,
         modal: &mut ModalSession,
         params: &PropertyMap,
     ) -> Result<(), OpError> {
         modal.before.restore(doc);
+        if let (Some(live), Some(saved)) = (sessions.as_deref_mut(), &modal.sessions_before) {
+            for mesh_id in saved.meshes() {
+                let stale = live
+                    .get(mesh_id)
+                    .is_none_or(|cur| !cur.matches(doc, mesh_id));
+                if stale {
+                    if let (Some(cur), Some(orig)) = (live.get_mut(mesh_id), saved.get(mesh_id)) {
+                        *cur = orig.clone();
+                    }
+                }
+            }
+        }
 
         let info = registry
             .get(&modal.op_id)
@@ -411,8 +462,16 @@ impl History {
         full.overlay(params);
 
         let mut edit = DocMut::with_sessions(doc, sessions);
-        let result = registry.execute(&modal.op_id, &full, &mut edit, ctx);
+        let result = execute_guarded(registry, &modal.op_id, &full, &mut edit, ctx);
         let payload = edit.finish();
+
+        let result = match (result, mesh_problems(doc, &modal.op_id)) {
+            (Ok(OpResult::Finished), Some(problem)) => {
+                tracing::error!("{problem}");
+                Err(OpError::Failed(problem))
+            }
+            (result, _) => result,
+        };
 
         match result {
             Ok(OpResult::Finished) => {
@@ -1383,5 +1442,70 @@ mod tests {
         assert!(err.to_string().contains("test.corrupt_mesh"), "{err}");
         assert_eq!(history.cursor(), steps, "no step for what was undone");
         assert!(doc.meshes().all(|(_, m)| m.validate().is_empty()));
+    }
+
+    #[test]
+    fn modal_sessions_reuse_base_edit_sessions_across_topology_drags() {
+        let mut reg = OperatorRegistry::new();
+        crate::register_builtin(&mut reg);
+        let mut doc = Document::new();
+        let obj = doc.add_mesh_object("Cube", kreate_mesh::primitives::cube(2.0));
+        doc.selection.add(obj);
+        let mesh_id = doc.object(obj).unwrap().mesh().unwrap();
+        kreate_mesh::selection::set_selected(
+            doc.mesh_mut(mesh_id).unwrap(),
+            kreate_mesh::Domain::Face,
+            0,
+            true,
+        );
+
+        let mut sessions = crate::EditSessions::new();
+        sessions.open_for(&doc, &[mesh_id]);
+        let orig_edges = sessions.get(mesh_id).unwrap().corner_edges();
+
+        let ctx = Context {
+            mode: crate::mode::Mode::EditMesh,
+        };
+        let mut history = History::new();
+        let mut p = PropertyMap::new();
+        p.set("offset", PropertyValue::Float(0.5));
+
+        let mut modal = history
+            .begin_modal(
+                &reg,
+                &mut doc,
+                Some(&mut sessions),
+                &ctx,
+                "mesh.extrude_region",
+                &p,
+            )
+            .unwrap()
+            .expect("extrude began");
+        assert!(
+            modal.sessions_before.is_some(),
+            "topology modal captures pre-gesture EditSessions"
+        );
+        assert_eq!(
+            std::sync::Arc::as_ptr(
+                &modal
+                    .sessions_before
+                    .as_ref()
+                    .unwrap()
+                    .get(mesh_id)
+                    .unwrap()
+                    .corner_edges()
+            ),
+            std::sync::Arc::as_ptr(&orig_edges),
+            "base corner_edges Arc is shared without rebuilding"
+        );
+
+        p.set("offset", PropertyValue::Float(1.2));
+        history
+            .update_modal(&reg, &mut doc, Some(&mut sessions), &ctx, &mut modal, &p)
+            .unwrap();
+        assert_eq!(doc.mesh(mesh_id).unwrap().num_faces(), 10);
+        history.commit_modal(modal);
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.mesh(mesh_id).unwrap().num_faces(), 6);
     }
 }

@@ -801,6 +801,10 @@ struct App {
         usize,
         std::collections::BTreeMap<u64, connector::ObjectSnap>,
     )>,
+    /// Structural snapshot captured at the end of a dry-run trial for 3D preview.
+    ai_trial_after: Option<Document>,
+    /// `(before, after, currently_showing_after)` for live Before/After AI 3D preview.
+    ai_preview_docs: Option<(Document, Document, bool)>,
     /// The release the update check downloaded, once it has; said in the
     /// status bar, then forgotten. See `kreate::update`.
     update_ready: Option<Arc<std::sync::Mutex<Option<String>>>>,
@@ -863,9 +867,10 @@ struct App {
     /// *document*, and `kreate-render` does not see one — the same reason the
     /// environment's key lives here.
     materials: Option<kreate::materials::Materials>,
-    /// What the path tracer's scene was last built from; a different scene
-    /// is built again.
-    path_trace_key: Option<u64>,
+    /// `(structure_key, full_key)` of what the path tracer's scene was last
+    /// built from: a change to scalar material constants alone rewrites
+    /// `surfaces` and `values` in place without rebuilding BVH/BLAS or textures.
+    path_trace_key: Option<(u64, u64)>,
     /// Which environment the viewport is holding, so a frame does not rebuild
     /// six faces and their mips to find out that nothing changed.
     ///
@@ -1004,6 +1009,8 @@ struct App {
     /// this instance runs means another instance crashed, and interrupting the
     /// user's work to say so is not this application's business.
     recoverable: Vec<docfile::Recoverable>,
+    /// Backup autosave path kept on disk after recovery until the user saves.
+    recovered_backup: Option<std::path::PathBuf>,
     /// What Ctrl+C took: the selection as a fragment's text, for Ctrl+V.
     ///
     /// The application's own rather than the system clipboard, for now — the
@@ -1173,6 +1180,8 @@ struct App {
     arrivals_waiting: bool,
     /// A point or handle of the active curve being dragged in the viewport.
     curve_drag: Option<CurveDrag>,
+    /// Handle of the 3D transform gizmo currently being dragged, confirmed on release.
+    gizmo_drag: Option<kreate_ui::transform_gizmo::GizmoHandle>,
     /// The object Auto dynamic topology last said it would not cut.
     dyntopo_told: Option<ObjectId>,
     /// File ▸ Shared Session, while in one.
@@ -1239,11 +1248,12 @@ impl App {
         }
         app.ui.trace_when_still =
             kreate::prefs::viewport_path().is_none_or(|p| kreate::prefs::load_trace_when_still(&p));
-        app.ui.appearance = kreate::prefs::interface_path()
-            .map(|p| kreate::prefs::load_appearance(&p))
-            .unwrap_or_default();
-        app.ui.ui_scale =
-            kreate::prefs::interface_path().map_or(1.0, |p| kreate::prefs::load_ui_scale(&p));
+        if let Some(iface) = kreate::prefs::interface_path() {
+            app.ui.appearance = kreate::prefs::load_appearance(&iface);
+            app.ui.ui_scale = kreate::prefs::load_ui_scale(&iface);
+            app.ui.language_pref = kreate::prefs::load_language(&iface);
+            app.ui.catalog.options = kreate::prefs::load_translation_options(&iface);
+        }
         app.ui.recent_files = kreate::prefs::recent_path()
             .map(|p| kreate::prefs::load_recent(&p))
             .unwrap_or_default();
@@ -1259,6 +1269,8 @@ impl App {
         Self {
             bridge: None,
             ai_mark: None,
+            ai_trial_after: None,
+            ai_preview_docs: None,
             update_ready: None,
             update_check: None,
             chat: None,
@@ -1335,6 +1347,7 @@ impl App {
             // Collected once, at startup. This is the only moment a recovery
             // offer is not an interruption.
             recoverable: docfile::find_recoverable(),
+            recovered_backup: None,
             clipboard: None,
             dispatching_key: None,
             playing: None,
@@ -1344,6 +1357,7 @@ impl App {
             sketch_drag_session: None,
             arrivals_waiting: false,
             curve_drag: None,
+            gizmo_drag: None,
             solid_auto: None,
             dyntopo_told: None,
             session: None,
@@ -2967,16 +2981,6 @@ impl App {
         if self.gesture.is_some() {
             return;
         }
-        // Bounds-checked at the start: a transform begun with the pointer over
-        // a panel has no sensible reference position, and the reference is what
-        // every later frame is measured against.
-        if self.cursor_viewport_px().is_none() {
-            self.status("point at the viewport to transform");
-            return;
-        }
-        let Some(cursor) = self.cursor_viewport_unclamped() else {
-            return;
-        };
         let Some((_, _, w, h)) = self.viewport_px else {
             return;
         };
@@ -2994,6 +2998,14 @@ impl App {
             self.status("nothing selected");
             return;
         };
+        // Clicking Move/Rotate/Scale/Extrude/Inset/Bevel on the Ribbon or
+        // Toolbar starts with the pointer over the button outside the viewport:
+        // use the unclamped viewport-relative pointer (or viewport centre when
+        // invoked without a pointer) so moving into the viewport transforms
+        // smoothly instead of refusing to start.
+        let cursor = self
+            .cursor_viewport_unclamped()
+            .unwrap_or((w * 0.5, h * 0.5));
 
         let mode = self.op_ctx.mode;
         // An extrude's frame: the selected faces' normal as its local Z, which
@@ -3434,6 +3446,7 @@ impl App {
 
     /// Confirms the gesture: one history entry, carrying the final parameters.
     fn confirm_gesture(&mut self) {
+        self.gizmo_drag = None;
         let fill = self.app_params();
         let Some((gesture, mut session)) = self.gesture.take() else {
             return;
@@ -3476,6 +3489,7 @@ impl App {
 
     /// Abandons the gesture. The document goes back and nothing is recorded.
     fn cancel_gesture(&mut self) {
+        self.gizmo_drag = None;
         let Some((gesture, session)) = self.gesture.take() else {
             return;
         };
@@ -3491,6 +3505,103 @@ impl App {
         History::cancel_modal(session, &mut self.doc);
         self.status(&format!("{} cancelled", gesture.kind.label()));
         self.redraw.set(RedrawReason::SCENE_CHANGED);
+    }
+
+    /// Orientation basis for the 3D transform gizmo (`Global`, `Local`, or `Cursor`).
+    fn gizmo_basis(&self) -> [Vec3; 3] {
+        match self.ui.tools.orientation {
+            1 => self.selection_basis(),
+            2 => self.cursor_basis(),
+            _ => [Vec3::X, Vec3::Y, Vec3::Z],
+        }
+    }
+
+    /// Target pivot and basis where the 3D transform gizmo should appear, if active.
+    fn current_gizmo_target(&self) -> Option<(glam::DVec3, [Vec3; 3])> {
+        use kreate_ops::mode::ActsOn;
+        if self.ui.tools.transform_gizmo == 0 {
+            return None;
+        }
+        if !self.op_ctx.mode.edits_elements()
+            && !matches!(
+                self.op_ctx.mode.acts_on(),
+                ActsOn::Objects | ActsOn::Bones | ActsOn::BoneJoints
+            )
+        {
+            return None;
+        }
+        let pivot = self
+            .gesture
+            .as_ref()
+            .map(|(g, _)| g.pivot())
+            .or_else(|| self.selection_pivot())?;
+        Some((pivot, self.gizmo_basis()))
+    }
+
+    /// Handles pressing and releasing handles of the 3D transform gizmo.
+    fn gizmo_mouse(&mut self, button: MouseButton, pressed: bool) -> bool {
+        use kreate_ui::transform_gizmo::{hit_test, GizmoKind};
+        if !pressed && button == MouseButton::Left && self.gizmo_drag.is_some() {
+            self.confirm_gesture();
+            return true;
+        }
+        if pressed && button == MouseButton::Right && self.gizmo_drag.is_some() {
+            self.cancel_gesture();
+            return true;
+        }
+        if !pressed || button != MouseButton::Left || self.gesture.is_some() {
+            return false;
+        }
+        if !self.press_belongs_to_viewport() {
+            return false;
+        }
+        let Some(kind) = GizmoKind::from_setting(self.ui.tools.transform_gizmo) else {
+            return false;
+        };
+        let Some((pivot, basis)) = self.current_gizmo_target() else {
+            return false;
+        };
+        let Some((cx, cy)) = self.input.cursor else {
+            return false;
+        };
+        let ppp = self.egui_ctx.pixels_per_point();
+        let Some((vx, vy, vw, vh)) = self.viewport_px else {
+            return false;
+        };
+        let aspect = if vh > 0.0 { (vw / vh) as f64 } else { 1.0 };
+        let projector = kreate_ui::object_glyph::Projector {
+            eye: self.camera.eye(),
+            rotation: self.camera.rotation,
+            projection: self.camera.projection_matrix(aspect).as_dmat4(),
+            rect: egui::Rect::from_min_size(
+                egui::pos2(vx / ppp, vy / ppp),
+                egui::vec2(vw / ppp, vh / ppp),
+            ),
+        };
+        let cursor_pt = egui::pos2(cx as f32 / ppp, cy as f32 / ppp);
+        let Some(handle) = hit_test(&projector, pivot, basis, kind, cursor_pt) else {
+            return false;
+        };
+        let modal_kind = match kind {
+            GizmoKind::Move => kreate::modal::Kind::Move,
+            GizmoKind::Rotate => kreate::modal::Kind::Rotate,
+            GizmoKind::Scale => kreate::modal::Kind::Scale,
+        };
+        self.begin_gesture(modal_kind);
+        if let Some((gesture, _)) = self.gesture.as_mut() {
+            if let Some(axis_idx) = handle.axis_index() {
+                let axis = [
+                    kreate::modal::Axis::X,
+                    kreate::modal::Axis::Y,
+                    kreate::modal::Axis::Z,
+                ][axis_idx];
+                gesture.cycle_axis(axis);
+            }
+            self.gizmo_drag = Some(handle);
+            self.drive_gesture();
+            return true;
+        }
+        false
     }
 
     /// Grows or shrinks the proportional radius during a gesture.
@@ -4557,7 +4668,6 @@ impl App {
             .iter()
             .map(|(_, mesh, world)| (&**mesh, *world))
             .collect();
-        let sheet = compose(&refs, &spec);
         let (ext, filter) = if pdf { ("pdf", "PDF") } else { ("dxf", "DXF") };
         let stem = if spec.number.trim().is_empty() {
             self.file
@@ -4576,6 +4686,7 @@ impl App {
         else {
             return;
         };
+        let sheet = compose(&refs, &spec);
         let bytes = if pdf {
             kreate_io::pdf::write(
                 &sheet.drawing,
@@ -4617,8 +4728,6 @@ impl App {
             self.status(&self.ui.catalog.get("drawing-flat-none"));
             return;
         };
-        let unit = self.doc.design.length_unit;
-        let drawing = kreate_io::sheet::flat_pattern(&plate, unit.metres(), unit.symbol());
         let Some(path) = rfd::FileDialog::new()
             .add_filter("DXF", &["dxf"])
             .add_filter("PDF", &["pdf"])
@@ -4628,6 +4737,8 @@ impl App {
         else {
             return;
         };
+        let unit = self.doc.design.length_unit;
+        let drawing = kreate_io::sheet::flat_pattern(&plate, unit.metres(), unit.symbol());
         let pdf = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
@@ -7902,13 +8013,101 @@ impl App {
         }
     }
 
-    /// The sketch keys: typing a length, Enter, Backspace and Escape.
+    /// The sketch keys: typing a length, CAD coordinates (`@dx,dy`, `#x,y`,
+    /// `len<deg`), CAD command aliases (`/` or `:`), Enter, Backspace and Escape.
     /// Returns whether the key was the tools'.
     fn sketch_key(&mut self, code: KeyCode) -> bool {
-        use kreate::sketching::Tool;
+        use kreate::sketching::{parse_cad_coord, CadCoord, Tool};
+        let sketch_alpha_digit = |k: KeyCode| -> Option<char> {
+            Some(match k {
+                KeyCode::KeyA => 'A',
+                KeyCode::KeyB => 'B',
+                KeyCode::KeyC => 'C',
+                KeyCode::KeyD => 'D',
+                KeyCode::KeyE => 'E',
+                KeyCode::KeyF => 'F',
+                KeyCode::KeyG => 'G',
+                KeyCode::KeyH => 'H',
+                KeyCode::KeyI => 'I',
+                KeyCode::KeyJ => 'J',
+                KeyCode::KeyK => 'K',
+                KeyCode::KeyL => 'L',
+                KeyCode::KeyM => 'M',
+                KeyCode::KeyN => 'N',
+                KeyCode::KeyO => 'O',
+                KeyCode::KeyP => 'P',
+                KeyCode::KeyQ => 'Q',
+                KeyCode::KeyR => 'R',
+                KeyCode::KeyS => 'S',
+                KeyCode::KeyT => 'T',
+                KeyCode::KeyU => 'U',
+                KeyCode::KeyV => 'V',
+                KeyCode::KeyW => 'W',
+                KeyCode::KeyX => 'X',
+                KeyCode::KeyY => 'Y',
+                KeyCode::KeyZ => 'Z',
+                KeyCode::Digit0 | KeyCode::Numpad0 => '0',
+                KeyCode::Digit1 | KeyCode::Numpad1 => '1',
+                KeyCode::Digit2 | KeyCode::Numpad2 => '2',
+                KeyCode::Digit3 | KeyCode::Numpad3 => '3',
+                KeyCode::Digit4 | KeyCode::Numpad4 => '4',
+                KeyCode::Digit5 | KeyCode::Numpad5 => '5',
+                KeyCode::Digit6 | KeyCode::Numpad6 => '6',
+                KeyCode::Digit7 | KeyCode::Numpad7 => '7',
+                KeyCode::Digit8 | KeyCode::Numpad8 => '8',
+                KeyCode::Digit9 | KeyCode::Numpad9 => '9',
+                _ => return None,
+            })
+        };
+        if let Some(mut buf) = self.sketching.command.take() {
+            match code {
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
+                    if let Some(chosen) = Tool::from_cad_alias(&buf) {
+                        self.dispatch(
+                            &Action::new("app.sketch_tool")
+                                .with("tool", PropertyValue::Text(chosen.name().into())),
+                        );
+                    }
+                    self.redraw.set(RedrawReason::UI);
+                    return true;
+                }
+                KeyCode::Escape => {
+                    self.redraw.set(RedrawReason::UI);
+                    return true;
+                }
+                KeyCode::Backspace => {
+                    if buf.pop().is_some() {
+                        self.sketching.command = Some(buf);
+                    }
+                    self.redraw.set(RedrawReason::UI);
+                    return true;
+                }
+                _ => {
+                    if let Some(ch) = sketch_alpha_digit(code) {
+                        buf.push(ch);
+                    }
+                    self.sketching.command = Some(buf);
+                    self.redraw.set(RedrawReason::UI);
+                    return true;
+                }
+            }
+        }
+        if self.sketching.typed.is_empty()
+            && !self.input.ctrl_down
+            && !self.input.alt_down
+            && (code == KeyCode::Slash || (code == KeyCode::Semicolon && self.input.shift_down))
+        {
+            self.sketching.command = Some(String::new());
+            self.redraw.set(RedrawReason::UI);
+            return true;
+        }
         let tool = self.sketching.tool;
         let drawing = tool.draws() && !self.sketching.clicks.is_empty();
+        let shift = self.input.shift_down;
         let typed = match code {
+            KeyCode::Digit2 if shift => Some('@'),
+            KeyCode::Digit3 if shift => Some('#'),
+            KeyCode::Comma if shift => Some('<'),
             KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
             KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
             KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
@@ -7928,11 +8127,18 @@ impl App {
             KeyCode::Tab if !self.sketching.typed.is_empty() => Some(','),
             _ => None,
         };
-        // A letter while a number is being typed is its unit begun, or a
-        // slip: not another tool's shortcut, which threw the number and
-        // what was being drawn away.
-        if !self.sketching.typed.is_empty() && format!("{code:?}").starts_with("Key") {
-            return true;
+        // A letter while a number is being typed is its unit begun (`mm`,
+        // `cm`, `in`, `ft`, `m`, `deg`), or a slip: never another tool's
+        // shortcut, which threw the number and what was being drawn away.
+        if !self.sketching.typed.is_empty() {
+            if let Some(ch) = sketch_alpha_digit(code).filter(|c| c.is_ascii_alphabetic()) {
+                let lower = ch.to_ascii_lowercase();
+                if matches!(lower, 'm' | 'c' | 'i' | 'n' | 'f' | 't' | 'd' | 'e' | 'g') {
+                    self.sketching.typed.push(lower);
+                    self.redraw.set(RedrawReason::UI);
+                }
+                return true;
+            }
         }
         // Before a drawing tool's first point: a number typed measures that
         // point from the one under the pointer — a face's corner, an end —
@@ -7981,13 +8187,16 @@ impl App {
             // And put there.
             KeyCode::Enter | KeyCode::NumpadEnter if starting && self.sketching.from.is_some() => {
                 let from = self.sketching.from.take().unwrap_or_default();
-                let lengths = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
+                let at = parse_cad_coord(&self.sketching.typed, unit)
+                    .map(|c| c.resolve(from))
+                    .unwrap_or_else(|| {
+                        let lengths = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
+                        from + glam::DVec2::new(
+                            lengths.first().copied().unwrap_or(0.0),
+                            lengths.get(1).copied().unwrap_or(0.0),
+                        )
+                    });
                 self.sketching.typed.clear();
-                let at = from
-                    + glam::DVec2::new(
-                        lengths.first().copied().unwrap_or(0.0),
-                        lengths.get(1).copied().unwrap_or(0.0),
-                    );
                 self.place_first_point(tool, at);
                 self.redraw.set(RedrawReason::SCENE_CHANGED);
                 true
@@ -8034,7 +8243,6 @@ impl App {
                 true
             }
             KeyCode::Enter | KeyCode::NumpadEnter if drawing => {
-                let lengths = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
                 let (last, toward) = (
                     self.sketching
                         .clicks
@@ -8044,6 +8252,52 @@ impl App {
                     self.sketching.hover.map(|h| h.0).unwrap_or_default(),
                 );
                 let v3 = |q: glam::DVec2| PropertyValue::Vec3([q.x, q.y, 0.0]);
+                if let Some(coord) = parse_cad_coord(&self.sketching.typed, unit) {
+                    self.sketching.typed.clear();
+                    match tool {
+                        Tool::Line => {
+                            let next = coord.resolve(last);
+                            self.sketching.clicks.push((next, 0));
+                            if matches!(coord, CadCoord::Polar { .. }) {
+                                let segment = self.sketching.clicks.len() as u32 - 2;
+                                self.sketching.typed_segments.push(segment);
+                            }
+                        }
+                        Tool::Spline | Tool::ControlSpline | Tool::Arc => {
+                            self.sketching.clicks.push((coord.resolve(last), 0));
+                        }
+                        Tool::Rectangle if self.active_drawing().is_some() => {
+                            let first = self.sketching.clicks[0];
+                            let far = coord.resolve(first.0);
+                            self.run_op_with(
+                                "draft.rectangle",
+                                &[
+                                    ("a", v3(first.0)),
+                                    ("b", v3(far)),
+                                    ("dimensioned", PropertyValue::Bool(true)),
+                                ],
+                            );
+                            self.sketch_tool_done();
+                        }
+                        Tool::Rectangle => {
+                            let first = self.sketching.clicks[0];
+                            let far = coord.resolve(first.0);
+                            self.run_op_with(
+                                "sketch.rectangle",
+                                &[
+                                    ("a", v3(first.0)),
+                                    ("b", v3(far)),
+                                    ("join", PropertyValue::Int(first.1 as i64)),
+                                ],
+                            );
+                            self.sketch_tool_done();
+                        }
+                        _ => {}
+                    }
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                    return true;
+                }
+                let lengths = kreate::sketching::typed_lengths(&self.sketching.typed, unit);
                 match (tool, lengths.as_slice()) {
                     // A length, and with it an angle in degrees from the
                     // drawing's X, as Fusion's two fields take them: the
@@ -9165,6 +9419,7 @@ impl App {
                 Command::RunScript { source } => self.run_script(&source),
                 Command::ChatSend { text } => self.chat_send(text),
                 Command::ChatAttach => self.pick_chat_attachments(),
+                Command::ChatAttachSelection => self.attach_selection_to_chat(),
                 Command::ChatDetach { index } => {
                     if index < self.chat_attachments.len() {
                         self.chat_attachments.remove(index);
@@ -9678,6 +9933,7 @@ impl App {
                         self.reset_asset_list();
                     }
                 }
+                Command::AssetSaveSelection => self.save_selection_as_asset(),
                 Command::AssetRemoveFolder { index } => {
                     if index < self.ui.asset_folders.len() {
                         self.ui.asset_folders.remove(index);
@@ -9776,7 +10032,7 @@ impl App {
                     // the next Ctrl+S write back into the autosave directory
                     // instead of asking where the document belongs.
                     self.file = DocumentFile::new();
-                    docfile::forget_recoverable(&path);
+                    self.recovered_backup = Some(path.clone());
                     self.recoverable.retain(|r| r.path != path);
                 }
                 Command::DiscardRecovery { path } => {
@@ -10041,6 +10297,9 @@ impl App {
         self.file.set_view(&self.camera);
         match self.file.save(&path, &self.doc) {
             Ok(()) => {
+                if let Some(backup) = self.recovered_backup.take() {
+                    docfile::forget_recoverable(&backup);
+                }
                 self.remember_recent(&path);
                 let message = format!("saved {}", path.display());
                 self.status(&message);
@@ -10052,6 +10311,69 @@ impl App {
                 Err(message)
             }
         }
+    }
+
+    /// Saves the selected objects (with their meshes, materials, shader graphs,
+    /// textures, and CAD features) into a `.kreate` asset file and registers
+    /// its parent directory in the local Asset Browser if needed.
+    fn save_selection_as_asset(&mut self) {
+        if self.doc.selection.objects.is_empty() {
+            self.status("select one or more objects to save as an asset");
+            return;
+        }
+        let default_name = self
+            .doc
+            .selection
+            .active
+            .and_then(|id| self.doc.object(id))
+            .map(|o| format!("{}.kreate", o.name))
+            .unwrap_or_else(|| "asset.kreate".to_string());
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Kreate asset", &["kreate"])
+            .set_file_name(&default_name);
+        if let Some(first_dir) = self.ui.asset_folders.first() {
+            dialog = dialog.set_directory(first_dir);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        let _ = self.save_selection_to_asset_file(&path);
+    }
+
+    fn save_selection_to_asset_file(
+        &mut self,
+        raw_path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
+        if self.doc.selection.objects.is_empty() {
+            return Err("nothing selected".to_string());
+        }
+        let is_kreate = raw_path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("kreate"));
+        let path = if is_kreate {
+            raw_path.to_path_buf()
+        } else {
+            let mut s = raw_path.as_os_str().to_os_string();
+            s.push(".kreate");
+            std::path::PathBuf::from(s)
+        };
+        let fragment = self.doc.extract_objects(&self.doc.selection.objects);
+        let bytes =
+            kreate_io::container::write(&fragment, &kreate_io::container::Manifest::default(), &[])
+                .map_err(|e| format!("cannot pack asset {}: {e}", path.display()))?;
+        std::fs::write(&path, bytes)
+            .map_err(|e| format!("cannot write asset {}: {e}", path.display()))?;
+        if let Some(parent) = path.parent() {
+            let dir = parent.to_path_buf();
+            if !self.ui.asset_folders.contains(&dir) {
+                self.ui.asset_folders.push(dir);
+                let _ = kreate::assets::save_folders(&self.ui.asset_folders);
+            }
+        }
+        self.reset_asset_list();
+        let msg = format!("saved asset {}", path.display());
+        self.status(&msg);
+        Ok(path)
     }
 
     /// Writes the scene to an interchange format.
@@ -10089,24 +10411,74 @@ impl App {
             // placed in the world — in the scene's unit.
             // For CAD: each part a faceted solid, in the scene's unit.
             "step" | "stp" => {
-                let parts = self.printable_parts();
-                if parts.is_empty() {
-                    Err("there is no geometry to write".to_string())
+                let visible_ids: Vec<ObjectId> = self
+                    .evaluated
+                    .iter()
+                    .filter(|(id, _)| self.doc.is_shown(*id))
+                    .filter_map(|(id, _)| self.doc.object(*id)?.mesh().map(|_| *id))
+                    .collect();
+                let exact_solids: Option<Vec<kreate_occt::Shape>> =
+                    if !visible_ids.is_empty() && kreate_scene::feature::exact::enabled() {
+                        visible_ids
+                            .iter()
+                            .map(|id| kreate_scene::feature::exact::world_solid(&self.doc, *id))
+                            .collect()
+                    } else {
+                        None
+                    };
+                if let Some(solids) = exact_solids {
+                    let refs: Vec<&kreate_occt::Shape> = solids.iter().collect();
+                    let millimetres = (self.doc.design.length_unit.metres() - 0.001).abs() < 1e-6;
+                    let tmp = std::env::temp_dir().join(format!(
+                        "kreate-step-{}-{}.step",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    ));
+                    if kreate_occt::write_step(&refs, &tmp, millimetres) {
+                        let res = std::fs::read(&tmp).map_err(|e| e.to_string());
+                        let _ = std::fs::remove_file(&tmp);
+                        res
+                    } else {
+                        let _ = std::fs::remove_file(&tmp);
+                        let parts = self.printable_parts();
+                        let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
+                            .iter()
+                            .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
+                            .collect();
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        Ok(kreate_io::step::write_step(
+                            &name,
+                            &refs,
+                            self.doc.design.length_unit.metres(),
+                        )
+                        .into_bytes())
+                    }
                 } else {
-                    let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
-                        .iter()
-                        .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
-                        .collect();
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    Ok(kreate_io::step::write_step(
-                        &name,
-                        &refs,
-                        self.doc.design.length_unit.metres(),
-                    )
-                    .into_bytes())
+                    let parts = self.printable_parts();
+                    if parts.is_empty() {
+                        Err("there is no geometry to write".to_string())
+                    } else {
+                        let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
+                            .iter()
+                            .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
+                            .collect();
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        Ok(kreate_io::step::write_step(
+                            &name,
+                            &refs,
+                            self.doc.design.length_unit.metres(),
+                        )
+                        .into_bytes())
+                    }
                 }
             }
             "csv" => Ok(self.parts_list().into_bytes()),
@@ -11091,6 +11463,38 @@ impl App {
         kreate_scene::modifier::EvalCtx::at(self.time)
     }
 
+    #[allow(clippy::type_complexity)]
+    fn eval_scene_stamp(
+        &self,
+    ) -> (
+        u64,
+        usize,
+        Option<usize>,
+        u64,
+        OpMode,
+        bool,
+        bool,
+        bool,
+        Option<usize>,
+    ) {
+        let first_ptr = self
+            .doc
+            .objects()
+            .next()
+            .map(|(_, o)| std::ptr::from_ref(o) as usize);
+        (
+            self.doc.version(),
+            self.doc.object_count(),
+            first_ptr,
+            self.time.frame().to_bits(),
+            self.op_ctx.mode,
+            self.ui.sketch_slice,
+            self.ui.sculpt.show_overlay,
+            self.sculpt_stroke.is_some(),
+            self.local_view.as_ref().map(|(a, _)| a.len()),
+        )
+    }
+
     fn evaluate_scene(&mut self) {
         self.evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
         // A boolean too big to finish leaves its input as it was; said once.
@@ -11359,6 +11763,24 @@ impl App {
                 // slot makes the plan fall through to a full upload rather than
                 // leaving a mesh drawn with someone else's flags.
                 old[*slot] = None;
+            }
+        }
+
+        // UV-only changes (UV island drags, sculpt mask/face-set dabs, weight
+        // paint dabs) rewrite the 8-byte-per-vertex UV buffer in place whenever
+        // existing smooth/seam splits remain valid, falling back to a fresh split
+        // upload only when a new seam or face-set border splits a vertex.
+        for (slot, mesh) in &plan.reuvs {
+            let Some(Some((held, gpu_mesh))) = old.get_mut(*slot) else {
+                continue;
+            };
+            if gpu_mesh.update_uvs(&gfx.gpu.queue, mesh) {
+                *held = mesh.clone();
+            } else {
+                let cpu = RenderMeshCpu::extract(mesh);
+                let color = gpu_mesh.color;
+                *gpu_mesh = GpuMesh::upload(&gfx.gpu.device, &gfx.viewport.layouts, &cpu, color);
+                *held = mesh.clone();
             }
         }
 
@@ -13516,6 +13938,43 @@ impl App {
         self.run_script_reporting(source);
     }
 
+    /// Answers live scene queries (`bbox("Cube")`, `size("Cube")`, `pos("Cube")`,
+    /// `param("width")`) for [`kreate_ops::program::unroll_with`].
+    fn script_scene_query(&self, fn_name: &str, arg: &str) -> Option<kreate_ops::program::Value> {
+        use kreate_ops::program::Value;
+        if fn_name == "param" {
+            return self
+                .doc
+                .design
+                .parameters
+                .iter()
+                .find(|p| p.name == arg)
+                .map(|p| Value::Number(p.value));
+        }
+        let (id, obj) = if arg.is_empty() {
+            let id = self.doc.selection.active?;
+            (id, self.doc.object(id)?)
+        } else {
+            self.doc.objects().find(|(_, o)| o.name == arg)?
+        };
+        match fn_name {
+            "pos" => {
+                let t = obj.transform.translation;
+                Some(Value::Tuple(vec![t.x, t.y, t.z]))
+            }
+            "bbox" => {
+                let (lo, hi) = self.doc.object_world_bounds(id)?;
+                Some(Value::Tuple(vec![lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]))
+            }
+            "size" => {
+                let (lo, hi) = self.doc.object_world_bounds(id)?;
+                let d = hi - lo;
+                Some(Value::Tuple(vec![d.x, d.y, d.z]))
+            }
+            _ => None,
+        }
+    }
+
     /// Runs a script as `run_script` does, and says what became of each line:
     /// the line, the history entry it became or why it did not, and the
     /// objects it made.
@@ -13528,11 +13987,17 @@ impl App {
         let mut report = Vec::new();
         let mut errors = 0;
         let mut skipped = 0;
-        // Names, loops and arithmetic unrolled into one call a line first
-        // (see `kreate_ops::program`); a script with none goes as it is.
+        // Names, loops, conditionals, f-strings and scene queries unrolled into
+        // one call a line first (see `kreate_ops::program`).
         let unrolled;
         let source = if kreate_ops::program::needs_unrolling(source) {
-            match kreate_ops::program::unroll(source) {
+            let unrolled_res = {
+                let this = &*self;
+                kreate_ops::program::unroll_with(source, &|fn_name, arg| {
+                    this.script_scene_query(fn_name, arg)
+                })
+            };
+            match unrolled_res {
                 Ok(lines) => {
                     unrolled = lines.join("\n");
                     unrolled.as_str()
@@ -14113,11 +14578,13 @@ impl App {
         }
         self.evaluate_scene();
         self.sync_gpu();
+        let pre_ui_scene_stamp = self.eval_scene_stamp();
         // Before the interface borrows anything: the panel reads this, and it
         // has to be settled while `self` is still free.
         self.publish_uv_view();
         // The sketch overlay and the feature list, likewise.
         self.update_sketch_view();
+        let gizmo_target = self.current_gizmo_target();
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -14271,6 +14738,8 @@ impl App {
                 ),
             }
         });
+        self.ui.gizmo_target = gizmo_target;
+        self.ui.gizmo_active = self.gizmo_drag;
         // The header's tool settings show what the keys last set.
         self.ui.tools.snap = self.snap.enabled;
         self.ui.tools.snap_mode = kreate::snap::Mode::ALL
@@ -14345,9 +14814,11 @@ impl App {
         self.sync_recoverable();
         // The panels may have changed the scene — a modifier added, a parameter
         // dragged — so it is re-evaluated before the frame is encoded rather
-        // than showing the change one frame late.
-        self.evaluate_scene();
-        self.sync_gpu();
+        // than showing the change one frame late; skipped when nothing moved.
+        if self.eval_scene_stamp() != pre_ui_scene_stamp {
+            self.evaluate_scene();
+            self.sync_gpu();
+        }
 
         let pixels_per_point = self.egui_ctx.pixels_per_point();
 
@@ -15014,20 +15485,7 @@ impl App {
             // changed — not when the camera moved.
             if gfx.viewport.wants_path_trace_scene() {
                 if let Some(materials) = self.materials.as_ref() {
-                    let traced_materials = materials.for_tracer(&self.doc);
-                    let images = &traced_materials.images;
-                    let mut surfaces = traced_materials.surfaces.clone();
-                    // Each area light as the glowing panel it is, one-sided,
-                    // each with a surface of its own after the materials'.
                     let panels = scenelights::area_panels(&self.doc);
-                    let first_panel = surfaces.len() as u32;
-                    surfaces.extend(panels.iter().map(|p| kreate_render::pathtrace::PtSurface {
-                        base_color: [0.0; 3],
-                        roughness: 1.0,
-                        emission: p.radiance,
-                        one_sided: true,
-                        ..Default::default()
-                    }));
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     // Cutters have no surface in the picture, as in the
@@ -15046,114 +15504,157 @@ impl App {
                         materials.index_of(&self.doc, *id).hash(&mut h);
                         materials.slots_of(&self.doc, *id).hash(&mut h);
                     }
-                    format!("{surfaces:?}").hash(&mut h);
-                    // The code and its numbers: a colour typed into a node
-                    // changes the second and must reach the picture.
-                    traced_materials.code.hash(&mut h);
-                    for v in traced_materials.values.iter().flatten() {
-                        v.to_bits().hash(&mut h);
-                    }
                     for p in &panels {
-                        format!("{:?}{:?}", p.positions, p.transform).hash(&mut h);
-                    }
-                    for image in images {
-                        (image.width, image.height, image.pixels.len()).hash(&mut h);
-                        image.pixels.iter().step_by(97).for_each(|b| b.hash(&mut h));
-                    }
-                    let key = h.finish();
-                    if self.path_trace_key != Some(key) || fresh {
-                        self.path_trace_key = Some(key);
-                        // Each mesh read once, however many objects show it:
-                        // linked copies hand the tracer the same slices,
-                        // which it stores once and places at each.
-                        type Shape = (
-                            Vec<[f32; 3]>,
-                            Vec<[f32; 2]>,
-                            Vec<kreate_math::Vec3>,
-                            Vec<u32>,
-                            Vec<u32>,
-                            Vec<kreate_render::mesh_gpu::Submesh>,
-                        );
-                        let mut shapes: std::collections::HashMap<usize, Shape> =
-                            std::collections::HashMap::new();
-                        for (_, mesh) in traced() {
-                            shapes.entry(Arc::as_ptr(mesh) as usize).or_insert_with(|| {
-                                let cpu = kreate_render::RenderMeshCpu::extract(mesh);
-                                (
-                                    cpu.positions.iter().map(|p| p.0).collect(),
-                                    cpu.uvs.clone(),
-                                    cpu.normals
-                                        .iter()
-                                        .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
-                                        .collect(),
-                                    cpu.indices,
-                                    cpu.colors,
-                                    cpu.submeshes,
-                                )
-                            });
+                        for v in p.radiance {
+                            v.to_bits().hash(&mut h);
                         }
-                        let placed: Vec<_> = traced()
-                            .map(|(id, mesh)| {
-                                let shape = &shapes[&(Arc::as_ptr(mesh) as usize)];
-                                (
-                                    Arc::as_ptr(mesh) as usize,
-                                    self.doc.world_transform(*id),
-                                    materials.index_of(&self.doc, *id),
-                                    materials.runs_of(&self.doc, *id, &shape.5),
-                                )
-                            })
-                            .collect();
-                        let mut meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = placed
-                            .iter()
-                            .map(|(key, transform, surface, runs)| {
-                                let (positions, uvs, normals, indices, colors, _) = &shapes[key];
-                                kreate_render::pathtrace::PtMesh {
-                                    positions,
-                                    uvs,
-                                    normals,
-                                    colors,
-                                    indices,
-                                    transform: *transform,
-                                    surface: *surface,
-                                    runs,
+                        for pos in &p.positions {
+                            for v in pos {
+                                v.to_bits().hash(&mut h);
+                            }
+                        }
+                        for v in p.transform.to_cols_array() {
+                            v.to_bits().hash(&mut h);
+                        }
+                    }
+                    let mut sh = h.clone();
+                    materials.tracer_structure_key(&self.doc).hash(&mut sh);
+                    let structure_key = sh.finish();
+                    materials.tracer_key(&self.doc).hash(&mut h);
+                    let full_key = h.finish();
+
+                    let same_structure =
+                        !fresh && self.path_trace_key.map(|(s, _)| s) == Some(structure_key);
+                    let same_full =
+                        !fresh && self.path_trace_key == Some((structure_key, full_key));
+
+                    if !same_full {
+                        let mut updated_in_place = false;
+                        if same_structure {
+                            let (mut surfaces, values) = materials.for_tracer_values(&self.doc);
+                            surfaces.extend(panels.iter().map(|p| {
+                                kreate_render::pathtrace::PtSurface {
+                                    base_color: [0.0; 3],
+                                    roughness: 1.0,
+                                    emission: p.radiance,
+                                    one_sided: true,
+                                    ..Default::default()
                                 }
-                            })
-                            .collect();
-                        let panel_uvs: Vec<Vec<[f32; 2]>> = panels
-                            .iter()
-                            .map(|p| vec![[0.0f32; 2]; p.positions.len()])
-                            .collect();
-                        meshes.extend(panels.iter().zip(&panel_uvs).enumerate().map(
-                            |(i, (p, uvs))| kreate_render::pathtrace::PtMesh {
-                                positions: &p.positions,
-                                uvs,
-                                normals: &p.normals,
-                                colors: &[],
-                                indices: &p.indices,
-                                transform: p.transform,
-                                surface: first_panel + i as u32,
-                                runs: &[],
-                            },
-                        ));
-                        let pt_images: Vec<kreate_render::pathtrace::PtImage<'_>> = images
-                            .iter()
-                            .map(|i| kreate_render::pathtrace::PtImage {
-                                width: i.width,
-                                height: i.height,
-                                pixels: &i.pixels,
-                                color: i.kind == kreate_render::material::TextureKind::Color,
-                            })
-                            .collect();
-                        gfx.viewport.set_path_trace_scene(
-                            &gfx.gpu.device,
-                            &gfx.gpu.queue,
-                            &meshes,
-                            &surfaces,
-                            &pt_images,
-                            &traced_materials.materials(),
-                        );
-                        for v in gfx.extra.values_mut() {
-                            v.viewport.set_path_trace_scene(
+                            }));
+                            let mut ok = gfx.viewport.update_path_trace_surfaces(
+                                &gfx.gpu.queue,
+                                &surfaces,
+                                &values,
+                            );
+                            for v in gfx.extra.values_mut() {
+                                ok &= v.viewport.update_path_trace_surfaces(
+                                    &gfx.gpu.queue,
+                                    &surfaces,
+                                    &values,
+                                );
+                            }
+                            updated_in_place = ok;
+                        }
+                        self.path_trace_key = Some((structure_key, full_key));
+                        if !updated_in_place {
+                            let traced_materials = materials.for_tracer(&self.doc);
+                            let images = &traced_materials.images;
+                            let mut surfaces = traced_materials.surfaces.clone();
+                            // Each area light as the glowing panel it is, one-sided,
+                            // each with a surface of its own after the materials'.
+                            let first_panel = surfaces.len() as u32;
+                            surfaces.extend(panels.iter().map(|p| {
+                                kreate_render::pathtrace::PtSurface {
+                                    base_color: [0.0; 3],
+                                    roughness: 1.0,
+                                    emission: p.radiance,
+                                    one_sided: true,
+                                    ..Default::default()
+                                }
+                            }));
+                            // Each mesh read once, however many objects show it:
+                            // linked copies hand the tracer the same slices,
+                            // which it stores once and places at each.
+                            type Shape = (
+                                Vec<[f32; 3]>,
+                                Vec<[f32; 2]>,
+                                Vec<kreate_math::Vec3>,
+                                Vec<u32>,
+                                Vec<u32>,
+                                Vec<kreate_render::mesh_gpu::Submesh>,
+                            );
+                            let mut shapes: std::collections::HashMap<usize, Shape> =
+                                std::collections::HashMap::new();
+                            for (_, mesh) in traced() {
+                                shapes.entry(Arc::as_ptr(mesh) as usize).or_insert_with(|| {
+                                    let cpu = kreate_render::RenderMeshCpu::extract(mesh);
+                                    (
+                                        cpu.positions.iter().map(|p| p.0).collect(),
+                                        cpu.uvs.clone(),
+                                        cpu.normals
+                                            .iter()
+                                            .map(|n| kreate_render::mesh_gpu::oct_decode(*n))
+                                            .collect(),
+                                        cpu.indices,
+                                        cpu.colors,
+                                        cpu.submeshes,
+                                    )
+                                });
+                            }
+                            let placed: Vec<_> = traced()
+                                .map(|(id, mesh)| {
+                                    let shape = &shapes[&(Arc::as_ptr(mesh) as usize)];
+                                    (
+                                        Arc::as_ptr(mesh) as usize,
+                                        self.doc.world_transform(*id),
+                                        materials.index_of(&self.doc, *id),
+                                        materials.runs_of(&self.doc, *id, &shape.5),
+                                    )
+                                })
+                                .collect();
+                            let mut meshes: Vec<kreate_render::pathtrace::PtMesh<'_>> = placed
+                                .iter()
+                                .map(|(key, transform, surface, runs)| {
+                                    let (positions, uvs, normals, indices, colors, _) =
+                                        &shapes[key];
+                                    kreate_render::pathtrace::PtMesh {
+                                        positions,
+                                        uvs,
+                                        normals,
+                                        colors,
+                                        indices,
+                                        transform: *transform,
+                                        surface: *surface,
+                                        runs,
+                                    }
+                                })
+                                .collect();
+                            let panel_uvs: Vec<Vec<[f32; 2]>> = panels
+                                .iter()
+                                .map(|p| vec![[0.0f32; 2]; p.positions.len()])
+                                .collect();
+                            meshes.extend(panels.iter().zip(&panel_uvs).enumerate().map(
+                                |(i, (p, uvs))| kreate_render::pathtrace::PtMesh {
+                                    positions: &p.positions,
+                                    uvs,
+                                    normals: &p.normals,
+                                    colors: &[],
+                                    indices: &p.indices,
+                                    transform: p.transform,
+                                    surface: first_panel + i as u32,
+                                    runs: &[],
+                                },
+                            ));
+                            let pt_images: Vec<kreate_render::pathtrace::PtImage<'_>> = images
+                                .iter()
+                                .map(|i| kreate_render::pathtrace::PtImage {
+                                    width: i.width,
+                                    height: i.height,
+                                    pixels: &i.pixels,
+                                    color: i.kind == kreate_render::material::TextureKind::Color,
+                                })
+                                .collect();
+                            gfx.viewport.set_path_trace_scene(
                                 &gfx.gpu.device,
                                 &gfx.gpu.queue,
                                 &meshes,
@@ -15161,8 +15662,23 @@ impl App {
                                 &pt_images,
                                 &traced_materials.materials(),
                             );
+                            for v in gfx.extra.values_mut() {
+                                v.viewport.set_path_trace_scene(
+                                    &gfx.gpu.device,
+                                    &gfx.gpu.queue,
+                                    &meshes,
+                                    &surfaces,
+                                    &pt_images,
+                                    &traced_materials.materials(),
+                                );
+                            }
                         }
                     }
+                }
+            } else if self.path_trace_key.take().is_some() {
+                gfx.viewport.clear_path_trace(&gfx.gpu.device);
+                for v in gfx.extra.values_mut() {
+                    v.viewport.clear_path_trace(&gfx.gpu.device);
                 }
             }
             // With the distance each lamp is worth computing to, which is
@@ -15216,6 +15732,12 @@ impl App {
                 ),
             };
         } else {
+            if self.path_trace_key.take().is_some() {
+                gfx.viewport.clear_path_trace(&gfx.gpu.device);
+                for v in gfx.extra.values_mut() {
+                    v.viewport.clear_path_trace(&gfx.gpu.device);
+                }
+            }
             // The other modes light themselves, so there is no exposure to
             // report and the header says nothing rather than a stale number.
             self.ui.view_status = kreate::shell::ViewStatus {
@@ -17349,6 +17871,11 @@ impl ApplicationHandler for App {
         // view, three move it. See `kreate::touch`.
         if cfg!(target_os = "android") {
             if let WindowEvent::Touch(touch) = &event {
+                use winit::event::TouchPhase;
+                self.input.pen_pressure = match touch.phase {
+                    TouchPhase::Ended | TouchPhase::Cancelled => None,
+                    _ => touch.force.map(|f| f.normalized() as f32),
+                };
                 self.touch(event_loop, _id, touch);
                 return;
             }
@@ -17596,6 +18123,9 @@ impl ApplicationHandler for App {
                 // The sketch tools: left draws or picks, right finishes.
                 // The middle button falls through, so the view still turns.
                 if self.op_ctx.mode == OpMode::Sketch && self.sketch_mouse(button, pressed) {
+                    return;
+                }
+                if self.gizmo_mouse(button, pressed) {
                     return;
                 }
                 // A curve's points and handles, in object mode, before a
@@ -18633,20 +19163,24 @@ fn main() {
 /// (apps/kreate-android) with the activity's loop.
 pub fn run(event_loop: EventLoop<()>, args: Vec<String>) {
     let mut path = None;
-    let mut locale = "en-US".to_string();
+    let mut cli_lang: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--lang" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    locale = v.clone();
+                    cli_lang = Some(v.clone());
                 }
             }
             other => path = Some(other.to_string()),
         }
         i += 1;
     }
+    let locale = kreate::prefs::effective_locale(
+        cli_lang.as_deref(),
+        kreate::prefs::interface_path().as_deref(),
+    );
 
     println!("{HELP}\n");
     let (doc, file) = load_document_and_file(path.as_deref());
@@ -19955,8 +20489,40 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
         assert!(app.ui.ai_pending.is_none());
         // Discarded: nothing.
         app.bridge_call("run", &add).unwrap();
+        // Live 3D Before/After preview toggle shows the proposed Cube and flips
+        // cleanly back without destroying Redo history.
+        app.ui.ai_pending.as_mut().unwrap().previewing = true;
+        app.settle_ai_pending();
+        assert_eq!(
+            app.doc.objects().count(),
+            2,
+            "3D preview shows proposed After state"
+        );
+        app.ui.ai_pending.as_mut().unwrap().previewing = false;
+        app.settle_ai_pending();
+        assert_eq!(
+            app.doc.objects().count(),
+            1,
+            "toggling off restores Before state"
+        );
         app.ui.ai_pending_decision = Some(false);
         app.settle_ai_pending();
+        assert_eq!(app.doc.objects().count(), 1);
+
+        // User's Redo stack survives an AI proposal dry-run untouched.
+        assert!(app.history.undo(&mut app.doc));
+        assert!(app.history.can_redo());
+        app.bridge_call("run", &add).unwrap();
+        assert!(
+            app.history.can_redo(),
+            "AI dry-run proposal must not wipe out the user's Redo stack"
+        );
+        app.ui.ai_pending_decision = Some(false);
+        app.settle_ai_pending();
+        assert!(app
+            .history
+            .redo(&app.registry, &mut app.doc, &app.op_ctx)
+            .unwrap());
         assert_eq!(app.doc.objects().count(), 1);
     }
 
@@ -19977,6 +20543,80 @@ kreate.ops.object.set_transform(location=(1, 0, 0))",
             context.contains("mode object") && context.contains("active Cube"),
             "{context}"
         );
+    }
+
+    #[test]
+    fn chat_context_reports_mesh_selection_and_preserves_unsent_prompt() {
+        let mut app = app();
+        app.run_op("object.add_primitive", two_metre_cube());
+        let active = app.doc.selection.active.expect("active cube");
+        let mesh_id = app.doc.object(active).unwrap().mesh().unwrap();
+        kreate_mesh::selection::set_selected(
+            app.doc.mesh_mut(mesh_id).unwrap(),
+            kreate_mesh::Domain::Face,
+            0,
+            true,
+        );
+
+        let context = app.chat_context();
+        assert!(
+            context.contains("mesh selection")
+                && context.contains("1/6 faces")
+                && context.contains("selection center")
+                && context.contains("avg normal"),
+            "expected rich mesh selection context, got: {context}"
+        );
+
+        app.attach_selection_to_chat();
+        assert_eq!(app.chat_attachments.len(), 1);
+        assert_eq!(app.chat_attachments[0].name, "selection.md");
+        let md = std::str::from_utf8(&app.chat_attachments[0].data).unwrap();
+        assert!(md.contains("Selected face indices: [0]"), "{md}");
+        // Clicking @Selection again refreshes rather than duplicating.
+        app.attach_selection_to_chat();
+        assert_eq!(app.chat_attachments.len(), 1);
+
+        // Sending when no chat child is running keeps both the typed prompt and attachments.
+        app.chat = None;
+        app.chat_send("bevel this face by 2mm".to_string());
+        assert_eq!(app.ui.chat_input, "bevel this face by 2mm");
+        assert_eq!(app.chat_attachments.len(), 1);
+    }
+
+    #[test]
+    fn scripts_query_scene_bounds_and_save_selection_as_reusable_asset() {
+        let mut app = app();
+        app.run_op("object.add_primitive", two_metre_cube());
+
+        // Stack two caps on top of `Cube` using `bbox("Cube")[5]`, `if`, and `f"..."`!
+        let report = app.run_script_reporting(
+            "top = bbox(\"Cube\")[5]\n\
+             w = size(\"Cube\")[0]\n\
+             for i in range(2):\n\
+             \x20   if i == 0 and w >= 1.9:\n\
+             \x20       kreate.ops.object.add_primitive(shape=\"cylinder\", size=0.2, location=(0, 0, top + 0.1))\n\
+             \x20       kreate.ops.object.rename(name=f\"Pin_{i}\")\n\
+             \x20   else:\n\
+             \x20       kreate.ops.object.add_primitive(shape=\"uv_sphere\", size=0.2, location=(0, 0, top + 0.3))\n\
+             \x20       kreate.ops.object.rename(name=f\"Cap_{i}\")",
+        );
+        assert_eq!(report.len(), 4);
+        assert!(report.iter().all(|r| r.result.is_ok()));
+        assert!(app.doc.objects().any(|(_, o)| o.name == "Pin_0"));
+        assert!(app.doc.objects().any(|(_, o)| o.name == "Cap_1"));
+
+        // Save the active selection as a reusable `.kreate` asset in a temp folder.
+        let dir = std::env::temp_dir().join(format!("kreate-save-asset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let asset_path = app
+            .save_selection_to_asset_file(&dir.join("cap_part"))
+            .expect("saved asset");
+        assert!(asset_path.ends_with("cap_part.kreate"));
+        assert!(app.ui.asset_folders.contains(&dir));
+        let (reloaded, _) = kreate_io::scene_file::read_scene_file(&asset_path).unwrap();
+        assert_eq!(reloaded.objects().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A script with names and a loop runs as its unrolled lines, and

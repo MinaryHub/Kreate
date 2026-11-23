@@ -37,6 +37,7 @@ pub mod text;
 pub mod theme;
 pub mod timeline;
 pub mod toolbar;
+pub mod transform_gizmo;
 pub mod uv_editor;
 pub mod view_icons;
 pub mod workspace;

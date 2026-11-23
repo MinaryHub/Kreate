@@ -54,12 +54,14 @@ impl Default for RelayConfig {
     }
 }
 
+type RoomMap = Mutex<HashMap<String, Arc<Mutex<Room>>>>;
+
 /// A running relay. Dropping it stops taking new participants and closes the
 /// ones it has.
 pub struct Relay {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
-    rooms: Arc<Mutex<HashMap<String, Room>>>,
+    rooms: Arc<RoomMap>,
 }
 
 #[derive(Default)]
@@ -143,7 +145,7 @@ impl Relay {
         let addr = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
-        let rooms: Arc<Mutex<HashMap<String, Room>>> = Arc::default();
+        let rooms: Arc<RoomMap> = Arc::default();
         {
             let stop = stop.clone();
             let rooms = rooms.clone();
@@ -196,7 +198,11 @@ impl Relay {
     pub fn peer_count(&self) -> usize {
         self.rooms
             .lock()
-            .map(|r| r.values().map(|room| room.peers.len()).sum())
+            .map(|r| {
+                r.values()
+                    .map(|room| room.lock().map(|g| g.peers.len()).unwrap_or(0))
+                    .sum()
+            })
             .unwrap_or(0)
     }
 }
@@ -206,8 +212,10 @@ impl Drop for Relay {
         self.stop.store(true, Ordering::Relaxed);
         if let Ok(rooms) = self.rooms.lock() {
             for room in rooms.values() {
-                for member in room.peers.values() {
-                    let _ = member.stream.shutdown(std::net::Shutdown::Both);
+                if let Ok(guard) = room.lock() {
+                    for member in guard.peers.values() {
+                        let _ = member.stream.shutdown(std::net::Shutdown::Both);
+                    }
                 }
             }
         }
@@ -215,11 +223,7 @@ impl Drop for Relay {
 }
 
 /// One participant, from the door to leaving.
-fn serve(
-    stream: TcpStream,
-    rooms: &Mutex<HashMap<String, Room>>,
-    config: &RelayConfig,
-) -> io::Result<()> {
+fn serve(stream: TcpStream, rooms: &RoomMap, config: &RelayConfig) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true)?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -268,37 +272,45 @@ fn serve(
         });
     }
 
-    let site = {
-        let mut rooms = rooms.lock().unwrap_or_else(|p| p.into_inner());
-        if rooms
-            .get(&room_name)
-            .is_some_and(|room| room.peers.len() >= config.max_peers)
-        {
-            drop(rooms);
-            return refuse("the session is full");
-        }
-        if !rooms.contains_key(&room_name) && rooms.len() >= MAX_ROOMS {
-            // Room for one more by letting an empty one go, or none.
-            let empty = rooms
-                .iter()
-                .find(|(_, r)| r.peers.is_empty())
-                .map(|(k, _)| k.clone());
-            match empty {
-                Some(k) => {
-                    rooms.remove(&k);
-                }
-                None => {
-                    drop(rooms);
-                    return refuse("the relay has no room for another session");
+    // Look up or create this room's dedicated mutex so traffic in one room
+    // never blocks other rooms on the relay.
+    let room_handle = {
+        let mut map = rooms.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(existing) = map.get(&room_name) {
+            existing.clone()
+        } else {
+            if map.len() >= MAX_ROOMS {
+                let empty = map
+                    .iter()
+                    .find(|(_, r)| r.lock().map(|g| g.peers.is_empty()).unwrap_or(false))
+                    .map(|(k, _)| k.clone());
+                match empty {
+                    Some(k) => {
+                        map.remove(&k);
+                    }
+                    None => {
+                        drop(map);
+                        return refuse("the relay has no room for another session");
+                    }
                 }
             }
+            let created = Arc::new(Mutex::new(Room::default()));
+            map.insert(room_name.clone(), created.clone());
+            created
         }
-        let room = rooms.entry(room_name.clone()).or_default();
+    };
+
+    let site = {
+        let mut room = room_handle.lock().unwrap_or_else(|p| p.into_inner());
+        if room.peers.len() >= config.max_peers {
+            drop(room);
+            return refuse("the session is full");
+        }
         // Checked: numbers are never reused, and one that wrapped to 0 would be
         // a participant handing out ordinary, colliding object ids — or, in a
         // debug build, a panic with the lock held that poisons every room.
         let Some(site) = room.next_site.checked_add(1) else {
-            drop(rooms);
+            drop(room);
             return refuse("the session has had too many participants; start a new one");
         };
         room.next_site = site;
@@ -325,7 +337,7 @@ fn serve(
                     let _ = tx.try_send(Frame::with_body(Msg::Snapshot { seq: room.seq }, bytes));
                 }
                 Err(_) => {
-                    drop(rooms);
+                    drop(room);
                     return refuse("the session's scene could not be sent");
                 }
             }
@@ -354,10 +366,7 @@ fn serve(
     let result = (|| -> io::Result<()> {
         loop {
             let frame = Frame::read_from(&mut reader)?;
-            let mut rooms = rooms.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(room) = rooms.get_mut(&room_name) else {
-                return Ok(());
-            };
+            let mut room = room_handle.lock().unwrap_or_else(|p| p.into_inner());
             match frame.msg {
                 // Nothing but the seed counts before the room is seeded: an
                 // edit from someone still waiting for the scene is of a scene
@@ -425,26 +434,24 @@ fn serve(
         }
     })();
 
-    let mut rooms = rooms.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(room) = rooms.get_mut(&room_name) {
-        room.peers.remove(&site);
-        room.pending.retain(|s| *s != site);
-        if room.seeder == Some(site) && !room.seeded {
-            // Gone before its scene arrived: the room is seeded empty, and
-            // those waiting start from that rather than waiting for ever.
-            room.seeder = None;
-            room.seeded = true;
-            room.send_pending();
-        }
-        room.looks.remove(&site);
-        room.locks.retain(|_, s| *s != site);
-        room.broadcast(&Frame::new(Msg::Left { site }), None);
-        let frame = room.locks_frame();
-        room.broadcast(&frame, None);
-        // An empty room's scene stays, so the last one out can come back to
-        // it: a relay that forgot on every disconnect would lose work to a
-        // dropped Wi-Fi.
+    let mut room = room_handle.lock().unwrap_or_else(|p| p.into_inner());
+    room.peers.remove(&site);
+    room.pending.retain(|s| *s != site);
+    if room.seeder == Some(site) && !room.seeded {
+        // Gone before its scene arrived: the room is seeded empty, and
+        // those waiting start from that rather than waiting for ever.
+        room.seeder = None;
+        room.seeded = true;
+        room.send_pending();
     }
+    room.looks.remove(&site);
+    room.locks.retain(|_, s| *s != site);
+    room.broadcast(&Frame::new(Msg::Left { site }), None);
+    let frame = room.locks_frame();
+    room.broadcast(&frame, None);
+    // An empty room's scene stays, so the last one out can come back to
+    // it: a relay that forgot on every disconnect would lose work to a
+    // dropped Wi-Fi.
     result
 }
 

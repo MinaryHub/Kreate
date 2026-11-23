@@ -108,8 +108,65 @@ pub struct KeymapText {
     pub capture_hint: String,
     /// Shown on the button of the binding that is listening.
     pub capturing: String,
+    /// Placeholder for the keymap filter input.
+    pub search_hint: String,
+    /// Localized operator names keyed by `command_info::variant_id` or `op_id`.
+    pub labels: BTreeMap<String, String>,
     /// One per entry of [`CONTEXT_ORDER`], in the same order.
     pub contexts: Vec<String>,
+}
+
+/// Resolved localized label for `binding`, or empty if none was supplied.
+pub fn binding_label<'a>(binding: &Binding, text: &'a KeymapText) -> &'a str {
+    let variant = crate::command_info::variant_id(&binding.action.op_id, &binding.action.params);
+    text.labels
+        .get(&variant)
+        .or_else(|| text.labels.get(&binding.action.op_id))
+        .map(String::as_str)
+        .unwrap_or("")
+}
+
+/// Whether `binding` matches `query` by localized label, operator ID, context
+/// heading, shortcut trigger (`Ctrl+J`), Korean choseong (`ㄷㅊ`), or 2-beolsik
+/// IME mismatch (`ehfcnf` / `ㄷㅌㅅ경ㄷ`).
+pub fn binding_matches(query: &str, binding: &Binding, label: &str, context_heading: &str) -> bool {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let normalized;
+    let query = if kreate_i18n::is_normalized(trimmed) {
+        trimmed
+    } else {
+        normalized = kreate_i18n::normalize(trimmed);
+        &normalized
+    };
+    let hay = format!(
+        "{label} {} {} {} {context_heading}",
+        binding.action.op_id,
+        binding.action.op_id.replace(['.', '_'], " "),
+        trigger_text(binding),
+    )
+    .to_lowercase();
+    let hay_cho = kreate_i18n::choseong(&hay);
+    let hay_keys = kreate_i18n::to_2beolsik_keys(&hay);
+
+    for word in query.to_lowercase().split_whitespace() {
+        if hay.contains(word) {
+            continue;
+        }
+        if kreate_i18n::is_choseong_only(word) && hay_cho.contains(word) {
+            continue;
+        }
+        if word.chars().count() >= 2 {
+            let word_keys = kreate_i18n::to_2beolsik_keys(word);
+            if word_keys.len() >= 2 && hay_keys.contains(&word_keys) {
+                continue;
+            }
+        }
+        return false;
+    }
+    true
 }
 
 /// The order contexts are listed in: outermost first, matching how a user thinks
@@ -168,17 +225,42 @@ pub fn keymap_editor(
         ui.colored_label(crate::theme::from_ui(ui).accent, &text.shadowed);
     }
 
+    let search_id = ui.id().with("keymap-search");
+    let mut query: String = ui.data_mut(|d| d.get_temp(search_id)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        let reserve = if query.is_empty() { 0.0 } else { 28.0 };
+        let width = (ui.available_width() - reserve).max(80.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut query)
+                .hint_text(&text.search_hint)
+                .desired_width(width),
+        );
+        if !query.is_empty() {
+            // i18n-exempt: a close mark
+            if ui.small_button("×").clicked() {
+                query.clear();
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
+
     ui.separator();
 
     let bindings: Vec<Binding> = keymap.bindings().collect();
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (index, context) in CONTEXT_ORDER.into_iter().enumerate() {
-            let group: Vec<&Binding> = bindings.iter().filter(|b| b.context == context).collect();
+            let heading = text.contexts.get(index).cloned().unwrap_or_default();
+            let group: Vec<&Binding> = bindings
+                .iter()
+                .filter(|b| {
+                    b.context == context
+                        && binding_matches(&query, b, binding_label(b, text), &heading)
+                })
+                .collect();
             if group.is_empty() {
                 continue;
             }
             ui.add_space(4.0);
-            let heading = text.contexts.get(index).cloned().unwrap_or_default();
             ui.label(RichText::new(heading).strong());
             for binding in group {
                 row(ui, binding, overrides, conflicts, text, capturing, edits);
@@ -205,7 +287,13 @@ fn row(
         // The operator, not the binding id: the id is a compatibility handle,
         // and showing it here would be showing the user an implementation
         // detail in place of the thing they are looking for.
-        let mut label = RichText::new(&binding.action.op_id);
+        let localized = binding_label(binding, text);
+        let primary = if localized.is_empty() {
+            binding.action.op_id.as_str()
+        } else {
+            localized
+        };
+        let mut label = RichText::new(primary);
         if binding.disabled {
             label = label.weak().strikethrough();
         }
@@ -215,6 +303,15 @@ fn row(
             label = label.color(theme.info);
         }
         ui.label(label);
+        if !localized.is_empty() && localized != binding.action.op_id {
+            // i18n-exempt: an operator identifier is script/API text
+            ui.label(
+                RichText::new(&binding.action.op_id)
+                    .monospace()
+                    .small()
+                    .color(theme.text_faint),
+            );
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // i18n-exempt: a symbol, not prose. A left arrow rather than the
@@ -407,5 +504,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn search_matches_operator_id_korean_label_choseong_and_trigger() {
+        let b = binding(Input::key("J"), Modifiers::ctrl(), EventKind::Press);
+        assert!(binding_matches("", &b, "영역 돌출", "편집 모드"));
+        assert!(binding_matches("extrude", &b, "영역 돌출", "편집 모드"));
+        assert!(binding_matches("돌출", &b, "영역 돌출", "편집 모드"));
+        assert!(binding_matches("ㄷㅊ", &b, "영역 돌출", "편집 모드"));
+        assert!(binding_matches("ehfcnf", &b, "영역 돌출", "편집 모드"));
+        assert!(binding_matches("ㄷㅌㅅ경ㄷ", &b, "영역 돌출", "편집 모드"));
+        assert!(binding_matches("ctrl+j", &b, "영역 돌출", "편집 모드"));
+        assert!(binding_matches("편집 ctrl+j", &b, "영역 돌출", "편집 모드"));
+        assert!(!binding_matches("bevel", &b, "영역 돌출", "편집 모드"));
     }
 }

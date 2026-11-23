@@ -55,7 +55,9 @@ pub fn console(
     queue: &mut CommandQueue,
 ) {
     let theme = crate::theme::from_ui(ui);
-    let input_height = ui.spacing().interact_size.y + 8.0;
+    let rows = input.lines().count().clamp(1, 6);
+    let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+    let input_height = (rows as f32 * row_h) + 14.0;
     let scrollback_height = (ui.available_height() - input_height).max(0.0);
 
     egui::ScrollArea::vertical()
@@ -102,21 +104,28 @@ pub fn console(
         });
 
     ui.separator();
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         // i18n-exempt: the prompt is a symbol every console shares
         ui.monospace(">>>");
         let response = ui.add(
-            egui::TextEdit::singleline(input)
+            egui::TextEdit::multiline(input)
                 .font(egui::TextStyle::Monospace)
+                .desired_rows(rows)
                 .hint_text(&text.placeholder)
-                .desired_width(f32::INFINITY),
+                .desired_width(f32::INFINITY)
+                // Enter runs the script; Shift+Enter starts an indented/next line.
+                .return_key(egui::KeyboardShortcut::new(
+                    egui::Modifiers::SHIFT,
+                    egui::Key::Enter,
+                )),
         );
         // The lines run before, and which of them the arrows have reached:
-        // Up and Down bring them back, as a shell's do.
+        // Up and Down bring them back when editing a single line, while
+        // multi-line scripts keep Up/Down for moving between lines.
         let history_id = ui.id().with("console-history");
         let (mut lines, mut at): (Vec<String>, usize) =
             ui.data_mut(|d| d.get_temp(history_id)).unwrap_or_default();
-        if response.has_focus() && !lines.is_empty() {
+        if response.has_focus() && !lines.is_empty() && !input.contains('\n') {
             let (up, down) = ui.input(|i| {
                 (
                     i.key_pressed(egui::Key::ArrowUp),
@@ -131,17 +140,20 @@ pub fn console(
                 *input = lines.get(at).cloned().unwrap_or_default();
             }
         }
-        let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let entered = response.has_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
         if entered && !input.trim().is_empty() {
-            if lines.last().map(String::as_str) != Some(input.as_str()) {
-                lines.push(input.clone());
+            let trimmed_script = input.trim_end().to_string();
+            if lines.last() != Some(&trimmed_script) {
+                lines.push(trimmed_script.clone());
                 if lines.len() > HISTORY {
                     lines.remove(0);
                 }
             }
             at = lines.len();
+            input.clear();
             queue.push(Command::RunScript {
-                source: std::mem::take(input),
+                source: trimmed_script,
             });
             // Keep typing: the next line goes where the last one went.
             response.request_focus();

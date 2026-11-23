@@ -806,6 +806,51 @@ impl RenderMeshCpu {
         self.face_flags = flags.face_flags;
     }
 
+    /// Extracts render-vertex UV coordinates directly against an existing
+    /// `corner_render` split table when every corner sharing a render vertex
+    /// still agrees on its UV coordinate.
+    ///
+    /// Returns `None` if a new UV seam or sculpt face-set border now assigns
+    /// distinct UVs to corners that previously shared one render vertex, so the
+    /// caller can fall back to a full split upload.
+    pub fn extract_compatible_uvs(
+        mesh: &MeshData,
+        corner_render: &[u32],
+        render_verts: u32,
+    ) -> Option<Vec<[f32; 2]>> {
+        if corner_render.len() != mesh.corner_verts().len() {
+            return None;
+        }
+        let n = render_verts as usize;
+        let Some(corner_uvs) = mesh.attributes().get_f32x2(names::UV) else {
+            return Some(vec![[0.0, 0.0]; n]);
+        };
+        if corner_uvs.len() != corner_render.len() {
+            return None;
+        }
+        let mut uvs = vec![[0.0f32; 2]; n];
+        let mut seen = vec![false; n];
+        for (&r, uv) in corner_render.iter().zip(corner_uvs) {
+            if r == u32::MAX {
+                continue;
+            }
+            let idx = r as usize;
+            if idx >= n {
+                return None;
+            }
+            let pair = [uv.x, uv.y];
+            if !seen[idx] {
+                seen[idx] = true;
+                uvs[idx] = pair;
+            } else if uvs[idx][0].to_bits() != pair[0].to_bits()
+                || uvs[idx][1].to_bits() != pair[1].to_bits()
+            {
+                return None;
+            }
+        }
+        Some(uvs)
+    }
+
     /// Total GPU bytes this mesh will occupy.
     ///
     /// Tracked as a budget rather than left to chance: memory regressions in this
@@ -1676,5 +1721,72 @@ mod submesh_tests {
         let mut want = plain.tri_to_face.clone();
         want.sort_unstable();
         assert_eq!(seen, want, "a triangle was dropped or duplicated");
+    }
+
+    #[test]
+    fn compatible_uvs_extract_without_rebuilding_and_reject_new_splits() {
+        use std::sync::Arc;
+        let mut mesh = primitives::grid(2.0, 2, 2);
+        let corners = mesh.corner_verts().len();
+        let initial: Vec<glam::Vec2> = mesh
+            .corner_verts()
+            .iter()
+            .map(|&v| glam::Vec2::new(v as f32 * 0.1, 0.0))
+            .collect();
+        mesh.attributes_mut().insert(
+            names::UV,
+            Domain::Corner,
+            AttrData::F32x2(Arc::new(initial)),
+        );
+        let base = RenderMeshCpu::extract(&mesh);
+
+        // Vertex-consistent update (e.g. sculpt mask, weight paint, or island translation).
+        let updated: Vec<glam::Vec2> = mesh
+            .corner_verts()
+            .iter()
+            .map(|&v| glam::Vec2::new(v as f32 * 0.25 + 0.5, 1.0))
+            .collect();
+        mesh.attributes_mut().insert(
+            names::UV,
+            Domain::Corner,
+            AttrData::F32x2(Arc::new(updated)),
+        );
+        let fast =
+            RenderMeshCpu::extract_compatible_uvs(&mesh, &base.corner_render, base.render_verts())
+                .expect("vertex-consistent UVs stay compatible with the existing split");
+        let full = RenderMeshCpu::extract(&mesh);
+        assert_eq!(fast, full.uvs);
+
+        // Introducing a seam across a smooth shared vertex requires a fresh split.
+        let mut split = vec![glam::Vec2::ZERO; corners];
+        split[0] = glam::Vec2::new(0.0, 1.0);
+        for (i, &v) in mesh.corner_verts().iter().enumerate() {
+            if v == mesh.corner_verts()[0] && i != 0 {
+                split[i] = glam::Vec2::new(0.0, 2.0);
+            }
+        }
+        // Pick an interior vertex shared by 4 faces on the 2x2 grid so at least two
+        // corners share a smooth render vertex.
+        let center_vert = (0..mesh.num_verts())
+            .find(|&v| mesh.corner_verts().iter().filter(|&&cv| cv == v).count() >= 2)
+            .unwrap();
+        let mut first = true;
+        for (i, &v) in mesh.corner_verts().iter().enumerate() {
+            if v == center_vert {
+                split[i] = if first {
+                    first = false;
+                    glam::Vec2::new(0.0, 1.0)
+                } else {
+                    glam::Vec2::new(0.0, 2.0)
+                };
+            }
+        }
+        mesh.attributes_mut()
+            .insert(names::UV, Domain::Corner, AttrData::F32x2(Arc::new(split)));
+        assert!(
+            RenderMeshCpu::extract_compatible_uvs(&mesh, &base.corner_render, base.render_verts())
+                .is_none(),
+            "conflicting corner UVs on a shared smooth render vertex must request re-splitting"
+        );
     }
 }

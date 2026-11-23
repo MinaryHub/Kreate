@@ -46,13 +46,23 @@ impl SculptDisplay {
         let coords = match &self.coords {
             Some((k, data)) if *k == key => data.clone(),
             _ => {
-                let mask = kreate_mesh::sculpt::mask_of(mesh);
-                let sets = kreate_mesh::sculpt::face_sets_of(mesh);
-                let mut uv = vec![glam::Vec2::ZERO; mesh.corner_verts().len()];
+                let nverts = mesh.num_verts() as usize;
+                let nfaces = mesh.num_faces() as usize;
+                let mask = mesh
+                    .attributes()
+                    .get_f32(MASK)
+                    .filter(|m| m.len() == nverts);
+                let sets = mesh
+                    .attributes()
+                    .get_i32(FACE_SET)
+                    .filter(|s| s.len() == nfaces);
+                let corner_verts = mesh.corner_verts();
+                let mut uv = vec![glam::Vec2::ZERO; corner_verts.len()];
                 for f in 0..mesh.num_faces() {
-                    let set = sets[f as usize] as f32;
+                    let set = sets.map_or(0.0, |s| s[f as usize] as f32);
                     for c in mesh.face_corner_range(f) {
-                        uv[c] = glam::Vec2::new(mask[mesh.corner_verts()[c] as usize], set);
+                        let m = mask.map_or(0.0, |m| m[corner_verts[c] as usize]);
+                        uv[c] = glam::Vec2::new(m, set);
                     }
                 }
                 let data = AttrData::F32x2(Arc::new(uv));

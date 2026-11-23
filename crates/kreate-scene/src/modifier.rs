@@ -371,10 +371,11 @@ impl ModifierInstance {
     }
 }
 
-/// The last boolean that gave up, by its two meshes' sizes: tried again
+/// Recent booleans that gave up, by their two meshes' sizes: tried again
 /// only when either changes shape, not each frame a cutter is dragged —
-/// every try is seconds on the thread that draws.
-static GAVE_UP: std::sync::Mutex<Option<[u32; 4]>> = std::sync::Mutex::new(None);
+/// every try is seconds on the thread that draws. Bounded to 64 entries so
+/// two or more failing booleans in one scene do not evict each other.
+static GAVE_UP: std::sync::Mutex<Vec<[u32; 4]>> = std::sync::Mutex::new(Vec::new());
 /// Whether a boolean gave up since the application last asked.
 static GAVE_UP_NEWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -403,7 +404,7 @@ fn boolean_or_input(
         cutter.num_faces(),
         cutter.num_verts(),
     ];
-    if GAVE_UP.lock().ok().and_then(|g| *g) == Some(key) {
+    if GAVE_UP.lock().ok().is_some_and(|g| g.contains(&key)) {
         GAVE_UP_HERE.with(|f| f.set(true));
         return input.clone();
     }
@@ -411,7 +412,12 @@ fn boolean_or_input(
         Ok(m) => m,
         Err(_) => {
             if let Ok(mut g) = GAVE_UP.lock() {
-                *g = Some(key);
+                if !g.contains(&key) {
+                    if g.len() >= 64 {
+                        g.remove(0);
+                    }
+                    g.push(key);
+                }
             }
             GAVE_UP_NEWS.store(true, std::sync::atomic::Ordering::Relaxed);
             GAVE_UP_HERE.with(|f| f.set(true));
@@ -676,12 +682,36 @@ struct Entry {
     used: u64,
 }
 
+/// Filters `operands` down to those referenced by enabled modifiers in `stack`.
+fn operands_for(stack: &[ModifierInstance], operands: &[Operand]) -> Vec<Operand> {
+    let mut out: Vec<Operand> = Vec::new();
+    for m in stack.iter().filter(|m| m.enabled) {
+        let uid = match m.kind {
+            ModifierKind::Boolean(b) => b.operand,
+            ModifierKind::PathArray(p) => p.path,
+            ModifierKind::Shrinkwrap(s) => s.target,
+            _ => continue,
+        };
+        if out.iter().any(|o| o.uid == uid) {
+            continue;
+        }
+        if let Some(op) = operands.iter().find(|o| o.uid == uid) {
+            out.push(op.clone());
+        }
+    }
+    out
+}
+
 /// Evaluated meshes, kept between frames.
 ///
 /// Owned by the application, not by the document — see the module docs.
 #[derive(Default)]
 pub struct ModifierCache {
     entries: Vec<Entry>,
+    /// Intermediate prefix results (`stack[..k]` for `1 <= k < stack.len()`),
+    /// kept so tweaking a tail modifier (e.g. Bevel width) reuses the evaluated
+    /// upstream stack (e.g. Boolean + Subdivide) without recomputing it.
+    prefixes: Vec<Entry>,
     /// Skinned meshes, one per bound input: see `ModifierCache::skinned`.
     skins: Vec<SkinEntry>,
     /// Shape-key mixes, one per input and set of values.
@@ -703,6 +733,7 @@ pub struct ModifierCache {
     /// enough that it is already too late to notice.
     hits: u64,
     misses: u64,
+    prefix_hits: u64,
 }
 
 impl ModifierCache {
@@ -952,7 +983,7 @@ impl ModifierCache {
         if let Some(entry) = self
             .geo
             .iter_mut()
-            .find(|e| Arc::ptr_eq(&e.input, input) && e.graph == *graph)
+            .find(|e| Arc::ptr_eq(&e.input, input) && e.graph.same_evaluation(graph))
         {
             entry.used = self.generation;
             return entry.output.clone();
@@ -1069,6 +1100,17 @@ impl ModifierCache {
         // is valid at every time, which is what stops a still scene
         // re-evaluating when the frame changes; see [`Entry::at`].
         let at = depends_on_time(stack).then_some(ctx.time);
+        let generation = self.generation;
+        for p in &mut self.prefixes {
+            if Arc::ptr_eq(&p.input, input)
+                && p.stack.len() < stack.len()
+                && p.stack.as_slice() == &stack[..p.stack.len()]
+                && p.at == depends_on_time(&p.stack).then_some(ctx.time)
+                && p.operands == operands_for(&p.stack, operands)
+            {
+                p.used = generation;
+            }
+        }
         // The whole invalidation mechanism, in one comparison. It is exact and
         // free, and it works only because the entry *holds* the input handle:
         // `Arc::make_mut` copies on write only while a handle is shared, so an
@@ -1077,12 +1119,66 @@ impl ModifierCache {
         if let Some(entry) = self.entries.iter_mut().find(|e| {
             Arc::ptr_eq(&e.input, input) && e.stack == stack && e.at == at && e.operands == operands
         }) {
-            entry.used = self.generation;
+            entry.used = generation;
             self.hits += 1;
             return entry.output.clone();
         }
 
-        let output = Arc::new(apply_stack_with(input, stack, ctx, operands));
+        // Longest cached prefix (`1 <= k < stack.len()`), checked across both
+        // `prefixes` and `entries` (so appending a new modifier to an already
+        // evaluated stack reuses the existing full-stack output immediately).
+        let mut best_k = 0usize;
+        let mut current = input.clone();
+        for k in (1..stack.len()).rev() {
+            let prefix = &stack[..k];
+            if is_identity(prefix) {
+                continue;
+            }
+            let pat = depends_on_time(prefix).then_some(ctx.time);
+            let pops = operands_for(prefix, operands);
+            if let Some(found) = self
+                .prefixes
+                .iter_mut()
+                .chain(self.entries.iter_mut())
+                .find(|e| {
+                    Arc::ptr_eq(&e.input, input)
+                        && e.stack.as_slice() == prefix
+                        && e.at == pat
+                        && e.operands == pops
+                })
+            {
+                found.used = generation;
+                best_k = k;
+                current = found.output.clone();
+                self.prefix_hits += 1;
+                break;
+            }
+        }
+
+        for idx in best_k..stack.len() {
+            let step = &stack[idx..idx + 1];
+            if step[0].enabled {
+                current = Arc::new(apply_stack_with(&current, step, ctx, operands));
+            }
+            let prefix_len = idx + 1;
+            if prefix_len < stack.len() && !is_identity(&stack[..prefix_len]) {
+                let prefix = &stack[..prefix_len];
+                let pat = depends_on_time(prefix).then_some(ctx.time);
+                let pops = operands_for(prefix, operands);
+                self.prefixes
+                    .retain(|e| !(Arc::ptr_eq(&e.input, input) && e.stack.len() == prefix_len));
+                self.prefixes.push(Entry {
+                    input: input.clone(),
+                    stack: prefix.to_vec(),
+                    operands: pops,
+                    output: current.clone(),
+                    at: pat,
+                    used: generation,
+                });
+            }
+        }
+
+        let output = current;
         self.misses += 1;
         // A time-dependent entry replaces the one for the previous instant
         // rather than joining it. This is §2.4's memory decision: a result per
@@ -1101,7 +1197,7 @@ impl ModifierCache {
             operands: operands.to_vec(),
             output: output.clone(),
             at,
-            used: self.generation,
+            used: generation,
         });
         output
     }
@@ -1232,6 +1328,7 @@ impl ModifierCache {
     pub fn sweep(&mut self) {
         let generation = self.generation;
         self.entries.retain(|e| e.used == generation);
+        self.prefixes.retain(|e| e.used == generation);
         self.skins.retain(|e| e.used == generation);
         self.shapes.retain(|e| e.used == generation);
         self.geo.retain(|e| e.used == generation);
@@ -1253,6 +1350,11 @@ impl ModifierCache {
         (self.hits, self.misses)
     }
 
+    /// Number of stack evaluations that reused a cached upstream modifier prefix.
+    pub fn prefix_hits(&self) -> u64 {
+        self.prefix_hits
+    }
+
     /// Roughly how much the evaluated meshes occupy.
     ///
     /// Only the outputs: the inputs are the document's and are counted there.
@@ -1261,6 +1363,11 @@ impl ModifierCache {
             .iter()
             .map(|e| e.output.memory_bytes())
             .sum::<usize>()
+            + self
+                .prefixes
+                .iter()
+                .map(|e| e.output.memory_bytes())
+                .sum::<usize>()
             + self
                 .skins
                 .iter()
@@ -1887,8 +1994,8 @@ mod time_tests {
                 },
             )));
         // As a boolean too big to finish would have left it: this pair of
-        // sizes remembered as given up.
-        *GAVE_UP.lock().unwrap() = Some([6, 8, 6, 8]);
+        // sizes remembered alongside earlier failures.
+        *GAVE_UP.lock().unwrap() = vec![[100, 200, 100, 200], [6, 8, 6, 8]];
         let mut cache = ModifierCache::new();
         let ctx = EvalCtx::still();
         let out = cache.evaluated(&doc, target, &ctx).unwrap();
@@ -1898,7 +2005,7 @@ mod time_tests {
         cache.evaluated(&doc, target, &ctx);
         assert!(cache.boolean_failed(target));
         // Forgotten and cut once it can be.
-        *GAVE_UP.lock().unwrap() = None;
+        GAVE_UP.lock().unwrap().clear();
         doc.object_mut(cutter).unwrap().transform.translation =
             kreate_math::DVec3::new(1.0, 0.0, 0.0);
         let out = cache.evaluated(&doc, target, &ctx).unwrap();
@@ -1988,5 +2095,45 @@ mod time_tests {
         doc.object_mut(target).unwrap().modifiers[0].enabled = true;
         doc.object_mut(target).unwrap().visible = false;
         assert!(boolean_cutters(&doc).is_empty());
+    }
+
+    #[test]
+    fn dragging_last_modifier_reuses_cached_prefix_without_rebuilding_base_stack() {
+        let mut doc = Document::new();
+        let id = doc.add_mesh_object("Part", kreate_mesh::primitives::cube(2.0));
+        doc.object_mut(id).unwrap().modifiers = vec![
+            ModifierInstance::new(ModifierKind::Subdivide(SubdivideParams {
+                levels: 2,
+                ..Default::default()
+            })),
+            ModifierInstance::new(ModifierKind::Array(ArrayParams {
+                count: 2,
+                ..Default::default()
+            })),
+        ];
+
+        let mut cache = ModifierCache::new();
+        let ctx = EvalCtx::still();
+        let first = cache.evaluated(&doc, id, &ctx).unwrap();
+        assert_eq!(cache.prefix_hits(), 0);
+        cache.sweep();
+
+        // Tweaking the tail Array modifier across multiple values reuses the
+        // subdivided prefix on every step and matches a fresh cache's output.
+        for count in [3u32, 4, 5] {
+            doc.object_mut(id).unwrap().modifiers[1].kind = ModifierKind::Array(ArrayParams {
+                count,
+                ..Default::default()
+            });
+            let incremental = cache.evaluated(&doc, id, &ctx).unwrap();
+            cache.sweep();
+
+            let mut fresh = ModifierCache::new();
+            let reference = fresh.evaluated(&doc, id, &ctx).unwrap();
+            assert_eq!(incremental.num_verts(), reference.num_verts());
+            assert_eq!(incremental.num_faces(), reference.num_faces());
+        }
+        assert_eq!(cache.prefix_hits(), 3);
+        assert!(cache.evaluated(&doc, id, &ctx).unwrap().num_faces() > first.num_faces());
     }
 }

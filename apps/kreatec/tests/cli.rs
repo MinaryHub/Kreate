@@ -515,3 +515,67 @@ fn help_succeeds_and_documents_the_git_integration() {
         result.stdout
     );
 }
+
+#[test]
+fn step_usda_and_drawing_diffs_work_through_kreatec() {
+    let dir = scratch("step_usda_drawing");
+    let step_path = dir.join("box.step");
+    let kreate_path = dir.join("box.kreate");
+    let usda_path = dir.join("stage.usda");
+
+    assert!(run(&["gen", "cube", step_path.to_str().unwrap()]).ok);
+    let inspected = run(&["inspect", step_path.to_str().unwrap()]);
+    assert!(inspected.ok, "{}", inspected.stdout);
+    assert!(
+        inspected.stdout.contains("mesh(es)"),
+        "{}",
+        inspected.stdout
+    );
+    assert!(
+        run(&[
+            "convert",
+            step_path.to_str().unwrap(),
+            kreate_path.to_str().unwrap()
+        ])
+        .ok
+    );
+
+    std::fs::write(
+        &usda_path,
+        "#usda 1.0\n(\n    upAxis = \"Z\"\n    metersPerUnit = 1\n)\ndef Cube \"StageCube\" { double size = 2 }\n",
+    )
+    .unwrap();
+    let usda_inspect = run(&["inspect", usda_path.to_str().unwrap()]);
+    assert!(usda_inspect.ok, "{}", usda_inspect.stdout);
+
+    // 2D drawing diff & textconv straight from DXF files.
+    let v1 = dir.join("v1");
+    let v2 = dir.join("v2");
+    std::fs::create_dir_all(&v1).unwrap();
+    std::fs::create_dir_all(&v2).unwrap();
+    let p1 = v1.join("plan.dxf");
+    let p2 = v2.join("plan.dxf");
+    std::fs::write(
+        &p1,
+        "0\nSECTION\n2\nENTITIES\n0\nLINE\n8\n0\n10\n0.0\n20\n0.0\n11\n10.0\n21\n0.0\n0\nENDSEC\n0\nEOF\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &p2,
+        "0\nSECTION\n2\nENTITIES\n0\nLINE\n8\n0\n10\n0.0\n20\n0.0\n11\n10.0\n21\n0.0\n0\nLINE\n8\n0\n10\n0.0\n20\n0.0\n11\n0.0\n21\n5.0\n0\nENDSEC\n0\nEOF\n",
+    )
+    .unwrap();
+
+    let tc = run(&["textconv", p1.to_str().unwrap()]);
+    assert!(
+        tc.ok && tc.stdout.contains("drawing entities 1"),
+        "{}",
+        tc.stdout
+    );
+    let df = run(&["diff", p1.to_str().unwrap(), p2.to_str().unwrap()]);
+    assert!(
+        df.ok && df.stdout.contains("drawing 1 -> 2 entities"),
+        "{}",
+        df.stdout
+    );
+}

@@ -249,6 +249,10 @@ pub struct ShellState {
     /// drawn over the picture for objects that have no surface — lights and
     /// cameras. `None` until the first frame has said how big the viewport is.
     pub projector: Option<kreate_ui::object_glyph::Projector>,
+    /// Selection pivot and orientation basis for the 3D transform gizmo.
+    pub gizmo_target: Option<(kreate_math::DVec3, [glam::Vec3; 3])>,
+    /// Handle currently being dragged on the 3D transform gizmo, if any.
+    pub gizmo_active: Option<kreate_ui::transform_gizmo::GizmoHandle>,
     /// Where the navigation gizmo is, in interface points.
     ///
     /// Geometry rather than a hover flag: it depends only on the viewport
@@ -372,6 +376,14 @@ pub struct ShellState {
     adjust_seen: Option<(usize, String)>,
     /// The chrome's appearance, as the preferences set it.
     pub appearance: kreate_ui::Appearance,
+    /// Explicit language override (`None` = system default, `Some("ko-KR")`, `Some("en-US")`).
+    pub language_pref: Option<String>,
+    /// Cached translated menu/panel labels invalidated on locale or option change.
+    labels_cache: Option<(
+        Option<String>,
+        kreate_i18n::TranslationOptions,
+        std::sync::Arc<Labels>,
+    )>,
     /// The whole interface drawn this much larger than the screen's own
     /// size (egui's zoom), as the preferences set it.
     pub ui_scale: f32,
@@ -966,6 +978,8 @@ impl Default for ShellState {
             view_lens_mm: 50.0,
             sidebar_tab: SidebarTab::Item,
             projector: None,
+            gizmo_target: None,
+            gizmo_active: None,
             gizmo_circle: None,
             viewport_blockers: Vec::new(),
             sidebars: std::collections::BTreeSet::new(),
@@ -994,6 +1008,8 @@ impl Default for ShellState {
             adjust_dismissed: None,
             adjust_seen: None,
             appearance: kreate_ui::Appearance::Dark,
+            language_pref: None,
+            labels_cache: None,
             ui_scale: 1.0,
             capturing: None,
             keymap_editor_shown: false,
@@ -1487,6 +1503,8 @@ pub struct ToolSettings {
     pub select_tool: u32,
     /// Edit mode: a vertex moved onto another merges with it.
     pub auto_merge: bool,
+    /// 0 off, 1 move, 2 rotate, 3 scale: interactive 3D gizmo over selection.
+    pub transform_gizmo: u32,
 }
 
 /// The viewport's on-off settings, as the Overlays menu shows them.
@@ -2565,10 +2583,25 @@ pub fn draw(
     mode: kreate_ops::operator::Mode,
     viewport_texture: Option<ViewportImage>,
 ) -> egui::Rect {
-    // Resolved once per frame into owned strings. A closure over the catalog
-    // would hold a borrow of `state` for the whole function, which conflicts with
-    // the mutable access the panels need to the command queue.
-    let l = Labels::new(&state.catalog);
+    // Cached across frames in an `Arc` and rebuilt only when the locale or
+    // translation toggles change, avoiding 400+ Fluent allocations per frame
+    // without holding an immutable borrow of `state` across panel draws.
+    let current_locale = state.catalog.locales().next().map(ToString::to_string);
+    let l = match &state.labels_cache {
+        Some((loc, opts, cached)) if *loc == current_locale && *opts == state.catalog.options => {
+            std::sync::Arc::clone(cached)
+        }
+        _ => {
+            let built = std::sync::Arc::new(Labels::new(&state.catalog));
+            state.labels_cache = Some((
+                current_locale,
+                state.catalog.options,
+                std::sync::Arc::clone(&built),
+            ));
+            state.outliner.sketch_heading = state.catalog.get("outliner-sketches");
+            built
+        }
+    };
     // Refilled by whatever draws over the viewport this frame. Cleared here
     // rather than by each drawer, so an overlay that stops being drawn stops
     // blocking the pointer on the very next frame.
@@ -3792,6 +3825,26 @@ fn draw_area(
                         if state.tools.orientation == 2 {
                             draw_work_plane(&painter, &projector, doc.cursor, doc.cursor_rotation);
                         }
+                        if let (Some((pivot, basis)), Some(kind)) = (
+                            state.gizmo_target,
+                            kreate_ui::transform_gizmo::GizmoKind::from_setting(
+                                state.tools.transform_gizmo,
+                            ),
+                        ) {
+                            let hot = state.gizmo_active.or_else(|| {
+                                ui.ctx()
+                                    .pointer_latest_pos()
+                                    .filter(|p| inner.contains(*p))
+                                    .and_then(|p| {
+                                        kreate_ui::transform_gizmo::hit_test(
+                                            &projector, pivot, basis, kind, p,
+                                        )
+                                    })
+                            });
+                            kreate_ui::transform_gizmo::draw(
+                                &painter, &projector, pivot, basis, kind, hot,
+                            );
+                        }
                     }
                     // The knife's path: the cut so far and the next stretch.
                     if let Some(projector) =
@@ -3982,6 +4035,71 @@ fn draw_area(
                 }
                 "preferences" => {
                     ui.horizontal(|ui| {
+                        ui.label(state.catalog.get("prefs-language"));
+                        let choices: [(Option<&str>, &str); 3] = [
+                            (None, "prefs-language-auto"),
+                            (Some("ko-KR"), "prefs-language-ko"),
+                            (Some("en-US"), "prefs-language-en"),
+                        ];
+                        for (code, key) in choices {
+                            let selected = state.language_pref.as_deref() == code;
+                            if ui
+                                .selectable_label(selected, state.catalog.get(key))
+                                .clicked()
+                                && !selected
+                            {
+                                state.language_pref = code.map(str::to_string);
+                                let iface = crate::prefs::interface_path();
+                                if let Some(path) = &iface {
+                                    let _ = crate::prefs::save_language(path, code);
+                                }
+                                let effective =
+                                    crate::prefs::effective_locale(None, iface.as_deref());
+                                let opts = state.catalog.options;
+                                let mut next = load_catalog(&effective);
+                                next.options = opts;
+                                state.catalog = next;
+                                state.labels_cache = None;
+                                state.outliner.sketch_heading.clear();
+                            }
+                        }
+                    });
+                    if state
+                        .catalog
+                        .locales()
+                        .next()
+                        .is_some_and(|l| l.language.as_str() != "en")
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label(state.catalog.get("prefs-translate"));
+                            let mut opts = state.catalog.options;
+                            let mut changed = false;
+                            changed |= ui
+                                .checkbox(&mut opts.ui, state.catalog.get("prefs-translate-ui"))
+                                .changed();
+                            changed |= ui
+                                .checkbox(
+                                    &mut opts.tooltips,
+                                    state.catalog.get("prefs-translate-tooltips"),
+                                )
+                                .changed();
+                            changed |= ui
+                                .checkbox(
+                                    &mut opts.new_data_names,
+                                    state.catalog.get("prefs-translate-new-data"),
+                                )
+                                .changed();
+                            if changed {
+                                state.catalog.options = opts;
+                                state.labels_cache = None;
+                                state.outliner.sketch_heading.clear();
+                                if let Some(path) = crate::prefs::interface_path() {
+                                    let _ = crate::prefs::save_translation_options(&path, opts);
+                                }
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
                         ui.label(state.catalog.get("prefs-theme"));
                         for a in kreate_ui::Appearance::ALL {
                             let key = match a {
@@ -4067,7 +4185,13 @@ fn draw_area(
                     }
                     ui.separator();
                     let conflicts = keymap.conflicts();
-                    let text = keymap_text(&state.catalog, overrides.len(), conflicts.len());
+                    let text = keymap_text(
+                        &state.catalog,
+                        keymap,
+                        &state.command_info,
+                        overrides.len(),
+                        conflicts.len(),
+                    );
                     let mut edits = std::mem::take(&mut state.keymap_edits);
                     kreate_ui::keymap_editor(
                         ui,
@@ -9028,6 +9152,12 @@ fn draw_assets(ui: &mut Ui, state: &mut ShellState) {
         ),
         loading: t("asset-loading"),
         add_folder: t("asset-add-folder"),
+        save_selection: t("asset-save-selection"),
+        save_selection_hint: state.catalog.format(
+            "asset-save-selection-hint",
+            kreate_i18n::TextKind::Tooltip,
+            &[],
+        ),
         remove_folder: t("asset-remove-folder"),
         no_folders: t("asset-no-folders"),
         // Poly Haven asks a program that uses its API to say so.
@@ -9228,42 +9358,53 @@ pub struct AiPending {
     pub atomic: bool,
     /// What the lines would change, in a line or a few.
     pub summary: String,
+    /// Whether the 3D viewport is currently showing the proposed After state.
+    pub previewing: bool,
 }
 
 /// Over the chat: whether the assistant's changes wait for a yes, and the
-/// one waiting, with Apply and Discard.
+/// one waiting, with Apply, Discard, and live 3D Preview.
 fn draw_ai_approval(ui: &mut Ui, state: &mut ShellState) {
     let theme = kreate_ui::theme::from_ui(ui);
     ui.checkbox(&mut state.chat_approve, state.catalog.get("chat-approve"))
         .on_hover_text(state.catalog.get("chat-approve-hint"));
-    let Some(pending) = state.ai_pending.clone() else {
+    let Some(mut pending) = state.ai_pending.clone() else {
         return;
     };
+    let apply_label = state.catalog.get("chat-apply");
+    let discard_label = state.catalog.get("chat-discard");
+    let preview_label = state.catalog.get("chat-preview");
+    let preview_hint = state.catalog.get("chat-preview-hint");
+    let proposal_label = state.catalog.get("chat-proposal");
+    let lines_label = state.catalog.get("chat-proposal-lines");
     egui::Frame::new()
         .fill(theme.raised)
         .stroke(egui::Stroke::new(1.0, theme.accent))
         .corner_radius(6)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(state.catalog.get("chat-proposal")).strong());
+            ui.label(egui::RichText::new(proposal_label).strong());
             ui.label(&pending.summary);
-            egui::CollapsingHeader::new(state.catalog.get("chat-proposal-lines"))
+            egui::CollapsingHeader::new(lines_label)
                 .id_salt("ai-pending-lines")
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(&pending.script).monospace().small());
                 });
             ui.horizontal(|ui| {
                 if ui
-                    .button(egui::RichText::new(state.catalog.get("chat-apply")).strong())
+                    .button(egui::RichText::new(apply_label).strong())
                     .clicked()
                 {
                     state.ai_pending_decision = Some(true);
                 }
-                if ui.button(state.catalog.get("chat-discard")).clicked() {
+                if ui.button(discard_label).clicked() {
                     state.ai_pending_decision = Some(false);
                 }
+                ui.toggle_value(&mut pending.previewing, preview_label)
+                    .on_hover_text(preview_hint);
             });
         });
+    state.ai_pending = Some(pending);
 }
 
 fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
@@ -9271,6 +9412,16 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
     let text = kreate_ui::chat::ChatText {
         attach: l.chat_attach.clone(),
         attach_hint: l.chat_attach_hint.clone(),
+        attach_selection: state.catalog.format(
+            "chat-attach-selection",
+            kreate_i18n::TextKind::Ui,
+            &[],
+        ),
+        attach_selection_hint: state.catalog.format(
+            "chat-attach-selection-hint",
+            kreate_i18n::TextKind::Tooltip,
+            &[],
+        ),
         remove: l.chat_remove.clone(),
         placeholder: l.chat_placeholder.clone(),
         empty: l.chat_empty.clone(),
@@ -11315,14 +11466,59 @@ fn draw_workspace_switcher(ui: &mut Ui, state: &mut ShellState) {
     // layout is chosen far less often than a tool, and a row of tabs took the
     // width the tools want.
     let current = names.get(active).cloned().unwrap_or_default();
+    let dup_label = state.catalog.get("workspace-duplicate");
+    let del_label = state.catalog.get("workspace-delete");
+    let rename_hint = state.catalog.get("workspace-rename-hint");
+    let rename_id = ui.id().with("workspace-rename");
     egui::ComboBox::from_id_salt("workspace")
         .width(118.0)
-        .selected_text(egui::RichText::new(current).strong())
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .selected_text(egui::RichText::new(&current).strong())
         .show_ui(ui, |ui| {
             for (index, name) in names.iter().enumerate() {
                 if ui.selectable_label(index == active, name).clicked() {
                     state.switch_workspace(index);
+                    ui.close();
                 }
+            }
+            ui.separator();
+            if ui.button(&dup_label).clicked() {
+                let copy_name = format!("{current} +");
+                state.workspaces.duplicate_active(copy_name);
+                if let Some(path) = crate::prefs::workspace_path() {
+                    let _ = crate::prefs::save_workspaces(&path, &state.workspaces);
+                }
+                ui.close();
+            }
+            let mut typed: String = ui.data_mut(|d| d.get_temp(rename_id)).unwrap_or_default();
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut typed)
+                    .hint_text(&rename_hint)
+                    .desired_width(148.0),
+            );
+            if field.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && !typed.trim().is_empty()
+            {
+                if state.workspaces.rename(active, typed.trim()) {
+                    if let Some(path) = crate::prefs::workspace_path() {
+                        let _ = crate::prefs::save_workspaces(&path, &state.workspaces);
+                    }
+                }
+                typed.clear();
+                ui.close();
+            }
+            ui.data_mut(|d| d.insert_temp(rename_id, typed));
+            if ui
+                .add_enabled(names.len() > 1, egui::Button::new(&del_label))
+                .clicked()
+            {
+                if state.workspaces.remove(active) {
+                    if let Some(path) = crate::prefs::workspace_path() {
+                        let _ = crate::prefs::save_workspaces(&path, &state.workspaces);
+                    }
+                }
+                ui.close();
             }
         });
 }
@@ -11641,8 +11837,36 @@ fn draw_context_menu(ui: &mut egui::Ui, state: &mut ShellState, viewport: egui::
 /// The counted lines are interpolated here rather than in the panel: Korean
 /// needs the number and the noun to agree in a way a format string cannot
 /// express, which is why the catalogue is Fluent.
-fn keymap_text(catalog: &Catalog, changed: usize, shadowed: usize) -> kreate_ui::KeymapText {
+fn keymap_text(
+    catalog: &Catalog,
+    keymap: &kreate_input::Keymap,
+    command_info: &std::collections::BTreeMap<String, kreate_ui::command_info::CommandInfo>,
+    changed: usize,
+    shadowed: usize,
+) -> kreate_ui::KeymapText {
     let t = |key: &str| catalog.format(key, TextKind::Ui, &[]);
+    let mut labels = std::collections::BTreeMap::new();
+    for binding in keymap.bindings() {
+        let variant =
+            kreate_ui::command_info::variant_id(&binding.action.op_id, &binding.action.params);
+        if labels.contains_key(&variant) {
+            continue;
+        }
+        let resolved = command_info
+            .get(&variant)
+            .or_else(|| command_info.get(&binding.action.op_id))
+            .map(|info| info.name.clone())
+            .or_else(|| {
+                [variant.as_str(), binding.action.op_id.as_str()]
+                    .into_iter()
+                    .map(kreate_ui::command_info::name_key)
+                    .find(|k| catalog.has(k))
+                    .map(|k| catalog.format(&k, TextKind::Ui, &[]))
+            });
+        if let Some(name) = resolved {
+            labels.insert(variant, name);
+        }
+    }
     kreate_ui::KeymapText {
         preset: t("keymap-preset"),
         changed: catalog.format(
@@ -11664,6 +11888,8 @@ fn keymap_text(catalog: &Catalog, changed: usize, shadowed: usize) -> kreate_ui:
         shadowed_hint: t("keymap-shadowed-hint"),
         capture_hint: t("keymap-capture-hint"),
         capturing: t("keymap-capturing"),
+        search_hint: t("keymap-search-hint"),
+        labels,
         contexts: kreate_ui::keymap_editor::CONTEXT_ORDER
             .into_iter()
             .map(|c| t(kreate_ui::keymap_editor::context_key(c)))
@@ -11717,6 +11943,23 @@ fn draw_tool_settings(
             t
         }
     };
+    let gizmos = [
+        get(state, "gizmo-off"),
+        get(state, "gizmo-move"),
+        get(state, "gizmo-rotate"),
+        get(state, "gizmo-scale"),
+    ];
+    let gizmo_idx = tools.transform_gizmo.min(3) as usize;
+    egui::ComboBox::from_id_salt(("transform-gizmo", area))
+        .width(86.0)
+        .selected_text(lit(gizmos[gizmo_idx].clone(), gizmo_idx != 0))
+        .show_ui(ui, |ui| {
+            for (i, name) in gizmos.iter().enumerate() {
+                ui.selectable_value(&mut tools.transform_gizmo, i as u32, name.as_str());
+            }
+        })
+        .response
+        .on_hover_text(get(state, "gizmo-hint"));
     let modes: Vec<String> = crate::snap::Mode::ALL
         .iter()
         .map(|m| get(state, m.label_key()))
@@ -12106,8 +12349,13 @@ fn draw_adjust_float(
     if info.schema.iter().all(|d| d.hidden) {
         return;
     }
-    // Put away for this operation; the next brings it back.
+    // Put away for this operation; the next brings it back, or F9 reopens it.
     let which = (history.cursor() + history.evicted(), entry.op_id.clone());
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    if !typing && ui.input(|i| i.key_pressed(egui::Key::F9)) {
+        state.adjust_dismissed = None;
+        state.adjust_open = true;
+    }
     if state.adjust_dismissed.as_ref() == Some(&which) {
         return;
     }
@@ -12176,15 +12424,17 @@ fn draw_adjust_float(
     let rect = shown.response.rect;
     state.viewport_blockers.push(rect);
     // Put away by Escape — unless a field has the keyboard, where Escape is
-    // the field's — or by a press anywhere else, as a popup is.
+    // the field's — or by a left/right click elsewhere (not MMB/Alt camera
+    // navigation, so orbiting to inspect an extrude or bevel keeps its dialog).
     let (escape, pressed_elsewhere) = ui.input(|i| {
-        let elsewhere = i.pointer.any_pressed()
+        let nav_less_click =
+            (i.pointer.primary_pressed() || i.pointer.secondary_pressed()) && !i.modifiers.alt;
+        let elsewhere = nav_less_click
             && i.pointer
                 .interact_pos()
                 .is_some_and(|at| !rect.contains(at));
         (i.key_pressed(egui::Key::Escape), elsewhere)
     });
-    let typing = ui.ctx().egui_wants_keyboard_input();
     if !adding && ((escape && !typing) || pressed_elsewhere) {
         state.adjust_dismissed = Some(which);
         state.adjust_open = false;
@@ -12851,8 +13101,24 @@ fn draw_object_transform(
         },
         &text,
     );
+    let multi_count = doc.selection.objects.len();
+    let apply_id = ui.id().with("transform-apply-selected");
+    let mut apply_all: bool = ui.data_mut(|d| d.get_temp(apply_id)).unwrap_or(false);
+    if multi_count > 1 {
+        let label = state.catalog.format(
+            "transform-apply-selected",
+            TextKind::Ui,
+            &[("count", &multi_count.to_string())],
+        );
+        if ui.checkbox(&mut apply_all, label).changed() {
+            ui.data_mut(|d| d.insert_temp(apply_id, apply_all));
+        }
+    }
     if out.changed {
-        let dragging = ui.ctx().input(|i| i.pointer.any_down());
+        let (dragging, alt) = ui.ctx().input(|i| (i.pointer.any_down(), i.modifiers.alt));
+        if multi_count > 1 && (apply_all || alt) {
+            params.set("all_selected", kreate_reflect::PropertyValue::Bool(true));
+        }
         send_edit(state, "object.set_transform", params.clone(), dragging);
     }
     if let Some(property) = out.keyed.and_then(object_animated) {
@@ -16345,11 +16611,16 @@ fn draw_tool_group(
                         theme.text_faint
                     },
                 );
-                let tip = match state.command_info.get(entry.id) {
-                    Some(info) if !info.shortcut.is_empty() => {
-                        format!("{}  {}", entry.label, info.shortcut)
-                    }
-                    _ => entry.label.clone(),
+                let mut map = PropertyMap::new();
+                for (name, value) in &entry.variant {
+                    map.set(name, value.clone());
+                }
+                let detail = menu_tooltip(state, entry.id, &map);
+                let tip = if detail.is_empty() {
+                    entry.label.clone()
+                } else {
+                    // i18n-exempt: translated label over translated description/shortcut
+                    format!("{}\n{detail}", entry.label)
                 };
                 if response.on_hover_text(tip).clicked() {
                     run_entry(state, entry);

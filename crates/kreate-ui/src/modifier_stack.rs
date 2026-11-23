@@ -236,6 +236,11 @@ fn parameters(ui: &mut Ui, catalog: &Catalog, row: &mut ModifierRow, queue: &mut
         }
     }
 
+    let live_id = egui::Id::new("modifier-stack-live-edit");
+    if !ui.input(|i| i.pointer.any_down()) {
+        ui.ctx().data_mut(|d| d.remove::<(String, u32)>(live_id));
+    }
+
     let changed = crate::property_editor::property_editor(
         ui,
         catalog,
@@ -247,10 +252,20 @@ fn parameters(ui: &mut Ui, catalog: &Catalog, row: &mut ModifierRow, queue: &mut
         // The index goes back in before dispatch, whatever the panel showed.
         let mut params = row.params.clone();
         params.set("index", PropertyValue::Int(row.index as i64));
-        queue.push(Command::RunOperator {
-            op_id: row.op_id.clone(),
-            params,
-        });
+        let target = (row.op_id.clone(), row.index);
+        let continuing = ui.input(|i| i.pointer.any_down())
+            && ui.ctx().data(|d| d.get_temp::<(String, u32)>(live_id)) == Some(target.clone());
+        if continuing {
+            queue.push(Command::AdjustLast { params });
+        } else {
+            queue.push(Command::RunOperator {
+                op_id: row.op_id.clone(),
+                params,
+            });
+            if ui.input(|i| i.pointer.any_down()) {
+                ui.ctx().data_mut(|d| d.insert_temp(live_id, target));
+            }
+        }
     }
 }
 

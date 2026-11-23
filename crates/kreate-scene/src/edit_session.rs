@@ -36,6 +36,7 @@ use crate::document::MeshId;
 use crate::Document;
 
 /// One mesh's edit structure, held while edit mode is open.
+#[derive(Clone)]
 pub struct EditSession {
     mesh: MeshId,
     bmesh: BMesh,
@@ -203,7 +204,7 @@ impl EditSession {
 /// than hashing one. It also keeps the order the sessions were opened in, which
 /// is `edit_targets`' order, which is the order operators walk them in — so a
 /// multi-mesh edit is deterministic without anyone arranging for it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct EditSessions {
     open: Vec<EditSession>,
 }

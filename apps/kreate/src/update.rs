@@ -145,25 +145,14 @@ pub fn pick_release(json: &serde_json::Value, asset: &str) -> Option<Release> {
     })
 }
 
-/// `curl`, without a console window flashing up on Windows.
-fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut command = Command::new("curl");
-    command.args(["-fsSL", "--retry", "2", "-A", "Kreate-updater"]);
-    command.args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let out = command.output().map_err(|e| format!("curl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "curl: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(out.stdout)
+/// Fetches GitHub release metadata JSON via the built-in HTTPS client.
+fn get_github_json(url: &str) -> Result<Vec<u8>, String> {
+    crate::http::get_bytes_with_headers(
+        url,
+        &[("Accept", "application/vnd.github+json")],
+        std::time::Duration::from_secs(30),
+        16 * 1024 * 1024,
+    )
 }
 
 /// The version staged for the next start, and the folder its files are in.
@@ -238,14 +227,14 @@ pub enum Found {
 /// [`fetch_and_stage`], saying what it found.
 pub fn look_and_stage(root: &Path, repo: &str, current: &str) -> Result<Found, String> {
     let api = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let body = curl(&["-H", "Accept: application/vnd.github+json", &api])?;
+    let body = get_github_json(&api)?;
     let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     let Some(release) = pick_release(&json, &asset_name()) else {
         return Ok(Found::Nothing);
     };
     if !is_newer(&release.version, current) {
         return Ok(Found::Latest(release.version));
-    }
+    };
     if staged(root).is_some_and(|(v, _)| v == release.version) {
         return Ok(Found::Waiting(release.version));
     }
@@ -253,8 +242,7 @@ pub fn look_and_stage(root: &Path, repo: &str, current: &str) -> Result<Found, S
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let zip_path = dir.join("download.zip");
-    let zip_text = zip_path.to_string_lossy().to_string();
-    curl(&["-o", &zip_text, &release.url])?;
+    crate::http::download_to_file(&release.url, &zip_path, 1_073_741_824)?;
     let files = dir.join("files");
     extract(&zip_path, &files)?;
     if !files.join(exe_file_name()).is_file() {

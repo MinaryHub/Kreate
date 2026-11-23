@@ -212,6 +212,137 @@ pub fn display_width(text: &str) -> usize {
         .sum()
 }
 
+/// Compatibility initial consonants in precomposed Hangul syllable order.
+const CHOSEONG_COMPAT: [char; 19] = [
+    'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ',
+    'ㅌ', 'ㅍ', 'ㅎ',
+];
+
+/// Replaces every Hangul syllable in `text` with its compatibility choseong
+/// (e.g. `"돌출"` -> `"ㄷㅊ"`), keeping other characters intact so word
+/// boundaries still work during command search.
+pub fn choseong(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            let cp = c as u32;
+            if (HANGUL_BASE..=HANGUL_LAST).contains(&cp) {
+                let idx = ((cp - HANGUL_BASE) / (21 * JONGSEONG_COUNT)) as usize;
+                CHOSEONG_COMPAT[idx]
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Whether `word` contains Hangul choseong jamo (`ㄱ`..=`ㅎ`) and no full
+/// syllables, meaning the user typed initial consonants such as `"ㄷㅊ"`.
+pub fn is_choseong_only(word: &str) -> bool {
+    let mut has_jamo = false;
+    for c in word.chars() {
+        let cp = c as u32;
+        if (HANGUL_BASE..=HANGUL_LAST).contains(&cp) {
+            return false;
+        }
+        if ('\u{3131}'..='\u{314E}').contains(&c) {
+            has_jamo = true;
+        }
+    }
+    has_jamo
+}
+
+/// Converts `text` into lowercase Korean 2-beolsik QWERTY keystrokes.
+///
+/// Mapping both query and target through the same deterministic key sequence
+/// handles both directions of IME mismatch at once:
+/// - Korean IME left on while typing `"extrude"` (`"ㄷㅌㅅ경ㄷ"` -> `"extrude"`)
+/// - English mode left on while typing `"돌출"` (`"ehfcnf"` == `"돌출"`'s keys)
+pub fn to_2beolsik_keys(text: &str) -> String {
+    const CHO: [&str; 19] = [
+        "r", "r", "s", "e", "e", "f", "a", "q", "q", "t", "t", "d", "w", "w", "c", "z", "x", "v",
+        "g",
+    ];
+    const JUNG: [&str; 21] = [
+        "k", "o", "i", "o", "j", "p", "u", "p", "h", "hk", "ho", "hl", "y", "n", "nj", "np", "nl",
+        "b", "m", "ml", "l",
+    ];
+    const JONG: [&str; 28] = [
+        "", "r", "r", "rt", "s", "sw", "sg", "e", "f", "fr", "fa", "fq", "ft", "fx", "fv", "fg",
+        "a", "q", "qt", "t", "t", "d", "w", "c", "z", "x", "v", "g",
+    ];
+
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let cp = c as u32;
+        if (HANGUL_BASE..=HANGUL_LAST).contains(&cp) {
+            let offset = cp - HANGUL_BASE;
+            let cho = (offset / (21 * JONGSEONG_COUNT)) as usize;
+            let jung = ((offset / JONGSEONG_COUNT) % 21) as usize;
+            let jong = (offset % JONGSEONG_COUNT) as usize;
+            out.push_str(CHO[cho]);
+            out.push_str(JUNG[jung]);
+            out.push_str(JONG[jong]);
+        } else if let Some(jamo) = compat_jamo_keys(c) {
+            out.push_str(jamo);
+        } else {
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+        }
+    }
+    out
+}
+
+fn compat_jamo_keys(c: char) -> Option<&'static str> {
+    Some(match c {
+        'ㄱ' | 'ㄲ' => "r",
+        'ㄳ' => "rt",
+        'ㄴ' => "s",
+        'ㄵ' => "sw",
+        'ㄶ' => "sg",
+        'ㄷ' | 'ㄸ' => "e",
+        'ㄹ' => "f",
+        'ㄺ' => "fr",
+        'ㄻ' => "fa",
+        'ㄼ' => "fq",
+        'ㄽ' => "ft",
+        'ㄾ' => "fx",
+        'ㄿ' => "fv",
+        'ㅀ' => "fg",
+        'ㅁ' => "a",
+        'ㅂ' | 'ㅃ' => "q",
+        'ㅄ' => "qt",
+        'ㅅ' | 'ㅆ' => "t",
+        'ㅇ' => "d",
+        'ㅈ' | 'ㅉ' => "w",
+        'ㅊ' => "c",
+        'ㅋ' => "z",
+        'ㅌ' => "x",
+        'ㅍ' => "v",
+        'ㅎ' => "g",
+        'ㅏ' => "k",
+        'ㅐ' | 'ㅒ' => "o",
+        'ㅑ' => "i",
+        'ㅓ' => "j",
+        'ㅔ' | 'ㅖ' => "p",
+        'ㅕ' => "u",
+        'ㅗ' => "h",
+        'ㅘ' => "hk",
+        'ㅙ' => "ho",
+        'ㅚ' => "hl",
+        'ㅛ' => "y",
+        'ㅜ' => "n",
+        'ㅝ' => "nj",
+        'ㅞ' => "np",
+        'ㅟ' => "nl",
+        'ㅠ' => "b",
+        'ㅡ' => "m",
+        'ㅢ' => "ml",
+        'ㅣ' => "l",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +526,21 @@ mod tests {
             vec!["abc"],
             "a zero column budget cannot wrap"
         );
+    }
+
+    #[test]
+    fn choseong_extracts_initial_consonants() {
+        assert_eq!(choseong("돌출"), "ㄷㅊ");
+        assert_eq!(choseong("모따기"), "ㅁㄸㄱ");
+        assert!(is_choseong_only("ㄷㅊ"));
+        assert!(!is_choseong_only("돌출"));
+        assert!(!is_choseong_only("ext"));
+    }
+
+    #[test]
+    fn two_beolsik_keys_roundtrip_both_ime_mistakes() {
+        assert_eq!(to_2beolsik_keys("ㄷㅌㅅ경ㄷ"), "extrude");
+        assert_eq!(to_2beolsik_keys("ㅠㄷㅍ디"), "bevel");
+        assert_eq!(to_2beolsik_keys("돌출"), "ehfcnf");
     }
 }

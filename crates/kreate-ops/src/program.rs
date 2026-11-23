@@ -36,13 +36,17 @@ use std::collections::HashMap;
 /// million undo steps would be a second one.
 pub const MOST_LINES: usize = 5000;
 
-/// What a name holds.
+/// What a name or scene query holds.
 #[derive(Clone, Debug, PartialEq)]
-enum Value {
+pub enum Value {
     Number(f64),
     Tuple(Vec<f64>),
     Text(String),
 }
+
+/// Callback answering scene queries such as `bbox("Cube")`, `size("Cube")`,
+/// `pos("Cube")`, or `param("thickness")`.
+pub type SceneQuery<'a> = dyn Fn(&str, &str) -> Option<Value> + 'a;
 
 impl Value {
     /// As it is written in a script line.
@@ -54,6 +58,30 @@ impl Value {
                 xs.iter().map(|x| number(*x)).collect::<Vec<_>>().join(", ")
             ),
             Value::Text(t) => format!("{t:?}"),
+        }
+    }
+
+    /// As interpolated inside `f"..."` or `str(...)`.
+    fn display(&self) -> String {
+        match self {
+            Value::Number(x) if *x == x.trunc() && x.abs() < 1e15 => format!("{}", *x as i64),
+            Value::Number(x) => format!("{x}"),
+            Value::Tuple(xs) => format!(
+                "({})",
+                xs.iter()
+                    .map(|x| Value::Number(*x).display())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Value::Text(t) => t.clone(),
+        }
+    }
+
+    fn truthy(&self) -> bool {
+        match self {
+            Value::Number(x) => *x != 0.0,
+            Value::Tuple(xs) => !xs.is_empty(),
+            Value::Text(t) => !t.is_empty(),
         }
     }
 }
@@ -68,33 +96,95 @@ fn number(x: f64) -> String {
 }
 
 /// Whether `source` uses anything this module adds: plain scripts go
-/// through untouched.
+/// through untouched, while loops, conditionals, assignments, f-strings,
+/// scene queries, or inline arithmetic (`location=(30mm * cos(45deg), 0, 0)`)
+/// are unrolled.
 pub fn needs_unrolling(source: &str) -> bool {
     source.lines().any(|l| {
         let t = l.trim();
-        t.starts_with("for ") || assignment(t).is_some()
+        if t.starts_with('#') || t.is_empty() {
+            return false;
+        }
+        t.starts_with("for ")
+            || t.starts_with("if ")
+            || assignment(t).is_some()
+            || t.contains("f\"")
+            || t.contains("bbox(")
+            || t.contains("size(")
+            || t.contains("pos(")
+            || t.contains("param(")
+            || inline_expression(t)
     })
 }
 
+/// Whether an operator call line contains arithmetic or trig/math calls
+/// outside string literals that plain `script::parse_call` cannot parse alone.
+fn inline_expression(line: &str) -> bool {
+    let Some((_, args)) = line.split_once('(') else {
+        return false;
+    };
+    let mut in_quotes = false;
+    let bytes = args.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if in_quotes {
+            continue;
+        }
+        if matches!(b, b'*' | b'/' | b'%') {
+            return true;
+        }
+        // Binary `+` or `-` (not a leading sign after `=`, `(`, `,`, `[`, or `e`/`E`).
+        if matches!(b, b'+' | b'-') && i > 0 {
+            let prev = args[..i]
+                .trim_end()
+                .as_bytes()
+                .last()
+                .copied()
+                .unwrap_or(b'(');
+            if !matches!(prev, b'=' | b'(' | b',' | b'[' | b'e' | b'E') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// `name = value`, where the name is a name and the line is not an
-/// operator call.
+/// operator call or a conditional.
 fn assignment(line: &str) -> Option<(&str, &str)> {
-    if line.contains("kreate.ops.") || line.starts_with('#') {
+    if line.contains("kreate.ops.")
+        || line.starts_with('#')
+        || line.starts_with("if ")
+        || line.starts_with("elif ")
+        || line.starts_with("else")
+    {
         return None;
     }
     let (name, value) = line.split_once('=')?;
+    if name.ends_with(['!', '<', '>']) || value.starts_with('=') {
+        return None;
+    }
     let name = name.trim();
     let ok = name
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    (ok && !value.starts_with('=')).then_some((name, value.trim()))
+    ok.then_some((name, value.trim()))
 }
 
-/// The script with its names, loops and arithmetic worked out: one
-/// operator call a line. An error says the line it is about.
+/// The script with its names, loops, conditionals and arithmetic worked out:
+/// one operator call a line. An error says the line it is about.
 pub fn unroll(source: &str) -> Result<Vec<String>, String> {
+    unroll_with(source, &|_, _| None)
+}
+
+/// [`unroll`] with access to live scene queries (`bbox("Name")`, `size("Name")`,
+/// `pos("Name")`, `param("name")`).
+pub fn unroll_with(source: &str, query: &SceneQuery<'_>) -> Result<Vec<String>, String> {
     let lines: Vec<(usize, &str)> = source
         .lines()
         .map(|l| (indent(l), l.trim_end()))
@@ -102,7 +192,7 @@ pub fn unroll(source: &str) -> Result<Vec<String>, String> {
         .collect();
     let mut out = Vec::new();
     let mut names = HashMap::new();
-    block(&lines, &mut names, &mut out)?;
+    block(&lines, &mut names, query, &mut out)?;
     Ok(out)
 }
 
@@ -113,9 +203,28 @@ fn indent(line: &str) -> usize {
         .sum()
 }
 
+fn indented_span(
+    lines: &[(usize, &str)],
+    header_idx: usize,
+    depth: usize,
+    head_line: &str,
+) -> Result<usize, String> {
+    let end = lines[header_idx + 1..]
+        .iter()
+        .position(|(d, _)| *d <= depth)
+        .map_or(lines.len(), |p| header_idx + 1 + p);
+    if end == header_idx + 1 {
+        return Err(format!(
+            "`{head_line}`: block has no indented lines under it"
+        ));
+    }
+    Ok(end)
+}
+
 fn block(
     lines: &[(usize, &str)],
     names: &mut HashMap<String, Value>,
+    query: &SceneQuery<'_>,
     out: &mut Vec<String>,
 ) -> Result<(), String> {
     let mut i = 0;
@@ -130,27 +239,74 @@ fn block(
                 .split_once(" in ")
                 .ok_or_else(|| format!("`{line}`: for <name> in range(...) or a [list]"))?;
             let name = name.trim().to_string();
-            let items = iterate(what.trim(), names).map_err(|e| format!("`{line}`: {e}"))?;
-            // The block: the lines after it, further in.
-            let end = lines[i + 1..]
-                .iter()
-                .position(|(d, _)| *d <= depth)
-                .map_or(lines.len(), |p| i + 1 + p);
-            if end == i + 1 {
-                return Err(format!("`{line}`: the loop has no indented lines under it"));
-            }
+            let items = iterate(what.trim(), names, query).map_err(|e| format!("`{line}`: {e}"))?;
+            let end = indented_span(lines, i, depth, line)?;
             for item in items {
                 names.insert(name.clone(), item);
-                block(&lines[i + 1..end], names, out)?;
+                block(&lines[i + 1..end], names, query, out)?;
             }
             i = end;
             continue;
         }
+        if let Some(first_cond) = line.strip_prefix("if ") {
+            let first_cond = first_cond
+                .strip_suffix(':')
+                .ok_or_else(|| format!("`{line}`: an if line ends with a colon"))?;
+            let mut branches: Vec<(Option<&str>, usize, usize, &str)> = Vec::new();
+            let first_end = indented_span(lines, i, depth, line)?;
+            branches.push((Some(first_cond.trim()), i + 1, first_end, line));
+            let mut cursor = first_end;
+            let mut saw_else = false;
+            while cursor < lines.len() && lines[cursor].0 == depth {
+                let next_line = lines[cursor].1.trim();
+                if let Some(elif_cond) = next_line.strip_prefix("elif ") {
+                    if saw_else {
+                        return Err(format!("`{next_line}`: elif cannot follow else"));
+                    }
+                    let elif_cond = elif_cond
+                        .strip_suffix(':')
+                        .ok_or_else(|| format!("`{next_line}`: an elif line ends with a colon"))?;
+                    let b_end = indented_span(lines, cursor, depth, next_line)?;
+                    branches.push((Some(elif_cond.trim()), cursor + 1, b_end, next_line));
+                    cursor = b_end;
+                } else if let Some(rest) = next_line.strip_prefix("else") {
+                    if rest.trim() != ":" {
+                        break;
+                    }
+                    if saw_else {
+                        return Err(format!("`{next_line}`: duplicate else branch"));
+                    }
+                    saw_else = true;
+                    let b_end = indented_span(lines, cursor, depth, next_line)?;
+                    branches.push((None, cursor + 1, b_end, next_line));
+                    cursor = b_end;
+                } else {
+                    break;
+                }
+            }
+            for (cond, start, end, header) in branches {
+                let take = match cond {
+                    Some(c) => {
+                        eval_condition(c, names, query).map_err(|e| format!("`{header}`: {e}"))?
+                    }
+                    None => true,
+                };
+                if take {
+                    block(&lines[start..end], names, query, out)?;
+                    break;
+                }
+            }
+            i = cursor;
+            continue;
+        }
+        if line.starts_with("elif ") || line == "else:" {
+            return Err(format!("`{line}`: unexpected branch without matching if"));
+        }
         if let Some((name, value)) = assignment(line) {
-            let v = value_of(value, names).map_err(|e| format!("`{line}`: {e}"))?;
+            let v = value_of(value, names, query).map_err(|e| format!("`{line}`: {e}"))?;
             names.insert(name.to_string(), v);
         } else {
-            out.push(call(line, names).map_err(|e| format!("`{line}`: {e}"))?);
+            out.push(call(line, names, query).map_err(|e| format!("`{line}`: {e}"))?);
             if out.len() > MOST_LINES {
                 return Err(format!(
                     "the loops make more than {MOST_LINES} lines: make fewer at once"
@@ -162,15 +318,92 @@ fn block(
     Ok(())
 }
 
+/// Evaluates a boolean condition (`or`, `and`, `not`, `== != <= >= < >`, or truthiness).
+fn eval_condition(
+    cond: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<bool, String> {
+    let cond = cond.trim();
+    if let Some((a, b)) = split_top_keyword(cond, " or ") {
+        return Ok(eval_condition(a, names, query)? || eval_condition(b, names, query)?);
+    }
+    if let Some((a, b)) = split_top_keyword(cond, " and ") {
+        return Ok(eval_condition(a, names, query)? && eval_condition(b, names, query)?);
+    }
+    if let Some(rest) = cond.strip_prefix("not ") {
+        return Ok(!eval_condition(rest, names, query)?);
+    }
+    if cond == "True" {
+        return Ok(true);
+    }
+    if cond == "False" {
+        return Ok(false);
+    }
+    for op in ["==", "!=", "<=", ">=", "<", ">"] {
+        if let Some((lhs, rhs)) = split_top_keyword(cond, op) {
+            let lv = value_of(lhs, names, query)?;
+            let rv = value_of(rhs, names, query)?;
+            return match (op, &lv, &rv) {
+                ("==", a, b) => Ok(a == b),
+                ("!=", a, b) => Ok(a != b),
+                (_, Value::Number(a), Value::Number(b)) => Ok(match op {
+                    "<=" => a <= b,
+                    ">=" => a >= b,
+                    "<" => a < b,
+                    ">" => a > b,
+                    _ => unreachable!(),
+                }),
+                _ => Err(format!("cannot compare `{lhs}` {op} `{rhs}`")),
+            };
+        }
+    }
+    Ok(value_of(cond, names, query)?.truthy())
+}
+
+fn split_top_keyword<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
+    let bytes = text.as_bytes();
+    let nbytes = needle.as_bytes();
+    let mut depth = 0i32;
+    let mut quoted = false;
+    let mut i = 0;
+    while i + nbytes.len() <= bytes.len() {
+        let b = bytes[i];
+        if b == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
+            quoted = !quoted;
+        } else if !quoted {
+            match b {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 && &bytes[i..i + nbytes.len()] == nbytes {
+                // Avoid matching `<` inside `<=`, `>` inside `>=`, etc.
+                if (needle == "<" || needle == ">") && bytes.get(i + 1).copied() == Some(b'=') {
+                    i += 2;
+                    continue;
+                }
+                return Some((text[..i].trim(), text[i + nbytes.len()..].trim()));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// What a for line runs over.
-fn iterate(what: &str, names: &HashMap<String, Value>) -> Result<Vec<Value>, String> {
+fn iterate(
+    what: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<Vec<Value>, String> {
     if let Some(args) = what
         .strip_prefix("range(")
         .and_then(|r| r.strip_suffix(')'))
     {
         let n: Vec<f64> = split(args)
             .iter()
-            .map(|a| number_of(a, names))
+            .map(|a| number_of(a, names, query))
             .collect::<Result<_, _>>()?;
         let (start, stop, step) = match n.as_slice() {
             [stop] => (0.0, *stop, 1.0),
@@ -187,26 +420,184 @@ fn iterate(what: &str, names: &HashMap<String, Value>) -> Result<Vec<Value>, Str
             .collect());
     }
     if let Some(items) = what.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        return split(items).iter().map(|v| value_of(v, names)).collect();
+        return split(items)
+            .iter()
+            .map(|v| value_of(v, names, query))
+            .collect();
     }
-    match names.get(what) {
-        Some(Value::Tuple(xs)) => Ok(xs.iter().map(|x| Value::Number(*x)).collect()),
+    match value_of(what, names, query) {
+        Ok(Value::Tuple(xs)) => Ok(xs.into_iter().map(Value::Number).collect()),
         _ => Err("a for line runs over range(...) or a [list]".into()),
     }
 }
 
+/// Resolves a scene query call like `bbox("Cube")` or `param("w")`.
+fn scene_call(
+    raw: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<Option<Value>, String> {
+    for fn_name in ["bbox", "size", "pos", "param"] {
+        if let Some(rest) = raw.strip_prefix(fn_name) {
+            let rest = rest.trim_start();
+            if let Some(inner) = rest.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                let arg_val = value_of(inner.trim(), names, query)?;
+                let arg_str = arg_val.display();
+                return query(fn_name, &arg_str)
+                    .map(Some)
+                    .ok_or_else(|| format!("{fn_name}({arg_str:?}) matched nothing in the scene"));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Evaluates `f"..."` interpolation.
+fn format_string(
+    body: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            if i + 1 < chars.len() && chars[i + 1] == '{' {
+                out.push('{');
+                i += 2;
+                continue;
+            }
+            let close = chars[i + 1..]
+                .iter()
+                .position(|&c| c == '}')
+                .ok_or_else(|| format!("unclosed `{{` in f\"{body}\""))?
+                + i
+                + 1;
+            let expr: String = chars[i + 1..close].iter().collect();
+            let v = value_of(expr.trim(), names, query)?;
+            out.push_str(&v.display());
+            i = close + 1;
+        } else if chars[i] == '}' && i + 1 < chars.len() && chars[i + 1] == '}' {
+            out.push('}');
+            i += 2;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Evaluates trailing `[index]` on a tuple expression (`pt[0]`, `size("Cube")[2]`).
+fn indexed_value(
+    raw: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<Option<Value>, String> {
+    if !raw.ends_with(']') || raw.starts_with('[') {
+        return Ok(None);
+    }
+    let bytes = raw.as_bytes();
+    let mut depth = 0i32;
+    let mut open = None;
+    for (i, &b) in bytes.iter().enumerate().rev() {
+        match b {
+            b']' => depth += 1,
+            b'[' => {
+                depth -= 1;
+                if depth == 0 {
+                    open = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(open) = open else {
+        return Ok(None);
+    };
+    if open == 0 {
+        return Ok(None);
+    }
+    let base = raw[..open].trim();
+    let idx_expr = raw[open + 1..raw.len() - 1].trim();
+    let base_val = value_of(base, names, query)?;
+    let idx_f = number_of(idx_expr, names, query)?;
+    let Value::Tuple(xs) = base_val else {
+        return Err(format!("`{base}` is not a tuple and cannot be indexed"));
+    };
+    let resolved = if idx_f < 0.0 {
+        (xs.len() as isize + idx_f as isize) as usize
+    } else {
+        idx_f as usize
+    };
+    xs.get(resolved)
+        .copied()
+        .map(|x| Some(Value::Number(x)))
+        .ok_or_else(|| {
+            format!(
+                "index {idx_f} is out of range for tuple of length {}",
+                xs.len()
+            )
+        })
+}
+
 /// A value on the right of `=`.
-fn value_of(raw: &str, names: &HashMap<String, Value>) -> Result<Value, String> {
+fn value_of(
+    raw: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<Value, String> {
     let raw = raw.trim();
-    if raw.len() >= 2 && (raw.starts_with('"') && raw.ends_with('"')) {
+    if let Some(body) = raw.strip_prefix("f\"").and_then(|s| s.strip_suffix('"')) {
+        return format_string(body, names, query).map(Value::Text);
+    }
+    if let Some(inner) = raw.strip_prefix("str(").and_then(|s| s.strip_suffix(')')) {
+        return Ok(Value::Text(value_of(inner, names, query)?.display()));
+    }
+    if let Some(inner) = raw.strip_prefix("len(").and_then(|s| s.strip_suffix(')')) {
+        return match value_of(inner, names, query)? {
+            Value::Tuple(xs) => Ok(Value::Number(xs.len() as f64)),
+            Value::Text(t) => Ok(Value::Number(t.chars().count() as f64)),
+            Value::Number(_) => Err(format!("`{inner}` has no length")),
+        };
+    }
+    if raw.len() >= 2
+        && raw.starts_with('"')
+        && raw.ends_with('"')
+        && !raw[1..raw.len() - 1].contains('"')
+    {
         return Ok(Value::Text(raw[1..raw.len() - 1].to_string()));
+    }
+    // String concatenation (`"Bolt_" + str(i)`).
+    if let Some((lhs, rhs)) = split_top_keyword(raw, "+") {
+        if lhs.starts_with('"')
+            || lhs.starts_with("f\"")
+            || lhs.starts_with("str(")
+            || rhs.starts_with('"')
+            || rhs.starts_with("f\"")
+            || rhs.starts_with("str(")
+        {
+            let lv = value_of(lhs, names, query)?;
+            let rv = value_of(rhs, names, query)?;
+            if matches!(lv, Value::Text(_)) || matches!(rv, Value::Text(_)) {
+                return Ok(Value::Text(format!("{}{}", lv.display(), rv.display())));
+            }
+        }
+    }
+    if let Some(v) = scene_call(raw, names, query)? {
+        return Ok(v);
+    }
+    if let Some(v) = indexed_value(raw, names, query)? {
+        return Ok(v);
     }
     if let Some(inner) = raw.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
         let parts = split(inner);
         if parts.len() > 1 {
             return parts
                 .iter()
-                .map(|p| number_of(p, names))
+                .map(|p| number_of(p, names, query))
                 .collect::<Result<_, _>>()
                 .map(Value::Tuple);
         }
@@ -214,12 +605,74 @@ fn value_of(raw: &str, names: &HashMap<String, Value>) -> Result<Value, String> 
     if let Some(name) = names.get(raw) {
         return Ok(name.clone());
     }
-    number_of(raw, names).map(Value::Number)
+    number_of(raw, names, query).map(Value::Number)
+}
+
+/// Expands `expr[idx]`, `len(...)`, and `bbox(...)`/`size(...)`/`pos(...)`/`param(...)`
+/// sub-expressions before handing arithmetic to `kreate_scene::expression::evaluate`.
+fn preprocess_numeric(
+    raw: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if let Some(Value::Number(x)) = scene_call(trimmed, names, query)? {
+        return Ok(format!("({x:?})"));
+    }
+    if let Some(Value::Number(x)) = indexed_value(trimmed, names, query)? {
+        return Ok(format!("({x:?})"));
+    }
+    // Replace inline `ident[idx]` occurrences such as `pt[0] + 5mm`.
+    let mut out = String::new();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '[' {
+                let mut depth = 0i32;
+                let mut end = None;
+                for (k, &ch) in chars.iter().enumerate().skip(i) {
+                    if ch == '[' {
+                        depth += 1;
+                    } else if ch == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(k);
+                            break;
+                        }
+                    }
+                }
+                if let Some(end) = end {
+                    let token: String = chars[start..=end].iter().collect();
+                    if let Some(Value::Number(x)) = indexed_value(&token, names, query)? {
+                        out.push_str(&format!("({x:?})"));
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+            let ident: String = chars[start..i].iter().collect();
+            out.push_str(&ident);
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    Ok(out)
 }
 
 /// A number: arithmetic of numbers with units and of names holding numbers.
-fn number_of(raw: &str, names: &HashMap<String, Value>) -> Result<f64, String> {
-    let text = with_units(raw.trim());
+fn number_of(
+    raw: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<f64, String> {
+    let expanded = preprocess_numeric(raw, names, query)?;
+    let text = with_units(expanded.trim());
     kreate_scene::expression::evaluate(&text, &|name| match names.get(name) {
         Some(Value::Number(x)) => Some(*x),
         _ => None,
@@ -230,13 +683,15 @@ fn number_of(raw: &str, names: &HashMap<String, Value>) -> Result<f64, String> {
 /// `6mm` as `(6*0.001)`, and so on for the units a script takes, so the
 /// expression language — which knows numbers only — can read them.
 fn with_units(raw: &str) -> String {
-    const UNITS: [(&str, f64); 7] = [
+    const UNITS: [(&str, f64); 9] = [
         ("mm", 0.001),
         ("cm", 0.01),
+        ("km", 1000.0),
         ("in", 0.0254),
         ("ft", 0.3048),
         ("deg", std::f64::consts::PI / 180.0),
         ("rad", 1.0),
+        ("°", std::f64::consts::PI / 180.0),
         ("m", 1.0),
     ];
     let chars: Vec<char> = raw.chars().collect();
@@ -315,7 +770,11 @@ fn split(text: &str) -> Vec<String> {
 }
 
 /// An operator line with its values worked out.
-fn call(line: &str, names: &HashMap<String, Value>) -> Result<String, String> {
+fn call(
+    line: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<String, String> {
     let (Some(open), true) = (line.find('('), line.ends_with(')')) else {
         return Ok(line.to_string());
     };
@@ -327,15 +786,29 @@ fn call(line: &str, names: &HashMap<String, Value>) -> Result<String, String> {
             done.push(arg);
             continue;
         };
-        done.push(format!("{}={}", key.trim(), argument(raw.trim(), names)?));
+        done.push(format!(
+            "{}={}",
+            key.trim(),
+            argument(raw.trim(), names, query)?
+        ));
     }
     Ok(format!("{head}({})", done.join(", ")))
 }
 
 /// One value of an operator line: worked out when it uses a name or does
 /// arithmetic, passed through when it is a plain literal.
-fn argument(raw: &str, names: &HashMap<String, Value>) -> Result<String, String> {
-    if raw.starts_with('"') || raw == "True" || raw == "False" || raw.contains("$last") {
+fn argument(
+    raw: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<String, String> {
+    if raw.starts_with("f\"") || raw.starts_with("str(") {
+        return Ok(value_of(raw, names, query)?.script());
+    }
+    if raw.starts_with('"') && !raw.contains('+') {
+        return Ok(raw.to_string());
+    }
+    if raw == "True" || raw == "False" || raw.contains("$last") {
         return Ok(raw.to_string());
     }
     let open_close = |o: char, c: char| raw.starts_with(o) && raw.ends_with(c);
@@ -344,29 +817,36 @@ fn argument(raw: &str, names: &HashMap<String, Value>) -> Result<String, String>
         let inner = split(&raw[1..raw.len() - 1]);
         // A single parenthesised value is arithmetic, not a tuple.
         if o == "(" && inner.len() == 1 {
-            return scalar(raw, names);
+            return scalar(raw, names, query);
         }
         let parts: Vec<String> = inner
             .iter()
-            .map(|p| argument(p, names))
+            .map(|p| argument(p, names, query))
             .collect::<Result<_, _>>()?;
         return Ok(format!("{o}{}{c}", parts.join(", ")));
     }
-    scalar(raw, names)
+    scalar(raw, names, query)
 }
 
-fn scalar(raw: &str, names: &HashMap<String, Value>) -> Result<String, String> {
+fn scalar(
+    raw: &str,
+    names: &HashMap<String, Value>,
+    query: &SceneQuery<'_>,
+) -> Result<String, String> {
     if let Some(v) = names.get(raw) {
         return Ok(v.script());
     }
+    if raw.contains('"') {
+        return Ok(value_of(raw, names, query)?.script());
+    }
     let uses_name = raw
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .any(|w| names.contains_key(w));
+        .any(|w| names.contains_key(w) || matches!(w, "bbox" | "size" | "pos" | "param" | "len"));
     let does_arithmetic = raw
         .char_indices()
-        .any(|(i, c)| matches!(c, '+' | '*' | '/' | '%' | '(') || (c == '-' && i > 0));
+        .any(|(i, c)| matches!(c, '+' | '*' | '/' | '%' | '(' | '[') || (c == '-' && i > 0));
     if uses_name || does_arithmetic {
-        number_of(raw, names).map(number)
+        value_of(raw, names, query).map(|v| v.script())
     } else {
         Ok(raw.to_string())
     }
@@ -439,5 +919,44 @@ mod tests {
         assert!(unroll("for i in range(2):\nkreate.ops.a()")
             .unwrap_err()
             .contains("no indented"));
+    }
+
+    #[test]
+    fn conditionals_fstrings_tuple_indexing_and_scene_queries_work() {
+        let script = "\
+dims = size(\"Base\")
+top_z = bbox(\"Base\")[5]
+for i in range(4):
+    if i == 0:
+        kreate.ops.object.add_primitive(name=f\"Corner_{i}\", location=(0, 0, top_z))
+    elif i % 2 == 1 and dims[0] >= 0.1:
+        kreate.ops.object.add_primitive(name=\"Odd_\" + str(i), location=(dims[0], 0, top_z))
+    else:
+        kreate.ops.object.add_primitive(name=f\"Even_{i}\", location=(0, dims[1], top_z))";
+
+        let lines = unroll_with(script, &|fn_name, arg| match (fn_name, arg) {
+            ("size", "Base") => Some(Value::Tuple(vec![0.2, 0.3, 0.05])),
+            ("bbox", "Base") => Some(Value::Tuple(vec![-0.1, -0.15, 0.0, 0.1, 0.15, 0.05])),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[0],
+            "kreate.ops.object.add_primitive(name=\"Corner_0\", location=(0, 0, 0.05))"
+        );
+        assert_eq!(
+            lines[1],
+            "kreate.ops.object.add_primitive(name=\"Odd_1\", location=(0.2, 0, 0.05))"
+        );
+        assert_eq!(
+            lines[2],
+            "kreate.ops.object.add_primitive(name=\"Even_2\", location=(0, 0.3, 0.05))"
+        );
+        assert_eq!(
+            lines[3],
+            "kreate.ops.object.add_primitive(name=\"Odd_3\", location=(0.2, 0, 0.05))"
+        );
     }
 }

@@ -35,6 +35,8 @@ pub enum PlyError {
     Truncated { element: String, item: usize },
     #[error("the {element} data has something that is not a number: {what}")]
     Number { element: String, what: String },
+    #[error("cancelled")]
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +140,15 @@ impl Reader<'_> {
 
 /// Parses a PLY file into the IR: one mesh, at the origin.
 pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
+    parse_ply_with(bytes, name, &crate::scene_file::ReadProgress::default())
+}
+
+/// [`parse_ply`] reporting element progress and honouring cancellation.
+pub fn parse_ply_with(
+    bytes: &[u8],
+    name: &str,
+    progress: &crate::scene_file::ReadProgress,
+) -> Result<ImportScene, PlyError> {
     if !bytes.starts_with(b"ply") {
         return Err(PlyError::NotPly);
     }
@@ -241,6 +252,10 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
         assumed: "Z up (PLY declares none)".into(),
     });
 
+    let total_items: u64 = elements.iter().map(|e| e.count as u64).sum();
+    progress.start(crate::scene_file::ReadStage::Parsing, total_items);
+    let mut done_items = 0u64;
+
     let mut positions: Vec<Vec3> = Vec::new();
     let mut normals: Vec<Vec3> = Vec::new();
     let mut uvs: Vec<Vec2> = Vec::new();
@@ -295,6 +310,12 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
         }
         let mut values = vec![0.0f64; element.properties.len()];
         for item in 0..element.count {
+            if item & 4095 == 0 {
+                if progress.cancelled() {
+                    return Err(PlyError::Cancelled);
+                }
+                progress.advance(done_items + item as u64);
+            }
             let fail = |what: String| {
                 if what.contains("ends early") {
                     PlyError::Truncated {
@@ -354,6 +375,7 @@ pub fn parse_ply(bytes: &[u8], name: &str) -> Result<ImportScene, PlyError> {
                 faces.push(face);
             }
         }
+        done_items += element.count as u64;
     }
 
     // Faces naming a vertex that is not there, or fewer than three distinct

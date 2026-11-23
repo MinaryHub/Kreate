@@ -13,9 +13,8 @@
 //! is: in the settings folder, readable by the user alone, handed to curl on
 //! its standard input.
 
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 /// The Space that turns a picture into a model.
 const TRELLIS: &str = "https://trellis-community-trellis.hf.space";
@@ -264,64 +263,47 @@ struct Space {
 }
 
 impl Space {
-    /// curl, with the token on its standard input when there is one.
-    fn curl(&self, args: &[&str], body: Option<&str>) -> Result<std::process::Child, String> {
-        let program = if cfg!(windows) { "curl.exe" } else { "curl" };
-        let mut command: Command = crate::claude::quiet_command(program);
-        command
-            .args([
-                "--silent",
-                "--show-error",
-                "--fail",
-                "--location",
-                "--no-buffer",
-            ])
-            .args(["--max-time", "900", "--max-filesize", "536870912"])
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if self.token.is_some() {
-            command.args(["--header", "@-"]);
-        }
-        if let Some(body) = body {
-            command.args([
-                "--header",
-                "Content-Type: application/json",
-                "--data-binary",
-                body,
-            ]);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("cannot start curl: {e}"))?;
-        if let (Some(token), Some(mut stdin)) = (&self.token, child.stdin.take()) {
-            let _ = writeln!(stdin, "Authorization: Bearer {token}");
-        }
-        Ok(child)
+    fn auth_header(&self) -> Option<String> {
+        self.token.as_ref().map(|t| format!("Bearer {t}"))
     }
 
-    /// What curl wrote, or why it failed.
-    fn output(&self, args: &[&str], body: Option<&str>) -> Result<String, String> {
-        let out = self
-            .curl(args, body)?
-            .wait_with_output()
-            .map_err(|e| e.to_string())?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        } else {
-            Err(format!(
-                "{} did not answer: {}",
-                self.url,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
+    fn get_text(&self, url: &str) -> Result<String, String> {
+        let auth = self.auth_header();
+        let headers: Vec<(&str, &str)> = auth
+            .as_deref()
+            .into_iter()
+            .map(|a| ("Authorization", a))
+            .collect();
+        let bytes = crate::http::get_bytes_with_headers(
+            url,
+            &headers,
+            std::time::Duration::from_secs(900),
+            64 * 1024 * 1024,
+        )
+        .map_err(|e| format!("{} did not answer: {e}", self.url))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn post_json(&self, url: &str, body: &str) -> Result<String, String> {
+        let auth = self.auth_header();
+        let mut headers: Vec<(&str, &str)> = vec![("Content-Type", "application/json")];
+        if let Some(a) = auth.as_deref() {
+            headers.push(("Authorization", a));
         }
+        crate::http::post_text(
+            url,
+            &headers,
+            body.as_bytes(),
+            std::time::Duration::from_secs(900),
+            64 * 1024 * 1024,
+        )
+        .map_err(|e| format!("{} did not answer: {e}", self.url))
     }
 
     /// The number the Space's queue knows a function by.
     fn function(&self, api_name: &str) -> Result<u64, String> {
         let config: serde_json::Value =
-            serde_json::from_str(&self.output(&[&format!("{}/config", self.url)], None)?)
+            serde_json::from_str(&self.get_text(&format!("{}/config", self.url))?)
                 .map_err(|e| format!("the Space's configuration: {e}"))?;
         config["dependencies"]
             .as_array()
@@ -335,11 +317,21 @@ impl Space {
 
     /// A file sent to the Space, as its functions take one.
     fn upload(&self, path: &Path) -> Result<serde_json::Value, String> {
-        let form = format!("files=@{}", path.display());
-        let answer = self.output(
-            &["--form", &form, &format!("{}/gradio_api/upload", self.url)],
-            None,
-        )?;
+        let auth = self.auth_header();
+        let headers: Vec<(&str, &str)> = auth
+            .as_deref()
+            .into_iter()
+            .map(|a| ("Authorization", a))
+            .collect();
+        let answer = crate::http::post_multipart_file(
+            &format!("{}/gradio_api/upload", self.url),
+            &headers,
+            "files",
+            path,
+            std::time::Duration::from_secs(300),
+            64 * 1024 * 1024,
+        )
+        .map_err(|e| format!("{} did not answer: {e}", self.url))?;
         let paths: Vec<String> =
             serde_json::from_str(&answer).map_err(|e| format!("an upload's answer: {e}"))?;
         let remote = paths.into_iter().next().ok_or("the upload was not kept")?;
@@ -362,20 +354,24 @@ impl Space {
             "trigger_id": null,
         })
         .to_string();
-        self.output(
-            &[&format!("{}/gradio_api/queue/join", self.url)],
-            Some(&join),
-        )?;
-        let mut child = self.curl(
-            &[&format!(
+        self.post_json(&format!("{}/gradio_api/queue/join", self.url), &join)?;
+        let auth = self.auth_header();
+        let headers: Vec<(&str, &str)> = auth
+            .as_deref()
+            .into_iter()
+            .map(|a| ("Authorization", a))
+            .collect();
+        let stream = crate::http::get_stream(
+            &format!(
                 "{}/gradio_api/queue/data?session_hash={}",
                 self.url, self.session
-            )],
-            None,
+            ),
+            &headers,
+            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(900),
         )?;
-        let stdout = child.stdout.take().ok_or("no answer stream")?;
         let mut result = Err(format!("the Space stopped answering `{api_name}`"));
-        for line in std::io::BufReader::new(stdout).lines() {
+        for line in stream.lines() {
             let Ok(line) = line else { break };
             let Some(data) = line.strip_prefix("data:") else {
                 continue;
@@ -414,8 +410,6 @@ impl Space {
                 _ => {}
             }
         }
-        let _ = child.kill();
-        let _ = child.wait();
         result
     }
 
@@ -433,15 +427,13 @@ impl Space {
         if !url.starts_with(self.url) {
             return Err("the Space's file is somewhere else".into());
         }
-        let partial = dest.with_extension("part");
-        let out = self.output(&["--output", &partial.to_string_lossy(), &url], None);
-        match out {
-            Ok(_) => std::fs::rename(&partial, dest).map_err(|e| e.to_string()),
-            Err(e) => {
-                let _ = std::fs::remove_file(&partial);
-                Err(e)
-            }
-        }
+        let auth = self.auth_header();
+        let headers: Vec<(&str, &str)> = auth
+            .as_deref()
+            .into_iter()
+            .map(|a| ("Authorization", a))
+            .collect();
+        crate::http::download_to_file_with_headers(&url, &headers, dest, 536_870_912)
     }
 }
 

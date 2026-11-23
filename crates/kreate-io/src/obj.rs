@@ -32,6 +32,8 @@ use crate::ir::{ImportMesh, ImportScene, LossyNote, SourceMetadata, UvOrigin};
 pub enum ObjError {
     #[error("line {line}: {msg}")]
     Parse { line: usize, msg: String },
+    #[error("cancelled")]
+    Cancelled,
 }
 
 fn err<T>(line: usize, msg: impl Into<String>) -> Result<T, ObjError> {
@@ -103,6 +105,16 @@ fn resolve_index(raw: i64, len: usize, line: usize, what: &str) -> Result<u32, O
 
 /// Parses OBJ text into the neutral IR.
 pub fn parse_obj(text: &str, opts: ObjOptions) -> Result<ImportScene, ObjError> {
+    parse_obj_with(text, opts, &crate::scene_file::ReadProgress::default())
+}
+
+/// Parses OBJ text while reporting byte progress and honouring cancellation.
+pub fn parse_obj_with(
+    text: &str,
+    opts: ObjOptions,
+    progress: &crate::scene_file::ReadProgress,
+) -> Result<ImportScene, ObjError> {
+    progress.start(crate::scene_file::ReadStage::Parsing, text.len() as u64);
     let mut positions: Vec<Vec3> = Vec::new();
     let mut uvs: Vec<Vec2> = Vec::new();
     let mut normals: Vec<Vec3> = Vec::new();
@@ -128,7 +140,15 @@ pub fn parse_obj(text: &str, opts: ObjOptions) -> Result<ImportScene, ObjError> 
         groups.len() - 1
     };
 
+    let mut seen_bytes = 0u64;
     for (lineno, raw_line) in text.lines().enumerate() {
+        seen_bytes += raw_line.len() as u64 + 1;
+        if lineno & 4095 == 0 {
+            if progress.cancelled() {
+                return Err(ObjError::Cancelled);
+            }
+            progress.advance(seen_bytes);
+        }
         let line = lineno + 1;
         // A backslash line continuation is legal in OBJ but vanishingly rare;
         // comments and blank lines are not.

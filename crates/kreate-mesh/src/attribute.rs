@@ -116,6 +116,28 @@ impl AttrData {
         self.len() == 0
     }
 
+    /// Heap bytes owned exclusively by this handle (`Arc::strong_count == 1`).
+    ///
+    /// Used by undo memory accounting so an attribute array still shared with
+    /// the live document (or another snapshot) is not charged as an independent
+    /// copy, while an array replaced on a later edit is charged in full.
+    pub fn uniquely_held_bytes(&self) -> usize {
+        let exclusive = match self {
+            AttrData::F32(v) => Arc::strong_count(v) == 1,
+            AttrData::F32x2(v) => Arc::strong_count(v) == 1,
+            AttrData::F32x3(v) => Arc::strong_count(v) == 1,
+            AttrData::F32x4(v) => Arc::strong_count(v) == 1,
+            AttrData::I32(v) => Arc::strong_count(v) == 1,
+            AttrData::Bool(v) => Arc::strong_count(v) == 1,
+            AttrData::U8x4(v) => Arc::strong_count(v) == 1,
+        };
+        if exclusive {
+            self.len() * self.ty().size()
+        } else {
+            0
+        }
+    }
+
     /// Builds a new array by blending several source values per output element.
     ///
     /// `offsets` is a CSR index: output element `i` blends the sources named by
@@ -348,6 +370,33 @@ impl AttrData {
             _ => false,
         }
     }
+
+    /// Exact bitwise equality across two layers of the same type.
+    pub fn same_bits_as(&self, other: &Self) -> bool {
+        if self.ptr_eq(other) {
+            return true;
+        }
+        match (self, other) {
+            (AttrData::F32(a), AttrData::F32(b)) => {
+                bytemuck::cast_slice::<f32, u8>(a) == bytemuck::cast_slice::<f32, u8>(b)
+            }
+            (AttrData::F32x2(a), AttrData::F32x2(b)) => {
+                bytemuck::cast_slice::<Vec2, u8>(a) == bytemuck::cast_slice::<Vec2, u8>(b)
+            }
+            (AttrData::F32x3(a), AttrData::F32x3(b)) => {
+                bytemuck::cast_slice::<Vec3, u8>(a) == bytemuck::cast_slice::<Vec3, u8>(b)
+            }
+            (AttrData::F32x4(a), AttrData::F32x4(b)) => {
+                bytemuck::cast_slice::<Vec4, u8>(a) == bytemuck::cast_slice::<Vec4, u8>(b)
+            }
+            (AttrData::I32(a), AttrData::I32(b)) => {
+                bytemuck::cast_slice::<i32, u8>(a) == bytemuck::cast_slice::<i32, u8>(b)
+            }
+            (AttrData::Bool(a), AttrData::Bool(b)) => a == b,
+            (AttrData::U8x4(a), AttrData::U8x4(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// One named layer.
@@ -486,6 +535,19 @@ impl AttributeStore {
 
     pub fn iter_domain(&self, domain: Domain) -> impl Iterator<Item = &Layer> {
         self.layers.iter().filter(move |l| l.domain == domain)
+    }
+
+    /// Adopts `prev`'s `Arc` allocations for every layer whose name, domain, and
+    /// bitwise values match, restoring pointer-identity sharing after network
+    /// or file deserialization.
+    pub fn share_unchanged_from(&mut self, prev: &Self) {
+        for layer in &mut self.layers {
+            if let Some(old) = prev.get(&layer.name) {
+                if old.domain == layer.domain && layer.data.same_bits_as(&old.data) {
+                    layer.data = old.data.clone();
+                }
+            }
+        }
     }
 
     /// Inserts or replaces a layer, returning the previous one if any.

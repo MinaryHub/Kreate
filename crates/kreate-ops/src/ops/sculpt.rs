@@ -342,12 +342,12 @@ impl Operator for SculptStroke {
         if dabs.is_empty() {
             return Ok(OpResult::Cancelled);
         }
-        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
-            return Ok(OpResult::Cancelled);
-        };
         // Dynamic topology re-cuts the surface; a grab, the mask and face
         // sets need the surface to stay as it is, as in Blender.
         if params.dyntopo && !matches!(stroke.brush, Brush::Grab | Brush::Mask | Brush::FaceSet) {
+            let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+                return Ok(OpResult::Cancelled);
+            };
             let detail = (params.detail.clamp(0.01, 1.0) as f32) * dabs[0].radius;
             let mut held = DYN.lock().unwrap_or_else(|e| e.into_inner());
             let cache = match held.take() {
@@ -361,13 +361,33 @@ impl Operator for SculptStroke {
                 OpResult::Cancelled
             });
         }
+        let Some(current_mesh) = doc.document().mesh(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
         let mut held = STROKE.lock().unwrap_or_else(|e| e.into_inner());
         let cache = match held.take() {
-            Some(cache) if cache.fits(m, &stroke, &dabs) => cache,
-            _ => StrokeCache::new(m, &stroke, dabs[0].radius),
+            Some(cache) if cache.fits(current_mesh, &stroke, &dabs) => cache,
+            _ => StrokeCache::new(current_mesh, &stroke, dabs[0].radius),
         };
         let cache = held.insert(cache);
-        Ok(if cache.run(m, &dabs, &stroke) {
+        if !cache.step(&dabs, &stroke) {
+            return Ok(OpResult::Cancelled);
+        }
+        if cache.positions_only() {
+            let (indices, current) = cache.changed_positions();
+            if indices.is_empty() {
+                return Ok(OpResult::Cancelled);
+            }
+            doc.edit_positions(mesh, &indices, |idx, slot| {
+                *slot = current[idx as usize];
+            })
+            .map_err(|e| OpError::Failed(e.to_string()))?;
+            return Ok(OpResult::Finished);
+        }
+        let Some(m) = doc.document_mut().mesh_mut(mesh) else {
+            return Ok(OpResult::Cancelled);
+        };
+        Ok(if cache.write_into(m) {
             OpResult::Finished
         } else {
             OpResult::Cancelled

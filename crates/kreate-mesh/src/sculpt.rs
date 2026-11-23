@@ -519,7 +519,11 @@ fn basis(n: Vec3) -> (Vec3, Vec3) {
 /// is the one [`apply`] gives from scratch.
 pub struct StrokeCache {
     original: Vec<Vec3>,
-    corners: Vec<u32>,
+    corners_arc: Arc<Vec<u32>>,
+    pos_attr: Option<AttrData>,
+    mask_attr: Option<AttrData>,
+    hide_attr: Option<AttrData>,
+    sets_attr: Option<AttrData>,
     normal: Vec<Vec3>,
     /// Only the brushes that need them build them.
     near: Option<Neighbours>,
@@ -549,10 +553,15 @@ impl StrokeCache {
         let started_with = Self::protection(mesh);
         let (mask, hidden, face_sets) = started_with.clone();
         let smoothing = stroke.brush == Brush::Smooth || stroke.auto_smooth > 0.0;
+        let attrs = mesh.attributes();
         Self {
             grid: Grid::new(&original, radius),
             normal: normals_of(&original, mesh),
-            corners: mesh.corner_verts().to_vec(),
+            corners_arc: mesh.corner_verts_arc().clone(),
+            pos_attr: attrs.get(names::POSITION).map(|l| l.data.clone()),
+            mask_attr: attrs.get(MASK).map(|l| l.data.clone()),
+            hide_attr: attrs.get(names::HIDE_VERT).map(|l| l.data.clone()),
+            sets_attr: attrs.get(FACE_SET).map(|l| l.data.clone()),
             near: smoothing.then(|| Neighbours::new(mesh)),
             faces_of: (stroke.brush == Brush::FaceSet).then(|| VertexFaces::new(mesh)),
             current: original.clone(),
@@ -594,6 +603,41 @@ impl StrokeCache {
         (mask, hidden, face_sets)
     }
 
+    fn same_protection(&self, mesh: &MeshData) -> bool {
+        let n = mesh.positions().len();
+        let nf = mesh.num_faces() as usize;
+        let attrs = mesh.attributes();
+        let same_attr = |cached: &Option<AttrData>, name: &str| match (cached, attrs.get(name)) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.ptr_eq(&b.data),
+            _ => false,
+        };
+        if same_attr(&self.mask_attr, MASK)
+            && same_attr(&self.hide_attr, names::HIDE_VERT)
+            && same_attr(&self.sets_attr, FACE_SET)
+        {
+            return true;
+        }
+        let mask_ok = match attrs.get_f32(MASK).filter(|m| m.len() == n) {
+            Some(m) => m == self.started_with.0.as_slice(),
+            None => self.started_with.0.len() == n && self.started_with.0.iter().all(|&v| v == 0.0),
+        };
+        if !mask_ok {
+            return false;
+        }
+        let hide_ok = match attrs.get_bool(names::HIDE_VERT).filter(|h| h.len() == n) {
+            Some(h) => h == self.started_with.1.as_slice(),
+            None => self.started_with.1.len() == n && self.started_with.1.iter().all(|&v| !v),
+        };
+        if !hide_ok {
+            return false;
+        }
+        match attrs.get_i32(FACE_SET).filter(|s| s.len() == nf) {
+            Some(s) => s == self.started_with.2.as_slice(),
+            None => self.started_with.2.len() == nf && self.started_with.2.iter().all(|&v| v == 0),
+        }
+    }
+
     fn key(stroke: &Stroke) -> Stroke {
         Stroke {
             grab: Vec3::ZERO,
@@ -603,23 +647,27 @@ impl StrokeCache {
 
     /// Whether `dabs` on `mesh` with `stroke` continues what this has done.
     ///
-    /// The mask, the hidden vertices and the face sets as well as the shape:
-    /// masking everything, stroking, then inverting the mask and stroking
-    /// the same dabs again left the positions and the dabs as they were, so
-    /// the second stroke picked up the first's state — the old mask — and
-    /// moved nothing.
+    /// Answered in O(1) via `Arc::ptr_eq` during modal sculpting, falling back
+    /// to zero-allocation slice checks when a caller built an independent copy.
     pub fn fits(&self, mesh: &MeshData, stroke: &Stroke, dabs: &[Dab]) -> bool {
-        self.key == Self::key(stroke)
-            && dabs.starts_with(&self.applied)
-            && mesh.corner_verts() == self.corners.as_slice()
-            && mesh.positions() == self.original.as_slice()
-            && Self::protection(mesh) == self.started_with
+        if self.key != Self::key(stroke) || !dabs.starts_with(&self.applied) {
+            return false;
+        }
+        let same_corners = Arc::ptr_eq(mesh.corner_verts_arc(), &self.corners_arc)
+            || mesh.corner_verts() == self.corners_arc.as_slice();
+        if !same_corners {
+            return false;
+        }
+        let same_pos = match (&self.pos_attr, mesh.attributes().get(names::POSITION)) {
+            (Some(a), Some(b)) if a.ptr_eq(&b.data) => true,
+            _ => mesh.positions() == self.original.as_slice(),
+        };
+        same_pos && self.same_protection(mesh)
     }
 
-    /// Applies what of `dabs` is new and writes the result into `mesh`, which
-    /// must be the mesh this began on (see [`StrokeCache::fits`]). `false`
-    /// when nothing was under any dab.
-    pub fn run(&mut self, mesh: &mut MeshData, dabs: &[Dab], stroke: &Stroke) -> bool {
+    /// Advances the cached stroke state for any unapplied `dabs` without
+    /// mutating a `MeshData` yet. Returns `true` if anything moved or painted.
+    pub fn step(&mut self, dabs: &[Dab], stroke: &Stroke) -> bool {
         if dabs.is_empty() || self.original.is_empty() {
             return false;
         }
@@ -642,6 +690,29 @@ impl StrokeCache {
             }
             self.applied = dabs.to_vec();
         }
+        self.moved || self.masked || self.painted_sets
+    }
+
+    /// Whether this stroke only displaced vertex positions (no mask or face-set writes).
+    pub fn positions_only(&self) -> bool {
+        self.moved && !self.masked && !self.painted_sets
+    }
+
+    /// Indices of vertices whose position differs from the stroke's starting mesh,
+    /// paired with their new positions.
+    pub fn changed_positions(&self) -> (Vec<u32>, &[Vec3]) {
+        let indices = self
+            .current
+            .iter()
+            .zip(&self.original)
+            .enumerate()
+            .filter_map(|(i, (now, was))| (now != was).then_some(i as u32))
+            .collect();
+        (indices, &self.current)
+    }
+
+    /// Writes cached attributes/positions into `mesh`.
+    pub fn write_into(&self, mesh: &mut MeshData) -> bool {
         if self.moved {
             mesh.positions_mut().copy_from_slice(&self.current);
         }
@@ -660,6 +731,16 @@ impl StrokeCache {
             );
         }
         self.moved || self.masked || self.painted_sets
+    }
+
+    /// Applies what of `dabs` is new and writes the result into `mesh`, which
+    /// must be the mesh this began on (see [`StrokeCache::fits`]). `false`
+    /// when nothing was under any dab.
+    pub fn run(&mut self, mesh: &mut MeshData, dabs: &[Dab], stroke: &Stroke) -> bool {
+        if !self.step(dabs, stroke) {
+            return false;
+        }
+        self.write_into(mesh)
     }
 
     /// How much vertex `i` takes of a dab that reaches it with falloff `w`:

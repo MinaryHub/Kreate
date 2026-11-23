@@ -145,6 +145,11 @@ tracing   = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 pollster  = "0.4"
+memmap2   = "0.9"
+# Built-in HTTPS without Mozilla's CDLA certificate bundle: `platform-verifier`
+# asks the operating system's own certificate store on every target (including
+# Android, where no `curl` binary exists), and `_ring` stays inside MIT/Apache/ISC.
+ureq      = { version = "3", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier", "gzip", "json"] }
 
 # --- dev / test ---
 proptest = "1.5"
@@ -163,4 +168,6 @@ opt-level = 3
 debug = false
 
 [profile.release]
+lto = "thin"
+codegen-units = 1
 debug = 1          # keep line tables for profiling (tracy/puffin) and crash minidumps

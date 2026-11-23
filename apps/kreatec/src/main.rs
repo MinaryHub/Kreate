@@ -29,11 +29,11 @@ USAGE:
     kreatec textconv <file>                  Stable text rendering, for git
 
 FORMATS:
-    .kreate, .obj, .stl, .gltf, .glb -- read and written, chosen by extension.
+    Read & write: .kreate, .obj, .stl, .gltf, .glb, .step, .stp, .3mf
+    Read:         .fbx, .usd, .usda, .usdc, .usdz, .dxf, .ply, .off, .dae, .urdf
 
-    .kreate is the native format and the only one that carries a scene:
-    objects, hierarchy, transforms and shared mesh datablocks. The others
-    carry meshes, so reading one produces a document of unparented objects.
+    .kreate is the native format and carries the full scene: objects,
+    hierarchy, transforms, CAD features, 2D drawings and shared datablocks.
 
     STL is triangles only, so a convert to it triangulates and says so.
     glTF is too, but records the original faces in a KREATE_ngons extension,
@@ -201,6 +201,24 @@ fn open(path: &Path, opts: ObjOptions) -> Result<Opened, String> {
             unknown: loaded.unknown,
         });
     }
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(ext.as_str(), "obj" | "stl" | "gltf" | "glb")
+        && kreate_io::scene_file::is_scene_file(path)
+    {
+        let (document, notes) = kreate_io::scene_file::read_scene_file(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        for note in &notes {
+            println!("  note: {note:?}");
+        }
+        return Ok(Opened {
+            document,
+            manifest: None,
+            unknown: Vec::new(),
+        });
+    }
     let meshes = load(path, opts)?;
     let mut document = Document::new();
     for (name, mesh) in meshes {
@@ -244,6 +262,16 @@ fn is_stl(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("stl"))
 }
 
+fn is_step(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("step") || e.eq_ignore_ascii_case("stp"))
+}
+
+fn is_3mf(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("3mf"))
+}
+
 /// Writes one mesh in whichever format the destination names.
 ///
 /// Notes are printed rather than swallowed: exporting to STL drops n-gons, UVs
@@ -259,6 +287,28 @@ fn save(path: &Path, meshes: &[(String, &MeshData)], opts: ObjOptions) -> Result
             document.add_object(Object::new(name.clone(), ObjectData::Mesh(id)));
         }
         return save_document(path, &document, &Manifest::default(), &[]);
+    }
+    if is_step(path) {
+        let parts: Vec<(String, &MeshData, kreate_math::DAffine3)> = meshes
+            .iter()
+            .map(|(n, m)| (n.clone(), *m, kreate_math::DAffine3::IDENTITY))
+            .collect();
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "part".to_string());
+        let text = kreate_io::step::write_step(&stem, &parts, f64::from(opts.unit_scale));
+        return std::fs::write(path, text)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()));
+    }
+    if is_3mf(path) {
+        let parts: Vec<(String, &MeshData, kreate_math::DAffine3)> = meshes
+            .iter()
+            .map(|(n, m)| (n.clone(), *m, kreate_math::DAffine3::IDENTITY))
+            .collect();
+        let bytes = kreate_io::threemf::write_3mf(&parts, f64::from(opts.unit_scale));
+        return std::fs::write(path, bytes)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()));
     }
     if is_gltf(path) {
         let gltf = GltfExportOptions {
@@ -498,6 +548,16 @@ fn textconv(path: &Path, opts: ObjOptions) -> Result<(), String> {
                 None => print!(" armature missing"),
             },
         }
+        if !object.features.is_empty() {
+            print!(" features {}", object.features.len());
+        }
+        if let Some(d) = &object.drawing {
+            print!(
+                " drawing entities {} constraints {}",
+                d.entities.len(),
+                d.constraints.len()
+            );
+        }
         if !object.visible {
             print!(" hidden");
         }
@@ -529,12 +589,19 @@ fn diff(a: &Path, b: &Path, opts: ObjOptions) -> Result<(), String> {
             .objects()
             .map(|(_, object)| {
                 let mesh = object.mesh().and_then(|id| document.mesh(id));
+                let (drawing_entities, drawing_constraints) = object
+                    .drawing
+                    .as_ref()
+                    .map_or((0, 0), |d| (d.entities.len(), d.constraints.len()));
                 (
                     object.name.clone(),
                     ObjectSummary {
                         verts: mesh.map(|m| m.num_verts()).unwrap_or(0),
                         edges: mesh.map(|m| m.num_edges()).unwrap_or(0),
                         faces: mesh.map(|m| m.num_faces()).unwrap_or(0),
+                        features: object.features.len(),
+                        drawing_entities,
+                        drawing_constraints,
                         translation: object.transform.translation.to_array(),
                         rotation: [
                             object.transform.rotation.x,
@@ -586,6 +653,9 @@ struct ObjectSummary {
     verts: u32,
     edges: u32,
     faces: u32,
+    features: usize,
+    drawing_entities: usize,
+    drawing_constraints: usize,
     translation: [f64; 3],
     rotation: [f64; 4],
     scale: [f64; 3],
@@ -616,6 +686,20 @@ impl ObjectSummary {
             out.push(format!(
                 "geometry {} -> {} verts, {} -> {} edges, {} -> {} faces",
                 self.verts, other.verts, self.edges, other.edges, self.faces, other.faces
+            ));
+        }
+        if self.features != other.features {
+            out.push(format!("features {} -> {}", self.features, other.features));
+        }
+        if self.drawing_entities != other.drawing_entities
+            || self.drawing_constraints != other.drawing_constraints
+        {
+            out.push(format!(
+                "drawing {} -> {} entities, {} -> {} constraints",
+                self.drawing_entities,
+                other.drawing_entities,
+                self.drawing_constraints,
+                other.drawing_constraints
             ));
         }
         if moved(&self.translation, &other.translation) {

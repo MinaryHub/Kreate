@@ -472,11 +472,7 @@ impl App {
     /// Adds the picture on screen to the animation's video, opening it at
     /// the first frame.
     fn write_video_frame(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let (w, h, png, _) = self.rendered_picture()?;
-        let rgba = image::load_from_memory(&png)
-            .map_err(|e| e.to_string())?
-            .to_rgba8()
-            .into_raw();
+        let (w, h, rgba, _) = self.rendered_rgba()?;
         let fps = self.doc.playback.fps;
         let job = self.render_job.as_mut().ok_or("the render stopped")?;
         if job.video.is_none() {
@@ -492,10 +488,10 @@ impl App {
         Ok(())
     }
 
-    /// The picture on screen as a PNG, its size, and — for a motion-blurred
-    /// one — the scene-linear mean it was made from.
+    /// The picture on screen as raw RGBA8 rows, its size, and — for a
+    /// motion-blurred one — the scene-linear mean it was made from.
     #[allow(clippy::type_complexity)]
-    fn rendered_picture(&self) -> Result<(u32, u32, Vec<u8>, Option<Vec<[f32; 4]>>), String> {
+    fn rendered_rgba(&self) -> Result<(u32, u32, Vec<u8>, Option<Vec<[f32; 4]>>), String> {
         // A motion-blurred picture is the mean of the shutter's moments,
         // shown through the same view transform on the CPU; any other is the
         // one on screen.
@@ -511,7 +507,7 @@ impl App {
                     .collect()
             });
 
-        let (w, h, png) = match &blurred {
+        let (w, h, rgba) = match &blurred {
             Some(mean) => {
                 let (w, h) = self
                     .gfx
@@ -537,16 +533,27 @@ impl App {
                     rgba.extend([s.r, s.g, s.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
                     rgba.push(255);
                 }
-                let image = image::RgbaImage::from_raw(w, h, rgba)
-                    .ok_or("the blurred picture has the wrong size")?;
-                let mut png = Vec::new();
-                image
-                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-                    .map_err(|e| e.to_string())?;
-                (w, h, png)
+                if rgba.len() != (w as usize) * (h as usize) * 4 {
+                    return Err("the blurred picture has the wrong size".to_string());
+                }
+                (w, h, rgba)
             }
-            None => self.read_target_png()?,
+            None => self.read_target_rgba()?,
         };
+        Ok((w, h, rgba, blurred))
+    }
+
+    /// The picture on screen as a PNG, its size, and — for a motion-blurred
+    /// one — the scene-linear mean it was made from.
+    #[allow(clippy::type_complexity)]
+    fn rendered_picture(&self) -> Result<(u32, u32, Vec<u8>, Option<Vec<[f32; 4]>>), String> {
+        let (w, h, rgba, blurred) = self.rendered_rgba()?;
+        let image =
+            image::RgbaImage::from_raw(w, h, rgba).ok_or("the capture has the wrong size")?;
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| format!("cannot encode the capture: {e}"))?;
         Ok((w, h, png, blurred))
     }
 
@@ -914,8 +921,8 @@ impl App {
         self.read_target_png()
     }
 
-    /// The viewport's colour target as it is, as a PNG.
-    pub(super) fn read_target_png(&self) -> Result<(u32, u32, Vec<u8>), String> {
+    /// The viewport's colour target as raw opaque RGBA8 rows.
+    pub(super) fn read_target_rgba(&self) -> Result<(u32, u32, Vec<u8>), String> {
         let gfx = self.gfx.as_ref().ok_or("the window closed")?;
         let (w, h) = gfx.viewport.render_size();
         let row = (w * 4).div_ceil(256) * 256;
@@ -971,6 +978,12 @@ impl App {
         for p in pixels.as_chunks_mut::<4>().0 {
             p[3] = 255;
         }
+        Ok((w, h, pixels))
+    }
+
+    /// The viewport's colour target as it is, as a PNG.
+    pub(super) fn read_target_png(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        let (w, h, pixels) = self.read_target_rgba()?;
         let image =
             image::RgbaImage::from_raw(w, h, pixels).ok_or("the capture has the wrong size")?;
         let mut png = Vec::new();

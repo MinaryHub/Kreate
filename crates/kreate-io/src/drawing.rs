@@ -67,120 +67,190 @@ pub struct Line2 {
     pub hidden: bool,
 }
 
+/// Precomputed world-space triangles, BVH, face geometry and edge adjacency
+/// shared across multiple orthographic/isometric views of the same assembly.
+pub struct PreparedDrawing {
+    middle: DVec3,
+    size: f64,
+    local: Vec<Vec3>,
+    tris: Vec<[u32; 3]>,
+    bvh: Bvh,
+    parts: Vec<PreparedPart>,
+}
+
+struct PreparedPart {
+    points: Vec<DVec3>,
+    normals: Vec<DVec3>,
+    edges: Vec<[u32; 2]>,
+    faces_of: Vec<Vec<usize>>,
+}
+
+impl PreparedDrawing {
+    pub fn new(parts: &[(&MeshData, DAffine3)]) -> Option<Self> {
+        let mut world: Vec<Vec<DVec3>> = Vec::with_capacity(parts.len());
+        let mut total_pts = 0usize;
+        for (mesh, place) in parts {
+            let pts: Vec<DVec3> = mesh
+                .positions()
+                .iter()
+                .map(|p| place.transform_point3(p.as_dvec3()))
+                .collect();
+            total_pts += pts.len();
+            world.push(pts);
+        }
+        if total_pts == 0 {
+            return None;
+        }
+        let (lo, hi) = world.iter().flatten().fold(
+            (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
+            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+        );
+        let middle = (lo + hi) * 0.5;
+        let size = (hi - lo).length().max(1e-9);
+        let mut local: Vec<Vec3> = Vec::with_capacity(total_pts);
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        let mut prepared = Vec::with_capacity(parts.len());
+
+        for ((mesh, place), points) in parts.iter().zip(world) {
+            let base = local.len() as u32;
+            local.extend(points.iter().map(|p| (*p - middle).as_vec3()));
+            let t = mesh.triangulate();
+            tris.extend(
+                t.indices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|t| t.map(|v| v + base)),
+            );
+
+            let flip = place.matrix3.determinant() < 0.0;
+            let normals: Vec<DVec3> = (0..mesh.num_faces())
+                .map(|f| {
+                    let ring = mesh.face_verts(f);
+                    let mut n = DVec3::ZERO;
+                    for i in 0..ring.len() {
+                        n += points[ring[i] as usize]
+                            .cross(points[ring[(i + 1) % ring.len()] as usize]);
+                    }
+                    let n = n.normalize_or_zero();
+                    if flip {
+                        -n
+                    } else {
+                        n
+                    }
+                })
+                .collect();
+
+            // O(corners) linear face-to-edge sweep instead of O(corners log faces) binary search.
+            let mut faces_of: Vec<Vec<usize>> = vec![Vec::new(); mesh.num_edges() as usize];
+            let corner_edges = mesh.corner_edges();
+            let offsets = mesh.face_offsets();
+            for f in 0..mesh.num_faces() as usize {
+                let start = offsets[f] as usize;
+                let end = offsets[f + 1] as usize;
+                for &e in &corner_edges[start..end] {
+                    faces_of[e as usize].push(f);
+                }
+            }
+            prepared.push(PreparedPart {
+                points,
+                normals,
+                edges: mesh.edges().to_vec(),
+                faces_of,
+            });
+        }
+
+        let bvh = Bvh::build(&local, &tris);
+        Some(Self {
+            middle,
+            size,
+            local,
+            tris,
+            bvh,
+            parts: prepared,
+        })
+    }
+
+    pub fn project(&self, view: View, crease: f64) -> Vec<Line2> {
+        use rayon::prelude::*;
+
+        let toward = view.toward();
+        let lift = self.size * 1e-5;
+        let hidden_at = |p: DVec3| -> bool {
+            let start = (p - self.middle + toward * lift).as_vec3();
+            self.bvh
+                .raycast(
+                    &self.local,
+                    &self.tris,
+                    &Ray::new(start, toward.as_vec3()),
+                    f32::MAX,
+                )
+                .is_some()
+        };
+
+        let mut lines: Vec<Line2> = Vec::new();
+        for part in &self.parts {
+            let part_lines: Vec<Line2> = part
+                .edges
+                .par_iter()
+                .enumerate()
+                .flat_map_iter(|(e, &[a, b])| {
+                    let drawn = match part.faces_of[e].as_slice() {
+                        [_] => true,
+                        [f, g] => {
+                            let (nf, ng) = (part.normals[*f], part.normals[*g]);
+                            nf.angle_between(ng) > crease
+                                || (nf.dot(toward) > 0.0) != (ng.dot(toward) > 0.0)
+                        }
+                        _ => true,
+                    };
+                    let mut out = Vec::new();
+                    if !drawn {
+                        return out;
+                    }
+                    let (pa, pb) = (part.points[a as usize], part.points[b as usize]);
+                    let (sa, sb) = (view.project(pa), view.project(pb));
+                    if (sa[0] - sb[0]).hypot(sa[1] - sb[1]) < self.size * 1e-9 {
+                        return out;
+                    }
+                    let steps =
+                        ((pa.distance(pb) / (self.size / 200.0)).ceil() as usize).clamp(1, 64);
+                    let mut run_start = 0usize;
+                    let mut run_hidden = hidden_at(pa.lerp(pb, 0.5 / steps as f64));
+                    for k in 1..=steps {
+                        let hidden = if k < steps {
+                            hidden_at(pa.lerp(pb, (k as f64 + 0.5) / steps as f64))
+                        } else {
+                            !run_hidden
+                        };
+                        if hidden != run_hidden || k == steps {
+                            let (t0, t1) =
+                                (run_start as f64 / steps as f64, k as f64 / steps as f64);
+                            out.push(Line2 {
+                                a: view.project(pa.lerp(pb, t0)),
+                                b: view.project(pa.lerp(pb, t1)),
+                                hidden: run_hidden,
+                            });
+                            run_start = k;
+                            run_hidden = hidden;
+                        }
+                    }
+                    out
+                })
+                .collect();
+            lines.extend(part_lines);
+        }
+        tidy(lines, self.size * 1e-6)
+    }
+}
+
 /// The drawing of `parts` (meshes placed in the world) from `view`. Creases
 /// are edges whose faces turn by more than `crease` radians.
 pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64) -> Vec<Line2> {
-    // Every part's triangles in the world, about their common middle so the
-    // tree's single precision is spent where the parts are.
-    let mut world: Vec<Vec<DVec3>> = Vec::new();
-    for (mesh, place) in parts {
-        world.push(
-            mesh.positions()
-                .iter()
-                .map(|p| place.transform_point3(p.as_dvec3()))
-                .collect(),
-        );
-    }
-    let all: Vec<DVec3> = world.iter().flatten().copied().collect();
-    if all.is_empty() {
+    let Some(prepared) = PreparedDrawing::new(parts) else {
         return Vec::new();
-    }
-    let (lo, hi) = all.iter().fold(
-        (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
-        |(lo, hi), p| (lo.min(*p), hi.max(*p)),
-    );
-    let middle = (lo + hi) * 0.5;
-    let size = (hi - lo).length().max(1e-9);
-    let mut local: Vec<Vec3> = Vec::new();
-    let mut tris: Vec<[u32; 3]> = Vec::new();
-    for ((mesh, _), points) in parts.iter().zip(&world) {
-        let base = local.len() as u32;
-        local.extend(points.iter().map(|p| (*p - middle).as_vec3()));
-        let t = mesh.triangulate();
-        tris.extend(
-            t.indices
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|t| t.map(|v| v + base)),
-        );
-    }
-    let bvh = Bvh::build(&local, &tris);
-    let toward = view.toward();
-    let lift = size * 1e-5;
-    let hidden_at = |p: DVec3| -> bool {
-        let start = (p - middle + toward * lift).as_vec3();
-        bvh.raycast(&local, &tris, &Ray::new(start, toward.as_vec3()), f32::MAX)
-            .is_some()
     };
-
-    let mut lines = Vec::new();
-    for ((mesh, place), points) in parts.iter().zip(&world) {
-        let flip = place.matrix3.determinant() < 0.0;
-        let normals: Vec<DVec3> = (0..mesh.num_faces())
-            .map(|f| {
-                let ring = mesh.face_verts(f);
-                let mut n = DVec3::ZERO;
-                for i in 0..ring.len() {
-                    n +=
-                        points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
-                }
-                let n = n.normalize_or_zero();
-                if flip {
-                    -n
-                } else {
-                    n
-                }
-            })
-            .collect();
-        let mut faces_of: Vec<Vec<usize>> = vec![Vec::new(); mesh.num_edges() as usize];
-        let offsets = mesh.face_offsets();
-        for (c, e) in mesh.corner_edges().iter().enumerate() {
-            let f = offsets.partition_point(|o| *o as usize <= c) - 1;
-            faces_of[*e as usize].push(f);
-        }
-        for (e, [a, b]) in mesh.edges().iter().enumerate() {
-            let drawn = match faces_of[e].as_slice() {
-                [_] => true,
-                [f, g] => {
-                    let (nf, ng) = (normals[*f], normals[*g]);
-                    nf.angle_between(ng) > crease
-                        || (nf.dot(toward) > 0.0) != (ng.dot(toward) > 0.0)
-                }
-                _ => true,
-            };
-            if !drawn {
-                continue;
-            }
-            let (pa, pb) = (points[*a as usize], points[*b as usize]);
-            // Seen end on, an edge is a point: nothing to draw.
-            let (sa, sb) = (view.project(pa), view.project(pb));
-            if (sa[0] - sb[0]).hypot(sa[1] - sb[1]) < size * 1e-9 {
-                continue;
-            }
-            let steps = ((pa.distance(pb) / (size / 200.0)).ceil() as usize).clamp(1, 64);
-            let mut run_start = 0usize;
-            let mut run_hidden = hidden_at(pa.lerp(pb, 0.5 / steps as f64));
-            for k in 1..=steps {
-                let hidden = if k < steps {
-                    hidden_at(pa.lerp(pb, (k as f64 + 0.5) / steps as f64))
-                } else {
-                    !run_hidden
-                };
-                if hidden != run_hidden || k == steps {
-                    let (t0, t1) = (run_start as f64 / steps as f64, k as f64 / steps as f64);
-                    lines.push(Line2 {
-                        a: view.project(pa.lerp(pb, t0)),
-                        b: view.project(pa.lerp(pb, t1)),
-                        hidden: run_hidden,
-                    });
-                    run_start = k;
-                    run_hidden = hidden;
-                }
-            }
-        }
-    }
-    tidy(lines, size * 1e-6)
+    prepared.project(view, crease)
 }
 
 /// Lines that fall on the same place on the page, drawn once: an edge seen

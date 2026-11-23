@@ -148,7 +148,7 @@ pub fn prewarm(ctx: &egui::Context) {
             egui::FontId::proportional(PREWARM_SIZES[0]),
             egui::FontId::proportional(PREWARM_SIZES[1]),
             egui::FontId::proportional(PREWARM_SIZES[2]),
-            egui::FontId::monospace(PREWARM_SIZES[0]),
+            egui::FontId::monospace(13.0),
         ] {
             // Laying the text out is what forces each glyph into the atlas.
             let _ = fonts.layout_no_wrap(PREWARM_TEXT.to_owned(), font_id, egui::Color32::WHITE);
@@ -156,8 +156,8 @@ pub fn prewarm(ctx: &egui::Context) {
     });
 }
 
-/// Text sizes to warm: body, button and heading.
-pub const PREWARM_SIZES: [f32; 3] = [14.0, 12.0, 18.0];
+/// Text sizes to warm: small (11), body/button (14) and heading (19), matching [`text_size`].
+pub const PREWARM_SIZES: [f32; 3] = [11.0, 14.0, 19.0];
 
 #[cfg(test)]
 mod tests {

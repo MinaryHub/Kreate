@@ -328,6 +328,116 @@ pub struct Projection {
     pub entities: Vec<EntityId>,
 }
 
+impl Drawing {
+    /// Approximate heap footprint of this drawing, for undo memory accounting.
+    pub fn approx_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.entities.capacity() * std::mem::size_of::<Entity>()
+            + self.layers.capacity() * std::mem::size_of::<Layer>()
+            + self.constraints.capacity() * std::mem::size_of::<Constraint>()
+            + self.projections.capacity() * std::mem::size_of::<Projection>()
+    }
+
+    /// Hashes only the geometry that 3D features read (curves, points, and
+    /// whether each is construction), with zero heap allocations. Annotation
+    /// edits — text, driven dimension labels, layer colours — do not invalidate
+    /// cached 3D solids.
+    pub fn geometry_hash(&self, h: &mut impl std::hash::Hasher) {
+        use kreate_geom2d::Curve2D;
+        use std::hash::Hash;
+
+        fn bits(v: f64) -> u64 {
+            if v == 0.0 {
+                0
+            } else {
+                v.to_bits()
+            }
+        }
+        fn vec2(v: kreate_geom2d::DVec2, h: &mut impl std::hash::Hasher) {
+            bits(v.x).hash(h);
+            bits(v.y).hash(h);
+        }
+
+        for e in &self.entities {
+            match &e.kind {
+                EntityKind::Point(p) => {
+                    1u8.hash(h);
+                    e.id.0.hash(h);
+                    e.construction.hash(h);
+                    vec2(*p, h);
+                }
+                EntityKind::Curve(c) => {
+                    2u8.hash(h);
+                    e.id.0.hash(h);
+                    e.construction.hash(h);
+                    match c {
+                        Curve2D::Line { a, b } => {
+                            0u8.hash(h);
+                            vec2(*a, h);
+                            vec2(*b, h);
+                        }
+                        Curve2D::Circle { c, r } => {
+                            1u8.hash(h);
+                            vec2(*c, h);
+                            bits(*r).hash(h);
+                        }
+                        Curve2D::Arc { c, r, start, sweep } => {
+                            2u8.hash(h);
+                            vec2(*c, h);
+                            bits(*r).hash(h);
+                            bits(*start).hash(h);
+                            bits(*sweep).hash(h);
+                        }
+                        Curve2D::Ellipse {
+                            c,
+                            major,
+                            ratio,
+                            start,
+                            sweep,
+                        } => {
+                            3u8.hash(h);
+                            vec2(*c, h);
+                            vec2(*major, h);
+                            bits(*ratio).hash(h);
+                            bits(*start).hash(h);
+                            bits(*sweep).hash(h);
+                        }
+                        Curve2D::Polyline { verts, closed } => {
+                            4u8.hash(h);
+                            closed.hash(h);
+                            verts.len().hash(h);
+                            for (p, bulge) in verts {
+                                vec2(*p, h);
+                                bits(*bulge).hash(h);
+                            }
+                        }
+                        Curve2D::Spline(s) => {
+                            5u8.hash(h);
+                            s.degree.hash(h);
+                            s.ctrl.len().hash(h);
+                            for p in &s.ctrl {
+                                vec2(*p, h);
+                            }
+                            for k in &s.knots {
+                                bits(*k).hash(h);
+                            }
+                            if let Some(w) = &s.weights {
+                                1u8.hash(h);
+                                for v in w {
+                                    bits(*v).hash(h);
+                                }
+                            } else {
+                                0u8.hash(h);
+                            }
+                        }
+                    }
+                }
+                EntityKind::Text(_) | EntityKind::Dimension(_) => {}
+            }
+        }
+    }
+}
+
 impl Default for Drawing {
     fn default() -> Self {
         Drawing {

@@ -2591,20 +2591,53 @@ pub fn write(
         })?;
         zip.write_all(&scene_bytes)?;
 
-        for (slot, (_, mesh)) in document.meshes().enumerate() {
-            zip.start_file(format!("{MESH_DIR}{}.kmesh", mesh_key(slot)), binary)?;
-            zip.write_all(&crate::kmesh::write(mesh, &[]))?;
-        }
-
-        // STORED like the meshes, and for the same reason: a deflated entry
-        // cannot be memory mapped, and a tile being already the shape a sampler
-        // addresses is the whole of what `.ktile` buys.
-        for (slot, (_, image)) in document.images().enumerate() {
-            if image.resident_tiles() == 0 {
-                continue;
+        {
+            use rayon::prelude::*;
+            let meshes_vec: Vec<(usize, &kreate_mesh::MeshData)> = document
+                .meshes()
+                .enumerate()
+                .map(|(slot, (_, m))| (slot, m))
+                .collect();
+            let encoded_meshes: Vec<(usize, Vec<u8>)> = if meshes_vec.len() > 1 {
+                meshes_vec
+                    .into_par_iter()
+                    .map(|(slot, mesh)| (slot, crate::kmesh::write(mesh, &[])))
+                    .collect()
+            } else {
+                meshes_vec
+                    .into_iter()
+                    .map(|(slot, mesh)| (slot, crate::kmesh::write(mesh, &[])))
+                    .collect()
+            };
+            for (slot, bytes) in encoded_meshes {
+                zip.start_file(format!("{MESH_DIR}{}.kmesh", mesh_key(slot)), binary)?;
+                zip.write_all(&bytes)?;
             }
-            zip.start_file(format!("{IMAGE_DIR}{}.ktile", mesh_key(slot)), binary)?;
-            zip.write_all(&crate::ktile::write(image))?;
+
+            // STORED like the meshes, and for the same reason: a deflated entry
+            // cannot be memory mapped, and a tile being already the shape a sampler
+            // addresses is the whole of what `.ktile` buys.
+            let images_vec: Vec<(usize, &kreate_scene::Image)> = document
+                .images()
+                .enumerate()
+                .filter(|(_, (_, image))| image.resident_tiles() > 0)
+                .map(|(slot, (_, image))| (slot, image))
+                .collect();
+            let encoded_images: Vec<(usize, Vec<u8>)> = if images_vec.len() > 1 {
+                images_vec
+                    .into_par_iter()
+                    .map(|(slot, image)| (slot, crate::ktile::write(image)))
+                    .collect()
+            } else {
+                images_vec
+                    .into_iter()
+                    .map(|(slot, image)| (slot, crate::ktile::write(image)))
+                    .collect()
+            };
+            for (slot, bytes) in encoded_images {
+                zip.start_file(format!("{IMAGE_DIR}{}.ktile", mesh_key(slot)), binary)?;
+                zip.write_all(&bytes)?;
+            }
         }
 
         // The bake, so a baked scene opens baked. STORED: it is mostly floats
@@ -2625,6 +2658,16 @@ pub fn write(
     Ok(buffer.into_inner())
 }
 
+/// Parses a `.kreate` archive from an in-memory or memory-mapped byte slice,
+/// indexing `STORED` `.kmesh` entries directly in place (preserving 16-byte
+/// alignment with zero intermediate `Vec<u8>` copies) and decoding meshes in
+/// parallel across CPU cores.
+pub fn read_slice(archive: &[u8]) -> Result<Loaded, ContainerError> {
+    let mut loaded = read_as_written_inner(std::io::Cursor::new(archive), Some(archive))?;
+    kreate_scene::drawing_migrate::sketches_to_drawings(&mut loaded.document);
+    Ok(loaded)
+}
+
 /// Parses a `.kreate` archive, bringing what an older build wrote up to
 /// this one: a sketch of points and lines is a drawing now
 /// (`kreate_scene::drawing_migrate`).
@@ -2637,6 +2680,15 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
 /// Parses a `.kreate` archive as it was written, nothing brought up to
 /// date: what a test of an old file reads it with.
 pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerError> {
+    read_as_written_inner(reader, None)
+}
+
+fn read_as_written_inner<R: Read + Seek>(
+    reader: R,
+    mapped: Option<&[u8]>,
+) -> Result<Loaded, ContainerError> {
+    use rayon::prelude::*;
+
     let mut zip = zip::ZipArchive::new(reader)?;
     // Every entry is read whole, so what they inflate to is bounded: a small
     // file of deflated zeros would otherwise take the machine's memory.
@@ -2680,7 +2732,19 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
         .file_names()
         .map(|name| name.map(|name| name.into_owned()))
         .collect::<Result<Vec<String>, _>>()?;
-    let mut meshes: BTreeMap<String, MeshData> = BTreeMap::new();
+    enum RawBytes<'a> {
+        Slice(&'a [u8]),
+        Owned(Vec<u8>),
+    }
+    impl RawBytes<'_> {
+        fn as_slice(&self) -> &[u8] {
+            match self {
+                RawBytes::Slice(s) => s,
+                RawBytes::Owned(v) => v,
+            }
+        }
+    }
+    let mut raw_meshes: Vec<(String, RawBytes<'_>)> = Vec::new();
     let mut image_tiles: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut unknown = Vec::new();
     let mut bake = None;
@@ -2688,19 +2752,29 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
         if name == MANIFEST || name == SCENE {
             continue;
         }
-        let mut file = zip.by_name(&name)?;
-        let bytes = budget.read(&mut file)?;
         if let Some(key) = name
             .strip_prefix(MESH_DIR)
             .and_then(|k| k.strip_suffix(".kmesh"))
         {
-            let mut loaded = crate::kmesh::read(&bytes).map_err(|source| ContainerError::Mesh {
-                key: key.to_string(),
-                source,
-            })?;
-            rename_legacy_uv(&mut loaded.mesh);
-            meshes.insert(key.to_string(), loaded.mesh);
-        } else if let Some(key) = name
+            let mut file = zip.by_name(&name)?;
+            if let (Some(buf), zip::CompressionMethod::Stored, Some(start)) =
+                (mapped, file.compression(), file.data_start())
+            {
+                let start = start as usize;
+                let len = file.size() as usize;
+                if let Some(slice) = buf.get(start..start.saturating_add(len)) {
+                    budget.claim(&name, len as u64)?;
+                    raw_meshes.push((key.to_string(), RawBytes::Slice(slice)));
+                    continue;
+                }
+            }
+            let bytes = budget.read(&mut file)?;
+            raw_meshes.push((key.to_string(), RawBytes::Owned(bytes)));
+            continue;
+        }
+        let mut file = zip.by_name(&name)?;
+        let bytes = budget.read(&mut file)?;
+        if let Some(key) = name
             .strip_prefix(IMAGE_DIR)
             .and_then(|k| k.strip_suffix(".ktile"))
         {
@@ -2718,6 +2792,20 @@ pub fn read_as_written<R: Read + Seek>(reader: R) -> Result<Loaded, ContainerErr
             unknown.push(UnknownEntry { name, bytes });
         }
     }
+
+    let decoded: Result<Vec<(String, MeshData)>, ContainerError> = raw_meshes
+        .into_par_iter()
+        .map(|(key, raw)| {
+            let mut loaded =
+                crate::kmesh::read(raw.as_slice()).map_err(|source| ContainerError::Mesh {
+                    key: key.clone(),
+                    source,
+                })?;
+            rename_legacy_uv(&mut loaded.mesh);
+            Ok((key, loaded.mesh))
+        })
+        .collect();
+    let meshes: BTreeMap<String, MeshData> = decoded?.into_iter().collect();
 
     let mut document = Document::new();
     let mut mesh_ids: BTreeMap<String, kreate_scene::MeshId> = BTreeMap::new();

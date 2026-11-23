@@ -240,6 +240,163 @@ impl Materials {
                 .zip(&other.compiled)
                 .all(|(a, b)| a.wgsl == b.wgsl)
     }
+
+    /// Fingerprint of everything [`Materials::for_tracer`] would hand the path
+    /// tracer, computed without untiling any image pixels.
+    pub fn tracer_key(&self, doc: &Document) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.compiled.len().hash(&mut h);
+        self.revisions.hash(&mut h);
+        let mut ids: Vec<_> = self.index.iter().collect();
+        ids.sort_by_key(|(_, index)| **index);
+        for (id, index) in ids {
+            index.hash(&mut h);
+            if let Some(m) = doc.material(*id) {
+                for v in [
+                    m.base_color.r,
+                    m.base_color.g,
+                    m.base_color.b,
+                    m.metallic,
+                    m.roughness,
+                ] {
+                    v.to_bits().hash(&mut h);
+                }
+                for v in graph_emission(m) {
+                    v.to_bits().hash(&mut h);
+                }
+                let (tr, ior) = graph_glass(m);
+                tr.to_bits().hash(&mut h);
+                ior.to_bits().hash(&mut h);
+                m.alpha_clip.unwrap_or(0.0).to_bits().hash(&mut h);
+            }
+        }
+        for compiled in &self.compiled {
+            compiled.wgsl.hash(&mut h);
+            for v in compiled.constants.iter().flatten() {
+                v.to_bits().hash(&mut h);
+            }
+            compiled.image_slots.hash(&mut h);
+            compiled.image_spaces.hash(&mut h);
+            for id in &compiled.images {
+                match doc.image(*id) {
+                    Some(img) => {
+                        (
+                            1u8,
+                            img.width(),
+                            img.height(),
+                            img.color_space,
+                            img.revision(),
+                            img.tile(0, 0).map(|t| t.bytes().as_ptr() as usize),
+                        )
+                            .hash(&mut h);
+                    }
+                    None => 0u8.hash(&mut h),
+                }
+            }
+        }
+        h.finish()
+    }
+
+    /// Fingerprint of the structural parts of [`Materials::for_tracer`] — shader
+    /// WGSL, image slots/revisions, alpha-clip image presence, and emitter glow —
+    /// excluding scalar surface/node constants that [`Materials::for_tracer_values`]
+    /// can rewrite in place.
+    pub fn tracer_structure_key(&self, doc: &Document) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.compiled.len().hash(&mut h);
+        let mut ids: Vec<_> = self.index.iter().collect();
+        ids.sort_by_key(|(_, index)| **index);
+        for (id, index) in ids {
+            index.hash(&mut h);
+            if let Some(m) = doc.material(*id) {
+                for v in graph_emission(m) {
+                    v.to_bits().hash(&mut h);
+                }
+                (m.alpha_clip.unwrap_or(0.0) > 0.0).hash(&mut h);
+            }
+        }
+        for compiled in &self.compiled {
+            compiled.wgsl.hash(&mut h);
+            compiled.constants.len().hash(&mut h);
+            compiled.image_slots.hash(&mut h);
+            compiled.image_spaces.hash(&mut h);
+            for id in &compiled.images {
+                match doc.image(*id) {
+                    Some(img) => {
+                        (
+                            1u8,
+                            img.width(),
+                            img.height(),
+                            img.color_space,
+                            img.revision(),
+                            img.tile(0, 0).map(|t| t.bytes().as_ptr() as usize),
+                        )
+                            .hash(&mut h);
+                    }
+                    None => 0u8.hash(&mut h),
+                }
+            }
+        }
+        h.finish()
+    }
+
+    /// Evaluates only scalar [`PtSurface`] descriptors and compiled material
+    /// constant vectors for the path tracer, without untiling any image pixels
+    /// or generating WGSL.
+    pub fn for_tracer_values(
+        &self,
+        doc: &Document,
+    ) -> (Vec<kreate_render::pathtrace::PtSurface>, Vec<[f32; 4]>) {
+        let mut surfaces = vec![
+            kreate_render::pathtrace::PtSurface {
+                base_color: [0.8, 0.8, 0.8],
+                metallic: 0.0,
+                roughness: 0.5,
+                ..Default::default()
+            };
+            self.compiled.len()
+        ];
+        let mut ids: Vec<_> = self.index.iter().collect();
+        ids.sort_by_key(|(_, index)| **index);
+        for (id, index) in ids {
+            if let (Some(m), Some(slot)) = (doc.material(*id), surfaces.get_mut(*index as usize)) {
+                *slot = kreate_render::pathtrace::PtSurface {
+                    base_color: [m.base_color.r, m.base_color.g, m.base_color.b],
+                    metallic: m.metallic,
+                    roughness: m.roughness,
+                    emission: graph_emission(m),
+                    transmission: graph_glass(m).0,
+                    ior: graph_glass(m).1,
+                    one_sided: false,
+                    alpha_clip: m.alpha_clip.unwrap_or(0.0),
+                    ..Default::default()
+                };
+            }
+        }
+        let mut image_count = 0usize;
+        let mut values: Vec<[f32; 4]> = Vec::new();
+        for (index, compiled) in self.compiled.iter().enumerate() {
+            let mut constants = compiled.constants.clone();
+            for slot in &compiled.image_slots {
+                if let Some(rect) = constants.get_mut(*slot) {
+                    *rect = [0.0, 0.0, 1.0, 1.0];
+                }
+            }
+            values.extend(constants);
+            if surfaces[index].alpha_clip > 0.0 {
+                surfaces[index].base_color_image = compiled
+                    .image_spaces
+                    .iter()
+                    .position(|s| *s == kreate_scene::ColorSpace::Srgb)
+                    .map(|k| image_count + k);
+            }
+            image_count += compiled.images.len();
+            surfaces[index].material = Some(index as u32);
+        }
+        (surfaces, values)
+    }
 }
 
 /// What [`Materials::for_tracer`] hands the path tracer.

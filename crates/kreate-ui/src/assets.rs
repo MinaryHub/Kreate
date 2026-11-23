@@ -35,6 +35,8 @@ pub struct AssetText {
     pub empty: String,
     pub loading: String,
     pub add_folder: String,
+    pub save_selection: String,
+    pub save_selection_hint: String,
     pub remove_folder: String,
     pub no_folders: String,
     /// The line an online source asks for, and where it links.
@@ -213,6 +215,14 @@ pub fn asset_browser(
             }
             if ui.small_button(&text.add_folder).clicked() {
                 queue.push(Command::AssetAddFolder);
+            }
+            if !text.save_selection.is_empty()
+                && ui
+                    .small_button(&text.save_selection)
+                    .on_hover_text(&text.save_selection_hint)
+                    .clicked()
+            {
+                queue.push(Command::AssetSaveSelection);
             }
         });
     }
@@ -519,6 +529,8 @@ mod tests {
             empty: t("NOTHING-HERE"),
             loading: t("Loading"),
             add_folder: t("Add folder"),
+            save_selection: t("Save selection"),
+            save_selection_hint: t("Save selection hint"),
             remove_folder: t("Remove"),
             no_folders: t("No folders"),
             credit: None,

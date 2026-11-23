@@ -200,7 +200,13 @@ pub fn pie_menu(
         };
         painter.galley(rect.center() - galley.size() / 2.0, galley, colour);
     }
-    ctx.request_repaint();
+    // Only schedule a timer wakeup until `HOLD` elapses; once open in tap-mode,
+    // pointer movement and clicks drive repaints without spinning the GPU idle.
+    if now - open.opened_at < HOLD {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+            (HOLD - (now - open.opened_at)).max(0.016),
+        ));
+    }
 
     let (clicked, escape, right) = ctx.input(|i| {
         (

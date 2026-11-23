@@ -187,8 +187,25 @@ impl Document {
         compare!(K::Action, actions);
         compare!(K::Armature, armatures);
 
-        changes.settings = self.settings_text() != base.settings_text();
+        changes.settings = !self.same_shared_settings(base);
         changes
+    }
+
+    fn same_shared_settings(&self, other: &Document) -> bool {
+        let (mut pa, mut pb) = (self.playback, other.playback);
+        pa.frame = 0.0;
+        pb.frame = 0.0;
+        let wa = self.active_world.and_then(|w| self.world_uid(w));
+        let wb = other.active_world.and_then(|w| other.world_uid(w));
+        if pa == pb
+            && self.render == other.render
+            && self.physics == other.physics
+            && self.design == other.design
+            && wa == wb
+        {
+            return true;
+        }
+        self.settings_text() == other.settings_text()
     }
 
     /// The scene settings a session shares, as text to compare. Not the
@@ -345,7 +362,11 @@ impl Document {
                 Some(id) => {
                     if fresh(K::Mesh, entry.uid) {
                         let mine = &mut self.meshes[id];
-                        mine.data = entry.data.clone();
+                        if !Arc::ptr_eq(&mine.data, &entry.data) {
+                            let mut incoming = (*entry.data).clone();
+                            incoming.share_unchanged_from(&mine.data);
+                            mine.data = Arc::new(incoming);
+                        }
                         mine.slots = slots;
                     }
                     id

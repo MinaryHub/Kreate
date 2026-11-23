@@ -934,6 +934,34 @@ impl Document {
         self.objects.get_mut(id).map(Arc::make_mut)
     }
 
+    /// Approximate heap bytes owned *exclusively* by this `Document` snapshot.
+    ///
+    /// Shared datablocks (`Arc::strong_count > 1`) cost only their arena slot
+    /// here; once a subsequent edit copies-on-write an object, mesh array or
+    /// image tile, the old snapshot becomes its sole owner (`strong_count == 1`)
+    /// and its true byte cost is reported to the undo budget.
+    pub fn uniquely_held_bytes(&self) -> usize {
+        let mut total = std::mem::size_of::<Document>()
+            + (self.objects.len() + self.meshes.len()) * std::mem::size_of::<usize>() * 8;
+        for entry in self.meshes.values() {
+            if Arc::strong_count(&entry.data) == 1 {
+                total += entry.data.uniquely_held_bytes();
+            }
+        }
+        for object in self.objects.values() {
+            if Arc::strong_count(object) == 1 {
+                total += std::mem::size_of::<Object>()
+                    + object
+                        .drawing
+                        .as_deref()
+                        .map_or(0, crate::drawing::Drawing::approx_bytes)
+                    + object.features.capacity() * std::mem::size_of::<crate::feature::Feature>()
+                    + object.sketch.capacity() * std::mem::size_of::<crate::sketch::Constraint>();
+            }
+        }
+        total
+    }
+
     // --- objects ------------------------------------------------------------
 
     /// Adds an object, numbered (`.001`) if another object has its name.
