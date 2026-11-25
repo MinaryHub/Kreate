@@ -37,16 +37,32 @@ pub enum GizmoHandle {
     AxisX,
     AxisY,
     AxisZ,
+    /// Slides/scales in the YZ plane (excludes X).
+    PlaneYZ,
+    /// Slides/scales in the XZ plane (excludes Y).
+    PlaneXZ,
+    /// Slides/scales on the XY floor plane (excludes Z).
+    PlaneXY,
 }
 
 impl GizmoHandle {
-    /// Axis index (`0 = X`, `1 = Y`, `2 = Z`), or `None` for the center handle.
+    /// Single-axis index (`0 = X`, `1 = Y`, `2 = Z`), if this is a 1D axis handle.
     pub fn axis_index(self) -> Option<usize> {
         match self {
-            Self::Center => None,
             Self::AxisX => Some(0),
             Self::AxisY => Some(1),
             Self::AxisZ => Some(2),
+            Self::Center | Self::PlaneYZ | Self::PlaneXZ | Self::PlaneXY => None,
+        }
+    }
+
+    /// Excluded normal axis (`0 = X`, `1 = Y`, `2 = Z`), if this is a 2D planar handle.
+    pub fn excluded_axis_index(self) -> Option<usize> {
+        match self {
+            Self::PlaneYZ => Some(0),
+            Self::PlaneXZ => Some(1),
+            Self::PlaneXY => Some(2),
+            Self::Center | Self::AxisX | Self::AxisY | Self::AxisZ => None,
         }
     }
 }
@@ -55,6 +71,8 @@ const ARM_SCREEN_PT: f32 = 68.0;
 const INNER_GAP_PT: f32 = 11.0;
 const CENTER_RADIUS_PT: f32 = 8.5;
 const HIT_RADIUS_PT: f32 = 9.5;
+const PLANE_OFFSET_FRAC: f64 = 0.34;
+const PLANE_HALF_FRAC: f64 = 0.085;
 const RING_SEGMENTS: usize = 48;
 
 fn axis_color(axis: usize, active: bool) -> Color32 {
@@ -74,6 +92,37 @@ fn handle_for_axis(axis: usize) -> GizmoHandle {
         1 => GizmoHandle::AxisY,
         _ => GizmoHandle::AxisZ,
     }
+}
+
+fn handle_for_plane(excluded_axis: usize) -> GizmoHandle {
+    match excluded_axis {
+        0 => GizmoHandle::PlaneYZ,
+        1 => GizmoHandle::PlaneXZ,
+        _ => GizmoHandle::PlaneXY,
+    }
+}
+
+fn plane_quad(
+    projector: &Projector,
+    pivot: DVec3,
+    axes: &[DVec3; 3],
+    arm: f64,
+    excluded: usize,
+) -> Option<[Pos2; 4]> {
+    let u = axes[(excluded + 1) % 3];
+    let v = axes[(excluded + 2) % 3];
+    let lo = PLANE_OFFSET_FRAC - PLANE_HALF_FRAC;
+    let hi = PLANE_OFFSET_FRAC + PLANE_HALF_FRAC;
+    let p0 = projector.project(pivot + (u * lo + v * lo) * arm)?;
+    let p1 = projector.project(pivot + (u * hi + v * lo) * arm)?;
+    let p2 = projector.project(pivot + (u * hi + v * hi) * arm)?;
+    let p3 = projector.project(pivot + (u * lo + v * hi) * arm)?;
+    // Skip edge-on planes that collapse into a thin sliver.
+    let area2 = ((p1 - p0).x * (p3 - p0).y - (p1 - p0).y * (p3 - p0).x).abs();
+    if area2 < 18.0 {
+        return None;
+    }
+    Some([p0, p1, p2, p3])
 }
 
 /// World-space length corresponding to `screen_pt` interface points at `pivot`.
@@ -130,6 +179,18 @@ pub fn hit_test(
 
     match kind {
         GizmoKind::Move | GizmoKind::Scale => {
+            for excluded in 0..3 {
+                if let Some(q) = plane_quad(projector, pivot, &axes, arm, excluded) {
+                    let mid = Pos2::new(
+                        (q[0].x + q[1].x + q[2].x + q[3].x) * 0.25,
+                        (q[0].y + q[1].y + q[2].y + q[3].y) * 0.25,
+                    );
+                    let d = cursor.distance(mid);
+                    if d <= 8.0 {
+                        consider(d * 0.9, handle_for_plane(excluded));
+                    }
+                }
+            }
             for (i, dir) in axes.iter().enumerate() {
                 let Some(tip) = projector.project(pivot + *dir * arm) else {
                     continue;
@@ -201,6 +262,24 @@ pub fn draw(
 
     match kind {
         GizmoKind::Move | GizmoKind::Scale => {
+            for excluded in 0..3 {
+                if let Some(q) = plane_quad(projector, pivot, &axes, arm, excluded) {
+                    let is_hot = active == Some(handle_for_plane(excluded));
+                    let stroke_col = axis_color(excluded, is_hot);
+                    let fill_col = Color32::from_rgba_unmultiplied(
+                        stroke_col.r(),
+                        stroke_col.g(),
+                        stroke_col.b(),
+                        if is_hot { 150 } else { 72 },
+                    );
+                    painter.add(egui::Shape::convex_polygon(
+                        q.to_vec(),
+                        fill_col,
+                        Stroke::new(if is_hot { 2.0 } else { 1.2 }, stroke_col),
+                    ));
+                }
+            }
+
             // Draw back-most axes first so front-most handles sit cleanly on top.
             let mut order = [0usize, 1, 2];
             order.sort_by(|&a, &b| {

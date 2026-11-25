@@ -11,7 +11,10 @@ impl App {
         if self.render_job.is_some() || self.rendering_still || self.gfx.is_none() {
             return;
         }
-        let Some(camera) = self.scene_camera(None) else {
+        let Some(camera) = self
+            .scene_camera(None)
+            .or_else(|| self.align_or_create_camera_to_view())
+        else {
             self.status("there is no camera to render through: add one with Add > Camera");
             return;
         };
@@ -722,10 +725,19 @@ impl App {
         if self.gfx.is_none() {
             return Err("the window is not open yet".into());
         }
-        let object = self.scene_camera(camera).ok_or(match camera {
-            Some(n) => format!("no camera called {n:?}"),
-            None => "the scene has no camera; add one with object.add_camera".to_string(),
-        })?;
+        let object = self
+            .scene_camera(camera)
+            .or_else(|| {
+                if camera.is_none() {
+                    self.align_or_create_camera_to_view()
+                } else {
+                    None
+                }
+            })
+            .ok_or(match camera {
+                Some(n) => format!("no camera called {n:?}"),
+                None => "the scene has no camera; add one with object.add_camera".to_string(),
+            })?;
         let size = (width.clamp(16, 8192), height.clamp(16, 8192));
 
         // Everything this changes, to put back.

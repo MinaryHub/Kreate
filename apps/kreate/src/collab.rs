@@ -31,6 +31,9 @@ impl App {
     }
 
     pub(super) fn collab_join(&mut self, name: String, address: String, key: String) {
+        if !self.confirm_discarding_changes("unsaved-what-open") {
+            return;
+        }
         self.collab_leave_quietly();
         save_name(&name);
         match Session::join(&address, &name, &key) {
@@ -161,7 +164,7 @@ impl App {
             live,
             hosting: session.is_hosting(),
             address: session.address.clone(),
-            key: String::new(),
+            key: self.ui.collab.key.clone(),
             color: session.color,
             peers: session
                 .peers

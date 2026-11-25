@@ -60,6 +60,8 @@ pub enum SheetEdit {
     Move {
         offset: f64,
     },
+    /// Duplicate selected keys (`Shift+D` or context menu).
+    Duplicate,
     Delete,
     /// `anim.keys_interpolation`'s order: constant, linear, Bézier.
     Interpolation(u32),
@@ -67,12 +69,15 @@ pub enum SheetEdit {
 }
 
 /// The panel's strings.
+#[derive(Default)]
 pub struct SheetText {
     pub empty: String,
     pub interpolation: String,
     pub constant: String,
     pub linear: String,
     pub bezier: String,
+    pub duplicate: String,
+    pub delete: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -542,6 +547,14 @@ pub fn dope_sheet(
         if pressed(Key::X) || pressed(Key::Delete) {
             out.push(SheetEdit::Delete);
         }
+        if shift && pressed(Key::D) {
+            out.push(SheetEdit::Duplicate);
+            if let Some(p) = pointer.or_else(|| ui.input(|i| i.pointer.hover_pos())) {
+                state.drag = Drag::Grab {
+                    from: layout.frame(p.x),
+                };
+            }
+        }
         if pressed(Key::G) {
             if let Some(p) = pointer.or_else(|| ui.input(|i| i.pointer.hover_pos())) {
                 state.drag = Drag::Grab {
@@ -553,8 +566,11 @@ pub fn dope_sheet(
             state.menu = pointer.or_else(|| ui.input(|i| i.pointer.hover_pos()));
         }
     }
+    if response.secondary_clicked() && state.drag == Drag::None {
+        state.menu = pointer.or_else(|| ui.input(|i| i.pointer.hover_pos()));
+    }
 
-    // --- the interpolation menu ------------------------------------------------------
+    // --- the context / interpolation menu --------------------------------------------
     if let Some(at) = state.menu {
         let mut close = false;
         let area = egui::Area::new(ui.id().with("sheet-interpolation"))
@@ -562,6 +578,17 @@ pub fn dope_sheet(
             .fixed_pos(at)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if !text.duplicate.is_empty() && ui.button(&text.duplicate).clicked() {
+                        out.push(SheetEdit::Duplicate);
+                        close = true;
+                    }
+                    if !text.delete.is_empty() && ui.button(&text.delete).clicked() {
+                        out.push(SheetEdit::Delete);
+                        close = true;
+                    }
+                    if !text.duplicate.is_empty() || !text.delete.is_empty() {
+                        ui.separator();
+                    }
                     ui.label(egui::RichText::new(&text.interpolation).strong());
                     ui.separator();
                     for (i, label) in [&text.constant, &text.linear, &text.bezier]
@@ -659,6 +686,8 @@ mod tests {
                 constant: "C".into(),
                 linear: "L".into(),
                 bezier: "B".into(),
+                duplicate: "Dup".into(),
+                delete: "Del".into(),
             };
             let mut out = Vec::new();
             let (state, view) = (&mut self.state, &self.view);

@@ -2290,6 +2290,7 @@ fn shot_timeline() {
                 frame: 24.0,
                 start: 1,
                 end: 120,
+                fps: 24.0,
                 playing: false,
                 autokey: true,
                 keys: vec![1.0, 24.0, 60.0, 96.0],

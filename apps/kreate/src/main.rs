@@ -2740,6 +2740,35 @@ impl App {
     /// Falls back to the world axes when there is nothing to ask, so a local
     /// constraint always has *some* meaning rather than collapsing to zero.
     fn selection_basis(&self) -> [Vec3; 3] {
+        if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Bones {
+            if let Some(active) = kreate_ops::ops::pose::posed_object(&self.doc) {
+                if let (Some((_, armature)), Some(obj)) =
+                    (self.doc.armature_of(active), self.doc.object(active))
+                {
+                    let frames = self.doc.posed_bones(active);
+                    let bone_idx = obj
+                        .pose
+                        .active
+                        .as_deref()
+                        .and_then(|name| armature.bones.iter().position(|b| b.name == name))
+                        .or_else(|| {
+                            (0..armature.bones.len())
+                                .find(|&i| obj.pose.is_selected(&armature.bones[i].name))
+                        });
+                    if let Some(frame) = bone_idx.and_then(|i| frames.get(i)) {
+                        let m = frame.matrix3;
+                        return [
+                            Vec3::new(m.x_axis.x as f32, m.x_axis.y as f32, m.x_axis.z as f32)
+                                .normalize_or(Vec3::X),
+                            Vec3::new(m.y_axis.x as f32, m.y_axis.y as f32, m.y_axis.z as f32)
+                                .normalize_or(Vec3::Y),
+                            Vec3::new(m.z_axis.x as f32, m.z_axis.y as f32, m.z_axis.z as f32)
+                                .normalize_or(Vec3::Z),
+                        ];
+                    }
+                }
+            }
+        }
         let world = self
             .doc
             .selection
@@ -3102,10 +3131,10 @@ impl App {
         // starts. Read once here rather than waiting for the next modifier
         // event, which might never come.
         gesture.set_snap_inverted(self.input.ctrl_down);
-        gesture.set_first_orientation(if matches!(self.ui.tools.orientation, 1 | 2) {
-            kreate::modal::Orientation::Local
-        } else {
-            kreate::modal::Orientation::Global
+        gesture.set_first_orientation(match self.ui.tools.orientation {
+            1 => kreate::modal::Orientation::Local,
+            2 => kreate::modal::Orientation::Cursor,
+            _ => kreate::modal::Orientation::Global,
         });
         // Proportional editing is meaningless in object mode: there is no
         // neighbouring geometry to fall off towards, only other objects, and
@@ -3589,13 +3618,15 @@ impl App {
         };
         self.begin_gesture(modal_kind);
         if let Some((gesture, _)) = self.gesture.as_mut() {
+            let axes = [
+                kreate::modal::Axis::X,
+                kreate::modal::Axis::Y,
+                kreate::modal::Axis::Z,
+            ];
             if let Some(axis_idx) = handle.axis_index() {
-                let axis = [
-                    kreate::modal::Axis::X,
-                    kreate::modal::Axis::Y,
-                    kreate::modal::Axis::Z,
-                ][axis_idx];
-                gesture.cycle_axis(axis);
+                gesture.cycle_axis(axes[axis_idx]);
+            } else if let Some(excluded_idx) = handle.excluded_axis_index() {
+                gesture.exclude_axis(axes[excluded_idx]);
             }
             self.gizmo_drag = Some(handle);
             self.drive_gesture();
@@ -4154,6 +4185,12 @@ impl App {
             return;
         };
         if !same_view(&self.camera, &pose) {
+            if self.ui.tools.lock_camera_to_view {
+                self.place_camera_object_at_view(object);
+                self.camera_view_pose = Some(self.camera);
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+                return;
+            }
             return leave(self);
         }
         // A marker cuts to another camera: the view cuts with it, as the
@@ -4172,6 +4209,57 @@ impl App {
             self.camera_view_pose = Some(now);
             self.redraw.set(RedrawReason::CAMERA_MOVED);
         }
+    }
+
+    fn place_camera_object_at_view(&mut self, object: kreate_scene::document::ObjectId) {
+        let eye = self.camera.eye();
+        let rot = self.camera.rotation.normalize();
+        let above_inv = self.doc.above(object).inverse();
+        let (_, parent_rot, _) = self.doc.above(object).to_scale_rotation_translation();
+        let local_pos = if above_inv.is_finite() {
+            above_inv.transform_point3(eye)
+        } else {
+            eye
+        };
+        let local_rot = (parent_rot.inverse() * rot).normalize();
+        if let Some(o) = self.doc.object_mut(object) {
+            o.transform.translation = local_pos;
+            o.transform.rotation = local_rot;
+        }
+    }
+
+    /// Aligns the scene camera to the current viewport view, or creates a new
+    /// camera at the current viewport view if the scene has none yet.
+    pub(crate) fn align_or_create_camera_to_view(
+        &mut self,
+    ) -> Option<kreate_scene::document::ObjectId> {
+        let existing = self.scene_camera(None);
+        let cam_id = match existing {
+            Some(id) => id,
+            None => {
+                let prev_selection = self.doc.selection.clone();
+                let eye = self.camera.eye();
+                let mut p = PropertyMap::new();
+                p.set("location", PropertyValue::Vec3([eye.x, eye.y, eye.z]));
+                self.run_op("object.add_camera", p);
+                let created = self.scene_camera(None)?;
+                if !prev_selection.is_empty() {
+                    self.doc.selection = prev_selection;
+                }
+                created
+            }
+        };
+        self.place_camera_object_at_view(cam_id);
+        let destination = self.view_through(cam_id);
+        if self.camera_view.is_none() {
+            self.camera_view = Some(self.camera);
+        }
+        self.camera_view_object = Some(cam_id);
+        self.camera_view_pose = Some(destination);
+        self.redraw.set(RedrawReason::SCENE_CHANGED);
+        self.redraw.set(RedrawReason::CAMERA_MOVED);
+        self.status("aligned camera to current view");
+        Some(cam_id)
     }
 
     /// The camera object to look through: the one called `name`; or else
@@ -4839,21 +4927,54 @@ impl App {
         }
     }
 
-    /// Every shown mesh object as it stands, for a print: its evaluated mesh
-    /// (modifiers applied, not cut by a section view) and where it is.
+    /// Every shown geometry object as it stands, for a print: its evaluated mesh
+    /// (CAD features, modifiers, curves, and 3D text applied; not cut by a section
+    /// view) and where it is.
     fn printable_parts(&self) -> Vec<(String, Arc<MeshData>, glam::DAffine3)> {
         self.evaluated
             .iter()
             .filter(|(id, _)| self.doc.is_shown(*id))
             .filter_map(|(id, mesh)| {
                 let object = self.doc.object(*id)?;
-                object.mesh()?;
                 let whole = self
                     .sectioned
                     .iter()
                     .find(|(_, _, out)| Arc::ptr_eq(out, mesh))
                     .map(|(input, _, _)| input.clone())
                     .unwrap_or_else(|| mesh.clone());
+                if whole.is_empty() {
+                    return None;
+                }
+                Some((object.name.clone(), whole, self.doc.world_transform(*id)))
+            })
+            .collect()
+    }
+
+    fn printable_parts_filtered(
+        &mut self,
+        selected_only: bool,
+    ) -> Vec<(String, Arc<MeshData>, glam::DAffine3)> {
+        self.evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
+        self.evaluated
+            .iter()
+            .filter(|(id, _)| {
+                if selected_only {
+                    self.doc.selection.objects.contains(id)
+                } else {
+                    self.doc.is_shown(*id)
+                }
+            })
+            .filter_map(|(id, mesh)| {
+                let object = self.doc.object(*id)?;
+                let whole = self
+                    .sectioned
+                    .iter()
+                    .find(|(_, _, out)| Arc::ptr_eq(out, mesh))
+                    .map(|(input, _, _)| input.clone())
+                    .unwrap_or_else(|| mesh.clone());
+                if whole.is_empty() {
+                    return None;
+                }
                 Some((object.name.clone(), whole, self.doc.world_transform(*id)))
             })
             .collect()
@@ -9245,8 +9366,20 @@ impl App {
             _ => None,
         };
         if let Some(axis) = axis {
+            let shift = self.input.shift_down;
             if let Some((gesture, _)) = &mut self.gesture {
-                gesture.cycle_axis(axis);
+                if shift
+                    && matches!(
+                        gesture.kind,
+                        kreate::modal::Kind::Move
+                            | kreate::modal::Kind::ExtrudeFree
+                            | kreate::modal::Kind::Scale
+                    )
+                {
+                    gesture.exclude_axis(axis);
+                } else {
+                    gesture.cycle_axis(axis);
+                }
             }
             self.drive_gesture();
             return true;
@@ -9924,6 +10057,24 @@ impl App {
                         ));
                     }
                 }
+                Command::AssetDrop { index, screen_pos } => {
+                    self.handle_asset_drop(index, screen_pos);
+                }
+                Command::FilletConfirm { radius_text } => {
+                    if let Some(tool) = self.fillet_tool.as_mut() {
+                        tool.typed = radius_text;
+                    }
+                    self.finish_fillet();
+                }
+                Command::FilletCancel => {
+                    self.fillet_tool = None;
+                    self.ui.fillet_dialog = None;
+                    self.ui.edges_hover.clear();
+                    self.ui.edges_picked.clear();
+                    let message = self.ui.catalog.get("fillet-cancelled");
+                    self.status(&message);
+                    self.redraw.set(RedrawReason::UI);
+                }
                 Command::AssetAddFolder => {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                         if !self.ui.asset_folders.contains(&folder) {
@@ -9963,21 +10114,61 @@ impl App {
                     }
                 }
                 Command::ExportFormat { index } => {
-                    if let Some(format) = kreate::formats::EXPORT.get(index) {
-                        let stem = self
-                            .file
-                            .path()
-                            .and_then(|p| p.file_stem())
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "untitled".into());
+                    self.ui.export_dialog = Some(shell::ExportDialogState {
+                        format_index: Some(index),
+                        selected_only: false,
+                        unit_choice: 0,
+                    });
+                    self.redraw.set(RedrawReason::UI);
+                }
+                Command::ExportWithOptions {
+                    format_index,
+                    selected_only,
+                    metres_per_unit,
+                } => {
+                    self.export_dialog_run(format_index, selected_only, metres_per_unit);
+                }
+                Command::PanBy { dx, dy } => {
+                    let (_, _, _, h) = self.viewport_px.unwrap_or((0.0, 0.0, 800.0, 600.0));
+                    let ppp = self.egui_ctx.pixels_per_point() as f64;
+                    let height = (h as f64).max(1.0);
+                    self.motion.interrupt(&self.camera);
+                    self.motion
+                        .target
+                        .pan((dx as f64 * ppp) / height, (dy as f64 * ppp) / height);
+                    self.redraw.set(RedrawReason::CAMERA_MOVED);
+                }
+                Command::ZoomBy { delta } => {
+                    self.motion.interrupt(&self.camera);
+                    self.motion.target.dolly(delta as f64);
+                    self.redraw.set(RedrawReason::CAMERA_MOVED);
+                }
+                Command::SaveRenderAs => {
+                    if let Some((w, h, rgba, _)) = self.last_render.clone() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter(format.name, format.extensions)
-                            .set_title(format!("Export {}", format.name))
-                            .set_file_name(format!("{stem}.{}", format.extensions[0]))
+                            .add_filter("PNG", &["png"])
+                            .add_filter("JPEG", &["jpg", "jpeg"])
+                            .set_title("Save Render As")
+                            .set_file_name("render.png")
                             .save_file()
                         {
-                            let _ = self.export_to(&path);
+                            match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
+                                Ok(()) => self.status(&format!("saved {}", path.display())),
+                                Err(e) => {
+                                    self.status(&format!("cannot save {}: {e}", path.display()))
+                                }
+                            }
                         }
+                    }
+                }
+                Command::CopyRenderImage => {
+                    if let Some((w, h, rgba, _)) = &self.last_render {
+                        let img = egui::ColorImage::from_rgba_unmultiplied(
+                            [*w as usize, *h as usize],
+                            rgba,
+                        );
+                        self.egui_ctx.copy_image(img);
+                        self.status("copied rendered image to clipboard");
                     }
                 }
                 Command::ExportSheet { pdf } => self.export_sheet(pdf),
@@ -10027,11 +10218,16 @@ impl App {
                     {
                         continue;
                     }
-                    // The recovered document deliberately keeps *no* path: it
-                    // came from an autosave, and inheriting that path would make
-                    // the next Ctrl+S write back into the autosave directory
-                    // instead of asking where the document belongs.
-                    self.file = DocumentFile::new();
+                    if let Some(orig) = self.file.recovered_original_path() {
+                        let mut fresh = DocumentFile::new();
+                        if let Some(v) = self.file.view() {
+                            fresh.set_view(&v);
+                        }
+                        fresh.adopt_recovered_path(orig, &self.doc);
+                        self.file = fresh;
+                    } else {
+                        self.file = DocumentFile::new();
+                    }
                     self.recovered_backup = Some(path.clone());
                     self.recoverable.retain(|r| r.path != path);
                 }
@@ -10357,7 +10553,17 @@ impl App {
             s.push(".kreate");
             std::path::PathBuf::from(s)
         };
-        let fragment = self.doc.extract_objects(&self.doc.selection.objects);
+        let fragment = if self
+            .doc
+            .selection
+            .objects
+            .iter()
+            .any(|id| self.doc.object(*id).is_some_and(|o| !o.features.is_empty()))
+        {
+            self.evaluated_export_document(true)
+        } else {
+            self.doc.extract_objects(&self.doc.selection.objects)
+        };
         let bytes =
             kreate_io::container::write(&fragment, &kreate_io::container::Manifest::default(), &[])
                 .map_err(|e| format!("cannot pack asset {}: {e}", path.display()))?;
@@ -10376,6 +10582,77 @@ impl App {
         Ok(path)
     }
 
+    fn handle_asset_drop(&mut self, index: usize, screen_pos: [f32; 2]) {
+        let Some(entry) = self.ui.asset_entries.get(index).cloned() else {
+            return;
+        };
+        let ppp = self.egui_ctx.pixels_per_point();
+        let px = (screen_pos[0] * ppp, screen_pos[1] * ppp);
+        let ndc = self.viewport_px.and_then(|(rx, ry, w, h)| {
+            let u = (px.0 - rx) / w.max(1.0);
+            let v = (px.1 - ry) / h.max(1.0);
+            ((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v))
+                .then(|| glam::Vec2::new(u * 2.0 - 1.0, 1.0 - v * 2.0))
+        });
+        let aspect = self.viewport_aspect();
+        let hit = ndc.and_then(|n| {
+            self.pick
+                .raycast_ndc(&self.doc, &self.evaluated, &self.camera, n, aspect)
+        });
+        match entry.kind {
+            kreate::assets::Kind::Material => {
+                if let Some(h) = &hit {
+                    self.doc.selection.clear();
+                    self.doc.selection.add(h.object);
+                    self.redraw.set(RedrawReason::SCENE_CHANGED);
+                }
+            }
+            kreate::assets::Kind::Model => {
+                let drop_world = if let Some(h) = &hit {
+                    h.point
+                } else if let Some(n) = ndc {
+                    let eye = self.camera.eye();
+                    let dir = self.camera.ray_direction(n, aspect).as_dvec3();
+                    if dir.z.abs() > 1e-4 {
+                        let t = -eye.z / dir.z;
+                        if t > 0.0 && t < 500.0 {
+                            eye + dir * t
+                        } else {
+                            self.camera.pivot
+                        }
+                    } else {
+                        self.camera.pivot
+                    }
+                } else {
+                    self.camera.pivot
+                };
+                self.asset_wishes.insert(
+                    entry.id.clone(),
+                    ImportWish {
+                        location: Some(drop_world),
+                        ..Default::default()
+                    },
+                );
+            }
+            kreate::assets::Kind::Hdri => {}
+        }
+        let fresh = self.ui.asset_fetching.insert(entry.id.clone());
+        if let (Some(library), true) = (&self.assets, fresh) {
+            self.ui.asset_selected = Some(entry.id.clone());
+            let size = kreate::assets::RESOLUTIONS
+                .get(self.ui.asset_resolution)
+                .copied()
+                .unwrap_or("1k");
+            library.fetch(entry.clone(), size);
+            self.ui.asset_error = None;
+            self.ui.asset_busy = Some(self.ui.catalog.format(
+                "asset-fetching",
+                kreate_i18n::TextKind::Ui,
+                &[("name", entry.name.as_str())],
+            ));
+        }
+    }
+
     /// Writes the scene to an interchange format.
     ///
     /// The other half of `load_from`, and until now it did not exist in the
@@ -10384,24 +10661,155 @@ impl App {
     /// can be reached from the interface, and a round trip that only the
     /// converter can perform is a round trip the user does not have.
     fn export_scene(&mut self) {
+        self.ui.export_dialog = Some(shell::ExportDialogState {
+            format_index: None,
+            selected_only: false,
+            unit_choice: 0,
+        });
+        self.redraw.set(RedrawReason::UI);
+    }
+
+    fn export_dialog_run(
+        &mut self,
+        format_index: Option<usize>,
+        selected_only: bool,
+        metres_per_unit: f64,
+    ) {
+        let stem = self
+            .file
+            .path()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled".into());
         let mut dialog = rfd::FileDialog::new();
-        for format in kreate::formats::EXPORT {
-            dialog = dialog.add_filter(format.name, format.extensions);
-        }
-        let Some(path) = dialog
-            .set_title("Export")
-            .set_file_name("untitled.glb")
+        let default_ext =
+            if let Some(format) = format_index.and_then(|i| kreate::formats::EXPORT.get(i)) {
+                dialog = dialog
+                    .add_filter(format.name, format.extensions)
+                    .set_title(format!("Export {}", format.name));
+                format.extensions[0]
+            } else {
+                for format in kreate::formats::EXPORT {
+                    dialog = dialog.add_filter(format.name, format.extensions);
+                }
+                dialog = dialog.set_title("Export");
+                "glb"
+            };
+        if let Some(path) = dialog
+            .set_file_name(format!("{stem}.{default_ext}"))
             .save_file()
-        else {
-            return;
-        };
-        let _ = self.export_to(&path);
+        {
+            let _ = self.export_to_opts(&path, selected_only, metres_per_unit);
+        }
+    }
+
+    /// Builds a temporary `Document` snapshot whose shown (or selected) objects
+    /// carry their evaluated `MeshData` (CAD features, modifiers, curves, 3D text)
+    /// so interchange exporters (`GLB`, `OBJ`, `USD`) write what is on screen.
+    fn evaluated_export_document(&mut self, selected_only: bool) -> Document {
+        let evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
+        let eval_map: std::collections::HashMap<ObjectId, Arc<MeshData>> = evaluated
+            .into_iter()
+            .map(|(id, m)| {
+                let whole = self
+                    .sectioned
+                    .iter()
+                    .find(|(_, _, out)| Arc::ptr_eq(out, &m))
+                    .map(|(input, _, _)| input.clone())
+                    .unwrap_or(m);
+                (id, whole)
+            })
+            .collect();
+
+        let keep: std::collections::HashSet<ObjectId> = self
+            .doc
+            .objects()
+            .filter_map(|(id, _)| {
+                let ok = if selected_only {
+                    self.doc.selection.objects.contains(&id)
+                } else {
+                    self.doc.is_shown(id)
+                };
+                ok.then_some(id)
+            })
+            .collect();
+
+        let mut doc = self.doc.clone();
+        let all_ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
+        // Detach kept children whose parent will be removed so their world transform stays intact.
+        for &id in &all_ids {
+            if keep.contains(&id) {
+                if let Some(p) = doc.object(id).and_then(|o| o.parent) {
+                    if !keep.contains(&p) {
+                        let _ = doc.set_parent(id, None);
+                    }
+                }
+            }
+        }
+        for id in all_ids {
+            if !keep.contains(&id) {
+                doc.remove_object(id);
+            }
+        }
+
+        for (id, eval_mesh) in eval_map {
+            if !keep.contains(&id) || eval_mesh.is_empty() {
+                continue;
+            }
+            let Some(old_obj) = doc.object(id).cloned() else {
+                continue;
+            };
+            let mut slots: Vec<Option<kreate_scene::document::MaterialId>> = match old_obj.mesh() {
+                Some(mid) => doc.mesh_slots(mid).to_vec(),
+                None => Vec::new(),
+            };
+            for (slot_idx, mat_opt) in old_obj.material_overrides.iter().enumerate() {
+                if let Some(mat) = *mat_opt {
+                    if slot_idx >= slots.len() {
+                        slots.resize(slot_idx + 1, None);
+                    }
+                    slots[slot_idx] = Some(mat);
+                }
+            }
+            let new_mid = doc.add_mesh((*eval_mesh).clone());
+            for (slot_idx, mat) in slots.into_iter().enumerate() {
+                doc.set_mesh_slot(new_mid, slot_idx, mat);
+            }
+            if let Some(obj) = doc.object_mut(id) {
+                obj.data = kreate_scene::document::ObjectData::Mesh(new_mid);
+                obj.modifiers.clear();
+                obj.features.clear();
+                obj.material_overrides.clear();
+            }
+        }
+        doc
     }
 
     /// Writes the scene to `path`, in the format its extension names. Says
     /// what happened.
     fn export_to(&mut self, path: &std::path::Path) -> Result<String, String> {
-        let (scene, mut notes) = kreate_io::scene_from_document(&self.doc);
+        let metres = self.doc.design.length_unit.metres();
+        self.export_to_opts(path, false, metres)
+    }
+
+    fn export_to_opts(
+        &mut self,
+        path: &std::path::Path,
+        selected_only: bool,
+        metres_per_unit: f64,
+    ) -> Result<String, String> {
+        if selected_only && self.doc.selection.is_empty() {
+            let msg = "cannot export: nothing selected".to_string();
+            self.status(&msg);
+            return Err(msg);
+        }
+        let metres_per_unit = if metres_per_unit.is_finite() && metres_per_unit > 0.0 {
+            metres_per_unit
+        } else {
+            self.doc.design.length_unit.metres()
+        };
+        let export_doc = self.evaluated_export_document(selected_only);
+        let (scene, mut notes) = kreate_io::scene_from_document(&export_doc);
         let lower = path
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -10409,17 +10817,25 @@ impl App {
         let written = match lower.as_str() {
             // For printing: every shown part as it stands — modifiers applied,
             // placed in the world — in the scene's unit.
-            // For CAD: each part a faceted solid, in the scene's unit.
+            // For CAD: each part an exact B-Rep solid when available, or a faceted solid.
             "step" | "stp" => {
-                let visible_ids: Vec<ObjectId> = self
+                let parts = self.printable_parts_filtered(selected_only);
+                let target_ids: Vec<ObjectId> = self
                     .evaluated
                     .iter()
-                    .filter(|(id, _)| self.doc.is_shown(*id))
-                    .filter_map(|(id, _)| self.doc.object(*id)?.mesh().map(|_| *id))
+                    .filter(|(id, m)| {
+                        !m.is_empty()
+                            && if selected_only {
+                                self.doc.selection.objects.contains(id)
+                            } else {
+                                self.doc.is_shown(*id)
+                            }
+                    })
+                    .map(|(id, _)| *id)
                     .collect();
                 let exact_solids: Option<Vec<kreate_occt::Shape>> =
-                    if !visible_ids.is_empty() && kreate_scene::feature::exact::enabled() {
-                        visible_ids
+                    if !target_ids.is_empty() && kreate_scene::feature::exact::enabled() {
+                        target_ids
                             .iter()
                             .map(|id| kreate_scene::feature::exact::world_solid(&self.doc, *id))
                             .collect()
@@ -10428,7 +10844,7 @@ impl App {
                     };
                 if let Some(solids) = exact_solids {
                     let refs: Vec<&kreate_occt::Shape> = solids.iter().collect();
-                    let millimetres = (self.doc.design.length_unit.metres() - 0.001).abs() < 1e-6;
+                    let millimetres = (metres_per_unit - 0.001).abs() < 1e-6;
                     let tmp = std::env::temp_dir().join(format!(
                         "kreate-step-{}-{}.step",
                         std::process::id(),
@@ -10443,7 +10859,6 @@ impl App {
                         res
                     } else {
                         let _ = std::fs::remove_file(&tmp);
-                        let parts = self.printable_parts();
                         let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
                             .iter()
                             .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
@@ -10452,33 +10867,20 @@ impl App {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        Ok(kreate_io::step::write_step(
-                            &name,
-                            &refs,
-                            self.doc.design.length_unit.metres(),
-                        )
-                        .into_bytes())
+                        Ok(kreate_io::step::write_step(&name, &refs, metres_per_unit).into_bytes())
                     }
+                } else if parts.is_empty() {
+                    Err("there is no geometry to write".to_string())
                 } else {
-                    let parts = self.printable_parts();
-                    if parts.is_empty() {
-                        Err("there is no geometry to write".to_string())
-                    } else {
-                        let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
-                            .iter()
-                            .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
-                            .collect();
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        Ok(kreate_io::step::write_step(
-                            &name,
-                            &refs,
-                            self.doc.design.length_unit.metres(),
-                        )
-                        .into_bytes())
-                    }
+                    let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
+                        .iter()
+                        .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
+                        .collect();
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    Ok(kreate_io::step::write_step(&name, &refs, metres_per_unit).into_bytes())
                 }
             }
             "csv" => Ok(self.parts_list().into_bytes()),
@@ -10496,16 +10898,12 @@ impl App {
                     _ => None,
                 };
                 match active.or(only) {
-                    Some(d) => Ok(kreate_io::dxf_write::write(
-                        d,
-                        self.doc.design.length_unit.metres(),
-                    )
-                    .into_bytes()),
+                    Some(d) => Ok(kreate_io::dxf_write::write(d, metres_per_unit).into_bytes()),
                     None => Err("select the object whose 2D drawing to write".to_string()),
                 }
             }
             "3mf" => {
-                let parts = self.printable_parts();
+                let parts = self.printable_parts_filtered(selected_only);
                 if parts.is_empty() {
                     Err("there is no geometry to write".to_string())
                 } else {
@@ -10513,10 +10911,7 @@ impl App {
                         .iter()
                         .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
                         .collect();
-                    Ok(kreate_io::threemf::write_3mf(
-                        &refs,
-                        self.doc.design.length_unit.metres(),
-                    ))
+                    Ok(kreate_io::threemf::write_3mf(&refs, metres_per_unit))
                 }
             }
             "usda" => {
@@ -10553,34 +10948,53 @@ impl App {
                     Err(e) => Err(e),
                 }
             }
-            "obj" | "stl" => {
-                // Neither format has a node, a light or a camera, so what
-                // travels is the geometry at the origin. Said out loud: a user
-                // who exports a lit scene to STL and finds one object in it
-                // should find out here rather than in the next program.
-                if !scene.lights.is_empty() || scene.nodes.len() > scene.meshes.len() {
-                    notes.push(kreate_io::LossyNote::Unsupported {
-                        what: format!("{lower} holds no hierarchy, lights or cameras"),
-                    });
-                }
-                let meshes = scene.meshes.clone();
-                if lower == "obj" {
-                    Ok(kreate_io::write_obj(&meshes, ObjOptions::default()).into_bytes())
-                } else if let Some((_, mesh)) = meshes.first() {
-                    if meshes.len() > 1 {
+            "stl" => {
+                let parts = self.printable_parts_filtered(selected_only);
+                if parts.is_empty() {
+                    Err("there is no geometry to write".to_string())
+                } else {
+                    if !scene.lights.is_empty() {
                         notes.push(kreate_io::LossyNote::Unsupported {
-                            what: format!(
-                                "STL holds one unnamed solid; {} meshes were not written",
-                                meshes.len() - 1
-                            ),
+                            what: "stl holds no lights or cameras".to_string(),
                         });
                     }
-                    let (bytes, more) =
-                        kreate_io::stl::write_stl(mesh, &kreate_io::stl::StlOptions::default());
+                    let refs: Vec<(String, &MeshData, glam::DAffine3)> = parts
+                        .iter()
+                        .map(|(name, mesh, world)| (name.clone(), &**mesh, *world))
+                        .collect();
+                    let (bytes, more) = kreate_io::stl::write_stl_parts(&refs, metres_per_unit);
                     notes.extend(more);
                     Ok(bytes)
-                } else {
+                }
+            }
+            "obj" => {
+                let parts = self.printable_parts_filtered(selected_only);
+                if parts.is_empty() {
                     Err("there is no geometry to write".to_string())
+                } else {
+                    if !scene.lights.is_empty() {
+                        notes.push(kreate_io::LossyNote::Unsupported {
+                            what: "obj holds no lights or cameras".to_string(),
+                        });
+                    }
+                    let baked: Vec<(String, MeshData)> = parts
+                        .iter()
+                        .map(|(name, mesh, world)| {
+                            let mut m = MeshData::clone(mesh);
+                            for p in m.positions_mut() {
+                                let wp = world.transform_point3(p.as_dvec3());
+                                *p = glam::Vec3::new(wp.x as f32, wp.y as f32, wp.z as f32);
+                            }
+                            (name.clone(), m)
+                        })
+                        .collect();
+                    let baked_refs: Vec<(String, &MeshData)> =
+                        baked.iter().map(|(n, m)| (n.clone(), m)).collect();
+                    let opts = ObjOptions {
+                        unit_scale: metres_per_unit.max(1e-9) as f32,
+                        ..ObjOptions::default()
+                    };
+                    Ok(kreate_io::write_obj(&baked_refs, opts).into_bytes())
                 }
             }
             _ => {
@@ -10831,11 +11245,13 @@ impl App {
                         };
                         wish.answer(answer);
                     } else if self.history.cursor() > before {
-                        // The view goes to what arrived: a CAD part is a few
-                        // centimetres across and lands as a dot on the grid,
-                        // a building out past the far edge of the view.
                         self.evaluate_scene();
-                        self.frame_selected();
+                        if wish.location.is_none() {
+                            // The view goes to what arrived: a CAD part is a few
+                            // centimetres across and lands as a dot on the grid,
+                            // a building out past the far edge of the view.
+                            self.frame_selected();
+                        }
                     }
                     self.status(&format!("added {}", path.display()));
                 }
@@ -11084,6 +11500,7 @@ impl App {
             frame: p.frame,
             start: p.start,
             end: p.end,
+            fps: p.fps,
             playing: self.playing.is_some(),
             autokey: self.autokey,
             keys,
@@ -12359,6 +12776,9 @@ impl App {
         {
             return false;
         }
+        if self.ui.nav_companion_rect.is_some_and(|r| r.contains(at)) {
+            return false;
+        }
         let Some((centre, radius)) = self.ui.gizmo_circle else {
             return true;
         };
@@ -12868,8 +13288,13 @@ impl App {
             .unwrap_or(1.0)
             .max(1.0);
         let ppp = self.egui_ctx.pixels_per_point() as f64;
-        let distance = (at - self.camera.eye()).length();
-        let per_pixel = 2.0 * (self.camera.fov_y * 0.5).tan() * distance / height;
+        let per_pixel = match self.camera.projection {
+            kreate_render::Projection::Perspective => {
+                let distance = (at - self.camera.eye()).length();
+                2.0 * (self.camera.fov_y * 0.5).tan() * distance / height
+            }
+            kreate_render::Projection::Orthographic => self.camera.ortho_height() / height,
+        };
         let radius_world = settings.radius as f64 * ppp * per_pixel;
         self.sculpt_stroke = Some(SculptStroke {
             object,
@@ -13150,8 +13575,13 @@ impl App {
             .unwrap_or(1.0)
             .max(1.0);
         let ppp = self.egui_ctx.pixels_per_point() as f64;
-        let distance = (at - self.camera.eye()).length();
-        let per_pixel = 2.0 * (self.camera.fov_y * 0.5).tan() * distance / height;
+        let per_pixel = match self.camera.projection {
+            kreate_render::Projection::Perspective => {
+                let distance = (at - self.camera.eye()).length();
+                2.0 * (self.camera.fov_y * 0.5).tan() * distance / height
+            }
+            kreate_render::Projection::Orthographic => self.camera.ortho_height() / height,
+        };
         let radius_world = self.ui.texture_paint.radius as f64 * ppp * per_pixel;
         self.texture_stroke = Some(TextureStroke {
             object,
@@ -14585,6 +15015,11 @@ impl App {
         // The sketch overlay and the feature list, likewise.
         self.update_sketch_view();
         let gizmo_target = self.current_gizmo_target();
+        let sculpt_hover_world = if self.op_ctx.mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+            self.sculpt_hit()
+        } else {
+            None
+        };
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -14748,6 +15183,21 @@ impl App {
             .unwrap_or(0) as u32;
         self.ui.tools.proportional = self.proportional.is_some();
         self.ui.tools.falloff = self.proportional_falloff;
+        if self.egui_ctx.egui_wants_keyboard_input() {
+            if let (Some(tool), Some(dlg)) = (&mut self.fillet_tool, &self.ui.fillet_dialog) {
+                tool.typed = dlg.radius_text.clone();
+            }
+        }
+        self.ui.fillet_dialog = self
+            .fillet_tool
+            .as_ref()
+            .map(|tool| shell::FilletDialogView {
+                chamfer: tool.chamfer,
+                edge_count: tool.points.len(),
+                radius_text: tool.typed.clone(),
+                unit_symbol: self.doc.design.length_unit.symbol(),
+            });
+        self.ui.sculpt_hover_world = sculpt_hover_world;
         let mut viewport_rect = egui::Rect::ZERO;
         let output = {
             let ui_state = &mut self.ui;
@@ -16789,6 +17239,54 @@ impl App {
             }
             "view.local_view" => self.toggle_local_view(),
             "view.camera" => self.toggle_camera_view(),
+            "view.camera_align_to_view" => {
+                let _ = self.align_or_create_camera_to_view();
+            }
+            "view.axis" => {
+                let which = action
+                    .params
+                    .get("axis")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                let destination = match which {
+                    0 => self.camera.looking_along(kreate_render::ViewAxis::NegY),
+                    1 => self.camera.looking_along(kreate_render::ViewAxis::PosY),
+                    2 => self.camera.looking_along(kreate_render::ViewAxis::PosX),
+                    3 => self.camera.looking_along(kreate_render::ViewAxis::NegX),
+                    4 => self.camera.looking_along(kreate_render::ViewAxis::PosZ),
+                    5 => self.camera.looking_along(kreate_render::ViewAxis::NegZ),
+                    _ => {
+                        let toward_eye = self.camera.forward();
+                        let up_ref = if toward_eye.dot(glam::DVec3::Z).abs() > 0.99 {
+                            glam::DVec3::Y
+                        } else {
+                            glam::DVec3::Z
+                        };
+                        let right = up_ref.cross(toward_eye).normalize();
+                        let up = toward_eye.cross(right);
+                        let basis = glam::DMat3::from_cols(right, up, toward_eye);
+                        kreate_render::Camera {
+                            rotation: glam::DQuat::from_mat3(&basis).normalize(),
+                            ..self.camera
+                        }
+                    }
+                };
+                self.motion
+                    .animate_to(self.camera, destination, kreate_render::DEFAULT_TRANSITION);
+                self.redraw.set(RedrawReason::CAMERA_MOVED);
+            }
+            "app.preferences" => {
+                self.ui.preferences_open = !self.ui.preferences_open;
+                self.redraw.set(RedrawReason::UI);
+            }
+            "file.export_selected" => {
+                self.ui.export_dialog = Some(shell::ExportDialogState {
+                    format_index: None,
+                    selected_only: true,
+                    unit_choice: 0,
+                });
+                self.redraw.set(RedrawReason::UI);
+            }
             // The keys' boolean, like the menu's: chosen in the viewport.
             "object.boolean" => {
                 let operation = action.params.get("operation").and_then(|v| match v {
@@ -17464,6 +17962,18 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         KeyCode::NumpadDivide => "NumpadDivide",
         KeyCode::NumpadDecimal => "NumpadDecimal",
         KeyCode::Numpad0 => "Numpad0",
+        KeyCode::Numpad1 => "Numpad1",
+        KeyCode::Numpad2 => "Numpad2",
+        KeyCode::Numpad3 => "Numpad3",
+        KeyCode::Numpad4 => "Numpad4",
+        KeyCode::Numpad5 => "Numpad5",
+        KeyCode::Numpad6 => "Numpad6",
+        KeyCode::Numpad7 => "Numpad7",
+        KeyCode::Numpad8 => "Numpad8",
+        KeyCode::Numpad9 => "Numpad9",
+        KeyCode::Period => "Period",
+        KeyCode::Comma => "Comma",
+        KeyCode::Home => "Home",
         KeyCode::Slash => "Slash",
         KeyCode::NumpadSubtract => "NumpadSubtract",
         KeyCode::Equal => "Equal",
@@ -18320,6 +18830,7 @@ impl ApplicationHandler for App {
                 self.input.scroll += y;
             }
             WindowEvent::MouseWheel { delta, .. } if self.cursor_in_viewport() => {
+                let is_pixel = matches!(delta, MouseScrollDelta::PixelDelta(_));
                 let (x, y) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
                     // A precision trackpad reports pixels. Scaled to notches so
@@ -18334,7 +18845,19 @@ impl ApplicationHandler for App {
                     c.radius = (c.radius * 1.15f32.powf(y as f32)).clamp(4.0, 800.0);
                     self.show_circle();
                 } else if !self.adjust_loop_cuts(y as f32) && !self.adjust_proportional(y as f32) {
-                    self.apply_wheel(x, y);
+                    if is_pixel
+                        && self.input.shift_down
+                        && !self.input.ctrl_down
+                        && !self.input.alt_down
+                    {
+                        if x != 0.0 || y != 0.0 {
+                            self.input.note_event();
+                            self.input.pan_delta.0 += x * WHEEL_PAN_PIXELS;
+                            self.input.pan_delta.1 += y * WHEEL_PAN_PIXELS;
+                        }
+                    } else {
+                        self.apply_wheel(x, y);
+                    }
                 }
             }
 

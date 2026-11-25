@@ -103,6 +103,15 @@ fn navigation(preset: Preset) -> Vec<Binding> {
     let alt_fallback = || {
         vec![
             orbit("view.orbit.alt_lmb", MouseButton::Left, Modifiers::alt()),
+            pan(
+                "view.pan.shift_alt_lmb",
+                MouseButton::Left,
+                Modifiers {
+                    shift: true,
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
             pan("view.pan.alt_mmb", MouseButton::Middle, Modifiers::alt()),
             dolly("view.dolly.alt_rmb", MouseButton::Right, Modifiers::alt()),
         ]
@@ -143,10 +152,19 @@ fn navigation(preset: Preset) -> Vec<Binding> {
         Preset::Max => vec![
             pan("view.pan.mmb", MouseButton::Middle, Modifiers::NONE),
             orbit("view.orbit.alt_mmb", MouseButton::Middle, Modifiers::alt()),
-            // Alt+LMB orbits here too, for the same reason it does in the
-            // default preset: a mouse without a middle button must still be able
-            // to turn the view.
+            // Alt+LMB orbits and Shift+Alt+LMB pans here too, for the same
+            // reason as in the default preset: a mouse or trackpad without a
+            // middle button must still be able to turn and move the view.
             orbit("view.orbit.alt_lmb", MouseButton::Left, Modifiers::alt()),
+            pan(
+                "view.pan.shift_alt_lmb",
+                MouseButton::Left,
+                Modifiers {
+                    shift: true,
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
             dolly("view.dolly.alt_rmb", MouseButton::Right, Modifiers::alt()),
             wheel,
             shift_wheel,
@@ -252,8 +270,21 @@ fn common() -> Vec<Binding> {
             Action::new("app.search"),
         ),
         key(
+            "app.preferences",
+            "Comma",
+            Context::Global,
+            Action::new("app.preferences"),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
             "view.frame_all",
             "F",
+            Context::Viewport,
+            Action::new("view.frame_all"),
+        ),
+        key(
+            "view.frame_all_home",
+            "Home",
             Context::Viewport,
             Action::new("view.frame_all"),
         ),
@@ -417,7 +448,7 @@ fn common() -> Vec<Binding> {
             Context::Viewport,
             Action::new("view.camera"),
         ),
-        // Blender's Set Active Object as Camera.
+        // Blender's Set Active Object as Camera, and Align Active Camera to View.
         key(
             "view.camera_set_active",
             "Numpad0",
@@ -425,6 +456,68 @@ fn common() -> Vec<Binding> {
             Action::new("view.camera_set_active"),
         )
         .with_modifiers(Modifiers::ctrl()),
+        key(
+            "view.camera_align_to_view",
+            "Numpad0",
+            Context::Viewport,
+            Action::new("view.camera_align_to_view"),
+        )
+        .with_modifiers(Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        }),
+        key(
+            "view.axis_front",
+            "Numpad1",
+            Context::Viewport,
+            Action::new("view.axis").with("axis", PropertyValue::Int(0)),
+        ),
+        key(
+            "view.axis_back",
+            "Numpad1",
+            Context::Viewport,
+            Action::new("view.axis").with("axis", PropertyValue::Int(1)),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "view.axis_right",
+            "Numpad3",
+            Context::Viewport,
+            Action::new("view.axis").with("axis", PropertyValue::Int(2)),
+        ),
+        key(
+            "view.axis_left",
+            "Numpad3",
+            Context::Viewport,
+            Action::new("view.axis").with("axis", PropertyValue::Int(3)),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "view.projection_numpad5",
+            "Numpad5",
+            Context::Viewport,
+            Action::new("view.toggle_projection"),
+        ),
+        key(
+            "view.axis_top",
+            "Numpad7",
+            Context::Viewport,
+            Action::new("view.axis").with("axis", PropertyValue::Int(4)),
+        ),
+        key(
+            "view.axis_bottom",
+            "Numpad7",
+            Context::Viewport,
+            Action::new("view.axis").with("axis", PropertyValue::Int(5)),
+        )
+        .with_modifiers(Modifiers::ctrl()),
+        key(
+            "view.axis_opposite",
+            "Numpad9",
+            Context::Viewport,
+            Action::new("view.axis").with("axis", PropertyValue::Int(6)),
+        ),
         // Blender's Alt+Z: see through the surfaces, and select through them.
         key(
             "view.xray",
@@ -436,6 +529,12 @@ fn common() -> Vec<Binding> {
         key(
             "view.frame_selected",
             "NumpadDecimal",
+            Context::Viewport,
+            Action::new("view.frame_selected"),
+        ),
+        key(
+            "view.frame_selected_period",
+            "Period",
             Context::Viewport,
             Action::new("view.frame_selected"),
         ),
@@ -547,7 +646,21 @@ fn common() -> Vec<Binding> {
             Context::UvEditor,
             Action::new("uv.smart_project"),
         ),
-        key("uv.pack", "P", Context::UvEditor, Action::new("uv.pack")),
+        key(
+            "uv.pin",
+            "P",
+            Context::UvEditor,
+            Action::new("uv.pin").with("clear", PropertyValue::Bool(false)),
+        ),
+        key(
+            "uv.unpin",
+            "P",
+            Context::UvEditor,
+            Action::new("uv.pin").with("clear", PropertyValue::Bool(true)),
+        )
+        .with_modifiers(Modifiers::alt()),
+        key("uv.pack", "P", Context::UvEditor, Action::new("uv.pack"))
+            .with_modifiers(Modifiers::ctrl()),
         key(
             "uv.select_all",
             "A",
@@ -1772,6 +1885,16 @@ mod tests {
                 Context::UvEditor,
                 &Input::key("P"),
                 Modifiers::NONE,
+                EventKind::Press
+            )
+            .map(|a| a.op_id),
+            Some("uv.pin".to_string())
+        );
+        assert_eq!(
+            k.resolve(
+                Context::UvEditor,
+                &Input::key("P"),
+                Modifiers::ctrl(),
                 EventKind::Press
             )
             .map(|a| a.op_id),

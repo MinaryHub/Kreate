@@ -10,6 +10,67 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- Planar handles (`XY`, `XZ`, `YZ`) on the 3D Move and Scale gizmos, a uniform
+  centre ring on the Scale gizmo, and `Shift+X` / `Shift+Y` / `Shift+Z`
+  single-axis exclusion during modal Move and Scale (`G` / `S`) in both Global
+  and Local orientations.
+- Five viewport navigation companion buttons below the Navigation Gizmo (drag
+  to Pan, drag to Zoom, Frame Selected, Perspective / Orthographic toggle, and
+  Camera View toggle) for trackpad, mouse-only and tablet workflows.
+- `Object ▸ Align Objects…` (Min, Center, Max along X, Y or Z) and `Object ▸
+  Place on Surface` to rest selected objects cleanly onto the ground plane or
+  another object beneath them.
+- A quick surface controls strip directly in `Properties ▸ Material` (Base
+  Colour, Metallic, Roughness, Transmission, Alpha and Emission Strength) so
+  everyday Principled BSDF materials can be tuned without opening the Shader
+  Editor, plus drag-to-assign material assets onto objects in the 3D viewport.
+- A UV Editor header toolbar (`Unwrap`, `Smart UV`, `Pack`, `Pin`, `Unpin`,
+  `Sticky` and `Checker`), live active-material base-colour texture backdrop in
+  the UV canvas, and 3D symmetry mirror dots on the mesh surface during Sculpt
+  mode when X/Y/Z mirror symmetry is active.
+- Direct editing of CAD Extrude `Through All`, `Taper` angle and Boolean
+  `Join / Cut / Intersect` operation when double-clicking a feature in the
+  Timeline, an STL import unit scale selector (`mm`, `m`, `cm`, `in`) with
+  bounding-box dimensions preview, and a render progress status indicator with
+  one-click `Save As…` in the Render Viewer.
+- Clickable crash-recovery restoration directly from the top app bar (`Recover
+  Autosave`) and status bar when unsaved backups are found on startup.
+- Dope Sheet keyframe box-marquee selection, `G` horizontal frame dragging and
+  `X` / `Delete` keyframe deletion, plus a Timeline `FPS` preset and custom
+  frame-rate selector (`24`, `25`, `30`, `60` or custom).
+- Starter prompt chips and a clear-conversation button in the Claude assistant
+  panel, one-click `Copy Code` + `Follow User` camera sync in live shared
+  editing, and a `Space` / `Enter` shortcut to start a 3D walkthrough from the
+  Welcome tour.
+
+### Changed
+
+- Outliner collections now fold and unfold cleanly, have a header `+` button to
+  create collections directly, keep world transform in place when dragging
+  objects into or out of parents, and can be deleted or unlinked from a
+  right-click context menu.
+- 2D Sketch constraints automatically spread apart instead of stacking on top
+  of shared corners, and distance, radius, diameter and angle dimensions draw
+  filled arrowheads and extension lines.
+- Value scrubbers (`DragValue`) step in proportion to property range and unit
+  with `Shift` for 10× finer precision, the F3 Command Palette remembers recent
+  operators at the top when opened empty, and Node Editor socket drags snap to
+  nearby compatible inputs with an `X` / `Delete` shortcut to remove nodes.
+- Turning off tooltip translation in Preferences now falls back cleanly to
+  English prose descriptions instead of raw internal key identifiers.
+- Updated repository screenshots and added animated workflow GIFs, generated
+  reproducibly from the live application shell and renderer.
+
+### Fixed
+
+- Long operator echo lines in the status bar now truncate cleanly before the
+  scene statistics on narrow windows instead of overlapping them, and the
+  Adjust Last Operation panel stays clear of the viewport navigation buttons.
+- Replaced unsupported small triangle glyphs (`▾`) on material preset buttons
+  with bundled triangles (`▼`) so no placeholder boxes appear.
+
 ## [0.15.1] - 2026-11-23
 
 ### Fixed

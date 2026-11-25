@@ -38,6 +38,20 @@ fn every_preset_can_orbit_pan_and_dolly_without_a_middle_button() {
             "{preset:?} cannot orbit without a middle button"
         );
         assert_eq!(
+            op(
+                preset,
+                MouseButton::Left,
+                Modifiers {
+                    shift: true,
+                    alt: true,
+                    ..Modifiers::NONE
+                }
+            )
+            .as_deref(),
+            Some("view.pan"),
+            "{preset:?} cannot pan without a middle button"
+        );
+        assert_eq!(
             op(preset, MouseButton::Right, Modifiers::alt()).as_deref(),
             Some("view.dolly"),
             "{preset:?} cannot dolly without a middle button"

@@ -23,6 +23,7 @@ pub struct TimelineView {
     pub frame: f64,
     pub start: i32,
     pub end: i32,
+    pub fps: f64,
     pub playing: bool,
     /// Whether transforms key themselves: the record button.
     pub autokey: bool,
@@ -54,6 +55,7 @@ pub enum TimelineEdit {
         start: i32,
         end: i32,
     },
+    SetFps(f64),
     ToggleAutokey,
     /// A marker on the frame the clock is on.
     AddMarker,
@@ -85,6 +87,7 @@ pub struct TimelineText {
     pub jump_end: String,
     pub start: String,
     pub end: String,
+    pub fps: String,
     pub autokey: String,
     /// The ruler's right-click menu.
     pub add_marker: String,
@@ -241,6 +244,34 @@ pub fn timeline(
                     start,
                     end: end.max(start + 1),
                 });
+            }
+            if view.fps > 0.0 && !text.fps.is_empty() {
+                ui.separator();
+                let mut fps = view.fps;
+                // i18n-exempt: numeric FPS rate with translated label
+                let fps_label = format!("{} {:.0}", text.fps, fps);
+                egui::ComboBox::from_id_salt("timeline-fps")
+                    .selected_text(fps_label)
+                    .width(72.0)
+                    .show_ui(ui, |ui| {
+                        for preset_fps in [24.0, 25.0, 30.0, 60.0] {
+                            // i18n-exempt: numeric frame rate
+                            let lbl = format!("{preset_fps:.0} FPS");
+                            if ui
+                                .selectable_label((fps - preset_fps).abs() < 0.05, lbl)
+                                .clicked()
+                            {
+                                out.push(TimelineEdit::SetFps(preset_fps));
+                            }
+                        }
+                        ui.separator();
+                        if ui
+                            .add(egui::DragValue::new(&mut fps).range(1.0..=240.0).speed(0.5))
+                            .changed()
+                        {
+                            out.push(TimelineEdit::SetFps(fps));
+                        }
+                    });
             }
         });
     });
@@ -641,6 +672,7 @@ mod tests {
             frame: 1.0,
             start: 1,
             end: 100,
+            fps: 24.0,
             playing: false,
             autokey: false,
             keys: vec![10.0],
@@ -659,6 +691,7 @@ mod tests {
             jump_end: String::new(),
             start: String::new(),
             end: String::new(),
+            fps: String::new(),
             autokey: String::new(),
             add_marker: String::new(),
             bind_camera: String::new(),

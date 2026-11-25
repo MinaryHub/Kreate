@@ -1326,21 +1326,33 @@ impl Document {
             }
         }
 
+        let was_root = self.objects[id].parent.is_none();
+        let old_above = if was_root {
+            DAffine3::IDENTITY
+        } else {
+            self.above(id)
+        };
         // A parent scaled to nothing on an axis has no inverse — not a
         // finite one — and that went into the file as numbers no reader
         // takes. The child then simply rides on it.
         let parent_inverse = match parent {
             Some(p) => Some(self.world_transform(p).inverse())
                 .filter(|m| m.is_finite())
+                .map(|inv| if was_root { inv } else { inv * old_above })
                 .unwrap_or(DAffine3::IDENTITY),
             None => DAffine3::IDENTITY,
         };
-        let was_root = self.objects[id].parent.is_none();
         {
             let o = Arc::make_mut(&mut self.objects[id]);
             o.parent = parent;
             o.parent_inverse = parent_inverse;
             o.parent_bone = None;
+            if parent.is_none() && !was_root {
+                let world_affine = old_above * o.transform.to_affine();
+                if world_affine.is_finite() {
+                    o.transform = DTransform::from_affine(world_affine);
+                }
+            }
         }
         match (was_root, parent.is_none()) {
             (true, false) => self.roots.retain(|r| *r != id),

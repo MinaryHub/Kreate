@@ -294,7 +294,13 @@ impl DocumentFile {
         // buffer rather than copying one. It is the reason autosave can happen
         // on a worker without the interface waiting for it.
         let snapshot = document.clone();
-        let manifest = self.manifest.clone();
+        let mut manifest = self.manifest.clone();
+        if let Some(orig) = &self.path {
+            manifest.extra.insert(
+                "original_path".into(),
+                serde_json::Value::String(orig.to_string_lossy().into_owned()),
+            );
+        }
         let unknown = self.unknown.clone();
         let (tx, rx) = mpsc::channel();
         // A plain thread, not a runtime. There is nothing asynchronous about
@@ -368,6 +374,28 @@ impl DocumentFile {
         self.autosaved_version = self.saved_version;
     }
 
+    /// The original user file path stored in an autosave's manifest, if any
+    /// (and never inside the autosave directory itself).
+    pub fn recovered_original_path(&self) -> Option<PathBuf> {
+        let raw = self.manifest.extra.get("original_path")?.as_str()?;
+        let candidate = PathBuf::from(raw);
+        if let Some(root) = autosave_root() {
+            if candidate.starts_with(&root) {
+                return None;
+            }
+        }
+        Some(candidate)
+    }
+
+    /// Adopts the user's original save path for a recovered autosave while
+    /// keeping the document marked modified until the user explicitly presses
+    /// `Ctrl+S`.
+    pub fn adopt_recovered_path(&mut self, original: PathBuf, document: &Document) {
+        self.manifest.extra.remove("original_path");
+        self.path = Some(original);
+        self.saved_version = document.version().wrapping_add(1);
+    }
+
     /// The emergency write, for a panic handler.
     ///
     /// Named for what it is. It goes beside the autosave rather than over the
@@ -395,7 +423,14 @@ impl DocumentFile {
                 dir.join("quit.kreate")
             }
         };
-        let bytes = container::write(document, &self.manifest, &self.unknown).ok()?;
+        let mut manifest = self.manifest.clone();
+        if let Some(orig) = &self.path {
+            manifest.extra.insert(
+                "original_path".into(),
+                serde_json::Value::String(orig.to_string_lossy().into_owned()),
+            );
+        }
+        let bytes = container::write(document, &manifest, &self.unknown).ok()?;
         write_atomic(&path, &bytes).ok()?;
         Some(path)
     }

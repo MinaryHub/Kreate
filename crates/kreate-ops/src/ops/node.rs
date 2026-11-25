@@ -722,6 +722,15 @@ impl Operator for SetNodeColor {
         match (&mut node.kind, params.field) {
             (NodeKind::Color(c), 0) => *c = colour,
             (NodeKind::Surface { base_color, .. }, 0) => *base_color = colour,
+            (NodeKind::Surface { emission, .. }, 1) => {
+                let peak = emission.r.max(emission.g).max(emission.b);
+                let strength = if peak > 1e-6 { peak } else { 1.0 };
+                *emission = kreate_math::SceneRgb {
+                    r: colour.r * strength,
+                    g: colour.g * strength,
+                    b: colour.b * strength,
+                };
+            }
             (NodeKind::Checker { color1, .. }, 0) => *color1 = colour,
             (NodeKind::Checker { color2, .. }, 1) => *color2 = colour,
             (NodeKind::ColorRamp { stops, .. }, i) if (i as usize) < stops.len() => {
@@ -794,6 +803,27 @@ impl Operator for SetNodeValue {
             (NodeKind::Math { b, .. }, 2) => *b = v,
             (NodeKind::Surface { metallic, .. }, 1) => *metallic = v.clamp(0.0, 1.0),
             (NodeKind::Surface { roughness, .. }, 2) => *roughness = v.clamp(0.0, 1.0),
+            (NodeKind::Surface { transmission, .. }, 3) => *transmission = v.clamp(0.0, 1.0),
+            (NodeKind::Surface { ior, .. }, 4) => *ior = v.clamp(1.0, 4.0),
+            (NodeKind::Surface { coat, .. }, 5) => *coat = v.clamp(0.0, 1.0),
+            (NodeKind::Surface { coat_roughness, .. }, 6) => *coat_roughness = v.clamp(0.0, 1.0),
+            (NodeKind::Surface { alpha, .. }, 7) => *alpha = v.clamp(0.0, 1.0),
+            (NodeKind::Surface { clip, .. }, 8) => *clip = v.clamp(0.0, 1.0),
+            (NodeKind::Surface { specular, .. }, 9) => *specular = v.clamp(0.0, 2.0),
+            (NodeKind::Surface { emission, .. }, 10) => {
+                let s = v.max(0.0);
+                let peak = emission.r.max(emission.g).max(emission.b);
+                let (tr, tg, tb) = if peak > 1e-6 {
+                    (emission.r / peak, emission.g / peak, emission.b / peak)
+                } else {
+                    (1.0, 1.0, 1.0)
+                };
+                *emission = kreate_math::SceneRgb {
+                    r: tr * s,
+                    g: tg * s,
+                    b: tb * s,
+                };
+            }
             (NodeKind::Noise { scale, .. }, 0)
             | (NodeKind::Voronoi { scale, .. }, 0)
             | (NodeKind::Checker { scale, .. }, 0)

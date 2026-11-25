@@ -163,19 +163,39 @@ pub fn visible_rows_grouped(
     expanded: impl Fn(usize) -> bool,
     row: impl Fn(usize) -> Option<OutlinerRow>,
 ) -> Vec<TreeRow> {
+    visible_rows_grouped_ext(depths, starts, expanded, |_| true, row)
+}
+
+/// Like [`visible_rows_grouped`], with `group_open` deciding whether each
+/// collection heading shows its member objects.
+pub fn visible_rows_grouped_ext(
+    depths: &[u16],
+    starts: &[usize],
+    expanded: impl Fn(usize) -> bool,
+    group_open: impl Fn(usize) -> bool,
+    row: impl Fn(usize) -> Option<OutlinerRow>,
+) -> Vec<TreeRow> {
     let mut out = vec![TreeRow::Root];
     // The depth below which rows are hidden by a collapsed ancestor, if any.
     let mut hidden_below: Option<u16> = None;
+    let mut in_closed_group = false;
     let mut next_group = 0;
-    let mut heading = |index: usize, out: &mut Vec<TreeRow>, hidden_below: &mut Option<u16>| {
+    let mut heading = |index: usize,
+                       out: &mut Vec<TreeRow>,
+                       hidden_below: &mut Option<u16>,
+                       in_closed_group: &mut bool| {
         while next_group < starts.len() && starts[next_group] <= index {
             out.push(TreeRow::Collection(next_group));
             *hidden_below = None;
+            *in_closed_group = !group_open(next_group);
             next_group += 1;
         }
     };
     for (index, depth) in depths.iter().enumerate() {
-        heading(index, &mut out, &mut hidden_below);
+        heading(index, &mut out, &mut hidden_below, &mut in_closed_group);
+        if in_closed_group {
+            continue;
+        }
         if let Some(limit) = hidden_below {
             if *depth > limit {
                 continue;
@@ -199,7 +219,12 @@ pub fn visible_rows_grouped(
             hidden_below = Some(*depth);
         }
     }
-    heading(usize::MAX, &mut out, &mut hidden_below);
+    heading(
+        usize::MAX,
+        &mut out,
+        &mut hidden_below,
+        &mut in_closed_group,
+    );
     out
 }
 
@@ -314,13 +339,30 @@ pub fn outliner(
         }
     }
 
+    let collapsed_groups_id = ui.id().with("collapsed-groups");
+    let mut collapsed_groups: std::collections::HashSet<String> = ui
+        .data(|d| d.get_temp(collapsed_groups_id))
+        .unwrap_or_default();
+
     let starts: Vec<usize> = groups.iter().map(|g| g.start).collect();
-    let rows = visible_rows_grouped(
+    let rows = visible_rows_grouped_ext(
         depths,
         &starts,
         |index| order.get(index).is_some_and(|key| expanded.contains(key)),
+        |g| {
+            groups
+                .get(g)
+                .is_none_or(|grp| !collapsed_groups.contains(&grp.name))
+        },
         &row,
     );
+    let visible_order: Vec<u32> = rows
+        .iter()
+        .filter_map(|r| match r {
+            TreeRow::Object(i) => order.get(*i).copied(),
+            _ => None,
+        })
+        .collect();
     // As deep as the tree shown goes, so every name keeps its room.
     let deepest = rows
         .iter()
@@ -336,6 +378,7 @@ pub fn outliner(
     let fit = ((ui.available_width() - ROW_ROOM) / deepest).clamp(3.0, INDENT);
     ui.data_mut(|d| d.insert_temp(egui::Id::new("outliner-indent"), fit));
     let mut toggled: Option<u32> = None;
+    let mut toggled_group: Option<String> = None;
     // A name being typed, Blender's double-click: kept across frames until
     // Enter, a click away, or Escape.
     let rename_id = ui.id().with("renaming");
@@ -376,14 +419,42 @@ pub fn outliner(
                     TreeRow::Root => draw_root(ui, catalog, queue),
                     TreeRow::Collection(g) => {
                         if let Some(group) = groups.get(g) {
-                            draw_collection_row(ui, catalog, group, queue, &mut renaming);
+                            let group_open = !collapsed_groups.contains(&group.name);
+                            if draw_collection_row(
+                                ui,
+                                catalog,
+                                group,
+                                group_open,
+                                queue,
+                                &mut renaming,
+                            ) {
+                                toggled_group = Some(group.name.clone());
+                            }
                         }
                     }
                     TreeRow::Object(index) => {
                         let Some(data) = row(index) else { continue };
                         let open = expanded.contains(&data.id);
+                        let vis_index = visible_order
+                            .iter()
+                            .position(|id| *id == data.id)
+                            .unwrap_or(0);
                         let top = ui.cursor().min.y;
-                        if draw_object_row(ui, catalog, order, selected, active, index, &data, open, queue, &mut renaming) {
+                        if draw_object_row(
+                            ui,
+                            catalog,
+                            order,
+                            depths,
+                            &visible_order,
+                            selected,
+                            active,
+                            index,
+                            vis_index,
+                            &data,
+                            open,
+                            queue,
+                            &mut renaming,
+                        ) {
                             toggled = Some(data.id);
                         }
                         if pending == Some(data.id) {
@@ -433,6 +504,12 @@ pub fn outliner(
             set.insert(key);
         }
         ui.data_mut(|d| d.insert_temp(expanded_id, set));
+    }
+    if let Some(name) = toggled_group {
+        if !collapsed_groups.remove(&name) {
+            collapsed_groups.insert(name);
+        }
+        ui.data_mut(|d| d.insert_temp(collapsed_groups_id, collapsed_groups));
     }
 }
 
@@ -529,19 +606,40 @@ fn draw_root(ui: &mut Ui, catalog: &Catalog, queue: &mut CommandQueue) {
                 collection: String::new(),
             });
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // i18n-exempt: universal '+' glyph with translated tooltip
+            if ui
+                .small_button("+")
+                .on_hover_text(catalog.format("outliner-new-collection", TextKind::Tooltip, &[]))
+                .clicked()
+            {
+                queue.push(Command::RunOperator {
+                    op_id: "collection.add".into(),
+                    params: kreate_reflect::PropertyMap::new(),
+                });
+            }
+        });
     });
 }
 
-/// A collection's heading: its icon, its name, and its eye.
+/// A collection's heading: its chevron, its icon, its name, and its eye.
 fn draw_collection_row(
     ui: &mut Ui,
     catalog: &Catalog,
     group: &OutlinerGroup,
+    open: bool,
     queue: &mut CommandQueue,
     renaming: &mut Option<Renaming>,
-) {
+) -> bool {
+    let mut toggled = false;
     ui.horizontal(|ui| {
-        ui.add_space(indent(ui));
+        ui.add_space(indent(ui).max(12.0) - 12.0);
+        let (chevron, chev_resp) =
+            ui.allocate_exact_size(egui::Vec2::splat(12.0), egui::Sense::click());
+        paint_chevron(ui, chevron, open, chev_resp.hovered());
+        if chev_resp.clicked() {
+            toggled = true;
+        }
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
         collection_icon(ui, rect);
         if group.fixed {
@@ -642,6 +740,7 @@ fn draw_collection_row(
             }
         });
     });
+    toggled
 }
 
 /// Draws one object's row. Returns whether its expander was clicked.
@@ -650,9 +749,12 @@ fn draw_object_row(
     ui: &mut Ui,
     catalog: &Catalog,
     order: &[u32],
+    depths: &[u16],
+    visible_order: &[u32],
     selected: &[u32],
     active: Option<u32>,
     index: usize,
+    vis_index: usize,
     row: &OutlinerRow,
     open: bool,
     queue: &mut CommandQueue,
@@ -738,7 +840,8 @@ fn draw_object_row(
                     additive: i.modifiers.ctrl || i.modifiers.command,
                     range: i.modifiers.shift,
                 });
-                let (objects, active) = resolve_click(order, selected, active, index, modifiers);
+                let (objects, active) =
+                    resolve_click(visible_order, selected, active, vis_index, modifiers);
                 queue.push(Command::SetSelection { objects, active });
             }
             // Blender's double-click: rename in place. Framing it is the
@@ -751,6 +854,14 @@ fn draw_object_row(
                 *renaming = Some(Renaming::Object(row.id, row.name.clone()));
             }
             response.context_menu(|ui| {
+                let select_target = |queue: &mut CommandQueue| {
+                    if !row.selected {
+                        queue.push(Command::SetSelection {
+                            objects: vec![row.id],
+                            active: Some(row.id),
+                        });
+                    }
+                };
                 if ui
                     .button(catalog.format("outliner-rename", TextKind::Ui, &[]))
                     .clicked()
@@ -760,6 +871,72 @@ fn draw_object_row(
                         active: Some(row.id),
                     });
                     *renaming = Some(Renaming::Object(row.id, row.name.clone()));
+                    ui.close();
+                }
+                if ui
+                    .button(catalog.format("outliner-frame", TextKind::Ui, &[]))
+                    .clicked()
+                {
+                    select_target(queue);
+                    queue.push(Command::FrameSelection);
+                    ui.close();
+                }
+                if row.has_children
+                    && ui
+                        .button(catalog.format("outliner-select-hierarchy", TextKind::Ui, &[]))
+                        .clicked()
+                {
+                    let base = depths.get(index).copied().unwrap_or(0);
+                    let mut subtree = vec![row.id];
+                    for (j, d) in depths.iter().enumerate().skip(index + 1) {
+                        if *d <= base {
+                            break;
+                        }
+                        if let Some(id) = order.get(j) {
+                            subtree.push(*id);
+                        }
+                    }
+                    queue.push(Command::SetSelection {
+                        objects: subtree,
+                        active: Some(row.id),
+                    });
+                    ui.close();
+                }
+                if row.depth > 0
+                    && ui
+                        .button(catalog.format("outliner-clear-parent", TextKind::Ui, &[]))
+                        .clicked()
+                {
+                    select_target(queue);
+                    let mut params = kreate_reflect::PropertyMap::new();
+                    params.set("clear", kreate_reflect::PropertyValue::Bool(true));
+                    queue.push(Command::RunOperator {
+                        op_id: "object.parent".into(),
+                        params,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(catalog.format("outliner-duplicate", TextKind::Ui, &[]))
+                    .clicked()
+                {
+                    select_target(queue);
+                    queue.push(Command::RunOperator {
+                        op_id: "object.duplicate".into(),
+                        params: kreate_reflect::PropertyMap::new(),
+                    });
+                    ui.close();
+                }
+                if ui
+                    .button(catalog.format("outliner-delete", TextKind::Ui, &[]))
+                    .clicked()
+                {
+                    select_target(queue);
+                    queue.push(Command::RunOperator {
+                        op_id: "object.delete".into(),
+                        params: kreate_reflect::PropertyMap::new(),
+                    });
                     ui.close();
                 }
             });
@@ -1211,6 +1388,29 @@ mod tests {
         assert_eq!(
             rows,
             vec![TreeRow::Root, TreeRow::Object(0), TreeRow::Object(4)]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_collection_hides_its_objects_but_keeps_its_heading() {
+        let depths = [0u16, 0, 0, 0];
+        let starts = [1usize, 3usize];
+        let rows = visible_rows_grouped_ext(
+            &depths,
+            &starts,
+            |_| false,
+            |g| g != 0,
+            |i| Some(leaf(i as u32)),
+        );
+        assert_eq!(
+            rows,
+            vec![
+                TreeRow::Root,
+                TreeRow::Object(0),
+                TreeRow::Collection(0),
+                TreeRow::Collection(1),
+                TreeRow::Object(3),
+            ]
         );
     }
 

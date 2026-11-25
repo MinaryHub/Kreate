@@ -19,6 +19,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SelectKeysBox>();
     registry.register::<SelectAllKeys>();
     registry.register::<MoveKeys>();
+    registry.register::<DuplicateKeys>();
     registry.register::<DeleteKeys>();
     registry.register::<SetKeyInterpolation>();
     registry.register::<SetExtrapolation>();
@@ -611,6 +612,55 @@ impl Operator for MoveKeys {
             }
         }
         Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DuplicateKeysParams {
+    pub offset: f64,
+}
+
+/// Duplicates the selected keys (`Shift+D`), leaving the copies selected.
+pub struct DuplicateKeys;
+
+impl Operator for DuplicateKeys {
+    type Params = DuplicateKeysParams;
+    fn id() -> &'static str {
+        "anim.keys_duplicate"
+    }
+    fn label() -> &'static str {
+        "Duplicate Keys"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        any_shown(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        if !params.offset.is_finite() {
+            return Ok(OpResult::Cancelled);
+        }
+        let shown = shown_actions(doc.document());
+        if !shown
+            .iter()
+            .any(|a| doc.document().action(*a).is_some_and(|a| a.any_selected()))
+        {
+            return Ok(OpResult::Cancelled);
+        }
+        let d = doc.document_mut();
+        let mut duplicated = false;
+        for id in shown {
+            if let Some(a) = d.action_mut(id) {
+                duplicated |= a.duplicate_selected(params.offset);
+            }
+        }
+        Ok(if duplicated {
+            OpResult::Finished
+        } else {
+            OpResult::Cancelled
+        })
     }
 }
 

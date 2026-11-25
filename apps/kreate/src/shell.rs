@@ -210,6 +210,20 @@ pub struct ShellState {
     pub collab: kreate_ui::collab::CollabForm,
     pub collab_view: Option<kreate_ui::collab::CollabView>,
     pub about_open: bool,
+    /// Floating Preferences window (`Edit ▸ Preferences…` / `Ctrl+,` / gear icon).
+    pub preferences_open: bool,
+    /// Export Options dialog (`File ▸ Export…` / `File ▸ Export Selected…`).
+    pub export_dialog: Option<ExportDialogState>,
+    /// Floating Fillet / Chamfer input card while picking edges in the viewport.
+    pub fillet_dialog: Option<FilletDialogView>,
+    /// Currently selected sketch constraint badge `(drafting, index)` for `Delete` key removal.
+    pub selected_constraint: Option<(bool, usize)>,
+    /// Whether the top crash-recovery banner was dismissed for this session.
+    pub recovery_banner_dismissed: bool,
+    /// World-space brush hover point on the active mesh in Sculpt Mode, for drawing symmetry dots.
+    pub sculpt_hover_world: Option<kreate_math::DVec3>,
+    /// Cached egui preview texture for the active material's base-colour image in the UV Editor.
+    uv_tex_cache: Option<(kreate_scene::Uid, u64, egui::TextureHandle)>,
     /// What Help ▸ Check for Updates came to, shown in a window of its own
     /// until closed: `None` closed, an empty string while it looks.
     pub update_check: Option<String>,
@@ -259,6 +273,8 @@ pub struct ShellState {
     /// rectangle, so it does not go stale between frames the way "the pointer is
     /// over me" does. The application uses it to decide who owns a press.
     pub gizmo_circle: Option<(egui::Pos2, f32)>,
+    /// Companion button strip beneath the navigation gizmo, in interface points.
+    pub nav_companion_rect: Option<egui::Rect>,
     /// Rectangles drawn over the viewport that the pointer belongs to rather
     /// than to the scene.
     ///
@@ -742,6 +758,10 @@ impl ShellState {
         self.property_tabs.insert(area, tab);
     }
 
+    pub fn set_uv_checker(&mut self, area: kreate_ui::AreaId, checker: bool) {
+        self.uv_views.entry(area).or_default().checker = checker;
+    }
+
     /// Whether a viewport area is showing its sidebar.
     pub fn sidebar_open(&self, area: kreate_ui::AreaId) -> bool {
         self.sidebars.contains(&area)
@@ -960,6 +980,13 @@ impl Default for ShellState {
             collab: Default::default(),
             collab_view: None,
             about_open: false,
+            preferences_open: false,
+            export_dialog: None,
+            fillet_dialog: None,
+            selected_constraint: None,
+            recovery_banner_dismissed: false,
+            sculpt_hover_world: None,
+            uv_tex_cache: None,
             update_check: None,
             welcome_open: false,
             render_result: None,
@@ -981,6 +1008,7 @@ impl Default for ShellState {
             gizmo_target: None,
             gizmo_active: None,
             gizmo_circle: None,
+            nav_companion_rect: None,
             viewport_blockers: Vec::new(),
             sidebars: std::collections::BTreeSet::new(),
             outliner: OutlinerOrder::default(),
@@ -1505,6 +1533,8 @@ pub struct ToolSettings {
     pub auto_merge: bool,
     /// 0 off, 1 move, 2 rotate, 3 scale: interactive 3D gizmo over selection.
     pub transform_gizmo: u32,
+    /// When looking through the camera, orbiting/panning/zooming moves the camera object.
+    pub lock_camera_to_view: bool,
 }
 
 /// The viewport's on-off settings, as the Overlays menu shows them.
@@ -2130,6 +2160,13 @@ struct Labels {
     area_close: String,
     area_undock: String,
     area_dock: String,
+    menu_preferences: String,
+    menu_export_selected: String,
+    view_camera_align: String,
+    object_drop_floor: String,
+    object_place_on: String,
+    object_align: String,
+    origin_to_bottom: String,
     extrude: String,
     subdivide: String,
     dissolve: String,
@@ -2539,6 +2576,13 @@ impl Labels {
             area_close: t("area-close"),
             area_undock: t("area-undock"),
             area_dock: t("area-dock"),
+            menu_preferences: t("menu-preferences"),
+            menu_export_selected: t("menu-export-selected"),
+            view_camera_align: t("view-camera-align"),
+            object_drop_floor: t("object-drop-floor"),
+            object_place_on: t("object-place-on"),
+            object_align: t("object-align"),
+            origin_to_bottom: t("origin-to-bottom"),
             extrude: t("menu-extrude"),
             subdivide: t("menu-subdivide"),
             dissolve: t("menu-dissolve"),
@@ -2606,6 +2650,7 @@ pub fn draw(
     // rather than by each drawer, so an overlay that stops being drawn stops
     // blocking the pointer on the very next frame.
     state.viewport_blockers.clear();
+    state.nav_companion_rect = None;
     // The keymap editor was not drawn last frame: its panel is gone, and a
     // binding it left listening is let go.
     if !std::mem::take(&mut state.keymap_editor_shown) {
@@ -2810,31 +2855,65 @@ pub fn draw(
             // session.
             if !state.recoverable.is_empty() {
                 ui.separator();
+                let latest_path = state.recoverable[0].path.clone();
                 let hint = state.catalog.format(
                     "recover-hint",
                     TextKind::Ui,
                     &[("count", &state.recoverable.len().to_string())],
                 );
-                ui.colored_label(theme.info, hint);
+                if ui
+                    .add(
+                        egui::Label::new(egui::RichText::new(hint).color(theme.info))
+                            .sense(egui::Sense::click()),
+                    )
+                    .clicked()
+                {
+                    state
+                        .queue
+                        .push(Command::RecoverDocument { path: latest_path });
+                }
             }
             // The last thing that happened.
             // A save that reports nothing is a save the user cannot distinguish
             // from one that silently failed.
             if let Some(message) = &state.status {
                 ui.separator();
-                // i18n-exempt: composed from a translated template and a path
-                ui.label(message);
-            }
-            if let Some(entry) = history.last() {
-                ui.separator();
-                // i18n-exempt: a generated script line is API text, not prose
-                ui.monospace(entry.to_script_preview(SCRIPT_PREVIEW));
+                let (shown, is_error) = translate_status_message(&state.catalog, message);
+                if is_error {
+                    egui::Frame::new()
+                        .fill(theme.axis_x.gamma_multiply(0.22))
+                        .stroke(egui::Stroke::new(1.0, theme.axis_x))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(6, 1))
+                        .show(ui, |ui| {
+                            // i18n-exempt: composed from translated template or runtime error
+                            ui.colored_label(theme.text, egui::RichText::new(shown).strong());
+                        });
+                } else {
+                    // i18n-exempt: composed from a translated template and a path
+                    ui.label(shown);
+                }
             }
             // The standing counts on the right, where Blender keeps its
             // statistics: what is true of the scene, apart from what just
-            // happened to it.
+            // happened to it. Placed first from the right so a long script
+            // echo truncates cleanly instead of colliding on narrow windows.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak(&status);
+                if let Some(entry) = history.last() {
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.separator();
+                        // i18n-exempt: a generated script line is API text, not prose
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(entry.to_script_preview(SCRIPT_PREVIEW))
+                                    .monospace(),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
             });
         });
     });
@@ -3019,6 +3098,8 @@ pub fn draw(
     }
     state.apply_area_edits();
     draw_help_windows(ui.ctx(), state, &l);
+    draw_preferences_window(ui.ctx(), state, keymap, preset, overrides);
+    draw_export_dialog(ui.ctx(), state, doc);
     draw_object_pick(ui.ctx(), state, doc, &l);
     draw_search(ui, state, &l, history, mode);
     draw_pie(ui, state, &l, doc, mode);
@@ -3243,6 +3324,7 @@ fn transform_nodes(l: &Labels) -> Vec<MenuNode> {
                 origin(&l.origin_to_geometry, 0),
                 origin(&l.origin_to_cursor, 1),
                 origin(&l.geometry_to_origin, 2),
+                origin(&l.origin_to_bottom, 3),
             ],
         ),
         MenuNode::Sub(
@@ -3889,6 +3971,11 @@ fn draw_area(
                         }
                     }
                     draw_adjust_float(ui, state, registry, history, inner);
+                    draw_fillet_float(ui, state, inner);
+                    if mode.acts_on() == kreate_ops::mode::ActsOn::Sculpt {
+                        draw_sculpt_symmetry_dots(ui, doc, state, inner);
+                    }
+                    draw_viewport_asset_drop(ui, state, inner);
                     if state.sidebar_open(area.id) {
                         draw_item_sidebar(ui, state, doc, registry, area.id, inner, l, mode);
                     }
@@ -4001,7 +4088,7 @@ fn draw_area(
                     );
                 }
                 "uv" => {
-                    draw_uv_editor(ui, state, area.id, l);
+                    draw_uv_editor(ui, state, doc, area.id, l);
                 }
                 "console" => {
                     draw_console(ui, state, history, l);
@@ -4034,177 +4121,7 @@ fn draw_area(
                     draw_drivers(ui, state, doc, area.id);
                 }
                 "preferences" => {
-                    ui.horizontal(|ui| {
-                        ui.label(state.catalog.get("prefs-language"));
-                        let choices: [(Option<&str>, &str); 3] = [
-                            (None, "prefs-language-auto"),
-                            (Some("ko-KR"), "prefs-language-ko"),
-                            (Some("en-US"), "prefs-language-en"),
-                        ];
-                        for (code, key) in choices {
-                            let selected = state.language_pref.as_deref() == code;
-                            if ui
-                                .selectable_label(selected, state.catalog.get(key))
-                                .clicked()
-                                && !selected
-                            {
-                                state.language_pref = code.map(str::to_string);
-                                let iface = crate::prefs::interface_path();
-                                if let Some(path) = &iface {
-                                    let _ = crate::prefs::save_language(path, code);
-                                }
-                                let effective =
-                                    crate::prefs::effective_locale(None, iface.as_deref());
-                                let opts = state.catalog.options;
-                                let mut next = load_catalog(&effective);
-                                next.options = opts;
-                                state.catalog = next;
-                                state.labels_cache = None;
-                                state.outliner.sketch_heading.clear();
-                            }
-                        }
-                    });
-                    if state
-                        .catalog
-                        .locales()
-                        .next()
-                        .is_some_and(|l| l.language.as_str() != "en")
-                    {
-                        ui.horizontal(|ui| {
-                            ui.label(state.catalog.get("prefs-translate"));
-                            let mut opts = state.catalog.options;
-                            let mut changed = false;
-                            changed |= ui
-                                .checkbox(&mut opts.ui, state.catalog.get("prefs-translate-ui"))
-                                .changed();
-                            changed |= ui
-                                .checkbox(
-                                    &mut opts.tooltips,
-                                    state.catalog.get("prefs-translate-tooltips"),
-                                )
-                                .changed();
-                            changed |= ui
-                                .checkbox(
-                                    &mut opts.new_data_names,
-                                    state.catalog.get("prefs-translate-new-data"),
-                                )
-                                .changed();
-                            if changed {
-                                state.catalog.options = opts;
-                                state.labels_cache = None;
-                                state.outliner.sketch_heading.clear();
-                                if let Some(path) = crate::prefs::interface_path() {
-                                    let _ = crate::prefs::save_translation_options(&path, opts);
-                                }
-                            }
-                        });
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(state.catalog.get("prefs-theme"));
-                        for a in kreate_ui::Appearance::ALL {
-                            let key = match a {
-                                kreate_ui::Appearance::Dark => "prefs-theme-dark",
-                                kreate_ui::Appearance::Light => "prefs-theme-light",
-                            };
-                            if ui
-                                .selectable_label(state.appearance == a, state.catalog.get(key))
-                                .clicked()
-                                && state.appearance != a
-                            {
-                                state.appearance = a;
-                                kreate_ui::Theme::new(a, kreate_ui::Density::default())
-                                    .install(ui.ctx());
-                                if let Some(path) = crate::prefs::interface_path() {
-                                    let _ = crate::prefs::save_appearance(&path, a);
-                                }
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(state.catalog.get("prefs-ui-scale"));
-                        for scale in crate::prefs::UI_SCALES {
-                            // i18n-exempt: a percentage
-                            let label = format!("{:.0}%", scale * 100.0);
-                            if ui
-                                .selectable_label((state.ui_scale - scale).abs() < 1e-3, label)
-                                .on_hover_text(state.catalog.get("prefs-ui-scale-desc"))
-                                .clicked()
-                            {
-                                state.ui_scale = scale;
-                                ui.ctx().set_zoom_factor(scale);
-                                if let Some(path) = crate::prefs::interface_path() {
-                                    let _ = crate::prefs::save_ui_scale(&path, scale);
-                                }
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(state.catalog.get("prefs-resolution-scale"));
-                        let mut scale = state.resolution_scale;
-                        if ui
-                            .add(egui::Slider::new(
-                                &mut scale,
-                                crate::prefs::MIN_RESOLUTION_SCALE..=1.0,
-                            ))
-                            .on_hover_text(state.catalog.get("prefs-resolution-scale-desc"))
-                            .changed()
-                        {
-                            state.resolution_scale = scale;
-                            if let Some(path) = crate::prefs::viewport_path() {
-                                let _ = crate::prefs::save_viewport(
-                                    &path,
-                                    scale,
-                                    state.punchy,
-                                    state.trace_when_still,
-                                    state.studio_preset,
-                                );
-                            }
-                        }
-                    });
-                    let punchy = ui
-                        .checkbox(&mut state.punchy, state.catalog.get("prefs-punchy"))
-                        .on_hover_text(state.catalog.get("prefs-punchy-desc"))
-                        .changed();
-                    let still = ui
-                        .checkbox(
-                            &mut state.trace_when_still,
-                            state.catalog.get("prefs-trace-when-still"),
-                        )
-                        .on_hover_text(state.catalog.get("prefs-trace-when-still-desc"))
-                        .changed();
-                    if punchy || still {
-                        if let Some(path) = crate::prefs::viewport_path() {
-                            let _ = crate::prefs::save_viewport(
-                                &path,
-                                state.resolution_scale,
-                                state.punchy,
-                                state.trace_when_still,
-                                state.studio_preset,
-                            );
-                        }
-                    }
-                    ui.separator();
-                    let conflicts = keymap.conflicts();
-                    let text = keymap_text(
-                        &state.catalog,
-                        keymap,
-                        &state.command_info,
-                        overrides.len(),
-                        conflicts.len(),
-                    );
-                    let mut edits = std::mem::take(&mut state.keymap_edits);
-                    kreate_ui::keymap_editor(
-                        ui,
-                        keymap,
-                        preset,
-                        overrides,
-                        &conflicts,
-                        &text,
-                        &mut state.capturing,
-                        &mut edits,
-                    );
-                    state.keymap_edits = edits;
-                    state.keymap_editor_shown = true;
+                    draw_preferences_contents(ui, state, keymap, preset, overrides);
                 }
                 // An area naming an editor this build does not have. Said out
                 // loud, with the id it wants, because the likeliest cause is a
@@ -4342,11 +4259,15 @@ fn draw_area_header(
                         // Blender's Pivot Point, where it keeps it: in the
                         // header, for the modes G/R/S work on objects or mesh
                         // elements in.
-                        if matches!(
-                            mode.acts_on(),
-                            kreate_ops::mode::ActsOn::Objects
-                                | kreate_ops::mode::ActsOn::MeshElements
-                        ) {
+                        if mode.edits_elements()
+                            || matches!(
+                                mode.acts_on(),
+                                kreate_ops::mode::ActsOn::Objects
+                                    | kreate_ops::mode::ActsOn::MeshElements
+                                    | kreate_ops::mode::ActsOn::Bones
+                                    | kreate_ops::mode::ActsOn::BoneJoints
+                            )
+                        {
                             ui.separator();
                             let names = [
                                 &l.pivot_median,
@@ -4908,11 +4829,18 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                 // and treating a `.glb` as a working file loses everything the
                 // format cannot hold.
                 MenuNode::Sub(l.file_export_menu.clone(), {
-                    let mut nodes = vec![entry(
-                        "file.export",
-                        &l.file_any_format,
-                        Run::Command(Command::ExportScene),
-                    )];
+                    let mut nodes = vec![
+                        entry(
+                            "file.export",
+                            &l.file_any_format,
+                            Run::Command(Command::ExportScene),
+                        ),
+                        entry(
+                            "file.export_selected",
+                            &l.menu_export_selected,
+                            dispatch("file.export_selected"),
+                        ),
+                    ];
                     nodes.push(Separator);
                     for (index, format) in crate::formats::EXPORT.iter().enumerate() {
                         nodes.push(MenuNode::Entry(
@@ -4981,6 +4909,12 @@ fn top_bar_menus(l: &Labels, can_undo: bool, can_redo: bool) -> Vec<TopMenu> {
                     "edit.copy_script",
                     &l.menu_copy_script,
                     dispatch("edit.copy_script"),
+                ),
+                Separator,
+                entry(
+                    "app.preferences",
+                    &l.menu_preferences,
+                    dispatch("app.preferences"),
                 ),
             ],
         },
@@ -5060,6 +4994,11 @@ fn view_nodes(l: &Labels) -> Vec<MenuNode> {
             "view.camera_set_active",
             &l.view_camera_set_active,
             dispatch("view.camera_set_active"),
+        ),
+        entry(
+            "view.camera_align_to_view",
+            &l.view_camera_align,
+            dispatch("view.camera_align_to_view"),
         ),
         entry("view.walk", &l.view_walk, dispatch("view.walk")),
         MenuNode::Separator,
@@ -6250,6 +6189,33 @@ fn object_nodes(l: &Labels) -> Vec<MenuNode> {
             &l.follow_path,
             op("object.follow_path", &[]),
         ),
+        MenuNode::Separator,
+        MenuNode::Entry(
+            MenuEntry::new(
+                "object.place_on",
+                &l.object_drop_floor,
+                op("object.place_on", &[("target", V::Text(String::new()))]),
+            )
+            .variant("target", V::Text(String::new())),
+        ),
+        MenuNode::Entry(
+            MenuEntry::new(
+                "object.place_on",
+                &l.object_place_on,
+                op(
+                    "object.place_on",
+                    &[("target", V::Text("$active".to_string()))],
+                ),
+            )
+            .variant("target", V::Text("$active".to_string())),
+        ),
+        entry("object.align", &l.object_align, op("object.align", &[])),
+        entry(
+            "object.align_faces",
+            &l.align_faces,
+            dispatch("object.align_faces"),
+        ),
+        MenuNode::Separator,
         MenuNode::Sub(
             l.menu_show_hide.clone(),
             vec![
@@ -6938,7 +6904,12 @@ fn draw_tool_buttons(ui: &mut Ui, state: &mut ShellState, mode: kreate_ops::oper
             .modal
             .as_ref()
             .and_then(|m| m.tool)
-            .unwrap_or(Tool::Select)
+            .unwrap_or(match state.tools.transform_gizmo {
+                1 => Tool::Move,
+                2 => Tool::Rotate,
+                3 => Tool::Scale,
+                _ => Tool::Select,
+            })
     };
 
     ui.horizontal(|ui| {
@@ -6998,11 +6969,33 @@ fn draw_tool_buttons(ui: &mut Ui, state: &mut ShellState, mode: kreate_ops::oper
             };
             if response.clicked() {
                 match tool {
-                    Tool::Select => state.tools.select_tool = (state.tools.select_tool + 1) % 3,
-                    Tool::Move | Tool::Rotate | Tool::Scale => {
-                        if let Some(op) = op {
-                            state.queue.dispatch(op, PropertyMap::new());
+                    Tool::Select => {
+                        if state.tools.transform_gizmo != 0 {
+                            state.tools.transform_gizmo = 0;
+                        } else {
+                            state.tools.select_tool = (state.tools.select_tool + 1) % 3;
                         }
+                    }
+                    Tool::Move => {
+                        state.tools.transform_gizmo = if state.tools.transform_gizmo == 1 {
+                            0
+                        } else {
+                            1
+                        };
+                    }
+                    Tool::Rotate => {
+                        state.tools.transform_gizmo = if state.tools.transform_gizmo == 2 {
+                            0
+                        } else {
+                            2
+                        };
+                    }
+                    Tool::Scale => {
+                        state.tools.transform_gizmo = if state.tools.transform_gizmo == 3 {
+                            0
+                        } else {
+                            3
+                        };
                     }
                     // Through the key's door, so the drag that places
                     // the new bones starts as E starts it.
@@ -7919,6 +7912,7 @@ fn draw_help_windows(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
         join_warning: t("collab-join-warning"),
         need_name: t("collab-need-name"),
         need_address: t("collab-need-address"),
+        copy_invite: t("collab-copy-invite"),
         leave: t("collab-leave"),
         connecting: t("collab-connecting"),
         hosting_at: t("collab-hosting-at"),
@@ -8402,51 +8396,59 @@ fn draw_render_result(ctx: &egui::Context, state: &mut ShellState, l: &Labels) {
             ui.add(egui::Image::new(&texture).fit_to_exact_size(shown));
             // i18n-exempt: composed by the application from translated parts and a path
             ui.label(&result.message);
-            if result.files.is_empty() {
-                return;
-            }
+            let save_as = state.catalog.get("render-save-as");
+            let copy_img = state.catalog.get("render-copy-image");
             ui.horizontal(|ui| {
-                if result.video() {
-                    // A video plays in the system's player.
-                    if ui.button(&play).clicked() {
-                        crate::desktop::open(&result.files[0]);
-                    }
-                } else if result.playable_frames() {
-                    let playing = result.player.as_ref().is_some_and(|p| p.playing);
-                    let label = if playing { pause.clone() } else { play.clone() };
-                    if ui.button(label).clicked() {
-                        match result.player.as_mut() {
-                            Some(p) => p.toggle(),
-                            None => {
-                                let wake = ui.ctx().clone();
-                                result.player = Some(crate::playback::Player::new(
-                                    result.files.clone(),
-                                    result.fps,
-                                    move || wake.request_repaint(),
-                                ));
+                if ui.button(&save_as).clicked() {
+                    state.queue.push(Command::SaveRenderAs);
+                }
+                if ui.button(&copy_img).clicked() {
+                    state.queue.push(Command::CopyRenderImage);
+                }
+                if !result.files.is_empty() {
+                    ui.separator();
+                    if result.video() {
+                        // A video plays in the system's player.
+                        if ui.button(&play).clicked() {
+                            crate::desktop::open(&result.files[0]);
+                        }
+                    } else if result.playable_frames() {
+                        let playing = result.player.as_ref().is_some_and(|p| p.playing);
+                        let label = if playing { pause.clone() } else { play.clone() };
+                        if ui.button(label).clicked() {
+                            match result.player.as_mut() {
+                                Some(p) => p.toggle(),
+                                None => {
+                                    let wake = ui.ctx().clone();
+                                    result.player = Some(crate::playback::Player::new(
+                                        result.files.clone(),
+                                        result.fps,
+                                        move || wake.request_repaint(),
+                                    ));
+                                }
                             }
                         }
-                    }
-                    if let Some(p) = result.player.as_mut() {
-                        let mut frame = p.frame();
-                        let last = p.len().saturating_sub(1);
-                        if ui
-                            .add(egui::Slider::new(&mut frame, 0..=last).show_value(true))
-                            .changed()
-                        {
-                            p.seek(frame);
+                        if let Some(p) = result.player.as_mut() {
+                            let mut frame = p.frame();
+                            let last = p.len().saturating_sub(1);
+                            if ui
+                                .add(egui::Slider::new(&mut frame, 0..=last).show_value(true))
+                                .changed()
+                            {
+                                p.seek(frame);
+                            }
+                            let (read, count) = p.progress();
+                            if read < count {
+                                // i18n-exempt: a translated word and two counts
+                                ui.label(format!("{loading} {read}/{count}"));
+                            }
                         }
-                        let (read, count) = p.progress();
-                        if read < count {
-                            // i18n-exempt: a translated word and two counts
-                            ui.label(format!("{loading} {read}/{count}"));
-                        }
+                    } else if ui.button(&open_file).clicked() {
+                        crate::desktop::open(&result.files[0]);
                     }
-                } else if ui.button(&open_file).clicked() {
-                    crate::desktop::open(&result.files[0]);
-                }
-                if ui.button(&open_folder).clicked() {
-                    crate::desktop::show_in_folder(&result.files[0]);
+                    if ui.button(&open_folder).clicked() {
+                        crate::desktop::show_in_folder(&result.files[0]);
+                    }
                 }
             });
             // Frames keep coming while playing.
@@ -9115,6 +9117,32 @@ fn draw_render_tab(
         let dragging = ui.ctx().input(|i| i.pointer.any_down());
         send_edit(state, "render.set_settings", params, dragging);
     }
+    if let Some(range_info) = registry.get("scene.set_frame_range") {
+        ui.separator();
+        let mut range_params = PropertyMap::new();
+        range_params.set(
+            "start",
+            kreate_reflect::PropertyValue::Int(doc.playback.start as i64),
+        );
+        range_params.set(
+            "end",
+            kreate_reflect::PropertyValue::Int(doc.playback.end as i64),
+        );
+        range_params.set(
+            "fps",
+            kreate_reflect::PropertyValue::Float(doc.playback.fps),
+        );
+        if kreate_ui::property_editor(
+            ui,
+            &state.catalog,
+            range_info.id,
+            range_info.schema,
+            &mut range_params,
+        ) {
+            let dragging = ui.ctx().input(|i| i.pointer.any_down());
+            send_edit(state, "scene.set_frame_range", range_params, dragging);
+        }
+    }
 }
 
 /// The asset browser: the chosen source's assets of the chosen kind, as
@@ -9554,7 +9582,13 @@ fn draw_chat(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
 }
 
 /// The UV editor, with the view state that belongs to this area.
-fn draw_uv_editor(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l: &Labels) {
+fn draw_uv_editor(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    doc: &Document,
+    area: kreate_ui::AreaId,
+    l: &Labels,
+) {
     let text = kreate_ui::UvText {
         no_uvs: l.uv_none.clone(),
         not_editing: l.uv_not_editing.clone(),
@@ -9563,6 +9597,43 @@ fn draw_uv_editor(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, 
     // Taken out and put back, because the editor writes to it while `state` is
     // also lending its command queue.
     let mut view = state.uv_views.remove(&area).unwrap_or_default();
+
+    // Resolve active material's base-colour image so the UV canvas shows the
+    // texture being mapped rather than a grey void.
+    view.texture = resolve_uv_backdrop_texture(ui.ctx(), state, doc);
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if ui
+            .button(state.catalog.get("uv-toolbar-unwrap"))
+            .on_hover_text(state.catalog.get("op-uv-unwrap-desc"))
+            .clicked()
+        {
+            state.queue.run("uv.unwrap", PropertyMap::new());
+        }
+        if ui.button(state.catalog.get("uv-toolbar-smart")).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("method", kreate_reflect::PropertyValue::Enum(1));
+            state.queue.run("uv.unwrap", p);
+        }
+        if ui.button(state.catalog.get("uv-toolbar-pack")).clicked() {
+            state.queue.run("uv.pack", PropertyMap::new());
+        }
+        if ui.button(state.catalog.get("uv-toolbar-pin")).clicked() {
+            state.queue.run("uv.pin", PropertyMap::new());
+        }
+        if ui.button(state.catalog.get("uv-toolbar-unpin")).clicked() {
+            let mut p = PropertyMap::new();
+            p.set("clear", kreate_reflect::PropertyValue::Bool(true));
+            state.queue.run("uv.pin", p);
+        }
+        ui.separator();
+        ui.checkbox(&mut view.sticky, state.catalog.get("uv-toolbar-sticky"))
+            .on_hover_text(state.catalog.get("uv-toolbar-sticky-hint"));
+        ui.checkbox(&mut view.checker, state.catalog.get("uv-toolbar-checker"))
+            .on_hover_text(state.catalog.get("uv-toolbar-checker-hint"));
+    });
+
     let commands = kreate_ui::uv_editor(
         ui,
         data.as_ref().map(|d| d.view()).as_ref(),
@@ -9587,6 +9658,7 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
         jump_end: l.time_jump_end.clone(),
         start: l.time_start.clone(),
         end: l.time_end.clone(),
+        fps: state.catalog.get("timeline-fps"),
         autokey: l.time_autokey.clone(),
         add_marker: l.marker_add.clone(),
         bind_camera: l.marker_bind_camera.clone(),
@@ -9599,6 +9671,13 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
     state.timeline_views.insert(area, panel);
     for edit in edits {
         let mut p = PropertyMap::new();
+        if let E::SetFps(fps) = edit {
+            p.set("start", V::Int(view.start as i64));
+            p.set("end", V::Int(view.end as i64));
+            p.set("fps", V::Float(fps));
+            state.queue.run("scene.set_frame_range", p);
+            continue;
+        }
         let id = match edit {
             E::SetFrame(frame) => {
                 p.set("frame", V::Float(frame));
@@ -9615,6 +9694,7 @@ fn draw_timeline(ui: &mut Ui, state: &mut ShellState, area: kreate_ui::AreaId, l
                 p.set("end", V::Int(end as i64));
                 "time.set_range"
             }
+            E::SetFps(_) => unreachable!(),
             E::ToggleAutokey => "time.toggle_autokey",
             // Without a frame, the clock's, filled in by the application.
             E::AddMarker => "marker.add",
@@ -10146,6 +10226,8 @@ fn draw_dope_sheet(
         constant: l.interp_constant.clone(),
         linear: l.interp_linear.clone(),
         bezier: l.interp_bezier.clone(),
+        duplicate: state.catalog.get("op-anim-keys-duplicate"),
+        delete: state.catalog.get("op-anim-keys-delete"),
     };
     let mut panel = state.sheet_views.remove(&area).unwrap_or_default();
     let edits = kreate_ui::dope_sheet::dope_sheet(ui, &view, &mut panel, &text);
@@ -10172,6 +10254,10 @@ fn draw_dope_sheet(
             E::Move { offset } => {
                 p.set("offset", V::Float(offset));
                 state.queue.run("anim.keys_move", p);
+            }
+            E::Duplicate => {
+                p.set("offset", V::Float(0.0));
+                state.queue.run("anim.keys_duplicate", p);
             }
             E::Delete => state.queue.run("anim.keys_delete", p),
             E::Interpolation(kind) => {
@@ -10439,8 +10525,7 @@ fn draw_geometry_editor(
     };
     let mut editor = state.node_views.remove(&area).unwrap_or_default();
     editor.showing(graph_key(("geometry", doc.selection.active)));
-    // No duplicate, group or clipboard for these yet.
-    editor.plain = true;
+    editor.plain = false;
     let mut asked = false;
     let edits = kreate_ui::node_editor(ui, view.as_ref(), &mut editor, &text, &mut asked);
     state.node_views.insert(area, editor);
@@ -10483,6 +10568,10 @@ fn draw_geometry_editor(
                 p.set("nodes", V::Ints(nodes));
                 state.queue.run("geo.remove", p);
             }
+            E::Duplicate { nodes } => {
+                p.set("nodes", V::Ints(nodes));
+                state.queue.run("geo.duplicate", p);
+            }
             E::SetValue {
                 node,
                 field,
@@ -10494,7 +10583,7 @@ fn draw_geometry_editor(
                 p.set("value", V::Float(value as f64));
                 send_edit(state, "geo.set_value", p, continuing);
             }
-            // Colours, images and copying are the material graph's.
+            // Colours, images and grouping are the material graph's.
             _ => {}
         }
     }
@@ -10752,6 +10841,29 @@ fn graph_view(
                                 max: 1.0,
                                 label: String::new(),
                             }),
+                            (NodeKind::Surface { emission, .. }, 4) => {
+                                let peak = emission.r.max(emission.g).max(emission.b);
+                                let tint = if peak > 1.0 {
+                                    kreate_math::SceneRgb::new(
+                                        emission.r / peak,
+                                        emission.g / peak,
+                                        emission.b / peak,
+                                    )
+                                } else {
+                                    *emission
+                                };
+                                Some(FieldView::Color {
+                                    field: 1,
+                                    swatch: swatch(tint),
+                                })
+                            }
+                            (NodeKind::Surface { alpha, .. }, 5) => Some(FieldView::Value {
+                                field: 7,
+                                value: *alpha,
+                                min: 0.0,
+                                max: 1.0,
+                                label: String::new(),
+                            }),
                             (NodeKind::MixColor { factor }, 0) => Some(FieldView::Value {
                                 field: 0,
                                 value: *factor,
@@ -10860,6 +10972,53 @@ fn graph_view(
                     })
                     .collect();
             let fields = match kind {
+                NodeKind::Surface {
+                    transmission,
+                    ior,
+                    coat,
+                    coat_roughness,
+                    emission,
+                    ..
+                } => {
+                    let strength = emission.r.max(emission.g).max(emission.b);
+                    vec![
+                        FieldView::Value {
+                            field: 3,
+                            value: *transmission,
+                            min: 0.0,
+                            max: 1.0,
+                            label: t("param-transmission"),
+                        },
+                        FieldView::Value {
+                            field: 4,
+                            value: *ior,
+                            min: 1.0,
+                            max: 3.0,
+                            label: t("param-ior"),
+                        },
+                        FieldView::Value {
+                            field: 5,
+                            value: *coat,
+                            min: 0.0,
+                            max: 1.0,
+                            label: t("op-material-set_properties-param-coat-name"),
+                        },
+                        FieldView::Value {
+                            field: 6,
+                            value: *coat_roughness,
+                            min: 0.0,
+                            max: 1.0,
+                            label: t("op-material-set_properties-param-coat_roughness-name"),
+                        },
+                        FieldView::Value {
+                            field: 10,
+                            value: strength,
+                            min: 0.0,
+                            max: 50.0,
+                            label: t("node-socket-strength"),
+                        },
+                    ]
+                }
                 NodeKind::Color(c) => vec![FieldView::Color {
                     field: 0,
                     swatch: swatch(*c),
@@ -11415,6 +11574,21 @@ fn draw_view_sidebar(
         let mut params = PropertyMap::new();
         params.set("lens", kreate_reflect::PropertyValue::Float(lens));
         state.queue.dispatch("view.set_lens", params);
+    }
+    ui.add_space(4.0);
+    ui.checkbox(
+        &mut state.tools.lock_camera_to_view,
+        state.catalog.get("view-lock-camera"),
+    )
+    .on_hover_text(state.catalog.get("view-lock-camera-hint"));
+    if ui
+        .button(state.catalog.get("view-camera-align"))
+        .on_hover_text(state.catalog.get("op-view-camera-align-to-view-desc"))
+        .clicked()
+    {
+        state
+            .queue
+            .dispatch("view.camera_align_to_view", PropertyMap::new());
     }
     ui.separator();
     ui.strong(&l.sidebar_cursor);
@@ -12312,12 +12486,173 @@ fn draw_nav_gizmo(ui: &mut Ui, state: &mut ShellState, viewport: egui::Rect) {
     } else if response.clicked() {
         // Only a click, never a drag that happened to end on a ball: snapping
         // after an orbit would undo the orbit the user just performed.
+        // Clicking the axis the camera already faces flips to the opposite side.
         if let Some(axis) = hovered {
-            state.queue.push(Command::SnapToAxis(axis));
+            let toward_eye = state.camera_rotation * kreate_math::DVec3::Z;
+            let target = if toward_eye.dot(axis.direction()) > 0.999 {
+                use kreate_render::ViewAxis as A;
+                match axis {
+                    A::PosX => A::NegX,
+                    A::NegX => A::PosX,
+                    A::PosY => A::NegY,
+                    A::NegY => A::PosY,
+                    A::PosZ => A::NegZ,
+                    A::NegZ => A::PosZ,
+                }
+            } else {
+                axis
+            };
+            state.queue.push(Command::SnapToAxis(target));
         }
     }
 
     nav_gizmo::draw(ui.painter(), centre, radius, &balls, hovered);
+
+    // Companion mini-controls right below the navigation gizmo for trackpad /
+    // mouse-only users: Pan (drag), Zoom (drag), Frame, Persp/Ortho, Camera.
+    let btn_size = egui::vec2(24.0, 22.0);
+    let gap = 3.0;
+    let col_x = (viewport.max.x - 12.0 - btn_size.x).max(viewport.min.x + 4.0);
+    let start_y = centre.y + radius + 8.0;
+    if start_y + (btn_size.y + gap) * 5.0 < viewport.max.y - 8.0 {
+        let theme = kreate_ui::theme::from_ui(ui);
+        let col_rect = egui::Rect::from_min_size(
+            egui::pos2(col_x - 2.0, start_y - 2.0),
+            egui::vec2(btn_size.x + 4.0, (btn_size.y + gap) * 5.0 + 2.0),
+        );
+        state.nav_companion_rect = Some(col_rect);
+
+        let draw_pill = |ui: &mut Ui, idx: usize, active: bool, sense: egui::Sense| {
+            let r = egui::Rect::from_min_size(
+                egui::pos2(col_x, start_y + idx as f32 * (btn_size.y + gap)),
+                btn_size,
+            );
+            let resp = ui.interact(r, ui.id().with(("nav-companion", idx)), sense);
+            let fill = if active {
+                theme.accent.gamma_multiply(0.85)
+            } else if resp.hovered() || resp.dragged() {
+                theme.raised
+            } else {
+                theme.sunken.gamma_multiply(0.88)
+            };
+            let p = ui.painter();
+            p.rect(
+                r,
+                5.0,
+                fill,
+                egui::Stroke::new(1.0, theme.border),
+                egui::StrokeKind::Inside,
+            );
+            let c = r.center();
+            let ink = egui::Stroke::new(1.3, theme.text);
+            match idx {
+                0 => {
+                    // 4-way pan crosshair
+                    p.line_segment([c + egui::vec2(-5.0, 0.0), c + egui::vec2(5.0, 0.0)], ink);
+                    p.line_segment([c + egui::vec2(0.0, -5.0), c + egui::vec2(0.0, 5.0)], ink);
+                    for d in [
+                        egui::vec2(-5.0, 0.0),
+                        egui::vec2(5.0, 0.0),
+                        egui::vec2(0.0, -5.0),
+                        egui::vec2(0.0, 5.0),
+                    ] {
+                        p.circle_filled(c + d, 1.3, theme.text);
+                    }
+                }
+                1 => {
+                    // Zoom magnifying glass with +
+                    let gc = c + egui::vec2(-1.2, -1.2);
+                    p.circle_stroke(gc, 4.0, ink);
+                    p.line_segment([gc + egui::vec2(-2.0, 0.0), gc + egui::vec2(2.0, 0.0)], ink);
+                    p.line_segment([gc + egui::vec2(0.0, -2.0), gc + egui::vec2(0.0, 2.0)], ink);
+                    p.line_segment([gc + egui::vec2(2.8, 2.8), c + egui::vec2(5.2, 5.2)], ink);
+                }
+                2 => {
+                    // Frame corner brackets
+                    for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                        let corner = c + egui::vec2(sx * 5.0, sy * 4.5);
+                        p.line_segment([corner, corner + egui::vec2(-sx * 2.8, 0.0)], ink);
+                        p.line_segment([corner, corner + egui::vec2(0.0, -sy * 2.8)], ink);
+                    }
+                    p.circle_filled(c, 1.5, theme.text);
+                }
+                3 => {
+                    // Ortho grid vs perspective trapezoid
+                    if active {
+                        let qr = egui::Rect::from_center_size(c, egui::vec2(9.0, 8.0));
+                        p.rect_stroke(qr, 1.0, ink, egui::StrokeKind::Inside);
+                        p.line_segment([egui::pos2(c.x, qr.min.y), egui::pos2(c.x, qr.max.y)], ink);
+                        p.line_segment([egui::pos2(qr.min.x, c.y), egui::pos2(qr.max.x, c.y)], ink);
+                    } else {
+                        let pts = vec![
+                            c + egui::vec2(-3.0, -4.0),
+                            c + egui::vec2(3.0, -4.0),
+                            c + egui::vec2(5.2, 4.0),
+                            c + egui::vec2(-5.2, 4.0),
+                        ];
+                        p.add(egui::Shape::closed_line(pts, ink));
+                    }
+                }
+                _ => {
+                    // Camera body + lens triangle
+                    let body = egui::Rect::from_center_size(
+                        c + egui::vec2(-1.5, 0.0),
+                        egui::vec2(7.5, 6.5),
+                    );
+                    p.rect_stroke(body, 1.2, ink, egui::StrokeKind::Inside);
+                    p.add(egui::Shape::closed_line(
+                        vec![
+                            egui::pos2(body.max.x, c.y),
+                            c + egui::vec2(5.5, -3.0),
+                            c + egui::vec2(5.5, 3.0),
+                        ],
+                        ink,
+                    ));
+                }
+            }
+            resp
+        };
+
+        let pan_resp = draw_pill(ui, 0, false, egui::Sense::click_and_drag())
+            .on_hover_text(state.catalog.get("nav-pan-hint"));
+        if pan_resp.drag_delta() != egui::Vec2::ZERO {
+            let d = pan_resp.drag_delta();
+            state.queue.push(Command::PanBy { dx: d.x, dy: d.y });
+        }
+
+        let zoom_resp = draw_pill(ui, 1, false, egui::Sense::click_and_drag())
+            .on_hover_text(state.catalog.get("nav-zoom-hint"));
+        if zoom_resp.drag_delta() != egui::Vec2::ZERO {
+            let d = zoom_resp.drag_delta();
+            state.queue.push(Command::ZoomBy { delta: -d.y * 0.04 });
+        } else if zoom_resp.clicked() {
+            state.queue.push(Command::ZoomBy { delta: 1.0 });
+        }
+
+        if draw_pill(ui, 2, false, egui::Sense::click())
+            .on_hover_text(state.catalog.get("nav-frame-hint"))
+            .clicked()
+        {
+            state.queue.push(Command::FrameSelection);
+        }
+
+        let ortho = state.view_status.orthographic;
+        if draw_pill(ui, 3, ortho, egui::Sense::click())
+            .on_hover_text(state.catalog.get("nav-persp-hint"))
+            .clicked()
+        {
+            state
+                .queue
+                .dispatch("view.toggle_projection", PropertyMap::new());
+        }
+
+        if draw_pill(ui, 4, false, egui::Sense::click())
+            .on_hover_text(state.catalog.get("nav-camera-hint"))
+            .clicked()
+        {
+            state.queue.dispatch("view.camera", PropertyMap::new());
+        }
+    }
 }
 
 /// The adjust-last-operation panel.
@@ -12376,6 +12711,11 @@ fn draw_adjust_float(
     } else {
         label
     };
+    let right_inset = if state.nav_companion_rect.is_some() {
+        44.0
+    } else {
+        12.0
+    };
     let shown = egui::Area::new(egui::Id::new((
         "adjust-float",
         viewport.min.x as i32,
@@ -12385,7 +12725,7 @@ fn draw_adjust_float(
     // Top right, under the navigation gizmo, where Fusion opens a command's
     // dialog: beside the model rather than over the corner the eye starts in.
     .pivot(egui::Align2::RIGHT_TOP)
-    .fixed_pos(viewport.right_top() + egui::vec2(-12.0, 132.0))
+    .fixed_pos(viewport.right_top() + egui::vec2(-right_inset, 132.0))
     .constrain_to(viewport)
     .show(ui.ctx(), |ui| {
         let theme = kreate_ui::theme::from_ui(ui);
@@ -13459,7 +13799,7 @@ fn draw_physical_library(ui: &mut Ui, state: &mut ShellState, doc: &Document, sl
         .map(|m| state.catalog.get(&m.name_key()));
     let mut chosen = None;
     ui.horizontal(|ui| {
-        ui.menu_button(format!("{title} \u{25BE}"), |ui| {
+        ui.menu_button(format!("{title} \u{25BC}"), |ui| {
             for category in Category::ALL {
                 ui.menu_button(state.catalog.get(category.name_key()), |ui| {
                     for entry in LIBRARY.iter().filter(|m| m.category == category) {
@@ -13513,6 +13853,48 @@ fn draw_physical_library(ui: &mut Ui, state: &mut ShellState, doc: &Document, sl
             // i18n-exempt: the library entry's translated name
             ui.label(egui::RichText::new(shown).color(theme.text_dim));
         }
+        ui.menu_button(
+            format!("{} \u{25BC}", state.catalog.get("material-quick-preset")),
+            |ui| {
+                use kreate_reflect::PropertyValue as V;
+                let apply_simple =
+                    |state: &mut ShellState, color: [f64; 3], rough: f64, emission: f64| {
+                        let mut u = PropertyMap::new();
+                        u.set("slot", V::Int(slot as i64));
+                        u.set("use_nodes", V::Bool(false));
+                        state.queue.run("material.use_nodes", u);
+                        let mut m = PropertyMap::new();
+                        m.set("slot", V::Int(slot as i64));
+                        m.set("base_color", V::Vec3(color));
+                        m.set("metallic", V::Float(0.0));
+                        m.set("roughness", V::Float(rough));
+                        m.set("emission_color", V::Vec3(color));
+                        m.set("emission_strength", V::Float(emission));
+                        state.queue.run("material.set", m);
+                    };
+                if ui
+                    .button(state.catalog.get("material-preset-clay"))
+                    .clicked()
+                {
+                    apply_simple(state, [0.82, 0.80, 0.77], 0.85, 0.0);
+                    ui.close();
+                }
+                if ui
+                    .button(state.catalog.get("material-preset-led"))
+                    .clicked()
+                {
+                    apply_simple(state, [1.0, 0.98, 0.92], 0.25, 8.0);
+                    ui.close();
+                }
+                if ui
+                    .button(state.catalog.get("material-preset-neon"))
+                    .clicked()
+                {
+                    apply_simple(state, [0.15, 0.92, 1.0], 0.20, 12.0);
+                    ui.close();
+                }
+            },
+        );
     });
     if let Some((id, name)) = chosen {
         let mut p = PropertyMap::new();
@@ -13750,6 +14132,9 @@ fn draw_material_tab(
     if uses_nodes {
         ui.add_space(4.0);
         ui.weak(&l.material_uses_nodes);
+        if let Some(graph) = &material.graph {
+            draw_node_surface_quick_controls(ui, state, graph, slot, l);
+        }
         return;
     }
 
@@ -16299,6 +16684,37 @@ fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool,
     {
         state.viewport_only = !state.viewport_only;
     }
+    let prefs_tip = tip(
+        state,
+        "app.preferences",
+        &state.catalog.get("op-app-preferences"),
+    );
+    {
+        let side = ui.spacing().interact_size.y;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+        let fill = if state.preferences_open {
+            theme.accent.gamma_multiply(0.35)
+        } else if resp.hovered() {
+            theme.raised
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        if fill != egui::Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, 4.0, fill);
+        }
+        let c = rect.center();
+        let stroke = egui::Stroke::new(1.4, theme.text);
+        ui.painter().circle_stroke(c, 3.5, stroke);
+        for i in 0..6 {
+            let a = (i as f32) * std::f32::consts::TAU / 6.0;
+            let d = egui::vec2(a.cos(), a.sin());
+            ui.painter()
+                .line_segment([c + d * 4.2, c + d * 6.0], stroke);
+        }
+        if resp.on_hover_text(prefs_tip).clicked() {
+            state.preferences_open = !state.preferences_open;
+        }
+    }
     ui.add_space(10.0);
     // The document, as a tab: its name, and a dot while it has changes no
     // save has kept.
@@ -16335,6 +16751,61 @@ fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool,
             .unwrap_or_else(|| state.catalog.get("search-commands"));
         if bar_button(ui, RibbonIcon::Search, true, &tip).clicked() {
             state.palette.open();
+        }
+        if !state.recoverable.is_empty() && !state.recovery_banner_dismissed {
+            let latest_name = state.recoverable[0].name.clone();
+            let latest_path = state.recoverable[0].path.clone();
+            let prompt = state.catalog.format(
+                "recover-banner-prompt",
+                TextKind::Ui,
+                &[
+                    ("name", latest_name.as_str()),
+                    ("count", &state.recoverable.len().to_string()),
+                ],
+            );
+            if ui
+                .small_button(state.catalog.get("recover-banner-dismiss"))
+                .clicked()
+            {
+                state.recovery_banner_dismissed = true;
+            }
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(state.catalog.get("recover-banner-restore"))
+                            .color(theme.accent)
+                            .strong(),
+                    )
+                    .stroke(egui::Stroke::new(1.0, theme.accent)),
+                )
+                .on_hover_text(prompt)
+                .clicked()
+            {
+                state
+                    .queue
+                    .push(Command::RecoverDocument { path: latest_path });
+            }
+        }
+        if let Some(collab) = &state.collab_view {
+            let count = (collab.peers.len() + 1).to_string();
+            let badge = state.catalog.format(
+                if collab.live {
+                    "collab-badge-live"
+                } else {
+                    "collab-badge-connecting"
+                },
+                TextKind::Ui,
+                &[("count", count.as_str())],
+            );
+            let dot_color = if collab.live {
+                egui::Color32::from_rgb(0x4c, 0xd9, 0x64)
+            } else {
+                theme.info
+            };
+            let rich = egui::RichText::new(badge).color(dot_color).strong();
+            if ui.button(rich).clicked() {
+                state.collab.open = true;
+            }
         }
     });
 }
@@ -16683,9 +17154,11 @@ fn draw_history_strip(ui: &mut Ui, state: &mut ShellState, l: &Labels) {
                                         .color(theme.text_faint),
                                 );
                             }
-                            for (i, label) in state.history_steps.iter().enumerate().skip(first) {
+                            for (i, raw_label) in state.history_steps.iter().enumerate().skip(first)
+                            {
                                 let applied = i + 1;
                                 let undone = applied > at;
+                                let label = translate_history_label(state, raw_label);
                                 let short: String = label.chars().take(14).collect();
                                 let short = if short.chars().count() < label.chars().count() {
                                     format!("{short}…")
@@ -16822,8 +17295,10 @@ pub struct SketchView {
     pub reference: Vec<bool>,
     /// The points a tool can pick: pinned, selected.
     pub points: Vec<(kreate_math::DVec3, bool, bool)>,
-    /// A constraint's mark, where it is drawn.
+    /// A constraint's mark, where it is drawn (transient tool readouts).
     pub glyphs: Vec<(kreate_math::DVec3, String)>,
+    /// Interactive geometric constraint badges (`H`, `V`, `//`, `⊥`, `=`, etc.).
+    pub badges: Vec<ConstraintBadge>,
     /// A drawing's text, as it stands on the page.
     pub texts: Vec<SketchText>,
     pub dims: Vec<SketchDim>,
@@ -16864,6 +17339,25 @@ pub struct SketchView {
     pub drafting: bool,
     /// In a drawing, the entities selected.
     pub picked_entities: Vec<u32>,
+}
+
+/// Interactive sketch constraint badge with index and associated line indices.
+#[derive(Clone, Debug)]
+pub struct ConstraintBadge {
+    pub at: kreate_math::DVec3,
+    pub label: String,
+    pub index: usize,
+    pub drafting: bool,
+    pub lines: Vec<usize>,
+}
+
+/// Floating Fillet / Chamfer input card state shown while picking edges.
+#[derive(Clone, Debug)]
+pub struct FilletDialogView {
+    pub chamfer: bool,
+    pub edge_count: usize,
+    pub radius_text: String,
+    pub unit_symbol: &'static str,
 }
 
 /// A closed area of a sketch, for drawing: its outline and holes, and the
@@ -17049,6 +17543,12 @@ pub struct FeatureRow {
     pub amount: f64,
     pub symmetric: bool,
     pub cut: bool,
+    /// `0` = Join, `1` = Cut, `2` = Intersect.
+    pub operation: u32,
+    pub through: bool,
+    pub second: f64,
+    pub offset: f64,
+    pub taper: f64,
     /// Left out of its body for now.
     pub suppressed: bool,
     /// How many features its body has, for moving it among them.
@@ -17069,6 +17569,9 @@ pub struct FeatureEdit {
     pub row: FeatureRow,
     /// As shown: the distance in the scene's unit, or the angle in degrees.
     pub amount: f64,
+    pub second: f64,
+    pub offset: f64,
+    pub taper_deg: f64,
     /// An expression of the parameters to hold the amount to; empty for
     /// the number alone.
     pub expression: String,
@@ -17085,7 +17588,7 @@ fn tool_label(state: &ShellState, name: &str) -> String {
 
 /// Every sketch's lines, and the one being drawn with all it carries.
 fn draw_sketches(
-    ui: &Ui,
+    ui: &mut Ui,
     painter: &egui::Painter,
     projector: &kreate_ui::object_glyph::Projector,
     state: &mut ShellState,
@@ -17093,6 +17596,7 @@ fn draw_sketches(
 ) {
     let theme = kreate_ui::theme::from_ui(ui).over_viewport();
     let blue = egui::Color32::from_rgb(0x4d, 0x9b, 0xf0);
+    let cyan = egui::Color32::from_rgb(0x38, 0xe8, 0xff);
     let pinned_ink = theme.text;
     // A selected sketch in the selection's colour, as a selected object's
     // outline is — the active one at full strength — and thicker, over a
@@ -17114,9 +17618,49 @@ fn draw_sketches(
         }
     }
     let Some(view) = state.sketch_view.clone() else {
+        state.selected_constraint = None;
         return;
     };
     let project = |p: &kreate_math::DVec3| projector.project(*p);
+
+    // Pre-place interactive constraint badges with horizontal de-overlapping so
+    // multiple constraints on the same curve (`H` + `=`) sit side by side cleanly.
+    let font = egui::FontId::proportional(11.0);
+    let mut placed_badges: Vec<(egui::Rect, std::sync::Arc<egui::Galley>, ConstraintBadge)> =
+        Vec::new();
+    for b in &view.badges {
+        let Some(p) = project(&b.at) else { continue };
+        if !inner.contains(p) {
+            continue;
+        }
+        let galley = painter.layout_no_wrap(b.label.clone(), font.clone(), theme.text);
+        let mut center = p + egui::vec2(8.0, -8.0);
+        let size = galley.size() + egui::vec2(6.0, 4.0);
+        for _ in 0..8 {
+            let candidate = egui::Rect::from_center_size(center, size);
+            if let Some((prev, _, _)) = placed_badges
+                .iter()
+                .find(|(r, _, _)| r.expand(1.5).intersects(candidate))
+            {
+                center.x = prev.max.x + size.x * 0.5 + 4.0;
+            } else {
+                break;
+            }
+        }
+        let rect = egui::Rect::from_center_size(center, size);
+        placed_badges.push((rect, galley, b.clone()));
+    }
+
+    let pointer = ui.ctx().pointer_hover_pos();
+    let mut hovered_lines: Vec<usize> = Vec::new();
+    for (rect, _, b) in &placed_badges {
+        let sel = state.selected_constraint == Some((b.drafting, b.index));
+        let hov = pointer.is_some_and(|pt| rect.contains(pt));
+        if sel || hov {
+            hovered_lines.extend(b.lines.iter().copied());
+        }
+    }
+
     // The regions picked, filled faintly; the one under the pointer brighter.
     let fill = |region: &RegionShape, alpha: u8| {
         let c = egui::Color32::from_rgba_unmultiplied(
@@ -17159,12 +17703,15 @@ fn draw_sketches(
     let purple = egui::Color32::from_rgb(0xa0, 0x6c, 0xd5);
     for (i, ([a, b], pinned, selected, construction)) in view.lines.iter().enumerate() {
         if let (Some(p), Some(q)) = (project(a), project(b)) {
+            let badge_lit = hovered_lines.contains(&i);
             // Reference: thin and purple, under nothing.
-            if !*selected && view.reference.get(i).copied().unwrap_or(false) {
+            if !*selected && !badge_lit && view.reference.get(i).copied().unwrap_or(false) {
                 painter.line_segment([p, q], egui::Stroke::new(1.2, purple));
                 continue;
             }
-            let ink = if *selected {
+            let ink = if badge_lit {
+                cyan
+            } else if *selected {
                 theme.accent
             } else if *pinned {
                 pinned_ink
@@ -17184,8 +17731,9 @@ fn draw_sketches(
             // A dark edge under the line, so it reads on a light solid as on
             // the dark ground: a sketch is drawn over the bodies made from
             // it, and their faces are as pale as the line.
-            painter.line_segment([p, q], egui::Stroke::new(3.6, halo));
-            painter.line_segment([p, q], egui::Stroke::new(1.6, ink));
+            let width = if badge_lit { 2.6 } else { 1.6 };
+            painter.line_segment([p, q], egui::Stroke::new(width + 2.0, halo));
+            painter.line_segment([p, q], egui::Stroke::new(width, ink));
         }
     }
     for (at, pinned, selected) in &view.points {
@@ -17209,7 +17757,70 @@ fn draw_sketches(
             );
         }
     }
-    let font = egui::FontId::proportional(11.0);
+    for (k, (rect, galley, b)) in placed_badges.into_iter().enumerate() {
+        let sel = state.selected_constraint == Some((b.drafting, b.index));
+        let resp = ui.interact(
+            rect,
+            ui.id().with(("sketch-badge", b.drafting, b.index, k)),
+            egui::Sense::click(),
+        );
+        let lit = sel || resp.hovered();
+        let bg = if sel {
+            theme.accent
+        } else if lit {
+            theme.raised
+        } else {
+            theme.sunken.gamma_multiply(0.88)
+        };
+        let border = if lit { cyan } else { theme.border_strong };
+        painter.rect_filled(rect, 3.0, bg);
+        painter.rect_stroke(
+            rect,
+            3.0,
+            egui::Stroke::new(if lit { 1.5 } else { 1.0 }, border),
+            egui::StrokeKind::Outside,
+        );
+        let text_pos = rect.center() - galley.size() * 0.5;
+        painter.galley(text_pos, galley, theme.text);
+        if resp.clicked() {
+            state.selected_constraint = Some((b.drafting, b.index));
+        }
+        let remove_label = state.catalog.get("op-sketch-constraint-remove");
+        let hint = state.catalog.get("sketch-badge-hint");
+        let resp = resp.on_hover_text(hint);
+        resp.context_menu(|ui| {
+            if ui.button(&remove_label).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("index", kreate_reflect::PropertyValue::Int(b.index as i64));
+                let op = if b.drafting {
+                    "draft.unconstrain"
+                } else {
+                    "sketch.constraint_remove"
+                };
+                state.queue.run(op, p);
+                if state.selected_constraint == Some((b.drafting, b.index)) {
+                    state.selected_constraint = None;
+                }
+                ui.close();
+            }
+        });
+    }
+    if let Some((drafting, index)) = state.selected_constraint {
+        let delete_pressed = !ui.ctx().egui_wants_keyboard_input()
+            && ui
+                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        if delete_pressed {
+            let mut p = PropertyMap::new();
+            p.set("index", kreate_reflect::PropertyValue::Int(index as i64));
+            let op = if drafting {
+                "draft.unconstrain"
+            } else {
+                "sketch.constraint_remove"
+            };
+            state.queue.run(op, p);
+            state.selected_constraint = None;
+        }
+    }
     for (at, text) in &view.glyphs {
         if let Some(p) = project(at) {
             let galley = painter.layout_no_wrap(text.clone(), font.clone(), theme.text);
@@ -17253,8 +17864,7 @@ fn draw_sketches(
             egui::epaint::TextShape::new(top_left, galley, blue).with_angle(run.y.atan2(run.x)),
         );
     }
-    // Dimensions: a thin line between what they measure and the number.
-    let pointer = ui.ctx().pointer_hover_pos();
+    // Dimensions: extension lines + crisp arrowheads + double-click number edit.
     let double = ui.ctx().input(|i| {
         i.pointer
             .button_double_clicked(egui::PointerButton::Primary)
@@ -17265,9 +17875,38 @@ fn draw_sketches(
         else {
             continue;
         };
-        let line = egui::Stroke::new(1.0, theme.text_dim);
+        let line = egui::Stroke::new(1.1, theme.text_dim);
         if d.kind != DimKind::Angle {
-            painter.line_segment([a, b], line);
+            let ab = b - a;
+            let len = ab.length();
+            if len > 1.0 {
+                let dir = ab / len;
+                let nrm = egui::vec2(-dir.y, dir.x);
+                let mid = a + ab * 0.5;
+                let off = (at - mid).dot(nrm);
+                let da = a + nrm * off;
+                let db = b + nrm * off;
+                if off.abs() > 3.0 {
+                    let ext = egui::Stroke::new(0.8, theme.text_faint);
+                    painter.line_segment([a, da], ext);
+                    painter.line_segment([b, db], ext);
+                }
+                painter.line_segment([da, db], line);
+                if len > 16.0 {
+                    let aw = 5.5;
+                    let ah = 2.4;
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![da, da + dir * aw + nrm * ah, da + dir * aw - nrm * ah],
+                        theme.text_dim,
+                        egui::Stroke::NONE,
+                    ));
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![db, db - dir * aw + nrm * ah, db - dir * aw - nrm * ah],
+                        theme.text_dim,
+                        egui::Stroke::NONE,
+                    ));
+                }
+            }
         }
         let r = painter.text(
             at,
@@ -17276,7 +17915,7 @@ fn draw_sketches(
             egui::FontId::monospace(11.0),
             theme.text,
         );
-        painter.rect_filled(r.expand(2.0), 3.0, theme.sunken.gamma_multiply(0.85));
+        painter.rect_filled(r.expand(2.0), 3.0, theme.sunken.gamma_multiply(0.88));
         painter.text(
             at,
             egui::Align2::CENTER_CENTER,
@@ -18166,7 +18805,7 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                             if row.is_sketch {
                                 state.queue.push(Command::EditSketch(row.label.clone()));
                             } else {
-                                let unit = state.length_unit;
+                                let unit = state.length_unit.max(1e-12);
                                 state.feature_edit = Some(FeatureEdit {
                                     amount: if row.revolve {
                                         row.amount.to_degrees()
@@ -18174,8 +18813,11 @@ fn draw_feature_list(ui: &mut Ui, state: &mut ShellState) {
                                         // A count or a ratio: no unit.
                                         row.amount
                                     } else {
-                                        row.amount / unit.max(1e-12)
+                                        row.amount / unit
                                     },
+                                    second: row.second / unit,
+                                    offset: row.offset / unit,
+                                    taper_deg: row.taper.to_degrees(),
                                     expression: row.expression.clone().unwrap_or_default(),
                                     row: row.clone(),
                                 });
@@ -18205,8 +18847,20 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
     );
     let title = edit.row.label.clone();
     let unit = state.length_unit;
+    let unit_suffix = if (unit - 0.001).abs() < 1e-6 {
+        " mm"
+    } else if (unit - 0.01).abs() < 1e-6 {
+        " cm"
+    } else if (unit - 0.0254).abs() < 1e-6 {
+        " in"
+    } else if (unit - 0.3048).abs() < 1e-6 {
+        " ft"
+    } else {
+        " m"
+    };
     egui::Window::new(title)
         .id(egui::Id::new("feature-edit"))
+        .default_pos(egui::pos2(24.0, 226.0))
         .collapsible(false)
         .resizable(false)
         .show(ui.ctx(), |ui| {
@@ -18241,7 +18895,11 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                         ui.checkbox(&mut edit.row.symmetric, "");
                     } else if kind == "sheet_metal" {
                         ui.label(state.catalog.get("feature-flange-height"));
-                        ui.add(egui::DragValue::new(&mut edit.amount).speed(0.1));
+                        ui.add(
+                            egui::DragValue::new(&mut edit.amount)
+                                .speed(0.1)
+                                .suffix(unit_suffix),
+                        );
                         ui.end_row();
                         ui.label(state.catalog.get("feature-flat"));
                         ui.checkbox(&mut edit.row.symmetric, "");
@@ -18254,16 +18912,61 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                         } else {
                             "feature-distance"
                         }));
-                        ui.add(egui::DragValue::new(&mut edit.amount).speed(0.1));
+                        ui.add(
+                            egui::DragValue::new(&mut edit.amount)
+                                .speed(0.1)
+                                .suffix(unit_suffix),
+                        );
                         if kind == "extrude" {
                             ui.end_row();
                             ui.label(state.catalog.get("feature-symmetric"));
                             ui.checkbox(&mut edit.row.symmetric, "");
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-through-all"));
+                            ui.checkbox(&mut edit.row.through, "");
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-second-side"));
+                            ui.add(
+                                egui::DragValue::new(&mut edit.second)
+                                    .speed(0.1)
+                                    .suffix(unit_suffix),
+                            );
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-start-offset"));
+                            ui.add(
+                                egui::DragValue::new(&mut edit.offset)
+                                    .speed(0.1)
+                                    .suffix(unit_suffix),
+                            );
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-taper"));
+                            ui.add(
+                                egui::DragValue::new(&mut edit.taper_deg)
+                                    .speed(0.5)
+                                    .range(-80.0..=80.0)
+                                    .suffix("°"),
+                            );
+                        } else if kind == "hole" {
+                            ui.end_row();
+                            ui.label(state.catalog.get("feature-through-all"));
+                            ui.checkbox(&mut edit.row.symmetric, "");
                         }
                     }
                     ui.end_row();
-                    ui.label(state.catalog.get("feature-cut"));
-                    ui.checkbox(&mut edit.row.cut, "");
+                    ui.label(state.catalog.get("feature-operation"));
+                    let op_labels = [
+                        state.catalog.get("feature-op-join"),
+                        state.catalog.get("feature-op-cut"),
+                        state.catalog.get("feature-op-intersect"),
+                    ];
+                    let current_op = edit.row.operation.min(2) as usize;
+                    egui::ComboBox::from_id_salt("feature-edit-op")
+                        .selected_text(&op_labels[current_op])
+                        .show_ui(ui, |ui| {
+                            for (idx, lbl) in op_labels.iter().enumerate() {
+                                ui.selectable_value(&mut edit.row.operation, idx as u32, lbl);
+                            }
+                        });
                     ui.end_row();
                     ui.label(state.catalog.get("feature-expression"));
                     ui.add(
@@ -18302,7 +19005,13 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
                     };
                     p.set("amount", V::Float(amount));
                     p.set("symmetric", V::Bool(edit.row.symmetric));
-                    p.set("operation", V::Enum(u32::from(edit.row.cut)));
+                    p.set("operation", V::Enum(edit.row.operation.min(2)));
+                    if edit.row.kind == "extrude" {
+                        p.set("through", V::Bool(edit.row.through));
+                        p.set("second", V::Float(edit.second * unit));
+                        p.set("offset", V::Float(edit.offset * unit));
+                        p.set("taper", V::Float(edit.taper_deg.to_radians()));
+                    }
                     state.queue.run("feature.set", p);
                     // Then held to the parameters, or let go.
                     let order = edit.row.order / 2;
@@ -18328,6 +19037,748 @@ fn draw_feature_edit(ui: &Ui, state: &mut ShellState) {
     if keep {
         state.feature_edit = Some(edit);
     }
+}
+
+/// Floating Fillet / Chamfer input card over the top-left of the 3D viewport.
+fn draw_fillet_float(ui: &Ui, state: &mut ShellState, viewport: egui::Rect) {
+    let Some(mut dialog) = state.fillet_dialog.clone() else {
+        return;
+    };
+    let title = state.catalog.get(if dialog.chamfer {
+        "feature-chamfer"
+    } else {
+        "feature-fillet"
+    });
+    let anchor = viewport.min + egui::vec2(14.0, 42.0);
+    let mut confirmed = false;
+    let mut cancelled = false;
+    egui::Window::new(title)
+        .id(egui::Id::new("fillet-float-dialog"))
+        .fixed_pos(anchor)
+        .collapsible(false)
+        .resizable(false)
+        .show(ui.ctx(), |ui| {
+            let edges_text = state.catalog.format(
+                "fillet-dialog-edges",
+                TextKind::Ui,
+                &[("count", &dialog.edge_count.to_string())],
+            );
+            ui.weak(edges_text);
+            ui.horizontal(|ui| {
+                ui.label(state.catalog.get("fillet-dialog-radius"));
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.radius_text)
+                        .desired_width(68.0)
+                        // i18n-exempt: numeric default radius hint
+                        .hint_text("1.0"),
+                );
+                // i18n-exempt: unit symbol (`mm`, `m`, `in`)
+                ui.weak(dialog.unit_symbol);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    confirmed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button(state.catalog.get("dialog-cancel")).clicked() {
+                    cancelled = true;
+                }
+                if ui
+                    .add_enabled(
+                        dialog.edge_count > 0,
+                        egui::Button::new(state.catalog.get("dialog-ok")),
+                    )
+                    .clicked()
+                {
+                    confirmed = true;
+                }
+            });
+        });
+    if confirmed {
+        state.queue.push(Command::FilletConfirm {
+            radius_text: dialog.radius_text,
+        });
+    } else if cancelled {
+        state.queue.push(Command::FilletCancel);
+    } else {
+        state.fillet_dialog = Some(dialog);
+    }
+}
+
+/// Draws 3D symmetry mirror dots over the active mesh in Sculpt Mode.
+fn draw_sculpt_symmetry_dots(ui: &Ui, doc: &Document, state: &ShellState, inner: egui::Rect) {
+    let (mx, my, mz) = (
+        state.sculpt.mirror_x,
+        state.sculpt.mirror_y,
+        state.sculpt.mirror_z,
+    );
+    if !mx && !my && !mz && state.sculpt.radial <= 1 {
+        return;
+    }
+    let (Some(projector), Some(hit_world), Some(active)) = (
+        state.projector,
+        state.sculpt_hover_world,
+        doc.selection.active,
+    ) else {
+        return;
+    };
+    let world = doc.world_transform(active);
+    let local = world.inverse().transform_point3(hit_world);
+    let theme = kreate_ui::theme::from_ui(ui).over_viewport();
+    let painter = ui.painter().with_clip_rect(inner);
+    for sx in if mx { &[-1.0, 1.0][..] } else { &[1.0][..] } {
+        for sy in if my { &[-1.0, 1.0][..] } else { &[1.0][..] } {
+            for sz in if mz { &[-1.0, 1.0][..] } else { &[1.0][..] } {
+                if *sx > 0.0 && *sy > 0.0 && *sz > 0.0 {
+                    continue;
+                }
+                let mirrored = kreate_math::DVec3::new(local.x * sx, local.y * sy, local.z * sz);
+                let mw = world.transform_point3(mirrored);
+                if let Some(p) = projector.project(mw) {
+                    if inner.contains(p) {
+                        painter.circle_filled(p, 4.5, egui::Color32::from_black_alpha(150));
+                        painter.circle_filled(p, 3.0, theme.accent);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Highlights the 3D viewport when dragging an asset tile over it and emits
+/// [`Command::AssetDrop`] when released inside `inner`.
+fn draw_viewport_asset_drop(ui: &Ui, state: &mut ShellState, inner: egui::Rect) {
+    let Some(payload) = egui::DragAndDrop::payload::<kreate_ui::assets::DraggedAsset>(ui.ctx())
+    else {
+        return;
+    };
+    let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) else {
+        return;
+    };
+    if !inner.contains(pos) {
+        return;
+    }
+    let theme = kreate_ui::theme::from_ui(ui);
+    ui.painter().rect_stroke(
+        inner.shrink(2.0),
+        4.0,
+        egui::Stroke::new(2.0, theme.accent),
+        egui::StrokeKind::Inside,
+    );
+    if ui.ctx().input(|i| i.pointer.any_released()) {
+        state.queue.push(Command::AssetDrop {
+            index: payload.0,
+            screen_pos: [pos.x, pos.y],
+        });
+        egui::DragAndDrop::clear_payload(ui.ctx());
+    }
+}
+
+/// Translates an English operator history label (`"Add Primitive"`, `"Translate"`, etc.)
+/// using the active locale's catalog when a matching command/operator entry exists.
+fn translate_history_label(state: &ShellState, raw: &str) -> String {
+    let key_from_words = format!(
+        "hist-{}",
+        raw.trim()
+            .to_ascii_lowercase()
+            .replace([' ', '_', '.'], "-")
+    );
+    if state.catalog.has(&key_from_words) {
+        return state.catalog.get(&key_from_words);
+    }
+    raw.to_string()
+}
+
+/// Translates common English status bar templates into the active locale at
+/// display time without altering `state.status` (preserving internal `starts_with`
+/// invariants) and flags error/warning messages for visual badge highlighting.
+fn translate_status_message(catalog: &Catalog, raw: &str) -> (String, bool) {
+    let lower = raw.to_ascii_lowercase();
+    let is_err = lower.starts_with("cannot ")
+        || lower.starts_with("error")
+        || lower.contains("failed")
+        || lower.contains("refused")
+        || lower.contains("could not")
+        || raw.contains("실패")
+        || raw.contains("오류")
+        || raw.contains("할 수 없");
+
+    let exact_key = match raw {
+        "nothing selected" => Some("status-msg-nothing-selected"),
+        "copied rendered image to clipboard" => Some("status-msg-copied-render"),
+        "nothing to export" => Some("status-msg-nothing-to-export"),
+        _ => None,
+    };
+    if let Some(k) = exact_key {
+        if catalog.has(k) {
+            return (catalog.get(k), is_err);
+        }
+    }
+    for (prefix, key) in [
+        ("saved asset ", "status-msg-saved-asset"),
+        ("saved ", "status-msg-saved"),
+        ("opened ", "status-msg-opened"),
+        ("exported ", "status-msg-exported"),
+        ("added ", "status-msg-added"),
+        ("reading ", "status-msg-reading"),
+        ("cannot save ", "status-msg-cannot-save"),
+        ("cannot open ", "status-msg-cannot-open"),
+        ("cannot export ", "status-msg-cannot-export"),
+        ("cannot import ", "status-msg-cannot-import"),
+    ] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            if catalog.has(key) {
+                return (
+                    catalog.format(key, TextKind::Ui, &[("target", rest.trim_end_matches('…'))]),
+                    is_err,
+                );
+            }
+        }
+    }
+    (raw.to_string(), is_err)
+}
+
+/// State for the Export Options dialog (`File ▸ Export…` and `File ▸ Export Selected…`).
+#[derive(Clone, Debug)]
+pub struct ExportDialogState {
+    pub format_index: Option<usize>,
+    pub selected_only: bool,
+    /// `0` = Scene Unit, `1` = mm, `2` = cm, `3` = m, `4` = inch.
+    pub unit_choice: usize,
+}
+
+fn draw_preferences_contents(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    keymap: &kreate_input::Keymap,
+    preset: kreate_input::Preset,
+    overrides: &std::collections::BTreeMap<kreate_input::BindingId, kreate_input::Override>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("prefs-language"));
+        let choices: [(Option<&str>, &str); 3] = [
+            (None, "prefs-language-auto"),
+            (Some("ko-KR"), "prefs-language-ko"),
+            (Some("en-US"), "prefs-language-en"),
+        ];
+        for (code, key) in choices {
+            let selected = state.language_pref.as_deref() == code;
+            if ui
+                .selectable_label(selected, state.catalog.get(key))
+                .clicked()
+                && !selected
+            {
+                state.language_pref = code.map(str::to_string);
+                let iface = crate::prefs::interface_path();
+                if let Some(path) = &iface {
+                    let _ = crate::prefs::save_language(path, code);
+                }
+                let effective = crate::prefs::effective_locale(None, iface.as_deref());
+                let opts = state.catalog.options;
+                let mut next = load_catalog(&effective);
+                next.options = opts;
+                state.catalog = next;
+                state.labels_cache = None;
+                state.outliner.sketch_heading.clear();
+            }
+        }
+    });
+    if state
+        .catalog
+        .locales()
+        .next()
+        .is_some_and(|l| l.language.as_str() != "en")
+    {
+        ui.horizontal(|ui| {
+            ui.label(state.catalog.get("prefs-translate"));
+            let mut opts = state.catalog.options;
+            let mut changed = false;
+            changed |= ui
+                .checkbox(&mut opts.ui, state.catalog.get("prefs-translate-ui"))
+                .changed();
+            changed |= ui
+                .checkbox(
+                    &mut opts.tooltips,
+                    state.catalog.get("prefs-translate-tooltips"),
+                )
+                .changed();
+            changed |= ui
+                .checkbox(
+                    &mut opts.new_data_names,
+                    state.catalog.get("prefs-translate-new-data"),
+                )
+                .changed();
+            if changed {
+                state.catalog.options = opts;
+                state.labels_cache = None;
+                state.outliner.sketch_heading.clear();
+                if let Some(path) = crate::prefs::interface_path() {
+                    let _ = crate::prefs::save_translation_options(&path, opts);
+                }
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("prefs-theme"));
+        for a in kreate_ui::Appearance::ALL {
+            let key = match a {
+                kreate_ui::Appearance::Dark => "prefs-theme-dark",
+                kreate_ui::Appearance::Light => "prefs-theme-light",
+            };
+            if ui
+                .selectable_label(state.appearance == a, state.catalog.get(key))
+                .clicked()
+                && state.appearance != a
+            {
+                state.appearance = a;
+                kreate_ui::Theme::new(a, kreate_ui::Density::default()).install(ui.ctx());
+                if let Some(path) = crate::prefs::interface_path() {
+                    let _ = crate::prefs::save_appearance(&path, a);
+                }
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("prefs-ui-scale"));
+        for scale in crate::prefs::UI_SCALES {
+            // i18n-exempt: a percentage
+            let label = format!("{:.0}%", scale * 100.0);
+            if ui
+                .selectable_label((state.ui_scale - scale).abs() < 1e-3, label)
+                .on_hover_text(state.catalog.get("prefs-ui-scale-desc"))
+                .clicked()
+            {
+                state.ui_scale = scale;
+                ui.ctx().set_zoom_factor(scale);
+                if let Some(path) = crate::prefs::interface_path() {
+                    let _ = crate::prefs::save_ui_scale(&path, scale);
+                }
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(state.catalog.get("prefs-resolution-scale"));
+        let mut scale = state.resolution_scale;
+        if ui
+            .add(egui::Slider::new(
+                &mut scale,
+                crate::prefs::MIN_RESOLUTION_SCALE..=1.0,
+            ))
+            .on_hover_text(state.catalog.get("prefs-resolution-scale-desc"))
+            .changed()
+        {
+            state.resolution_scale = scale;
+            if let Some(path) = crate::prefs::viewport_path() {
+                let _ = crate::prefs::save_viewport(
+                    &path,
+                    scale,
+                    state.punchy,
+                    state.trace_when_still,
+                    state.studio_preset,
+                );
+            }
+        }
+    });
+    let punchy = ui
+        .checkbox(&mut state.punchy, state.catalog.get("prefs-punchy"))
+        .on_hover_text(state.catalog.get("prefs-punchy-desc"))
+        .changed();
+    let still = ui
+        .checkbox(
+            &mut state.trace_when_still,
+            state.catalog.get("prefs-trace-when-still"),
+        )
+        .on_hover_text(state.catalog.get("prefs-trace-when-still-desc"))
+        .changed();
+    if punchy || still {
+        if let Some(path) = crate::prefs::viewport_path() {
+            let _ = crate::prefs::save_viewport(
+                &path,
+                state.resolution_scale,
+                state.punchy,
+                state.trace_when_still,
+                state.studio_preset,
+            );
+        }
+    }
+    ui.separator();
+    let conflicts = keymap.conflicts();
+    let text = keymap_text(
+        &state.catalog,
+        keymap,
+        &state.command_info,
+        overrides.len(),
+        conflicts.len(),
+    );
+    let mut edits = std::mem::take(&mut state.keymap_edits);
+    kreate_ui::keymap_editor(
+        ui,
+        keymap,
+        preset,
+        overrides,
+        &conflicts,
+        &text,
+        &mut state.capturing,
+        &mut edits,
+    );
+    state.keymap_edits = edits;
+    state.keymap_editor_shown = true;
+}
+
+fn draw_preferences_window(
+    ctx: &egui::Context,
+    state: &mut ShellState,
+    keymap: &kreate_input::Keymap,
+    preset: kreate_input::Preset,
+    overrides: &std::collections::BTreeMap<kreate_input::BindingId, kreate_input::Override>,
+) {
+    if !state.preferences_open {
+        return;
+    }
+    let mut open = state.preferences_open;
+    let title = state.catalog.get("op-app-preferences");
+    let shown = egui::Window::new(title)
+        .id(egui::Id::new("preferences-window"))
+        .default_size(egui::vec2(640.0, 520.0))
+        .min_size(egui::vec2(420.0, 320.0))
+        .collapsible(false)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    draw_preferences_contents(ui, state, keymap, preset, overrides);
+                });
+        });
+    if let Some(shown) = shown {
+        state.viewport_blockers.push(shown.response.rect);
+    }
+    state.preferences_open = open;
+}
+
+fn draw_export_dialog(ctx: &egui::Context, state: &mut ShellState, doc: &Document) {
+    let Some(mut dialog) = state.export_dialog.take() else {
+        return;
+    };
+    let mut open = true;
+    let mut keep = true;
+    let title = state.catalog.get("export-dialog-title");
+    let scope_lbl = state.catalog.get("export-scope");
+    let scope_vis = state.catalog.get("export-scope-visible");
+    let scope_sel = state.catalog.get("export-scope-selected");
+    let unit_lbl = state.catalog.get("export-unit");
+    let scene_unit_lbl = format!(
+        "{} ({})",
+        state.catalog.get("export-unit-scene"),
+        doc.design.length_unit.symbol()
+    );
+    let continue_lbl = state.catalog.get("export-continue");
+    let cancel_lbl = state.catalog.get("export-cancel");
+    let has_selection = !doc.selection.is_empty();
+    let shown = egui::Window::new(title)
+        .id(egui::Id::new("export-options-dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_min_width(320.0);
+            ui.label(&scope_lbl);
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut dialog.selected_only, false, &scope_vis);
+                ui.add_enabled_ui(has_selection, |ui| {
+                    ui.selectable_value(&mut dialog.selected_only, true, &scope_sel);
+                });
+            });
+            ui.add_space(6.0);
+            ui.label(&unit_lbl);
+            let unit_choices = [scene_unit_lbl.as_str(), "mm", "cm", "m", "in"];
+            ui.horizontal(|ui| {
+                for (idx, name) in unit_choices.iter().enumerate() {
+                    // i18n-exempt: standard SI/imperial unit symbols and translated Scene Unit
+                    ui.selectable_value(&mut dialog.unit_choice, idx, *name);
+                }
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(&continue_lbl).clicked() {
+                    let metres = match dialog.unit_choice {
+                        1 => 0.001,
+                        2 => 0.01,
+                        3 => 1.0,
+                        4 => 0.0254,
+                        _ => doc.design.length_unit.metres(),
+                    };
+                    state.queue.push(Command::ExportWithOptions {
+                        format_index: dialog.format_index,
+                        selected_only: dialog.selected_only && has_selection,
+                        metres_per_unit: metres,
+                    });
+                    keep = false;
+                }
+                if ui.button(&cancel_lbl).clicked() {
+                    keep = false;
+                }
+            });
+        });
+    if let Some(shown) = shown {
+        state.viewport_blockers.push(shown.response.rect);
+    }
+    if open && keep {
+        state.export_dialog = Some(dialog);
+    }
+}
+
+/// Renders live sliders & colour swatches in the Material tab for unconnected
+/// inputs/layers of a node-based material's output `NodeKind::Surface`, so
+/// picking Steel, Oak, or Frosted Glass from the library keeps key controls
+/// immediately editable without destroying procedural node graphs.
+fn draw_node_surface_quick_controls(
+    ui: &mut Ui,
+    state: &mut ShellState,
+    graph: &kreate_scene::shader::ShaderGraph,
+    slot: u32,
+    l: &Labels,
+) {
+    use kreate_reflect::PropertyValue as V;
+    use kreate_scene::shader::NodeKind;
+    let Some(out_id) = graph.output() else {
+        return;
+    };
+    let Some(node) = graph.nodes.get(out_id) else {
+        return;
+    };
+    let NodeKind::Surface {
+        base_color,
+        metallic,
+        roughness,
+        emission,
+        transmission,
+        ior,
+        alpha,
+        coat,
+        coat_roughness,
+        ..
+    } = &node.kind
+    else {
+        return;
+    };
+    let node_raw = out_id as i64;
+    let set_val = |state: &mut ShellState, field: u32, val: f32| {
+        let mut p = PropertyMap::new();
+        p.set("slot", V::Int(slot as i64));
+        p.set("node", V::Int(node_raw));
+        p.set("field", V::Int(field as i64));
+        p.set("value", V::Float(val as f64));
+        state.queue.run("node.set_value", p);
+    };
+    let set_col = |state: &mut ShellState, field: u32, srgb: [f32; 3]| {
+        let mut p = PropertyMap::new();
+        p.set("slot", V::Int(slot as i64));
+        p.set("node", V::Int(node_raw));
+        p.set("field", V::Int(field as i64));
+        p.set(
+            "color",
+            V::Vec3([srgb[0] as f64, srgb[1] as f64, srgb[2] as f64]),
+        );
+        state.queue.run("node.set_color", p);
+    };
+
+    ui.add_space(4.0);
+    let heading = state.catalog.get("material-node-quick");
+    kreate_ui::panel::section(ui, &heading, true, |ui| {
+        if graph.incoming(out_id, 0).is_none() {
+            let srgb = base_color.as_swatch();
+            let mut rgb = [srgb.r, srgb.g, srgb.b];
+            ui.horizontal(|ui| {
+                ui.label(&l.material_base_colour);
+                if ui.color_edit_button_rgb(&mut rgb).changed() {
+                    set_col(state, 0, rgb);
+                }
+            });
+        }
+        if graph.incoming(out_id, 1).is_none() {
+            let mut v = *metallic;
+            let lbl = state.catalog.get("node-socket-metallic");
+            if ui
+                .add(egui::Slider::new(&mut v, 0.0..=1.0).text(lbl))
+                .changed()
+            {
+                set_val(state, 1, v);
+            }
+        }
+        if graph.incoming(out_id, 2).is_none() {
+            let mut v = *roughness;
+            let lbl = state.catalog.get("node-socket-roughness");
+            if ui
+                .add(egui::Slider::new(&mut v, 0.0..=1.0).text(lbl))
+                .changed()
+            {
+                set_val(state, 2, v);
+            }
+        }
+        {
+            let mut v = *transmission;
+            let lbl = state.catalog.get("material-transmission");
+            if ui
+                .add(egui::Slider::new(&mut v, 0.0..=1.0).text(lbl))
+                .changed()
+            {
+                set_val(state, 3, v);
+            }
+        }
+        if *transmission > 0.001 {
+            let mut v = *ior;
+            let lbl = state.catalog.get("node-socket-ior");
+            if ui
+                .add(egui::Slider::new(&mut v, 1.0..=2.6).text(lbl))
+                .changed()
+            {
+                set_val(state, 4, v);
+            }
+        }
+        {
+            let mut v = *coat;
+            let lbl = state
+                .catalog
+                .get("op-material-set_properties-param-coat-name");
+            if ui
+                .add(egui::Slider::new(&mut v, 0.0..=1.0).text(lbl))
+                .changed()
+            {
+                set_val(state, 5, v);
+            }
+        }
+        if *coat > 0.001 {
+            let mut v = *coat_roughness;
+            let lbl = state
+                .catalog
+                .get("op-material-set_properties-param-coat_roughness-name");
+            if ui
+                .add(egui::Slider::new(&mut v, 0.0..=1.0).text(lbl))
+                .changed()
+            {
+                set_val(state, 6, v);
+            }
+        }
+        if graph.incoming(out_id, 5).is_none() && *alpha < 0.999 {
+            let mut v = *alpha;
+            let lbl = state.catalog.get("node-socket-alpha");
+            if ui
+                .add(egui::Slider::new(&mut v, 0.0..=1.0).text(lbl))
+                .changed()
+            {
+                set_val(state, 7, v);
+            }
+        }
+        if graph.incoming(out_id, 4).is_none() {
+            let peak = emission.r.max(emission.g).max(emission.b);
+            let tint = if peak > 1e-5 {
+                kreate_math::SceneRgb::new(
+                    (emission.r / peak).clamp(0.0, 1.0),
+                    (emission.g / peak).clamp(0.0, 1.0),
+                    (emission.b / peak).clamp(0.0, 1.0),
+                )
+            } else {
+                kreate_math::SceneRgb::new(1.0, 1.0, 1.0)
+            };
+            let srgb = tint.as_swatch();
+            let mut rgb = [srgb.r, srgb.g, srgb.b];
+            ui.horizontal(|ui| {
+                ui.label(&l.material_emission_map);
+                if ui.color_edit_button_rgb(&mut rgb).changed() {
+                    set_col(state, 1, rgb);
+                }
+            });
+            let mut strength = peak;
+            let lbl = state.catalog.get("node-socket-strength");
+            if ui
+                .add(egui::Slider::new(&mut strength, 0.0..=50.0).text(lbl))
+                .changed()
+            {
+                set_val(state, 10, strength);
+            }
+        }
+    });
+}
+
+/// Resolves (and caches by image UID + revision) a preview `egui::TextureId`
+/// for the active object's active material base-colour image so the UV Editor
+/// displays the texture behind the UV islands.
+fn resolve_uv_backdrop_texture(
+    ctx: &egui::Context,
+    state: &mut ShellState,
+    doc: &Document,
+) -> Option<egui::TextureId> {
+    let active = doc.selection.active?;
+    let slot = state.material_slot as usize;
+    let mat = doc.material_at(active, slot)?;
+    let img_id = mat
+        .map(kreate_scene::MaterialMap::BaseColor)
+        .or_else(|| mat.images().into_iter().next())?;
+    let img = doc.image(img_id)?;
+    if img.width() == 0 || img.height() == 0 || img.resident_tiles() == 0 {
+        return None;
+    }
+    if let Some((cached_uid, cached_rev, handle)) = &state.uv_tex_cache {
+        if *cached_uid == img.uid && *cached_rev == img.revision() {
+            return Some(handle.id());
+        }
+    }
+    let out_w = img.width().min(512) as usize;
+    let out_h = img.height().min(512) as usize;
+    let mut pixels = vec![egui::Color32::from_rgb(32, 32, 36); out_w * out_h];
+    const TILE_PX: u32 = 128;
+    for y in 0..out_h {
+        let sy = ((y as u64 * img.height() as u64) / out_h as u64)
+            .min(img.height().saturating_sub(1) as u64) as u32;
+        let ty = sy / TILE_PX;
+        let ly = (sy % TILE_PX) as usize;
+        for x in 0..out_w {
+            let sx = ((x as u64 * img.width() as u64) / out_w as u64)
+                .min(img.width().saturating_sub(1) as u64) as u32;
+            let tx = sx / TILE_PX;
+            let lx = (sx % TILE_PX) as usize;
+            if let Some(tile) = img.tile(tx, ty) {
+                let bytes = tile.bytes();
+                let bpp = bytes.len() / ((TILE_PX * TILE_PX) as usize);
+                let idx = (ly * TILE_PX as usize + lx) * bpp;
+                if bpp == 4 && idx + 4 <= bytes.len() {
+                    pixels[y * out_w + x] = egui::Color32::from_rgba_unmultiplied(
+                        bytes[idx],
+                        bytes[idx + 1],
+                        bytes[idx + 2],
+                        bytes[idx + 3],
+                    );
+                } else if bpp == 16 && idx + 16 <= bytes.len() {
+                    let rf = f32::from_le_bytes(bytes[idx..idx + 4].try_into().unwrap_or([0; 4]));
+                    let gf =
+                        f32::from_le_bytes(bytes[idx + 4..idx + 8].try_into().unwrap_or([0; 4]));
+                    let bf =
+                        f32::from_le_bytes(bytes[idx + 8..idx + 12].try_into().unwrap_or([0; 4]));
+                    let srgb = kreate_math::SceneRgb::new(
+                        rf.clamp(0.0, 1.0),
+                        gf.clamp(0.0, 1.0),
+                        bf.clamp(0.0, 1.0),
+                    )
+                    .as_swatch();
+                    pixels[y * out_w + x] = egui::Color32::from_rgb(
+                        (srgb.r * 255.0).round() as u8,
+                        (srgb.g * 255.0).round() as u8,
+                        (srgb.b * 255.0).round() as u8,
+                    );
+                }
+            }
+        }
+    }
+    let color_img = egui::ColorImage {
+        size: [out_w, out_h],
+        source_size: egui::vec2(out_w as f32, out_h as f32),
+        pixels,
+    };
+    let handle = ctx.load_texture("uv-backdrop", color_img, egui::TextureOptions::LINEAR);
+    let id = handle.id();
+    state.uv_tex_cache = Some((img.uid, img.revision(), handle));
+    Some(id)
 }
 
 #[cfg(test)]

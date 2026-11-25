@@ -161,8 +161,13 @@ fn rebase(
 #[derive(Clone, Debug, Default, PartialEq, OpParams)]
 pub struct OriginSetParams {
     /// Where the origin goes: to the middle of the geometry, to the 3D cursor,
-    /// or the geometry to where the origin is.
-    #[param(variants("origin_to_geometry", "origin_to_cursor", "geometry_to_origin"))]
+    /// the geometry to where the origin is, or to the bottom-centre of the mesh.
+    #[param(variants(
+        "origin_to_geometry",
+        "origin_to_cursor",
+        "geometry_to_origin",
+        "origin_to_bottom"
+    ))]
     pub kind: u32,
 }
 
@@ -208,6 +213,16 @@ impl Operator for OriginSet {
                         continue;
                     }
                     to_local.transform_point3(d.cursor)
+                }
+                3 => {
+                    let mut lo = DVec3::splat(f64::INFINITY);
+                    let mut hi = DVec3::splat(f64::NEG_INFINITY);
+                    for p in data.positions() {
+                        let dp = p.as_dvec3();
+                        lo = lo.min(dp);
+                        hi = hi.max(dp);
+                    }
+                    DVec3::new((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5, lo.z)
                 }
                 _ => middle,
             };

@@ -1806,6 +1806,15 @@ pub fn feature_rows(
                 "hole" => "feature-hole",
                 _ => "sketch-tool-extrude",
             });
+            let more = match f.shape {
+                kreate_scene::feature::Shape::Extrude { more, .. } => more,
+                _ => Default::default(),
+            };
+            let operation = match f.operation {
+                kreate_scene::feature::Operation::Join => 0,
+                kreate_scene::feature::Operation::Cut => 1,
+                kreate_scene::feature::Operation::Intersect => 2,
+            };
             rows.push(crate::shell::FeatureRow {
                 order: f.order * 2 + 1,
                 // Its own name, given; else its kind and its place.
@@ -1825,7 +1834,12 @@ pub fn feature_rows(
                 revolve,
                 amount,
                 symmetric,
-                cut: f.operation == kreate_scene::feature::Operation::Cut,
+                cut: operation == 1,
+                operation,
+                through: more.through,
+                second: more.second,
+                offset: more.offset,
+                taper: more.taper,
                 suppressed: f.suppressed,
                 count: o.features.len() as u32,
                 expression: doc
@@ -1861,6 +1875,11 @@ pub fn feature_rows(
             amount: 0.0,
             symmetric: false,
             cut: false,
+            operation: 0,
+            through: false,
+            second: 0.0,
+            offset: 0.0,
+            taper: 0.0,
             suppressed: false,
             count: 0,
             expression: None,
@@ -1975,31 +1994,59 @@ pub fn view(
         .iter()
         .map(|p| (*p - centroid).length())
         .fold(0.0f64, f64::max);
+    let line_of_pair = |u: u32, v: u32| -> Vec<usize> {
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(li, [x, y])| ((*x == u && *y == v) || (*x == v && *y == u)).then_some(li))
+            .collect()
+    };
+    let mut push_badge = |at_pt: DVec2, label: &str, index: usize, assoc_lines: Vec<usize>| {
+        view.badges.push(crate::shell::ConstraintBadge {
+            at: to_world(at_pt),
+            label: label.into(),
+            index,
+            drafting: false,
+            lines: assoc_lines,
+        });
+    };
     for (index, c) in constraints.iter().enumerate() {
         match c {
             Constraint::Horizontal { a, b } => {
-                view.glyphs.push((to_world(mid(*a, *b)), "H".into()))
+                push_badge(mid(*a, *b), "H", index, line_of_pair(*a, *b));
             }
-            Constraint::Vertical { a, b } => view.glyphs.push((to_world(mid(*a, *b)), "V".into())),
+            Constraint::Vertical { a, b } => {
+                push_badge(mid(*a, *b), "V", index, line_of_pair(*a, *b));
+            }
             Constraint::Parallel { a, b, c, d } => {
-                view.glyphs.push((to_world(mid(*a, *b)), "//".into()));
-                view.glyphs.push((to_world(mid(*c, *d)), "//".into()));
+                let mut both = line_of_pair(*a, *b);
+                both.extend(line_of_pair(*c, *d));
+                push_badge(mid(*a, *b), "//", index, both.clone());
+                push_badge(mid(*c, *d), "//", index, both);
             }
             Constraint::Perpendicular { a, b, c, d } => {
-                view.glyphs.push((to_world(mid(*a, *b)), "⊥".into()));
-                view.glyphs.push((to_world(mid(*c, *d)), "⊥".into()));
+                let mut both = line_of_pair(*a, *b);
+                both.extend(line_of_pair(*c, *d));
+                push_badge(mid(*a, *b), "⊥", index, both.clone());
+                push_badge(mid(*c, *d), "⊥", index, both);
             }
             Constraint::Equal { a, b, c, d } => {
-                view.glyphs.push((to_world(mid(*a, *b)), "=".into()));
-                view.glyphs.push((to_world(mid(*c, *d)), "=".into()));
+                let mut both = line_of_pair(*a, *b);
+                both.extend(line_of_pair(*c, *d));
+                push_badge(mid(*a, *b), "=", index, both.clone());
+                push_badge(mid(*c, *d), "=", index, both);
             }
             Constraint::Tangent { a, b, .. } => {
-                view.glyphs.push((to_world(mid(*a, *b)), "T".into()))
+                push_badge(mid(*a, *b), "T", index, line_of_pair(*a, *b));
             }
-            Constraint::OnLine { p, .. } => view.glyphs.push((to_world(at(*p)), "∘".into())),
-            Constraint::Coincident { a, .. } => view.glyphs.push((to_world(at(*a)), "∘".into())),
+            Constraint::OnLine { p, a, b } => {
+                push_badge(at(*p), "∘", index, line_of_pair(*a, *b));
+            }
+            Constraint::Coincident { a, .. } => {
+                push_badge(at(*a), "∘", index, Vec::new());
+            }
             Constraint::Fixed { a, .. } if *a != 0 => {
-                view.glyphs.push((to_world(at(*a)), "F".into()))
+                push_badge(at(*a), "F", index, Vec::new());
             }
             Constraint::Distance { a, b, value } => {
                 let diameter = constraints.iter().any(|k| {
@@ -2569,12 +2616,26 @@ pub fn drawing_view(
         d.point_of(EntityRef::at(e, Part::Mid))
             .or_else(|| d.point_of(EntityRef::at(e, Part::Center)))
     };
-    let mut mark = |p: Option<DVec2>, text: &str| {
-        if let Some(p) = p {
-            view.glyphs.push((to_world(p), text.to_string()));
-        }
+    let lines_of_entities = |ents: &[EntityId]| -> Vec<usize> {
+        map.line_entity
+            .iter()
+            .enumerate()
+            .filter_map(|(li, e)| ents.contains(e).then_some(li))
+            .collect()
     };
-    for c in &d.constraints {
+    for (index, c) in d.constraints.iter().enumerate() {
+        let assoc = lines_of_entities(&c.entities());
+        let mut mark = |p: Option<DVec2>, text: &str| {
+            if let Some(p) = p {
+                view.badges.push(crate::shell::ConstraintBadge {
+                    at: to_world(p),
+                    label: text.to_string(),
+                    index,
+                    drafting: true,
+                    lines: assoc.clone(),
+                });
+            }
+        };
         match c {
             // Ends held together are plainly one corner: a mark on every
             // one is clutter, and Fusion draws none.

@@ -408,6 +408,36 @@ pub enum Command {
     DiscardRecovery {
         path: std::path::PathBuf,
     },
+    /// Pan the viewport camera by a screen-space pixel delta (navigation gizmo hand button).
+    PanBy {
+        dx: f32,
+        dy: f32,
+    },
+    /// Dolly the viewport camera by a drag/click delta (navigation gizmo zoom button).
+    ZoomBy {
+        delta: f32,
+    },
+    /// Export scene or selection with explicit options from the Export Options dialog.
+    ExportWithOptions {
+        format_index: Option<usize>,
+        selected_only: bool,
+        metres_per_unit: f64,
+    },
+    /// Save the last rendered image to a user-chosen PNG path.
+    SaveRenderAs,
+    /// Copy the last rendered image to the system clipboard.
+    CopyRenderImage,
+    /// Confirm the active viewport Fillet/Chamfer tool with the typed radius.
+    FilletConfirm {
+        radius_text: String,
+    },
+    /// Cancel the active viewport Fillet/Chamfer tool.
+    FilletCancel,
+    /// Drop an asset tile onto the 3D viewport at `screen_pos`.
+    AssetDrop {
+        index: usize,
+        screen_pos: [f32; 2],
+    },
 }
 
 /// A queue the UI appends to and the application drains.

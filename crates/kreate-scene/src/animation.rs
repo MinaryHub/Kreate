@@ -505,6 +505,40 @@ impl Action {
         after != before
     }
 
+    /// Duplicates the selected keys shifted by `offset` frames, selecting the
+    /// newly created copies and deselecting the originals (Blender's `Shift+D`).
+    pub fn duplicate_selected(&mut self, offset: f64) -> bool {
+        let mut duplicated = false;
+        for curve in &mut self.curves {
+            let mut copies: Vec<Keyframe> =
+                curve.keys.iter().filter(|k| k.selected).copied().collect();
+            if copies.is_empty() {
+                continue;
+            }
+            for k in &mut curve.keys {
+                k.selected = false;
+            }
+            for copy in &mut copies {
+                copy.frame += offset;
+                copy.selected = true;
+            }
+            let mut merged: Vec<Keyframe> = curve
+                .keys
+                .drain(..)
+                .filter(|k| {
+                    !copies
+                        .iter()
+                        .any(|c| (c.frame - k.frame).abs() < SAME_FRAME)
+                })
+                .collect();
+            merged.extend(copies);
+            merged.sort_by(|a, b| a.frame.total_cmp(&b.frame));
+            curve.keys = merged;
+            duplicated = true;
+        }
+        duplicated
+    }
+
     /// Sets how the selected keys travel to the next.
     /// Sets how the curves with a selected key carry on past their ends.
     pub fn set_selected_extrapolation(&mut self, extrapolation: Extrapolation) -> bool {

@@ -270,6 +270,8 @@ pub struct NodeEditorState {
     drag: Drag,
     /// Where the Add menu was opened, in graph units.
     add_at: Option<Vec2>,
+    add_filter: String,
+    add_just_opened: bool,
     /// Whether the view has been framed on its graph yet.
     framed: bool,
     /// The panel's rect last frame, so the application can tell whether the
@@ -295,6 +297,8 @@ impl NodeEditorState {
             self.selected.clear();
             self.drag = Drag::None;
             self.add_at = None;
+            self.add_filter.clear();
+            self.add_just_opened = false;
             self.framed = false;
         }
     }
@@ -308,6 +312,8 @@ impl Default for NodeEditorState {
             selected: Vec::new(),
             drag: Drag::None,
             add_at: None,
+            add_filter: String::new(),
+            add_just_opened: false,
             framed: false,
             rect: None,
             shown: 0,
@@ -800,6 +806,8 @@ pub fn node_editor(
         }
         if add {
             state.add_at = pointer.map(|p| camera.to_graph(p).to_vec2());
+            state.add_filter.clear();
+            state.add_just_opened = true;
         }
         if home {
             let (pan, zoom) = frame(view, rect.size());
@@ -809,21 +817,54 @@ pub fn node_editor(
     }
     if background.secondary_clicked() {
         state.add_at = pointer.map(|p| camera.to_graph(p).to_vec2());
+        state.add_filter.clear();
+        state.add_just_opened = true;
     }
     if let Some(at) = state.add_at {
         let anchor = camera.to_screen(at.to_pos2());
         let mut close = false;
-        egui::Area::new(ui.id().with("node-add"))
+        let area = egui::Area::new(ui.id().with("node-add"))
             .order(egui::Order::Foreground)
             .fixed_pos(anchor)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.label(egui::RichText::new(&text.add).strong());
+                    let search = ui.add(
+                        egui::TextEdit::singleline(&mut state.add_filter).desired_width(180.0),
+                    );
+                    if state.add_just_opened {
+                        search.request_focus();
+                        state.add_just_opened = false;
+                    }
+                    let needle = state.add_filter.trim().to_lowercase();
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let mut first_match: Option<u32> = None;
                     ui.separator();
-                    for (kind, label) in view.addable.iter().enumerate() {
-                        if ui.button(label).clicked() {
+                    egui::ScrollArea::vertical()
+                        .id_salt("node-add-scroll")
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for (kind, label) in view.addable.iter().enumerate() {
+                                if !needle.is_empty() && !label.to_lowercase().contains(&needle) {
+                                    continue;
+                                }
+                                if first_match.is_none() {
+                                    first_match = Some(kind as u32);
+                                }
+                                if ui.button(label).clicked() {
+                                    out.push(NodeEdit::Add {
+                                        kind: kind as u32,
+                                        x: at.x,
+                                        y: at.y,
+                                    });
+                                    close = true;
+                                }
+                            }
+                        });
+                    if enter {
+                        if let Some(kind) = first_match {
                             out.push(NodeEdit::Add {
-                                kind: kind as u32,
+                                kind,
                                 x: at.x,
                                 y: at.y,
                             });
@@ -833,9 +874,11 @@ pub fn node_editor(
                 });
             });
         let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
-        let clicked_away = press && on_panel;
+        let clicked_away =
+            press && on_panel && pointer.is_none_or(|p| !area.response.rect.contains(p));
         if close || escape || clicked_away {
             state.add_at = None;
+            state.add_filter.clear();
         }
     }
     out

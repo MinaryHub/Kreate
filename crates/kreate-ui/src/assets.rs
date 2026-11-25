@@ -10,6 +10,10 @@ use egui::Ui;
 
 use crate::{Command, CommandQueue};
 
+/// Drag-and-drop payload carried when dragging an asset tile onto the viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DraggedAsset(pub usize);
+
 /// One tile.
 #[derive(Clone, Debug)]
 pub struct AssetTile {
@@ -297,7 +301,10 @@ pub fn asset_browser(
                             ui.set_width(TILE);
                             let size = egui::vec2(TILE, TILE);
                             let (rect, response) =
-                                ui.allocate_exact_size(size, egui::Sense::click());
+                                ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                            if response.drag_started() {
+                                response.dnd_set_drag_payload(DraggedAsset(tile.index));
+                            }
                             match tile.texture {
                                 // Fitted, not stretched: a tall bottle stays
                                 // tall, centred in its square.

@@ -670,7 +670,23 @@ impl Operator for AddCamera {
             "Camera",
             kreate_scene::document::ObjectData::Camera(datablock),
         );
-        object.transform.translation = DVec3::from_array(params.location);
+        let eye = DVec3::from_array(params.location);
+        let target = if (eye - d.cursor).length_squared() > 1e-6 {
+            d.cursor
+        } else {
+            eye + DVec3::Y
+        };
+        let forward = (target - eye).normalize_or_zero();
+        let up = if forward.dot(DVec3::Z).abs() > 0.999 {
+            DVec3::Y
+        } else {
+            DVec3::Z
+        };
+        object.transform.translation = eye;
+        object.transform.rotation = kreate_math::DQuat::from_mat4(
+            &kreate_math::DMat4::look_at_rh(eye, target, up).inverse(),
+        )
+        .normalize();
         let id = d.add_object(object);
         d.selection.clear();
         d.selection.add(id);
@@ -2803,7 +2819,7 @@ pub struct TranslateParams {
     /// object's own — a part turned on its own moves, turns and stretches
     /// along its own axes, each by the same amount.
     /// Hidden, as a gesture's: what a drag held to a local axis fills in.
-    #[param(variants("global", "local"), hidden)]
+    #[param(variants("global", "local", "cursor"), hidden)]
     pub orientation: u32,
     /// With the local orientation: the offset along each object's own axes,
     /// in place of `translation`.
@@ -2848,6 +2864,7 @@ impl Operator for Translate {
         let offset = DVec3::from_array(params.translation);
         let along_own = DVec3::from_array(params.local_translation);
         let d = doc.document_mut();
+        let cursor_turn = d.cursor_rotation.normalize();
         // The move is in the world: each object takes it in its parent's
         // space, so a child of a turned or scaled parent goes as far and the
         // same way as the rest; one under a selected parent goes with it.
@@ -2855,6 +2872,8 @@ impl Operator for Translate {
             // Local: the same distance along this object's own axes.
             let offset = if params.orientation == 1 {
                 world_turn(d, id) * along_own
+            } else if params.orientation == 2 && along_own != DVec3::ZERO {
+                cursor_turn * along_own
             } else {
                 offset
             };
@@ -3035,7 +3054,7 @@ pub struct RotateParams {
     /// The axes the transform is measured along: the world's, or each
     /// object's own — a part turned on its own moves, turns and stretches
     /// along its own axes, each by the same amount.
-    #[param(variants("global", "local"))]
+    #[param(variants("global", "local", "cursor"))]
     pub orientation: u32,
     /// Key what this changed, at `key_frame`: auto-keying, filled in by the
     /// application when its record button is on. Hidden, because it is the
@@ -3082,11 +3101,15 @@ impl Operator for Rotate {
         let pivot = pivot_point(doc.document(), &targets, params.pivot);
 
         let d = doc.document_mut();
+        let cursor_turn = d.cursor_rotation.normalize();
         for id in movable(d, &targets) {
-            // Local: about this object's own axis.
+            // Local: about this object's own axis. Cursor: about the 3D cursor's axis.
             let rotation = if params.orientation == 1 {
                 let own = (world_turn(d, id) * axis).normalize_or(axis);
                 DQuat::from_axis_angle(own, params.angle)
+            } else if params.orientation == 2 {
+                let cur = (cursor_turn * axis).normalize_or(axis);
+                DQuat::from_axis_angle(cur, params.angle)
             } else {
                 world_rotation
             };
@@ -3131,7 +3154,7 @@ pub struct ScaleParams {
     /// The axes the transform is measured along: the world's, or each
     /// object's own — a part turned on its own moves, turns and stretches
     /// along its own axes, each by the same amount.
-    #[param(variants("global", "local"))]
+    #[param(variants("global", "local", "cursor"))]
     pub orientation: u32,
     /// Key what this changed, at `key_frame`: auto-keying, filled in by the
     /// application when its record button is on. Hidden, because it is the
@@ -3185,6 +3208,7 @@ impl Operator for Scale {
         let pivot = pivot_point(doc.document(), &targets, params.pivot);
 
         let d = doc.document_mut();
+        let cursor_turn = d.cursor_rotation.normalize();
         for id in movable(d, &targets) {
             let at = d.world_transform(id).translation;
             let about = if params.pivot == 1 { Some(at) } else { pivot };
@@ -3197,6 +3221,17 @@ impl Operator for Scale {
             // stretched along a world axis takes the nearest it can.
             let (moved, own) = if params.orientation == 1 {
                 (turn * (turn.inverse() * (at - about) * factor), factor)
+            } else if params.orientation == 2 {
+                let m = glam::DMat3::from_quat(cursor_turn.inverse() * turn);
+                let own = DVec3::new(
+                    axis_factor(m.x_axis, factor),
+                    axis_factor(m.y_axis, factor),
+                    axis_factor(m.z_axis, factor),
+                );
+                (
+                    cursor_turn * (cursor_turn.inverse() * (at - about) * factor),
+                    own,
+                )
             } else {
                 let m = glam::DMat3::from_quat(turn);
                 let own = DVec3::new(
@@ -4260,6 +4295,71 @@ impl Operator for PlaceOn {
             return Ok(OpResult::Cancelled);
         };
         let name = params.target.trim();
+        if name.is_empty() {
+            // Empty target: drop every selected object flush onto the Z = 0 floor.
+            let ids = d.selection.objects.clone();
+            let mut moved_any = false;
+            for id in ids {
+                let d_ref = doc.document();
+                let Some(own) = bounds_or_point(d_ref, id) else {
+                    continue;
+                };
+                let mut delta = DVec3::new(0.0, 0.0, -own.0.z);
+                if params.center {
+                    delta.x = -side_of(own, 0, 1);
+                    delta.y = -side_of(own, 1, 1);
+                }
+                if delta.length() >= 1e-12 {
+                    move_in_world(doc.document_mut(), id, delta);
+                    moved_any = true;
+                }
+            }
+            return Ok(if moved_any {
+                OpResult::Finished
+            } else {
+                OpResult::Cancelled
+            });
+        }
+        if name == "$active" {
+            let Some(under) = bounds_or_point(d, active) else {
+                return Ok(OpResult::Cancelled);
+            };
+            let others: Vec<_> = d
+                .selection
+                .objects
+                .iter()
+                .copied()
+                .filter(|&id| id != active)
+                .collect();
+            if others.is_empty() {
+                return Err(OpError::Failed(
+                    "select the object(s) to place, then Shift-select the target object last"
+                        .into(),
+                ));
+            }
+            let mut moved_any = false;
+            for id in others {
+                let d_ref = doc.document();
+                let Some(own) = bounds_or_point(d_ref, id) else {
+                    continue;
+                };
+                let mut delta = DVec3::new(0.0, 0.0, under.1.z - own.0.z);
+                if params.center {
+                    for axis in 0..2 {
+                        delta[axis] = side_of(under, axis, 1) - side_of(own, axis, 1);
+                    }
+                }
+                if delta.length() >= 1e-12 {
+                    move_in_world(doc.document_mut(), id, delta);
+                    moved_any = true;
+                }
+            }
+            return Ok(if moved_any {
+                OpResult::Finished
+            } else {
+                OpResult::Cancelled
+            });
+        }
         let target = object_named(d, name)
             .ok_or_else(|| OpError::Failed(format!("no object called {name:?}")))?;
         if target == active {

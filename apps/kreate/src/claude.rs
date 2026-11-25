@@ -1086,6 +1086,9 @@ impl Chat {
                     .arg("--mcp-config")
                     .arg(config.to_string())
                     .arg("--strict-mcp-config");
+                if claude_knows(&tool, "--include-partial-messages") {
+                    command.arg("--include-partial-messages");
+                }
                 // The document, and its own memory folder: no shell, no web,
                 // and no file anywhere else — anything not allowed here is
                 // refused, there being nobody to ask.
@@ -1910,20 +1913,40 @@ pub fn parse_codex_line(line: &str) -> Vec<Event> {
 
 /// The events in one line of Claude Code's `--output-format stream-json`.
 pub fn parse_line(line: &str) -> Vec<Event> {
+    use std::cell::Cell;
+    thread_local! {
+        static STREAMED: Cell<bool> = const { Cell::new(false) };
+    }
     let Ok(message) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     match message.get("type").and_then(Value::as_str) {
         Some("system") => {
+            STREAMED.with(|s| s.set(false));
             if let Some(id) = message.get("session_id").and_then(Value::as_str) {
                 out.push(Event::Session(id.to_string()));
             }
         }
+        Some("stream_event") => {
+            let ev = message.get("event").unwrap_or(&Value::Null);
+            if ev.get("type").and_then(Value::as_str) == Some("content_block_delta") {
+                let delta = ev.get("delta").unwrap_or(&Value::Null);
+                if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
+                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            STREAMED.with(|s| s.set(true));
+                            out.push(Event::TextPart(text.to_string()));
+                        }
+                    }
+                }
+            }
+        }
         Some("assistant") => {
+            let already_streamed = STREAMED.with(|s| s.replace(false));
             for block in content(&message) {
                 match block.get("type").and_then(Value::as_str) {
-                    Some("text") => {
+                    Some("text") if !already_streamed => {
                         let text = block
                             .get("text")
                             .and_then(Value::as_str)
@@ -1953,6 +1976,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             }
         }
         Some("result") => {
+            STREAMED.with(|s| s.set(false));
             if let Some(id) = message.get("session_id").and_then(Value::as_str) {
                 out.push(Event::Session(id.to_string()));
             }

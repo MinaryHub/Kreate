@@ -389,25 +389,18 @@ pub fn write_stl(mesh: &MeshData, options: &StlOptions) -> (Vec<u8>, Vec<LossyNo
     };
     let to_source = options.axis.from_kreate();
 
-    // A fan per face. STL is triangles only, so an n-gon has to be split, and a
-    // fan is the right choice for the convex faces that dominate: it adds no
-    // vertices and needs no arithmetic.
-    let mut triangles: Vec<[Vec3; 3]> = Vec::new();
-    let mut ngons = 0usize;
-    for face in mesh.faces() {
-        if face.len() < 3 {
-            continue;
-        }
-        if face.len() > 3 {
-            ngons += 1;
-        }
-        for i in 1..face.len() - 1 {
-            triangles.push([
-                to_source * positions[face[0] as usize] * scale,
-                to_source * positions[face[i] as usize] * scale,
-                to_source * positions[face[i + 1] as usize] * scale,
-            ]);
-        }
+    // Ear-clipped triangulation (`mesh.triangulate()`) so concave CAD n-gons
+    // (L-brackets, slotted plates, boolean cutouts) never bridge across open
+    // pockets the way a blind fan from `face[0]` did.
+    let ngons = mesh.faces().filter(|f| f.len() > 3).count();
+    let tri = mesh.triangulate();
+    let mut triangles: Vec<[Vec3; 3]> = Vec::with_capacity(tri.indices.len() / 3);
+    for t in tri.indices.as_chunks::<3>().0 {
+        triangles.push([
+            to_source * positions[t[0] as usize] * scale,
+            to_source * positions[t[1] as usize] * scale,
+            to_source * positions[t[2] as usize] * scale,
+        ]);
     }
     if ngons > 0 {
         notes.push(LossyNote::Unsupported {
@@ -420,6 +413,62 @@ pub fn write_stl(mesh: &MeshData, options: &StlOptions) -> (Vec<u8>, Vec<LossyNo
         });
     }
 
+    (encode_binary_stl(&triangles), notes)
+}
+
+/// Writes evaluated, world-placed parts (`(name, mesh, world_transform)`) into
+/// a single binary STL in the scene's length unit (`metres_per_unit`, e.g.
+/// `0.001` for millimetres so a `40 mm` CAD bracket arrives in a slicer as `40`).
+pub fn write_stl_parts(
+    parts: &[(String, &MeshData, kreate_math::DAffine3)],
+    metres_per_unit: f64,
+) -> (Vec<u8>, Vec<LossyNote>) {
+    let mut notes = Vec::new();
+    let inv_unit = if metres_per_unit > 0.0 {
+        1.0 / metres_per_unit
+    } else {
+        1000.0
+    };
+    let mut triangles: Vec<[Vec3; 3]> = Vec::new();
+    let mut ngons = 0usize;
+    let mut had_uvs = false;
+
+    for (_, mesh, world) in parts {
+        ngons += mesh.faces().filter(|f| f.len() > 3).count();
+        had_uvs |= mesh.attributes().iter().any(|l| l.name.starts_with("uv"));
+        let tri = mesh.triangulate();
+        if tri.indices.is_empty() {
+            continue;
+        }
+        let positions = mesh.positions();
+        let flip = world.matrix3.determinant() < 0.0;
+        for t in tri.indices.as_chunks::<3>().0 {
+            let (i0, i1, i2) = if flip {
+                (t[0] as usize, t[2] as usize, t[1] as usize)
+            } else {
+                (t[0] as usize, t[1] as usize, t[2] as usize)
+            };
+            let p0 = (world.transform_point3(positions[i0].as_dvec3()) * inv_unit).as_vec3();
+            let p1 = (world.transform_point3(positions[i1].as_dvec3()) * inv_unit).as_vec3();
+            let p2 = (world.transform_point3(positions[i2].as_dvec3()) * inv_unit).as_vec3();
+            triangles.push([p0, p1, p2]);
+        }
+    }
+
+    if ngons > 0 {
+        notes.push(LossyNote::Unsupported {
+            what: format!("{ngons} n-gons were triangulated; STL has no way to record them"),
+        });
+    }
+    if had_uvs {
+        notes.push(LossyNote::Unsupported {
+            what: "UVs were dropped; STL stores none".to_string(),
+        });
+    }
+    (encode_binary_stl(&triangles), notes)
+}
+
+fn encode_binary_stl(triangles: &[[Vec3; 3]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_BYTES + 4 + triangles.len() * TRIANGLE_BYTES);
     let mut header = [0u8; HEADER_BYTES];
     // Deliberately not beginning with "solid": a binary file whose header starts
@@ -430,7 +479,7 @@ pub fn write_stl(mesh: &MeshData, options: &StlOptions) -> (Vec<u8>, Vec<LossyNo
     out.extend_from_slice(&header);
     out.extend_from_slice(&(triangles.len() as u32).to_le_bytes());
 
-    for t in &triangles {
+    for t in triangles {
         // Written from the winding rather than left at zero. It is redundant, but
         // a reader that trusts it — and some do — should find it agreeing with
         // the geometry rather than contradicting it.
@@ -442,5 +491,5 @@ pub fn write_stl(mesh: &MeshData, options: &StlOptions) -> (Vec<u8>, Vec<LossyNo
         }
         out.extend_from_slice(&0u16.to_le_bytes());
     }
-    (out, notes)
+    out
 }

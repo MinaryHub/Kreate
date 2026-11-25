@@ -315,9 +315,10 @@ pub fn property_editor_full(
                     (PropertyKind::Vec3, Some(PropertyValue::Vec3(_)))
                 );
                 if vector {
-                    out.changed |= vector_component(ui, desc, values, 0);
+                    out.changed |= vector_component(ui, Some(catalog), desc, values, 0);
                 } else {
-                    out.changed |= property_widget(ui, desc, values);
+                    out.changed |=
+                        property_widget_with_catalog(ui, Some(catalog), op_id, desc, values);
                 }
                 if decorated {
                     match mark(desc.name) {
@@ -346,7 +347,7 @@ pub fn property_editor_full(
                 if vector {
                     for i in 1..3 {
                         ui.label("");
-                        out.changed |= vector_component(ui, desc, values, i);
+                        out.changed |= vector_component(ui, Some(catalog), desc, values, i);
                         if decorated {
                             ui.label("");
                         }
@@ -359,7 +360,13 @@ pub fn property_editor_full(
 }
 
 /// One component of a vector parameter, with its axis letter and colour.
-fn vector_component(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMap, i: usize) -> bool {
+fn vector_component(
+    ui: &mut Ui,
+    catalog: Option<&Catalog>,
+    desc: &PropertyDesc,
+    values: &mut PropertyMap,
+    i: usize,
+) -> bool {
     let Some(PropertyValue::Vec3(mut v)) = values.get(desc.name).cloned() else {
         return false;
     };
@@ -370,7 +377,8 @@ fn vector_component(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMap, 
         // Adding zero turns a negative zero positive, which would otherwise
         // show as "-0°" — a sign on nothing.
         let mut component = v[i] + 0.0;
-        let field = ui.scope(|ui| drag_float(ui, desc, &mut component));
+        let default_i = Some(natural_default_float(desc));
+        let field = ui.scope(|ui| drag_float_inner(ui, catalog, desc, default_i, &mut component));
         axis_marker(ui, field.response.rect, i);
         if field.inner {
             v[i] = component;
@@ -473,6 +481,16 @@ fn key_diamond(ui: &mut Ui, mark: KeyMark) -> egui::Response {
 
 /// Draws the widget for one parameter.
 pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMap) -> bool {
+    property_widget_with_catalog(ui, None, "", desc, values)
+}
+
+fn property_widget_with_catalog(
+    ui: &mut Ui,
+    catalog: Option<&Catalog>,
+    op_id: &str,
+    desc: &PropertyDesc,
+    values: &mut PropertyMap,
+) -> bool {
     let current = values.get(desc.name).cloned();
     let mut changed = false;
 
@@ -486,7 +504,7 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
 
         (PropertyKind::Int, Some(PropertyValue::Int(v))) => {
             let mut n = v;
-            if drag_int(ui, desc, &mut n) {
+            if drag_int_with_catalog(ui, catalog, desc, &mut n) {
                 values.set(desc.name, desc.clamp(PropertyValue::Int(n)));
                 changed = true;
             }
@@ -494,7 +512,7 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
 
         (PropertyKind::Float, Some(PropertyValue::Float(v))) => {
             let mut f = v;
-            if drag_float(ui, desc, &mut f) {
+            if drag_float_with_catalog(ui, catalog, desc, &mut f) {
                 values.set(desc.name, desc.clamp(PropertyValue::Float(f)));
                 changed = true;
             }
@@ -515,7 +533,10 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
                         // i18n-exempt: axis letters are conventionally untranslated
                         ui.label(*axis);
                         let mut component = out[i] + 0.0;
-                        let field = ui.scope(|ui| drag_float(ui, desc, &mut component));
+                        let default_i = Some(natural_default_float(desc));
+                        let field = ui.scope(|ui| {
+                            drag_float_inner(ui, catalog, desc, default_i, &mut component)
+                        });
                         axis_marker(ui, field.response.rect, i);
                         if field.inner {
                             out[i] = component;
@@ -560,6 +581,38 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
                 values.set(desc.name, desc.clamp(PropertyValue::Vec3(out)));
                 changed = true;
             }
+            // Right-clicking the colour bar lets a user copy or type an exact
+            // `#RRGGBB` hex code (`egui`'s RGB picker omits a hex box).
+            let hex_id = ui.make_persistent_id((desc.name, "hex-edit"));
+            response.context_menu(|ui| {
+                let cur_hex = format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                );
+                let mut buf: String = ui
+                    .data_mut(|d| d.get_temp(hex_id))
+                    .unwrap_or_else(|| cur_hex.clone());
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut buf)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(96.0)
+                        // i18n-exempt: universal #RRGGBB hex notation
+                        .hint_text("#RRGGBB"),
+                );
+                if edit.changed() {
+                    ui.data_mut(|d| d.insert_temp(hex_id, buf.clone()));
+                }
+                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if let Some(parsed) = parse_hex_rgb(&buf) {
+                        values.set(desc.name, desc.clamp(PropertyValue::Vec3(parsed)));
+                        changed = true;
+                        ui.data_mut(|d| d.remove::<String>(hex_id));
+                        ui.close();
+                    }
+                }
+            });
         }
 
         // Text too long to be typed is not offered for typing: a box holding
@@ -616,11 +669,15 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
             let selected = variants.get(v as usize).copied().unwrap_or("?");
             let mut choice = v;
             egui::ComboBox::from_id_salt((desc.name, "enum"))
-                .selected_text(prettify(selected))
+                .selected_text(enum_variant_label(catalog, op_id, desc.name, selected))
                 .show_ui(ui, |ui| {
                     for (i, variant) in variants.iter().enumerate() {
                         if ui
-                            .selectable_value(&mut choice, i as u32, prettify(variant))
+                            .selectable_value(
+                                &mut choice,
+                                i as u32,
+                                enum_variant_label(catalog, op_id, desc.name, variant),
+                            )
                             .clicked()
                         {
                             changed = true;
@@ -658,7 +715,89 @@ pub fn property_widget(ui: &mut Ui, desc: &PropertyDesc, values: &mut PropertyMa
     changed
 }
 
-/// A drag-scrub float field, in display units.
+fn enum_variant_label(
+    catalog: Option<&Catalog>,
+    op_id: &str,
+    field: &str,
+    variant: &str,
+) -> String {
+    if let Some(c) = catalog {
+        let slug = variant.replace(['_', '.'], "-");
+        let field_slug = field.replace('_', "-");
+        if !op_id.is_empty() {
+            let op_slug = op_id.replace(['_', '.'], "-");
+            let specific = format!("enum-{op_slug}-{field_slug}-{slug}");
+            if c.has(&specific) {
+                return c.format(&specific, TextKind::Ui, &[]);
+            }
+        }
+        let by_field = format!("enum-{field_slug}-{slug}");
+        if c.has(&by_field) {
+            return c.format(&by_field, TextKind::Ui, &[]);
+        }
+        let common = format!("enum-{slug}");
+        if c.has(&common) {
+            return c.format(&common, TextKind::Ui, &[]);
+        }
+    }
+    prettify(variant)
+}
+
+fn parse_hex_rgb(text: &str) -> Option<[f64; 3]> {
+    let hex = text.trim().strip_prefix('#').unwrap_or(text.trim());
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some([
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+        ])
+    } else if hex.len() == 3 {
+        let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+        let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+        let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+        Some([
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+        ])
+    } else {
+        None
+    }
+}
+
+/// Evaluates user-typed numbers, arithmetic (`100/3`, `12+8`), and unit
+/// suffixes (`25mm`, `1.5in`, `45°`, `50%`) into the widget's display unit.
+fn parse_display_float(text: &str, unit: Unit, to_display: f64) -> Option<f64> {
+    use kreate_reflect::expr::{self, Unit as ExprUnit};
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match unit {
+        Unit::Length => expr::eval(trimmed, ExprUnit::Length)
+            .ok()
+            .map(|metres| metres * to_display),
+        Unit::Angle => expr::eval(trimmed, ExprUnit::Angle)
+            .ok()
+            .map(|radians| radians * to_display),
+        Unit::Factor => {
+            let body = trimmed.trim_end_matches('%').trim();
+            expr::eval(body, ExprUnit::Factor).ok()
+        }
+        Unit::None | Unit::Font | Unit::Count => expr::eval(trimmed, ExprUnit::Factor).ok(),
+    }
+}
+
+/// Scrub step in *display* units (`default_step` is already in display units,
+/// while an explicit `desc.step` is in stored units).
+fn display_scrub_step(desc: &PropertyDesc, display: &UnitDisplay) -> f64 {
+    desc.step
+        .map_or(display.default_step, |s| s * display.to_display)
+}
+
 /// A coloured strip down the left edge of an axis field.
 ///
 /// The letter says which axis; the colour is what lets the eye find the right
@@ -686,30 +825,141 @@ fn axis_marker(ui: &Ui, rect: egui::Rect, axis: usize) {
     );
 }
 
-fn drag_float(ui: &mut Ui, desc: &PropertyDesc, value: &mut f64) -> bool {
-    let display = UnitDisplay::of(desc.unit);
-    let mut shown = *value * display.to_display;
+fn natural_default_float(desc: &PropertyDesc) -> f64 {
+    let base: f64 = if desc.name == "scale" { 1.0 } else { 0.0 };
+    base.clamp(
+        desc.min.unwrap_or(f64::NEG_INFINITY),
+        desc.max.unwrap_or(f64::INFINITY),
+    )
+}
 
-    let step = desc.step.unwrap_or(display.default_step) * display.to_display;
+fn drag_float_with_catalog(
+    ui: &mut Ui,
+    catalog: Option<&Catalog>,
+    desc: &PropertyDesc,
+    value: &mut f64,
+) -> bool {
+    drag_float_inner(ui, catalog, desc, Some(natural_default_float(desc)), value)
+}
+
+fn drag_float_inner(
+    ui: &mut Ui,
+    catalog: Option<&Catalog>,
+    desc: &PropertyDesc,
+    default_stored: Option<f64>,
+    value: &mut f64,
+) -> bool {
+    let display = UnitDisplay::of(desc.unit);
+    let initial_shown = *value * display.to_display;
+    let mut shown = initial_shown;
+
+    let step = display_scrub_step(desc, &display);
+    let unit = desc.unit;
+    let to_display = display.to_display;
     let mut drag = egui::DragValue::new(&mut shown)
         .speed(step)
         .suffix(display.suffix)
         .max_decimals(display.decimals)
+        .clamp_existing_to_range(false)
         // Typed, it is the number once it is finished: taken a keystroke at
         // a time, "12.5" was three steps to undo and the object jumped
         // through 1 and 12 on the way.
-        .update_while_editing(false);
+        .update_while_editing(false)
+        .custom_parser(move |s| parse_display_float(s, unit, to_display));
 
-    // The soft range bounds the *drag*; typing is bound only by the hard range.
-    // A slider that cannot be exceeded is a standing complaint about modelling
-    // tools, and the schema distinguishes the two for exactly this reason.
-    let soft_lo = desc.soft_min.or(desc.min);
-    let soft_hi = desc.soft_max.or(desc.max);
-    if let (Some(lo), Some(hi)) = (soft_lo, soft_hi) {
-        drag = drag.range((lo * display.to_display)..=(hi * display.to_display));
+    // Hard bounds apply to both typing and dragging; soft bounds clamp pointer
+    // drags below while leaving typed numbers free up to the hard limit.
+    let hard_lo = desc
+        .min
+        .map(|lo| lo * display.to_display)
+        .unwrap_or(f64::NEG_INFINITY);
+    let hard_hi = desc
+        .max
+        .map(|hi| hi * display.to_display)
+        .unwrap_or(f64::INFINITY);
+    if hard_lo.is_finite() || hard_hi.is_finite() {
+        drag = drag.range(hard_lo..=hard_hi);
     }
 
-    if ui.add(drag).changed() {
+    let response = ui.add(drag);
+
+    // Subtle bottom fill indicator on bounded [0..1] factor fields (Metallic,
+    // Roughness, Weights) so a column of percentages reads visually like sliders.
+    if desc.unit == Unit::Factor {
+        let lo = desc.soft_min.or(desc.min).unwrap_or(0.0);
+        let hi = desc.soft_max.or(desc.max).unwrap_or(1.0);
+        if (hi - lo) > 1e-6 && response.rect.width() > 8.0 {
+            let t = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;
+            if t > 0.0 {
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(response.rect.min.x + 1.0, response.rect.max.y - 2.0),
+                    egui::pos2(
+                        response.rect.min.x + 1.0 + (response.rect.width() - 2.0) * t,
+                        response.rect.max.y - 0.5,
+                    ),
+                );
+                let accent = crate::theme::from_ui(ui).accent.gamma_multiply(0.55);
+                ui.painter().rect_filled(bar, 1.0, accent);
+            }
+        }
+    }
+
+    let mut menu_changed = false;
+    if let Some(c) = catalog {
+        let clip_id = egui::Id::new("kreate-num-clip");
+        response.context_menu(|ui| {
+            if ui
+                .button(c.format("num-menu-copy", TextKind::Ui, &[]))
+                .clicked()
+            {
+                ui.data_mut(|d| d.insert_temp(clip_id, initial_shown));
+                ui.ctx().copy_text(format!("{initial_shown}"));
+                ui.close();
+            }
+            let clipped: Option<f64> = ui.data(|d| d.get_temp(clip_id));
+            if ui
+                .add_enabled(
+                    clipped.is_some(),
+                    egui::Button::new(c.format("num-menu-paste", TextKind::Ui, &[])),
+                )
+                .clicked()
+            {
+                if let Some(v) = clipped {
+                    *value = display.from_display(v);
+                    menu_changed = true;
+                }
+                ui.close();
+            }
+            if let Some(def) = default_stored {
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        (*value - def).abs() > 1e-12,
+                        egui::Button::new(c.format("field-reset", TextKind::Ui, &[])),
+                    )
+                    .clicked()
+                {
+                    *value = def;
+                    menu_changed = true;
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    if menu_changed {
+        true
+    } else if response.changed() {
+        if response.dragged() {
+            if let Some(lo) = desc.soft_min.or(desc.min) {
+                let lo_shown = (lo * display.to_display).min(initial_shown);
+                shown = shown.max(lo_shown);
+            }
+            if let Some(hi) = desc.soft_max.or(desc.max) {
+                let hi_shown = (hi * display.to_display).max(initial_shown);
+                shown = shown.min(hi_shown);
+            }
+        }
         *value = display.from_display(shown);
         true
     } else {
@@ -717,15 +967,81 @@ fn drag_float(ui: &mut Ui, desc: &PropertyDesc, value: &mut f64) -> bool {
     }
 }
 
-fn drag_int(ui: &mut Ui, desc: &PropertyDesc, value: &mut i64) -> bool {
-    let mut n = *value;
+fn drag_int_with_catalog(
+    ui: &mut Ui,
+    catalog: Option<&Catalog>,
+    desc: &PropertyDesc,
+    value: &mut i64,
+) -> bool {
+    let initial = *value;
+    let mut n = initial;
     let mut drag = egui::DragValue::new(&mut n)
         .speed(desc.step.unwrap_or(1.0))
-        .update_while_editing(false);
-    if let (Some(lo), Some(hi)) = (desc.min.or(desc.soft_min), desc.max.or(desc.soft_max)) {
-        drag = drag.range((lo as i64)..=(hi as i64));
+        .clamp_existing_to_range(false)
+        .update_while_editing(false)
+        .custom_parser(|s| {
+            kreate_reflect::expr::eval(s.trim(), kreate_reflect::expr::Unit::Factor)
+                .ok()
+                .map(|x| x.round())
+        });
+    let hard_lo = desc.min.map(|lo| lo as i64).unwrap_or(i64::MIN);
+    let hard_hi = desc.max.map(|hi| hi as i64).unwrap_or(i64::MAX);
+    if desc.min.is_some() || desc.max.is_some() {
+        drag = drag.range(hard_lo..=hard_hi);
     }
-    if ui.add(drag).changed() {
+    let response = ui.add(drag);
+    let mut menu_changed = false;
+    if let Some(c) = catalog {
+        let clip_id = egui::Id::new("kreate-num-clip");
+        let def = 0_i64.clamp(hard_lo, hard_hi);
+        response.context_menu(|ui| {
+            if ui
+                .button(c.format("num-menu-copy", TextKind::Ui, &[]))
+                .clicked()
+            {
+                ui.data_mut(|d| d.insert_temp(clip_id, initial as f64));
+                ui.ctx().copy_text(initial.to_string());
+                ui.close();
+            }
+            let clipped: Option<f64> = ui.data(|d| d.get_temp(clip_id));
+            if ui
+                .add_enabled(
+                    clipped.is_some(),
+                    egui::Button::new(c.format("num-menu-paste", TextKind::Ui, &[])),
+                )
+                .clicked()
+            {
+                if let Some(v) = clipped {
+                    *value = (v.round() as i64).clamp(hard_lo, hard_hi);
+                    menu_changed = true;
+                }
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    *value != def,
+                    egui::Button::new(c.format("field-reset", TextKind::Ui, &[])),
+                )
+                .clicked()
+            {
+                *value = def;
+                menu_changed = true;
+                ui.close();
+            }
+        });
+    }
+    if menu_changed {
+        true
+    } else if response.changed() {
+        if response.dragged() {
+            if let Some(lo) = desc.soft_min.or(desc.min) {
+                n = n.max((lo as i64).min(initial));
+            }
+            if let Some(hi) = desc.soft_max.or(desc.max) {
+                n = n.min((hi as i64).max(initial));
+            }
+        }
         *value = n;
         true
     } else {
@@ -885,6 +1201,36 @@ mod tests {
         assert_eq!(
             d.clamp(PropertyValue::Float(500.0)),
             PropertyValue::Float(100.0)
+        );
+    }
+
+    #[test]
+    fn numeric_fields_parse_units_arithmetic_and_keep_gentle_scrub_steps() {
+        let angle_d = desc("angle", PropertyKind::Float, Unit::Angle);
+        let angle_disp = UnitDisplay::of(Unit::Angle);
+        assert!(
+            (display_scrub_step(&angle_d, &angle_disp) - 1.0).abs() < 1e-9,
+            "angle default step is 1 degree, not 57.3 degrees"
+        );
+        let parsed_deg =
+            parse_display_float("30 + 15°", Unit::Angle, angle_disp.to_display).unwrap();
+        assert!((parsed_deg - 45.0).abs() < 1e-9);
+
+        let factor_d = desc("roughness", PropertyKind::Float, Unit::Factor);
+        let factor_disp = UnitDisplay::of(Unit::Factor);
+        assert!((display_scrub_step(&factor_d, &factor_disp) - 1.0).abs() < 1e-9);
+        assert_eq!(
+            parse_display_float("100 / 4 %", Unit::Factor, factor_disp.to_display),
+            Some(25.0)
+        );
+
+        let len_disp = UnitDisplay::of(Unit::Length);
+        let parsed_len = parse_display_float("25mm", Unit::Length, len_disp.to_display).unwrap();
+        assert!((len_disp.from_display(parsed_len) - 0.025).abs() < 1e-12);
+
+        let rgb = parse_hex_rgb("#FF8000").unwrap();
+        assert!(
+            (rgb[0] - 1.0).abs() < 1e-6 && (rgb[1] - 128.0 / 255.0).abs() < 1e-6 && rgb[2] == 0.0
         );
     }
 }

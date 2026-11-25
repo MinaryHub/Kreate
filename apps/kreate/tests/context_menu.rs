@@ -245,16 +245,20 @@ fn turning_off_tooltip_translation_leaves_the_interface_alone() {
         tooltips: false,
         new_data_names: false,
     };
+    let en_info = describe(&english(), "mesh.extrude_region", "Extrude", None);
     let info = describe(&catalog, "mesh.extrude_region", "Extrude", None);
     assert_ne!(
         info.name,
         name_key("mesh.extrude_region"),
         "the interface should still be translated"
     );
+    assert_ne!(
+        info.name, en_info.name,
+        "the interface label should remain Korean"
+    );
     assert_eq!(
-        info.description,
-        description_key("mesh.extrude_region"),
-        "an untranslated tooltip resolves to its key"
+        info.description, en_info.description,
+        "an untranslated tooltip resolves to the English fallback sentence"
     );
 }
 

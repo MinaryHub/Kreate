@@ -129,6 +129,13 @@ pub struct UvState {
     pub band: Option<(Pos2, Pos2)>,
     /// Whether the band removes rather than adds.
     pub band_deselect: bool,
+    /// Selects all coincident corners sharing the clicked UV coordinate so
+    /// moving a vertex does not tear adjacent faces apart.
+    pub sticky: bool,
+    /// Draws an 8×8 UV checker grid inside the `[0, 1]` unit square.
+    pub checker: bool,
+    /// Active material's base-colour texture to display behind the UV wires.
+    pub texture: Option<egui::TextureId>,
 }
 
 impl Default for UvState {
@@ -141,6 +148,9 @@ impl Default for UvState {
             rect: None,
             band: None,
             band_deselect: false,
+            sticky: true,
+            checker: false,
+            texture: None,
         }
     }
 }
@@ -321,7 +331,16 @@ pub fn uv_editor(
             zoom_about(state, rect, pos, (scroll * 0.004).exp());
         }
     }
-    let pan = ui.input(|i| i.pointer.middle_down());
+    if response.hovered()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| crate::text::physical_key_pressed(i, egui::Key::Home))
+    {
+        frame_unit_square(state, rect);
+    }
+    let pan = ui.input(|i| {
+        i.pointer.middle_down()
+            || (i.modifiers.alt && i.modifiers.shift && i.pointer.primary_down())
+    });
     if pan {
         let delta = response.drag_delta();
         state.centre -= Vec2::new(delta.x, -delta.y) / state.scale;
@@ -378,40 +397,19 @@ pub fn uv_editor(
         }
     }
 
-    // --- pins -------------------------------------------------------------------
-    if response.hovered() && !ui.ctx().egui_wants_keyboard_input() {
-        let pin = ui.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Key {
-                    key: egui::Key::P,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => Some(modifiers.alt),
-                _ => None,
-            })
-        });
-        if let Some(clear) = pin {
-            let mut params = PropertyMap::new();
-            params.set("clear", PropertyValue::Bool(clear));
-            out.push(Command::RunOperator {
-                op_id: "uv.pin".to_string(),
-                params,
-            });
-        }
-    }
-
     // --- selection ----------------------------------------------------------
-    let (extend, deselect) = ui.input(|i| (i.modifiers.shift, i.modifiers.ctrl));
+    let (extend, deselect, alt_held) =
+        ui.input(|i| (i.modifiers.shift, i.modifiers.ctrl, i.modifiers.alt));
+    let can_select = !pan && !alt_held;
 
-    if response.drag_started() && !pan {
+    if response.drag_started() && can_select {
         if let Some(pos) = response.interact_pointer_pos() {
             state.band = Some((pos, pos));
             state.band_deselect = deselect;
         }
     }
     if let Some((from, _)) = state.band {
-        if response.dragged() && !pan {
+        if response.dragged() && can_select {
             if let Some(pos) = response.interact_pointer_pos() {
                 state.band = Some((from, pos));
             }
@@ -448,12 +446,36 @@ pub fn uv_editor(
                 out.push(select_command(corners, extend, state.band_deselect));
             }
         }
-    } else if response.clicked() {
+    } else if response.clicked() && can_select {
         if let Some(pos) = response.interact_pointer_pos() {
             out.extend(click(view, state, rect, pos, extend, deselect));
         }
     }
 
+    out
+}
+
+/// Collects all live corners sharing `slot`'s UV coordinate within `1e-5` so a
+/// sticky click moves welded vertices together instead of ripping faces apart.
+fn coincident_corners(view: &UvView<'_>, slot: u32) -> Vec<u32> {
+    let Some(target) = view.uv(slot) else {
+        return vec![slot];
+    };
+    let mut out = Vec::new();
+    for face in 0..view.face_count() {
+        for &c in view.face(face) {
+            if let Some(uv) = view.uv(c) {
+                if (uv - target).length_sq() <= 1e-10 && !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(slot);
+    } else {
+        out.sort_unstable();
+    }
     out
 }
 
@@ -472,7 +494,14 @@ fn click(
     deselect: bool,
 ) -> Option<Command> {
     match pick(view, state, rect, pos, PICK_RADIUS) {
-        Some(slot) => Some(select_command(vec![slot], extend, deselect)),
+        Some(slot) => {
+            let corners = if state.sticky {
+                coincident_corners(view, slot)
+            } else {
+                vec![slot]
+            };
+            Some(select_command(corners, extend, deselect))
+        }
         None if extend || deselect => None,
         None => Some(select_command(Vec::new(), false, false)),
     }
@@ -489,7 +518,7 @@ fn select_command(corners: Vec<u32>, extend: bool, deselect: bool) -> Command {
     }
 }
 
-/// The unit square and the texel grid inside it.
+/// The unit square and the texel grid (or material texture / checker) inside it.
 fn draw_unit_square(
     painter: &egui::Painter,
     state: &UvState,
@@ -500,6 +529,34 @@ fn draw_unit_square(
     let max = to_screen(state, rect, Vec2::new(1.0, 0.0));
     let square = Rect::from_two_pos(min, max);
     painter.rect_filled(square, 0.0, theme.base);
+
+    if let Some(tex) = state.texture {
+        painter.image(
+            tex,
+            square,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 225),
+        );
+    } else if state.checker {
+        let cells = 8usize;
+        let cw = square.width() / cells as f32;
+        let ch = square.height() / cells as f32;
+        let dark = theme.sunken;
+        let light = theme.raised;
+        for row in 0..cells {
+            for col in 0..cells {
+                let cell = Rect::from_min_size(
+                    Pos2::new(
+                        square.min.x + col as f32 * cw,
+                        square.min.y + row as f32 * ch,
+                    ),
+                    Vec2::new(cw, ch),
+                );
+                let fill = if (row + col) % 2 == 0 { light } else { dark };
+                painter.rect_filled(cell, 0.0, fill);
+            }
+        }
+    }
 
     // Tenths, and only while they are far enough apart to read. Log-scaled
     // subdivision the way the 3D grid does it would be over-engineering here:
@@ -850,5 +907,43 @@ mod tests {
 
         assert!(click(&v, &state, rect, empty, true, false).is_none());
         assert!(click(&v, &state, rect, empty, false, true).is_none());
+    }
+
+    #[test]
+    fn sticky_click_selects_all_welded_corners_at_the_same_uv() {
+        let uvs = vec![
+            egui::vec2(0.0, 0.0),
+            egui::vec2(0.5, 0.5),
+            egui::vec2(0.0, 1.0),
+            egui::vec2(0.5, 0.5),
+            egui::vec2(1.0, 0.0),
+            egui::vec2(1.0, 1.0),
+        ];
+        let sel = vec![false; 6];
+        let offsets = vec![0, 3, 6];
+        let corners = vec![0, 1, 2, 3, 4, 5];
+        let v = view(&uvs, &sel, &offsets, &corners);
+        let mut state = UvState::default();
+        let rect = panel();
+        frame_unit_square(&mut state, rect);
+        let seam_pt = to_screen(&state, rect, egui::vec2(0.5, 0.5));
+
+        let Some(Command::RunOperator { params, .. }) =
+            click(&v, &state, rect, seam_pt, false, false)
+        else {
+            panic!("expected select_set command");
+        };
+        assert_eq!(
+            params.get("corners"),
+            Some(&PropertyValue::Ints(vec![1, 3]))
+        );
+
+        state.sticky = false;
+        let Some(Command::RunOperator { params, .. }) =
+            click(&v, &state, rect, seam_pt, false, false)
+        else {
+            panic!("expected single-corner select_set command");
+        };
+        assert_eq!(params.get("corners"), Some(&PropertyValue::Ints(vec![1])));
     }
 }

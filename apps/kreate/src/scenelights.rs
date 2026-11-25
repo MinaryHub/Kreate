@@ -231,6 +231,19 @@ pub fn shot(doc: &Document, rate: f64, subject: kreate_math::DVec3) -> Shot {
             &fallback
         }
     };
+    // Standard HDRIs (Poly Haven, EXR/HDR) arrive normalized around unit
+    // scene-linear rather than 20,000-lux candela; with auto-exposure on and no
+    // photometric lamps in the scene, expose around 0 EV (+ ±EV compensation)
+    // rather than dropping to -11.14 EV (pitch black).
+    if camera.auto_exposure
+        && reading.is_none()
+        && crate::environment::background_image(doc).is_some()
+    {
+        return Shot {
+            exposure: camera.exposure_compensation,
+            metered: true,
+        };
+    }
     Shot {
         exposure: camera.metered_exposure(reading, rate),
         // The same condition `Camera::metered_exposure` applies, and the reason

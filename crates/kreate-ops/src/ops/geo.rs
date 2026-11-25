@@ -18,6 +18,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Unlink>();
     registry.register::<Translate>();
     registry.register::<SetValue>();
+    registry.register::<Duplicate>();
 }
 
 /// The active mesh object's graph.
@@ -394,6 +395,75 @@ impl Operator for SetValue {
             return Ok(OpResult::Cancelled);
         }
         node.kind = kind;
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, OpParams)]
+pub struct DuplicateParams {
+    pub nodes: Vec<u32>,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Duplicates non-IO geometry nodes and internal wires between them (`Shift+D`).
+pub struct Duplicate;
+
+impl Operator for Duplicate {
+    type Params = DuplicateParams;
+    fn id() -> &'static str {
+        "geo.duplicate"
+    }
+    fn label() -> &'static str {
+        "Duplicate Geometry Nodes"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        has_graph(doc)
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some(g) = graph_mut(doc) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let mut map = std::collections::HashMap::new();
+        let dx = if params.x == 0.0 && params.y == 0.0 {
+            32.0
+        } else {
+            params.x as f32
+        };
+        let dy = if params.x == 0.0 && params.y == 0.0 {
+            24.0
+        } else {
+            params.y as f32
+        };
+        for &n in &params.nodes {
+            let idx = n as usize;
+            let Some(orig) = g.nodes.get(idx).cloned() else {
+                continue;
+            };
+            if matches!(orig.kind, GeoNodeKind::Input | GeoNodeKind::Output) {
+                continue;
+            }
+            let new_idx = g.nodes.len();
+            g.nodes.push(GeoNode {
+                name: orig.name,
+                kind: orig.kind,
+                position: [orig.position[0] + dx, orig.position[1] + dy],
+            });
+            map.insert(idx, new_idx);
+        }
+        if map.is_empty() {
+            return Ok(OpResult::Cancelled);
+        }
+        let existing_links = g.links.clone();
+        for l in existing_links {
+            if let (Some(&from), Some(&to)) = (map.get(&l.from_node), map.get(&l.to_node)) {
+                let _ = g.link(from, to, l.to_socket);
+            }
+        }
         Ok(OpResult::Finished)
     }
 }

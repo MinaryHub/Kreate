@@ -387,13 +387,41 @@ fn a_nodes_numbers_and_image_are_set_through_their_fields() {
             ("color", PropertyValue::Vec3([1.0, 0.0, 0.0])),
         ]
     ));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.set_value",
+        &[
+            ("node", PropertyValue::Int(surface)),
+            ("field", PropertyValue::Int(7)),
+            ("value", PropertyValue::Float(0.6)),
+        ]
+    ));
+    assert!(run(
+        &registry,
+        &mut history,
+        &mut doc,
+        &ctx,
+        "node.set_value",
+        &[
+            ("node", PropertyValue::Int(surface)),
+            ("field", PropertyValue::Int(10)),
+            ("value", PropertyValue::Float(2.5)),
+        ]
+    ));
     match graph(&doc, material).nodes[surface as usize].kind {
         NodeKind::Surface {
             roughness,
             base_color,
+            alpha,
+            emission,
             ..
         } => {
             assert!((roughness - 0.9).abs() < 1e-6);
+            assert!((alpha - 0.6).abs() < 1e-6);
+            assert!((emission.r - 2.5).abs() < 1e-6);
             assert_eq!(base_color.r, 1.0);
             assert_eq!(base_color.g, 0.0);
         }
@@ -408,7 +436,7 @@ fn a_nodes_numbers_and_image_are_set_through_their_fields() {
         "node.set_value",
         &[
             ("node", PropertyValue::Int(surface)),
-            ("field", PropertyValue::Int(7)),
+            ("field", PropertyValue::Int(11)),
             ("value", PropertyValue::Float(0.1)),
         ]
     ));

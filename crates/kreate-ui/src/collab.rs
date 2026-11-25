@@ -80,6 +80,8 @@ pub struct CollabText {
     pub need_name: String,
     /// Why Join is off: no address yet.
     pub need_address: String,
+    /// Button label for copying the invite address and key.
+    pub copy_invite: String,
 }
 
 /// Draws the session window when it is open.
@@ -204,6 +206,14 @@ fn draw_live(
             ui.add(
                 egui::Label::new(egui::RichText::new(&view.address).monospace()).selectable(true),
             );
+            if !text.copy_invite.is_empty() && ui.small_button(&text.copy_invite).clicked() {
+                let invite = if view.key.is_empty() {
+                    view.address.clone()
+                } else {
+                    format!("{} (key: {})", view.address, view.key)
+                };
+                ui.ctx().copy_text(invite);
+            }
         });
     }
     ui.add_space(4.0);

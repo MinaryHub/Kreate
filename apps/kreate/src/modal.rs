@@ -153,6 +153,8 @@ pub enum Orientation {
     /// The selection's: an object's own rotation, or in edit mode the object the
     /// elements belong to.
     Local,
+    /// The 3D cursor's work-plane axes.
+    Cursor,
 }
 
 /// A world axis the gesture is constrained to.
@@ -272,7 +274,9 @@ pub struct Gesture {
     right: Vec3,
     up: Vec3,
     pub axis: Option<Axis>,
-    /// Which axes the constraint is in. Only meaningful while `axis` is set.
+    /// Two-axis planar constraint (`Shift+X/Y/Z` or planar gizmo square).
+    pub plane_exclude: Option<Axis>,
+    /// Which axes the constraint is in. Only meaningful while `axis` or `plane_exclude` is set.
     pub orientation: Orientation,
     /// What the first press of an axis key means — the header's Transform
     /// Orientation. The second press is the other one, the third lets go.
@@ -395,9 +399,14 @@ impl Gesture {
         // The world size of one pixel at the pivot's distance. This is what makes
         // a free move track the cursor: drag the mouse a hundred pixels and the
         // selection moves a hundred pixels' worth of world.
-        let distance = (pivot - camera.eye()).length().max(1e-6);
         let height = viewport.1.max(1.0) as f64;
-        let units_per_pixel = (2.0 * (camera.fov_y * 0.5).tan() * distance / height) as f32;
+        let units_per_pixel = match camera.projection {
+            kreate_render::Projection::Perspective => {
+                let distance = (pivot - camera.eye()).length().max(1e-6);
+                (2.0 * (camera.fov_y * 0.5).tan() * distance / height) as f32
+            }
+            kreate_render::Projection::Orthographic => (camera.ortho_height() / height) as f32,
+        };
 
         let pivot_px =
             project(pivot, camera, viewport).unwrap_or((viewport.0 * 0.5, viewport.1 * 0.5));
@@ -411,6 +420,7 @@ impl Gesture {
             right: camera.right().as_vec3(),
             up: camera.up().as_vec3(),
             axis: None,
+            plane_exclude: None,
             orientation: Orientation::Global,
             first_orientation: Orientation::Global,
             basis,
@@ -494,6 +504,7 @@ impl Gesture {
         // An extrude starts along its faces' normal. X, Y or Z sends it along
         // that axis instead — the header's orientation first, the other one
         // on a second press — and a third press brings it back to the normal.
+        self.plane_exclude = None;
         if self.kind == Kind::Extrude && self.along_normals {
             return;
         }
@@ -501,7 +512,7 @@ impl Gesture {
             let first = self.first_orientation;
             let second = match first {
                 Orientation::Global => Orientation::Local,
-                Orientation::Local => Orientation::Global,
+                Orientation::Local | Orientation::Cursor => Orientation::Global,
             };
             match self.axis {
                 Some(current)
@@ -527,7 +538,7 @@ impl Gesture {
         let first = self.first_orientation;
         let second = match first {
             Orientation::Global => Orientation::Local,
-            Orientation::Local => Orientation::Global,
+            Orientation::Local | Orientation::Cursor => Orientation::Global,
         };
         match self.axis {
             Some(current) if current == axis && self.orientation == first => {
@@ -539,6 +550,33 @@ impl Gesture {
             }
             _ => {
                 self.axis = Some(axis);
+                self.orientation = first;
+            }
+        }
+    }
+
+    /// Locks Move or Scale to the plane perpendicular to `excluded` (`Shift+X/Y/Z`
+    /// or dragging a planar gizmo square).
+    pub fn exclude_axis(&mut self, excluded: Axis) {
+        if !matches!(self.kind, Kind::Move | Kind::ExtrudeFree | Kind::Scale) {
+            return;
+        }
+        self.axis = None;
+        let first = self.first_orientation;
+        let second = match first {
+            Orientation::Global => Orientation::Local,
+            Orientation::Local | Orientation::Cursor => Orientation::Global,
+        };
+        match self.plane_exclude {
+            Some(cur) if cur == excluded && self.orientation == first => {
+                self.orientation = second;
+            }
+            Some(cur) if cur == excluded => {
+                self.plane_exclude = None;
+                self.orientation = first;
+            }
+            _ => {
+                self.plane_exclude = Some(excluded);
                 self.orientation = first;
             }
         }
@@ -586,6 +624,22 @@ impl Gesture {
         .then_some(axis)
     }
 
+    /// Operator orientation enum value (`0` = global, `1` = local, `2` = cursor)
+    /// when an axis or plane constraint is active.
+    fn constrained_orientation(&self) -> Option<u32> {
+        if self.axis.is_none() && self.plane_exclude.is_none() {
+            return None;
+        }
+        if !matches!(self.kind, Kind::Move | Kind::Rotate | Kind::Scale) {
+            return None;
+        }
+        match self.orientation {
+            Orientation::Global => None,
+            Orientation::Local => Some(1),
+            Orientation::Cursor => Some(2),
+        }
+    }
+
     /// The constrained direction in world space.
     fn axis_direction(&self, axis: Axis) -> Vec3 {
         match self.orientation {
@@ -593,7 +647,7 @@ impl Gesture {
             // Normalised, because the basis comes from an object transform and a
             // scaled object's axes are not unit vectors. Without this a
             // constrained move on a scaled object travels the wrong distance.
-            Orientation::Local => {
+            Orientation::Local | Orientation::Cursor => {
                 // An extrude sent along a local axis means the object's, not
                 // the faces' normal frame it was begun with.
                 let basis = if self.kind == Kind::Extrude && !self.along_normal {
@@ -976,13 +1030,24 @@ impl Gesture {
                     "translation",
                     PropertyValue::Vec3([offset.x, offset.y, offset.z]),
                 );
-                // Held to a local axis: the distance along it, for each
-                // object to take along its own — the world offset is only the
+                // Held to a local axis or local plane: the distance along it, for
+                // each object to take along its own — the world offset is only the
                 // active object's.
                 if let Some(axis) = self.local_axis() {
                     let along = offset.dot(self.axis_direction(axis).as_dvec3());
                     let mut own = [0.0; 3];
                     own[axis.index() as usize] = along;
+                    params.set("orientation", PropertyValue::Enum(1));
+                    params.set("local_translation", PropertyValue::Vec3(own));
+                } else if let (Kind::Move, Orientation::Local, Some(excluded)) =
+                    (self.kind, self.orientation, self.plane_exclude)
+                {
+                    let mut own = [0.0; 3];
+                    for a in [Axis::X, Axis::Y, Axis::Z] {
+                        if a != excluded {
+                            own[a.index() as usize] = offset.dot(self.axis_direction(a).as_dvec3());
+                        }
+                    }
                     params.set("orientation", PropertyValue::Enum(1));
                     params.set("local_translation", PropertyValue::Vec3(own));
                 }
@@ -1051,9 +1116,9 @@ impl Gesture {
                 };
                 params.set("angle", PropertyValue::Float(angle));
                 params.set("axis", PropertyValue::Enum(axis.index()));
-                // About each object's own axis when held to a local one.
-                if self.local_axis().is_some() {
-                    params.set("orientation", PropertyValue::Enum(1));
+                // About each object's own axis (1) or the 3D cursor's axis (2).
+                if let Some(orient) = self.constrained_orientation() {
+                    params.set("orientation", PropertyValue::Enum(orient));
                 }
             }
             Kind::Scale => {
@@ -1069,17 +1134,19 @@ impl Gesture {
                 } else {
                     factor
                 };
-                let scale = match self.axis {
-                    None => [factor, factor, factor],
-                    Some(Axis::X) => [factor, 1.0, 1.0],
-                    Some(Axis::Y) => [1.0, factor, 1.0],
-                    Some(Axis::Z) => [1.0, 1.0, factor],
+                let scale = match (self.axis, self.plane_exclude) {
+                    (Some(Axis::X), _) => [factor, 1.0, 1.0],
+                    (Some(Axis::Y), _) => [1.0, factor, 1.0],
+                    (Some(Axis::Z), _) => [1.0, 1.0, factor],
+                    (None, Some(Axis::X)) => [1.0, factor, factor],
+                    (None, Some(Axis::Y)) => [factor, 1.0, factor],
+                    (None, Some(Axis::Z)) => [factor, factor, 1.0],
+                    (None, None) => [factor, factor, factor],
                 };
                 params.set("scale", PropertyValue::Vec3(scale));
-                // Along each object's own axes when held to a local one; the
-                // world's otherwise, which is the operators' default.
-                if self.local_axis().is_some() {
-                    params.set("orientation", PropertyValue::Enum(1));
+                // Along each object's own axes (1) or the 3D cursor's axes (2).
+                if let Some(orient) = self.constrained_orientation() {
+                    params.set("orientation", PropertyValue::Enum(orient));
                 }
             }
         }
@@ -1131,14 +1198,37 @@ impl Gesture {
             if let Some(target) = self.snap_target() {
                 let free = self.screen_to_world(dx, dy).as_dvec3();
                 let to_target = target - self.snap_source(target, free);
-                return match self.axis {
-                    None => to_target,
-                    Some(axis) => {
+                return match (self.axis, self.plane_exclude) {
+                    (Some(axis), _) => {
                         let direction = self.axis_direction(axis).as_dvec3();
                         direction * to_target.dot(direction)
                     }
+                    (None, Some(excluded)) => {
+                        let n = self.axis_direction(excluded).as_dvec3();
+                        to_target - n * to_target.dot(n)
+                    }
+                    (None, None) => to_target,
                 };
             }
+        }
+        if let (None, Some(excluded)) = (self.axis, self.plane_exclude) {
+            let n = self.axis_direction(excluded).as_dvec3();
+            let [u_axis, v_axis] = match excluded {
+                Axis::X => [Axis::Y, Axis::Z],
+                Axis::Y => [Axis::X, Axis::Z],
+                Axis::Z => [Axis::X, Axis::Y],
+            };
+            let u = self.axis_direction(u_axis).as_dvec3();
+            let v = self.axis_direction(v_axis).as_dvec3();
+            if let Some(value) = self.typed() {
+                let dom = self.dominant_in_plane(dx, dy, u_axis, v_axis);
+                return self.axis_direction(dom).as_dvec3() * value;
+            }
+            let in_plane = self.plane_ray_delta(dx, dy, n).unwrap_or_else(|| {
+                let free = self.screen_to_world(dx, dy).as_dvec3();
+                free - n * free.dot(n)
+            });
+            return u * snap(in_plane.dot(u)) + v * snap(in_plane.dot(v));
         }
         match (self.axis, self.typed()) {
             // A typed distance along a chosen axis is exact, and unsnapped.
@@ -1164,6 +1254,56 @@ impl Gesture {
                 let free = self.screen_to_world(dx, dy).as_dvec3();
                 DVec3::new(snap(free.x), snap(free.y), snap(free.z))
             }
+        }
+    }
+
+    /// Ray-plane displacement on `(P - pivot) · n = 0` so dragging a planar handle
+    /// keeps the selection directly under the mouse on the floor/plane; returns
+    /// `None` at grazing angles so the caller falls back smoothly to view-plane
+    /// projection without shooting to infinity.
+    fn plane_ray_delta(&self, dx: f32, dy: f32, n: DVec3) -> Option<DVec3> {
+        let (vw, vh) = (self.viewport.0.max(1.0), self.viewport.1.max(1.0));
+        let aspect = (vw / vh) as f64;
+        let hit_at = |px: (f32, f32)| -> Option<DVec3> {
+            let ndc = glam::Vec2::new(px.0 / vw * 2.0 - 1.0, 1.0 - px.1 / vh * 2.0);
+            let (origin, dir) = match self.camera.projection {
+                kreate_render::Projection::Perspective => {
+                    let d = self.camera.ray_direction(ndc, aspect);
+                    (
+                        self.camera.eye(),
+                        DVec3::new(d.x as f64, d.y as f64, d.z as f64),
+                    )
+                }
+                kreate_render::Projection::Orthographic => {
+                    let half_h = self.camera.ortho_height() * 0.5;
+                    let half_w = half_h * aspect;
+                    let origin = self.camera.eye()
+                        + self.camera.right() * (ndc.x as f64 * half_w)
+                        + self.camera.up() * (ndc.y as f64 * half_h);
+                    (origin, self.camera.forward())
+                }
+            };
+            let denom = dir.dot(n);
+            if denom.abs() < 0.12 {
+                return None;
+            }
+            let t = (self.pivot - origin).dot(n) / denom;
+            if !t.is_finite() || t <= 0.0 || t > (self.camera.distance * 25.0).max(100.0) {
+                return None;
+            }
+            Some(origin + dir * t)
+        };
+        let a = hit_at(self.start)?;
+        let b = hit_at((self.start.0 + dx, self.start.1 + dy))?;
+        Some(b - a)
+    }
+
+    fn dominant_in_plane(&self, dx: f32, dy: f32, a: Axis, b: Axis) -> Axis {
+        let world = self.screen_to_world(dx, dy);
+        if world.dot(self.axis_direction(a)).abs() >= world.dot(self.axis_direction(b)).abs() {
+            a
+        } else {
+            b
         }
     }
 
@@ -1341,15 +1481,28 @@ impl Gesture {
             );
         }
         let len = kreate_reflect::format_length;
-        let axis = match (self.axis, self.orientation) {
+        let axis = match (self.axis, self.plane_exclude, self.orientation) {
             _ if self.kind == Kind::Extrude && self.along_normals => " along normals".to_string(),
             _ if self.kind == Kind::Extrude && self.along_normal => " normal".to_string(),
-            (Some(axis), Orientation::Global) => format!(" {}", axis.label()),
+            (Some(axis), _, Orientation::Global) => format!(" {}", axis.label()),
             // Doubled, the way it was typed, so the header says which of the two
             // constraints is active rather than leaving it to be inferred from
             // the result.
-            (Some(axis), Orientation::Local) => format!(" {0}{0}", axis.label()),
-            (None, _) => String::new(),
+            (Some(axis), _, Orientation::Local) => format!(" {0}{0}", axis.label()),
+            (Some(axis), _, Orientation::Cursor) => format!(" cursor {}", axis.label()),
+            (None, Some(excluded), orient) => {
+                let plane = match excluded {
+                    Axis::X => "YZ",
+                    Axis::Y => "XZ",
+                    Axis::Z => "XY",
+                };
+                match orient {
+                    Orientation::Global => format!(" {plane}"),
+                    Orientation::Local => format!(" local {plane}"),
+                    Orientation::Cursor => format!(" cursor {plane}"),
+                }
+            }
+            (None, None, _) => String::new(),
         };
         let precise = if self.precise_from.is_some() {
             "  precise"

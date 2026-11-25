@@ -456,7 +456,7 @@ fn under(dir: &Path, ready: Ready) -> Ready {
 /// Extensions read as models, and as environments.
 const SCENES: &[&str] = &[
     "gltf", "glb", "fbx", "obj", "stl", "ply", "3mf", "off", "usd", "usda", "usdc", "usdz", "dae",
-    "urdf", "kreate",
+    "urdf", "step", "stp", "dxf", "kreate",
 ];
 const ENVIRONMENTS: &[&str] = &["hdr", "exr"];
 const IMAGES: &[&str] = &["png", "jpg", "jpeg"];
@@ -945,11 +945,37 @@ fn model_thumbnail(file: &Path) -> Option<Picture> {
         }
     }
     let (doc, _) = kreate_io::scene_file::read_scene_file(file).ok()?;
-    let mut triangles = Vec::new();
+    let default_rgb = [0.86f32, 0.90, 1.0];
+    let mut colored = Vec::new();
     for (id, object) in doc.objects() {
-        let Some(mesh) = object.mesh().and_then(|m| doc.mesh(m)) else {
-            continue;
+        let eval_fallback;
+        let mesh: &kreate_mesh::MeshData = match object.mesh().and_then(|m| doc.mesh(m)) {
+            Some(m) if !m.is_empty() => m,
+            _ if !object.features.is_empty() => {
+                eval_fallback =
+                    kreate_scene::feature::body(&doc, &object.features, doc.world_transform(id));
+                if eval_fallback.is_empty() {
+                    continue;
+                }
+                &eval_fallback
+            }
+            _ => continue,
         };
+        let base_rgb = doc
+            .material_at(id, 0)
+            .or_else(|| {
+                object
+                    .material_overrides
+                    .iter()
+                    .flatten()
+                    .next()
+                    .and_then(|mid| doc.material(*mid))
+            })
+            .map(|mat| {
+                let s = mat.base_color.as_swatch();
+                [s.r, s.g, s.b]
+            })
+            .unwrap_or(default_rgb);
         let world = doc.world_transform(id);
         let p: Vec<glam::DVec3> = mesh
             .positions()
@@ -959,15 +985,18 @@ fn model_thumbnail(file: &Path) -> Option<Picture> {
         for f in 0..mesh.num_faces() {
             let ring = mesh.face_verts(f);
             for i in 1..ring.len().saturating_sub(1) {
-                triangles.push([
-                    p[ring[0] as usize],
-                    p[ring[i] as usize],
-                    p[ring[i + 1] as usize],
-                ]);
+                colored.push((
+                    [
+                        p[ring[0] as usize],
+                        p[ring[i] as usize],
+                        p[ring[i + 1] as usize],
+                    ],
+                    base_rgb,
+                ));
             }
         }
     }
-    let picture = draw_triangles(&triangles, 256)?;
+    let picture = draw_colored_triangles(&colored, 256)?;
     if let (Some(path), Some(png)) = (kept, picture_png(&picture)) {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -981,6 +1010,15 @@ fn model_thumbnail(file: &Path) -> Option<Picture> {
 /// above, filling the square, lit from over the viewer's shoulder, on
 /// nothing.
 pub fn draw_triangles(triangles: &[[glam::DVec3; 3]], size: u32) -> Option<Picture> {
+    let colored: Vec<([glam::DVec3; 3], [f32; 3])> =
+        triangles.iter().map(|t| (*t, [0.86, 0.90, 1.0])).collect();
+    draw_colored_triangles(&colored, size)
+}
+
+pub fn draw_colored_triangles(
+    triangles: &[([glam::DVec3; 3], [f32; 3])],
+    size: u32,
+) -> Option<Picture> {
     use glam::DVec3;
     if triangles.is_empty() {
         return None;
@@ -992,7 +1030,7 @@ pub fn draw_triangles(triangles: &[[glam::DVec3; 3]], size: u32) -> Option<Pictu
     let light = (-toward + up * 0.6 - right * 0.4).normalize();
     let flat: Vec<[(f64, f64, f64); 3]> = triangles
         .iter()
-        .map(|t| t.map(|p| (p.dot(right), p.dot(up), p.dot(toward))))
+        .map(|(t, _)| t.map(|p| (p.dot(right), p.dot(up), p.dot(toward))))
         .collect();
     let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
     for t in &flat {
@@ -1018,13 +1056,18 @@ pub fn draw_triangles(triangles: &[[glam::DVec3; 3]], size: u32) -> Option<Pictu
     };
     let mut depth = vec![f64::MAX; n * n];
     let mut pixels = vec![0u8; n * n * 4];
-    for (t, world) in flat.iter().zip(triangles) {
+    for (t, (world, tint)) in flat.iter().zip(triangles) {
         let normal = (world[1] - world[0])
             .cross(world[2] - world[0])
             .normalize_or_zero();
         // Either side faces the light: a file's winding is not to be trusted.
-        let lit = 0.25 + 0.75 * normal.dot(light).abs();
-        let shade = (lit.clamp(0.0, 1.0) * 255.0) as u8;
+        let lit = (0.28 + 0.72 * normal.dot(light).abs()).clamp(0.0, 1.0) as f32;
+        let rgb_bytes = [
+            (lit * tint[0].clamp(0.05, 1.0) * 255.0).round() as u8,
+            (lit * tint[1].clamp(0.05, 1.0) * 255.0).round() as u8,
+            (lit * tint[2].clamp(0.05, 1.0) * 255.0).round() as u8,
+            255,
+        ];
         let [a, b, c] = t.map(to_px);
         let area = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
         if area.abs() < 1e-12 {
@@ -1047,13 +1090,7 @@ pub fn draw_triangles(triangles: &[[glam::DVec3; 3]], size: u32) -> Option<Pictu
                 let at = y * n + x;
                 if d < depth[at] {
                     depth[at] = d;
-                    // A cool grey, the viewport's own.
-                    pixels[at * 4..at * 4 + 4].copy_from_slice(&[
-                        (shade as f32 * 0.86) as u8,
-                        (shade as f32 * 0.9) as u8,
-                        shade,
-                        255,
-                    ]);
+                    pixels[at * 4..at * 4 + 4].copy_from_slice(&rgb_bytes);
                 }
             }
         }
