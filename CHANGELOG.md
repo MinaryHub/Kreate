@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-25
+
 ### Added
 
 - Planar handles (`XY`, `XZ`, `YZ`) on the 3D Move and Scale gizmos, a uniform
@@ -1245,7 +1247,8 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.16.0
 [0.15.1]: https://github.com/MinaryHub/Kreate/releases/tag/v0.15.1
 [0.15.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.15.0
 [0.14.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.14.0
