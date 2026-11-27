@@ -81,6 +81,7 @@ fn dispatch(count: u32) -> String {
     out.surface = surface_default();
     out.normal = vec3<f32>(0.0, 0.0, 1.0);
     out.gradient = vec3<f32>(0.0);
+    out.emission = vec3<f32>(0.0);
     out.alpha = 1.0;
     out.clip = 0.0;
 ",
@@ -103,6 +104,7 @@ fn dispatch(count: u32) -> String {
             out.surface = m.surface;
             out.normal = m.normal;
             out.gradient = m.gradient;
+            out.emission = m.emission;
             out.alpha = m.alpha;
             out.clip = m.clip;
         }}
@@ -852,6 +854,8 @@ pub struct PathTracer {
     /// reflections, and is otherwise the backdrop: a product shot's. At the
     /// ground, or under the scene when it reaches below.
     pub ground: bool,
+    /// Film Transparent: leave background rays at alpha = 0.
+    pub transparent_background: bool,
     /// A baked gas the paths travel through: group 1.
     volume: PtVolumeGpu,
     /// The rays are asked of the device's ray tracing, not walked in the
@@ -1315,6 +1319,7 @@ impl PathTracer {
             size: (0, 0),
             sample: 0,
             ground: false,
+            transparent_background: false,
             noise_threshold: 0.01,
             max_bounces: 4,
             volume,
@@ -2037,7 +2042,12 @@ impl PathTracer {
             // Where the last eye is from this one: the shader's hits are
             // this eye's plus an offset, kept small for f32.
             prev_eye: [moved.x, moved.y, moved.z, 0.0],
-            reproject: [u32::from(self.reproject_now), HISTORY, 0, 0],
+            reproject: [
+                u32::from(self.reproject_now),
+                HISTORY,
+                u32::from(self.transparent_background),
+                0,
+            ],
             ground: [
                 self.scene.as_ref().map_or(0.0, |s| s.lowest.min(0.0)),
                 f32::from(u8::from(self.ground && self.scene.is_some())),
@@ -2049,7 +2059,12 @@ impl PathTracer {
         queue.write_buffer(
             &self.resolve_params,
             0,
-            bytemuck::cast_slice(&[region.0, region.1, 0, 0]),
+            bytemuck::cast_slice(&[
+                region.0,
+                region.1,
+                u32::from(self.transparent_background),
+                0,
+            ]),
         );
     }
 

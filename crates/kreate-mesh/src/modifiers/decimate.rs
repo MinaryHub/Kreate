@@ -105,10 +105,22 @@ pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
     if input.is_empty() || !ratio.is_finite() || ratio >= 1.0 {
         return input.clone();
     }
-    let tri = input.triangulate();
-    let (tris, _) = tri.indices.as_chunks::<3>();
+    let tri = input.triangulate_corners();
+    let corner_verts = input.corner_verts();
+    let (tri_corners_slice, _) = tri.corners.as_chunks::<3>();
     let mut pos: Vec<Vec3> = input.positions().to_vec();
-    let mut tris: Vec<[u32; 3]> = tris.to_vec();
+    let mut tris: Vec<[u32; 3]> = tri_corners_slice
+        .iter()
+        .map(|c| {
+            [
+                corner_verts[c[0] as usize],
+                corner_verts[c[1] as usize],
+                corner_verts[c[2] as usize],
+            ]
+        })
+        .collect();
+    let tri_corners: Vec<[u32; 3]> = tri_corners_slice.to_vec();
+    let tri_faces: &[u32] = &tri.tri_to_face;
     let mut alive = vec![true; tris.len()];
     let target = ((tris.len() as f32 * ratio).round() as usize).max(2);
     let mut live = tris.len();
@@ -296,9 +308,14 @@ pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
         }
     }
 
-    // Out: the live triangles over the vertices still in use.
+    // Out: the live triangles over the vertices still in use, carrying
+    // source indices so Point, Face, and Corner attributes (UVs, materials,
+    // skin weights, vertex colours, normals) survive decimation intact.
     let mut index = vec![u32::MAX; pos.len()];
     let mut out_pos: Vec<Vec3> = Vec::new();
+    let mut out_vert_src: Vec<u32> = Vec::new();
+    let mut out_face_src: Vec<u32> = Vec::with_capacity(live);
+    let mut out_corner_src: Vec<u32> = Vec::with_capacity(live * 3);
     let mut faces: Vec<Vec<u32>> = Vec::with_capacity(live);
     for (i, t) in tris.iter().enumerate() {
         if !alive[i] {
@@ -310,14 +327,57 @@ pub fn decimate(input: &MeshData, params: &DecimateParams) -> MeshData {
             if index[v] == u32::MAX {
                 index[v] = out_pos.len() as u32;
                 out_pos.push(pos[v]);
+                out_vert_src.push(v as u32);
             }
             face.push(index[v]);
         }
         if face[0] != face[1] && face[1] != face[2] && face[0] != face[2] {
             faces.push(face);
+            out_face_src.push(tri_faces[i]);
+            out_corner_src.extend_from_slice(&tri_corners[i]);
         }
     }
-    MeshData::from_faces(out_pos, &faces)
+    let mut out = MeshData::from_faces(out_pos, &faces);
+    for layer in input
+        .attributes()
+        .iter_domain(crate::attribute::Domain::Point)
+    {
+        if crate::attribute::names::is_selection(&layer.name) {
+            continue;
+        }
+        out.attributes_mut().insert(
+            &layer.name,
+            crate::attribute::Domain::Point,
+            layer.data.gather(&out_vert_src),
+        );
+    }
+    for layer in input
+        .attributes()
+        .iter_domain(crate::attribute::Domain::Face)
+    {
+        if crate::attribute::names::is_selection(&layer.name) {
+            continue;
+        }
+        out.attributes_mut().insert(
+            &layer.name,
+            crate::attribute::Domain::Face,
+            layer.data.gather(&out_face_src),
+        );
+    }
+    for layer in input
+        .attributes()
+        .iter_domain(crate::attribute::Domain::Corner)
+    {
+        if crate::attribute::names::is_selection(&layer.name) {
+            continue;
+        }
+        out.attributes_mut().insert(
+            &layer.name,
+            crate::attribute::Domain::Corner,
+            layer.data.gather(&out_corner_src),
+        );
+    }
+    out
 }
 
 fn normal_of(tri: &[u32; 3], pos: &[Vec3], moved: Option<(u32, Vec3)>) -> Vec3 {
@@ -356,5 +416,40 @@ mod tests {
         let cube = primitives::cube(2.0);
         let out = decimate(&cube, &DecimateParams { ratio: 1.0 });
         assert_eq!(out.num_faces(), 6);
+    }
+
+    #[test]
+    fn decimate_preserves_uvs_materials_and_skin_weights() {
+        let mut sphere = primitives::uv_sphere(1.0, 24, 12);
+        let nv = sphere.num_verts() as usize;
+        let nf = sphere.num_faces() as usize;
+        sphere.attributes_mut().insert(
+            "skin:Root",
+            crate::attribute::Domain::Point,
+            crate::attribute::AttrData::F32(std::sync::Arc::new(vec![1.0; nv])),
+        );
+        sphere.attributes_mut().insert(
+            crate::attribute::names::MATERIAL_INDEX,
+            crate::attribute::Domain::Face,
+            crate::attribute::AttrData::I32(std::sync::Arc::new(vec![2; nf])),
+        );
+        let out = decimate(&sphere, &DecimateParams { ratio: 0.5 });
+        let uvs = out
+            .attributes()
+            .get_f32x2(crate::attribute::names::UV)
+            .expect("UV layer preserved");
+        assert_eq!(uvs.len(), out.num_corners() as usize);
+        let mats = out
+            .attributes()
+            .get_i32(crate::attribute::names::MATERIAL_INDEX)
+            .expect("material_index layer preserved");
+        assert_eq!(mats.len(), out.num_faces() as usize);
+        assert!(mats.iter().all(|&m| m == 2));
+        let weights = out
+            .attributes()
+            .get_f32("skin:Root")
+            .expect("skin weight layer preserved");
+        assert_eq!(weights.len(), out.num_verts() as usize);
+        assert!(weights.iter().all(|&w| (w - 1.0).abs() < 1e-6));
     }
 }

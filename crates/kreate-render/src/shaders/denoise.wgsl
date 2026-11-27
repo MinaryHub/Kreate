@@ -85,11 +85,13 @@ const KERNEL: array<f32, 3> = array<f32, 3>(0.375, 0.25, 0.0625);
 fn denoise_step(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(position.xy);
     let last = vec2<i32>(params.region) - 1;
-    let here = textureLoad(source, px, 0).rgb;
+    let here_px = textureLoad(source, px, 0);
+    let here = here_px.rgb;
+    let here_a = here_px.a;
     let d = textureLoad(depth, px, 0);
     // The background: nothing to keep apart, and nothing noisy.
     if (d <= 0.0) {
-        return vec4<f32>(here, 1.0);
+        return vec4<f32>(here, here_a);
     }
     let n = textureLoad(normals, px, 0).xyz;
     let a = albedo(px);
@@ -139,13 +141,13 @@ fn denoise_step(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
             total += w;
         }
     }
-    return vec4<f32>(sum / max(total, 1e-6), 1.0);
+    return vec4<f32>(sum / max(total, 1e-6), here_a);
 }
 
 @fragment
 fn denoise_blend(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(position.xy);
-    let raw = textureLoad(source, px, 0).rgb;
+    let raw = textureLoad(source, px, 0);
     let calm = textureLoad(filtered, px, 0).rgb;
-    return vec4<f32>(mix(raw, calm, params.keep), 1.0);
+    return vec4<f32>(mix(raw.rgb, calm, params.keep), raw.a);
 }

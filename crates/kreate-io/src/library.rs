@@ -99,6 +99,29 @@ pub fn resolve_path(document_dir: &Path, library: &str) -> PathBuf {
     document_dir.join(Path::new(library))
 }
 
+/// Resolves the geometry to import for a library object, evaluating parametric
+/// CAD features, curves, and modifiers when present so linked CAD parts do not
+/// arrive as empty meshes.
+fn evaluated_library_mesh(
+    doc: &Document,
+    id: kreate_scene::document::ObjectId,
+    cache: &mut kreate_scene::modifier::ModifierCache,
+) -> Option<(kreate_scene::document::MeshId, kreate_mesh::MeshData)> {
+    let source = doc.object(id)?;
+    let ObjectData::Mesh(mesh_id) = source.data else {
+        return None;
+    };
+    let needs_eval =
+        !source.features.is_empty() || !source.modifiers.is_empty() || source.curve.is_some();
+    if needs_eval {
+        let eval_ctx = kreate_scene::modifier::EvalCtx::still();
+        if let Some(eval) = cache.evaluated(doc, id, &eval_ctx) {
+            return Some((mesh_id, (*eval).clone()));
+        }
+    }
+    doc.mesh(mesh_id).map(|m| (mesh_id, m.clone()))
+}
+
 /// Reads one object's mesh out of a library and adds it to `document`.
 ///
 /// The new object is marked [`Linkage::Linked`], which makes it read-only. Its
@@ -122,7 +145,7 @@ pub fn link_object(
         }
     })?;
 
-    let (_, source) = loaded
+    let (src_id, source) = loaded
         .document
         .objects()
         .find(|(_, object)| object.name == reference.name)
@@ -131,15 +154,8 @@ pub fn link_object(
             name: reference.name.clone(),
         })?;
 
-    let ObjectData::Mesh(mesh_id) = source.data else {
-        return Err(LibraryError::NotGeometry {
-            library: reference.library.clone(),
-            name: reference.name.clone(),
-        });
-    };
-    let mesh = loaded
-        .document
-        .mesh(mesh_id)
+    let mut eval_cache = kreate_scene::modifier::ModifierCache::new();
+    let (mesh_id, mesh) = evaluated_library_mesh(&loaded.document, src_id, &mut eval_cache)
         .ok_or_else(|| LibraryError::NotGeometry {
             library: reference.library.clone(),
             name: reference.name.clone(),
@@ -150,7 +166,7 @@ pub fn link_object(
     // and the mesh's `Arc`-per-array layout means the clone shares every buffer
     // with the copy that was just read — so this is a handful of pointer bumps,
     // not a copy of the geometry.
-    let local_mesh = document.add_mesh(mesh.clone());
+    let local_mesh = document.add_mesh(mesh);
     let mut mat_map = std::collections::HashMap::new();
     let mut img_map = std::collections::HashMap::new();
     let slots = copy_slots(
@@ -270,14 +286,14 @@ pub fn link_all(
     let mut made = Vec::new();
     let mut mat_map = std::collections::HashMap::new();
     let mut img_map = std::collections::HashMap::new();
-    for (_, source) in loaded.document.objects() {
-        let ObjectData::Mesh(mesh_id) = source.data else {
+    let mut eval_cache = kreate_scene::modifier::ModifierCache::new();
+    for (src_id, source) in loaded.document.objects() {
+        let Some((mesh_id, mesh)) =
+            evaluated_library_mesh(&loaded.document, src_id, &mut eval_cache)
+        else {
             continue;
         };
-        let Some(mesh) = loaded.document.mesh(mesh_id) else {
-            continue;
-        };
-        let local_mesh = document.add_mesh(mesh.clone());
+        let local_mesh = document.add_mesh(mesh);
         let slots = copy_slots(
             &loaded.document,
             loaded.document.mesh_slots(mesh_id),
@@ -343,6 +359,7 @@ pub fn refresh_links(document: &mut Document, document_dir: &Path) -> Vec<Librar
         String,
         Option<(
             Document,
+            kreate_scene::modifier::ModifierCache,
             std::collections::HashMap<
                 kreate_scene::document::MaterialId,
                 kreate_scene::document::MaterialId,
@@ -366,12 +383,13 @@ pub fn refresh_links(document: &mut Document, document_dir: &Path) -> Vec<Librar
                 .map(|loaded| {
                     (
                         loaded.document,
+                        kreate_scene::modifier::ModifierCache::new(),
                         std::collections::HashMap::new(),
                         std::collections::HashMap::new(),
                     )
                 })
         });
-        let Some((library_document, mat_map, img_map)) = library else {
+        let Some((library_document, eval_cache, mat_map, img_map)) = library else {
             // Once per library, not once per object. A scene linking forty props
             // from one missing asset file has one problem — the file — and
             // saying so forty times buries it. A *missing object* in a library
@@ -390,13 +408,12 @@ pub fn refresh_links(document: &mut Document, document_dir: &Path) -> Vec<Librar
             continue;
         };
 
-        let found = library_document
+        let src_id = library_document
             .objects()
             .find(|(_, object)| object.name == reference.name)
-            .and_then(|(_, object)| match object.data {
-                ObjectData::Mesh(mesh_id) => Some((mesh_id, library_document.mesh(mesh_id)?)),
-                _ => None,
-            });
+            .map(|(oid, _)| oid);
+        let found =
+            src_id.and_then(|oid| evaluated_library_mesh(library_document, oid, eval_cache));
         let Some((src_mesh_id, mesh)) = found else {
             problems.push(LibraryError::NoSuchObject {
                 library: reference.library.clone(),
@@ -405,7 +422,6 @@ pub fn refresh_links(document: &mut Document, document_dir: &Path) -> Vec<Librar
             continue;
         };
 
-        let mesh = mesh.clone();
         let new_mesh = document.add_mesh(mesh);
         let slots = copy_slots(
             library_document,

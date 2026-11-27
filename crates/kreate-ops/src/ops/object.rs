@@ -1377,6 +1377,8 @@ pub struct SetMaterialParams {
     /// image's — is below this: a leaf on a card. Zero is never.
     #[param(min = 0.0, max = 1.0)]
     pub alpha_clip: f64,
+    /// Render both front and back faces (foliage, cloth, thin decals).
+    pub double_sided: bool,
     /// How strongly a non-metal reflects, as a multiple of what its index of
     /// refraction says: one is physical, zero takes the reflection away.
     #[param(min = 0.0, soft_max = 2.0)]
@@ -1436,6 +1438,7 @@ impl Default for SetMaterialParams {
             ior: 1.5,
             thin: false,
             alpha_clip: 0.0,
+            double_sided: false,
             specular: 1.0,
             coat: 0.0,
             coat_roughness: 0.03,
@@ -1518,6 +1521,7 @@ impl Operator for SetMaterial {
         material.ior = params.ior.max(1.0) as f32;
         material.thin = params.thin;
         material.alpha_clip = (params.alpha_clip > 0.0).then(|| params.alpha_clip.min(1.0) as f32);
+        material.double_sided = params.double_sided;
         // Colours as the base colour's are: a swatch to a reflectance.
         let reflectance = |c: [f64; 3]| {
             kreate_math::Srgb::new(c[0] as f32, c[1] as f32, c[2] as f32).as_reflectance()
@@ -2291,6 +2295,7 @@ pub fn material_params(material: &kreate_scene::Material, slot: u32) -> SetMater
         ior: material.ior as f64,
         thin: material.thin,
         alpha_clip: material.alpha_clip.unwrap_or(0.0) as f64,
+        double_sided: material.double_sided,
         specular: layers.specular as f64,
         coat: layers.coat as f64,
         coat_roughness: layers.coat_roughness as f64,
@@ -2319,6 +2324,11 @@ pub fn material_params(material: &kreate_scene::Material, slot: u32) -> SetMater
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
 pub struct SetCameraParams {
+    /// Whether the camera uses orthographic (parallel) projection instead of perspective.
+    pub orthographic: bool,
+    /// Width of an orthographic view in metres.
+    #[param(min = 0.01, soft_max = 100.0, unit = "length")]
+    pub ortho_scale: f64,
     /// Focal length in millimetres. What a lens is labelled with.
     #[param(min = 1.0, soft_max = 300.0)]
     pub focal_length_mm: f64,
@@ -2352,6 +2362,8 @@ impl Default for SetCameraParams {
     fn default() -> Self {
         let c = kreate_scene::Camera::new("");
         Self {
+            orthographic: c.projection == kreate_scene::camera::Projection::Orthographic,
+            ortho_scale: c.ortho_scale,
             focal_length_mm: c.focal_length_mm,
             sensor_width_mm: c.sensor_width_mm,
             auto_exposure: c.auto_exposure,
@@ -2395,6 +2407,12 @@ impl Operator for SetCamera {
         let Some(camera) = d.camera_mut(id) else {
             return Ok(OpResult::Cancelled);
         };
+        camera.projection = if params.orthographic {
+            kreate_scene::camera::Projection::Orthographic
+        } else {
+            kreate_scene::camera::Projection::Perspective
+        };
+        camera.ortho_scale = params.ortho_scale.max(0.01);
         camera.focal_length_mm = params.focal_length_mm.max(1.0);
         camera.sensor_width_mm = params.sensor_width_mm.max(1.0);
         camera.auto_exposure = params.auto_exposure;
@@ -2421,6 +2439,8 @@ pub fn active_camera(doc: &Document) -> Option<kreate_scene::document::CameraId>
 /// The parameters that would leave a camera exactly as it is.
 pub fn camera_params(camera: &kreate_scene::Camera) -> SetCameraParams {
     SetCameraParams {
+        orthographic: camera.projection == kreate_scene::camera::Projection::Orthographic,
+        ortho_scale: camera.ortho_scale,
         focal_length_mm: camera.focal_length_mm,
         sensor_width_mm: camera.sensor_width_mm,
         auto_exposure: camera.auto_exposure,

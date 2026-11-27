@@ -1433,10 +1433,12 @@ fn emit_material(
         emissive_factor: json::material::EmissiveFactor(
             described.map(|m| m.emissive.to_array()).unwrap_or_default(),
         ),
-        // A cut-out is glTF's MASK, and the threshold its cutoff.
+        // A cut-out is glTF's MASK, translucent alpha without cut-out is BLEND.
         alpha_mode: json::validation::Checked::Valid(
             if described.is_some_and(|m| m.alpha_clip.is_some()) {
                 json::material::AlphaMode::Mask
+            } else if described.is_some_and(|m| m.base_color[3] < 0.999) {
+                json::material::AlphaMode::Blend
             } else {
                 json::material::AlphaMode::Opaque
             },
@@ -1444,6 +1446,7 @@ fn emit_material(
         alpha_cutoff: described
             .and_then(|m| m.alpha_clip)
             .map(json::material::AlphaCutoff),
+        double_sided: described.is_some_and(|m| m.double_sided),
         extensions: described.and_then(|m| {
             let glows = m.emissive != Vec3::ZERO && m.emissive_strength != 1.0;
             let clear = m.transmission > 0.0;

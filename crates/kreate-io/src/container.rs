@@ -469,11 +469,21 @@ pub struct BoneRecord {
     pub roll: f64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub connected: bool,
+    #[serde(default = "default_bone_deform", skip_serializing_if = "is_true")]
+    pub deform: bool,
     /// Edit-mode selection, as the skeleton was left.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub select_head: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub select_tail: bool,
+}
+
+fn default_bone_deform() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 /// One bone's pose: its transform relative to rest, and whether it is
@@ -972,6 +982,8 @@ pub struct RenderRecord {
     pub bounces: u32,
     #[serde(default = "default_video_quality")]
     pub video_quality: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transparent_background: bool,
 }
 
 fn default_bounces() -> u32 {
@@ -1222,6 +1234,8 @@ pub struct MaterialRecord {
     /// Below what opacity the surface is cut away, for one that is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha_clip: Option<f32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub double_sided: bool,
     /// The layers over the plain surface, written only when there are any:
     /// specular weight, coat and its roughness, sheen colour and roughness,
     /// anisotropy and its turn, then what scatters inside and what passing
@@ -2092,6 +2106,7 @@ pub fn write(
                         tail: b.tail.to_array(),
                         roll: b.roll,
                         connected: b.connected,
+                        deform: b.deform,
                         select_head: b.select_head,
                         select_tail: b.select_tail,
                     })
@@ -2242,6 +2257,7 @@ pub fn write(
                     motion_blur: r.motion_blur,
                     bounces: r.bounces,
                     video_quality: r.video_quality,
+                    transparent_background: r.transparent_background,
                 }
             });
         scene.playback =
@@ -2298,6 +2314,7 @@ pub fn write(
                         .then_some([m.transmission, m.ior]),
                     thin: m.thin,
                     alpha_clip: m.alpha_clip,
+                    double_sided: m.double_sided,
                     layers: (!m.layers.is_plain()).then(|| m.layers.to_vec()),
                     graph: m.graph.as_ref().map(|g| graph_record(g, document)),
                     action: m.action.and_then(|a| action_index.get(&a).copied()),
@@ -2989,6 +3006,7 @@ fn read_as_written_inner<R: Read + Seek>(
             ior: record.transmission.map_or(1.5, |t| t[1]),
             thin: record.thin,
             alpha_clip: record.alpha_clip.map(|c| c.clamp(0.0, 1.0)),
+            double_sided: record.double_sided,
             layers: record
                 .layers
                 .as_deref()
@@ -3036,6 +3054,7 @@ fn read_as_written_inner<R: Read + Seek>(
                     tail: glam::DVec3::from_array(b.tail),
                     roll: b.roll,
                     connected: b.connected,
+                    deform: b.deform,
                     select_head: b.select_head,
                     select_tail: b.select_tail,
                 });
@@ -3172,6 +3191,7 @@ fn read_as_written_inner<R: Read + Seek>(
             motion_blur: r.motion_blur,
             bounces: r.bounces.clamp(1, 64),
             video_quality: r.video_quality.min(2),
+            transparent_background: r.transparent_background,
         };
     }
     if let Some(p) = scene.playback {

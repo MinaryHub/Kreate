@@ -535,3 +535,128 @@ fn a_skinned_mesh_comes_back_through_binary_usd() {
         assert!(d < 1e-3, "frame {frame}: the surface moved by {d}");
     }
 }
+
+#[test]
+fn nla_clips_and_non_deform_bones_export_cleanly_in_glb() {
+    let (mut doc, _body) = rigged();
+    let rig_id = doc
+        .objects()
+        .find(|(_, o)| matches!(o.data, ObjectData::Armature(_)))
+        .map(|(id, _)| id)
+        .expect("rig");
+    let arm_id = match doc.object(rig_id).unwrap().data {
+        ObjectData::Armature(a) => a,
+        _ => unreachable!(),
+    };
+    // Add a non-deforming control bone (e.g. IK target) that should be omitted
+    // from the exported skin joint list.
+    doc.armature_mut(arm_id).unwrap().add_bone(Bone {
+        name: "IK_Target".into(),
+        parent: None,
+        head: DVec3::new(0.0, 2.0, 2.0),
+        tail: DVec3::new(0.0, 2.0, 2.5),
+        deform: false,
+        ..Default::default()
+    });
+
+    // Add two distinct NLA clips alongside the active action ("Bend").
+    let mut walk = Action::new("Walk");
+    for (frame, angle) in [(1.0, 0.0), (12.0, 0.7)] {
+        let q = DQuat::from_rotation_x(angle);
+        for (i, v) in [q.w, q.x, q.y, q.z].into_iter().enumerate() {
+            walk.curve_mut(&bone_path("Lower", "rotation_quaternion"), i as u8)
+                .insert(frame, v, Interpolation::Linear);
+        }
+    }
+    let walk_id = doc.add_action(walk);
+
+    let mut wave = Action::new("Wave");
+    for (frame, angle) in [(1.0, 0.0), (8.0, -0.9)] {
+        let q = DQuat::from_rotation_y(angle);
+        for (i, v) in [q.w, q.x, q.y, q.z].into_iter().enumerate() {
+            wave.curve_mut(&bone_path("Hand", "rotation_quaternion"), i as u8)
+                .insert(frame, v, Interpolation::Linear);
+        }
+    }
+    let wave_id = doc.add_action(wave);
+
+    let rig_obj = doc.object_mut(rig_id).unwrap();
+    rig_obj.nla.push(kreate_scene::nla::NlaStrip::new(
+        "Walk",
+        walk_id,
+        1.0,
+        (1.0, 12.0),
+    ));
+    rig_obj.nla.push(kreate_scene::nla::NlaStrip::new(
+        "Wave",
+        wave_id,
+        15.0,
+        (1.0, 8.0),
+    ));
+
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let clip_names: Vec<&str> = scene.animations.iter().map(|a| a.name.as_str()).collect();
+    assert!(
+        clip_names.contains(&"Walk") && clip_names.contains(&"Wave"),
+        "expected NLA clips Walk & Wave in exported animations, got {clip_names:?}"
+    );
+    assert!(
+        scene.animations.len() >= 3,
+        "expected active + 2 NLA clips, got {clip_names:?}"
+    );
+    // Non-deforming IK_Target must not appear in the exported skin joints.
+    assert_eq!(scene.skins.len(), 1);
+    let joint_names: Vec<&str> = scene.skins[0]
+        .joints
+        .iter()
+        .map(|&n| scene.nodes[n].name.as_str())
+        .collect();
+    assert!(
+        !joint_names.contains(&"IK_Target"),
+        "non-deforming bone leaked into skin joints: {joint_names:?}"
+    );
+    assert_eq!(joint_names, ["Upper", "Lower", "Hand"]);
+
+    // Verify GLB serializes and re-parses with all animation clips intact.
+    let (bytes, _) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let parsed = parse_gltf(&bytes, &GltfOptions::default()).expect("GLB parses");
+    let parsed_names: Vec<&str> = parsed.animations.iter().map(|a| a.name.as_str()).collect();
+    assert!(
+        parsed_names.contains(&"Walk") && parsed_names.contains(&"Wave"),
+        "GLB lost NLA clips: {parsed_names:?}"
+    );
+}
+
+#[test]
+fn double_sided_and_alpha_blend_round_trip_in_glb() {
+    let mut doc = Document::new();
+    let mesh = doc.add_mesh(kreate_mesh::primitives::cube(1.0));
+    let mat = kreate_scene::Material {
+        name: "FrostedGlass".into(),
+        alpha: 0.45,
+        alpha_clip: None,
+        double_sided: true,
+        ..Default::default()
+    };
+    let mat_id = doc.add_material(mat);
+    doc.set_mesh_slots(mesh, vec![Some(mat_id)]);
+    doc.add_object(Object::new("Pane", ObjectData::Mesh(mesh)));
+
+    let (scene, _) = kreate_io::scene_from_document(&doc);
+    let (bytes, _) = kreate_io::write_gltf_scene(&scene, &kreate_io::GltfExportOptions::default());
+    let parsed = parse_gltf(&bytes, &GltfOptions::default()).expect("GLB parses");
+    assert_eq!(parsed.materials.len(), 1);
+    assert!(parsed.materials[0].double_sided, "doubleSided preserved");
+    assert!(
+        (parsed.materials[0].base_color[3] - 0.45).abs() < 0.01,
+        "alpha preserved: {}",
+        parsed.materials[0].base_color[3]
+    );
+    assert!(parsed.materials[0].alpha_clip.is_none(), "not MASK mode");
+
+    let mut back = Document::new();
+    build_into(&parsed, &mut back);
+    let restored = back.materials().next().expect("material").1;
+    assert!(restored.double_sided);
+    assert!((restored.alpha - 0.45).abs() < 0.01);
+}

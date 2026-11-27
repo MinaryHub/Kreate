@@ -182,6 +182,8 @@ struct PtMaterialOut {
     normal: vec3<f32>,
     // A bump's surface gradient, in object space.
     gradient: vec3<f32>,
+    // Emitted radiance evaluated by the compiled material graph (in nits).
+    emission: vec3<f32>,
     // Opacity, and below what the surface is cut away (zero: never).
     alpha: f32,
     clip: f32,
@@ -1153,7 +1155,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // keeps the light off, and a faint mirror of what is above. Only the
         // camera's ray meets it — it is a backdrop, not a thing in the room,
         // and the light the scene's surfaces get is the room's as before.
-        if (pt.ground.y > 0.0 && !floor_tried && bounce == 0u && sight) {
+        if (pt.ground.y > 0.0 && pt.reproject.z == 0u && !floor_tried && bounce == 0u && sight) {
             floor_tried = true;
             let tg = select(-1.0, (pt.ground.x - origin.z) / dir.z, dir.z < -1e-6);
             // A face lying on the floor is in front of it: without the
@@ -1303,6 +1305,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
         if (hit.t < 0.0) {
+            // Transparent background: primary camera ray escaping directly to
+            // sky contributes zero radiance and zero coverage alpha.
+            if (pt.reproject.z != 0u && bounce == 0u && sight) {
+                break;
+            }
             // Off the floor into nothing: the floor's own backdrop.
             if (floor_back.x >= 0.0) {
                 radiance += throughput * floor_back;
@@ -1384,10 +1391,13 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 pdy,
                 abs(dot(n, dir)),
             );
-            // Cut away here: the path goes on as if the triangle were not
-            // there, from the point it reached — not counted as a bounce,
-            // as glass is not.
-            if (made.clip > 0.0 && made.alpha < made.clip) {
+            // Cut away (MASK) or stochastic translucency (BLEND): the path goes
+            // on as if the triangle were not there, not counted as a bounce.
+            let pass_through = (made.clip > 0.0 && made.alpha < made.clip)
+                || (made.clip == 0.0
+                    && made.alpha < 0.999
+                    && pt_random() > clamp(made.alpha, 0.0, 1.0));
+            if (pass_through) {
                 origin = p;
                 skip = vec2<u32>(hit.instance, hit.triangle);
                 crossings += 1u;
@@ -1433,7 +1443,8 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // A one-sided glow — an area light's panel — lights only the side its
         // normals face, so a path arriving from behind finds nothing.
         let lit_side = (entering || pt_surfaces[m + 3u].x == 0.0) && !leaving_below;
-        let glow = select(vec3<f32>(0.0), pt_surfaces[m + 2u].rgb, lit_side);
+        let surface_glow = select(pt_surfaces[m + 2u].rgb, made.emission, material_index > 0.0);
+        let glow = select(vec3<f32>(0.0), surface_glow, lit_side);
         if (pt_luminance(glow) > 0.0) {
             var weight = 1.0;
             if (last_pdf >= 0.0) {
@@ -1785,14 +1796,18 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let rl = pt_luminance(radiance);
     let sample = vec4<f32>(radiance, 1.0);
     let stats = vec4<f32>(first_albedo, rl * rl);
-    // The first hit, for the next view to find this pixel by.
+    // The first hit, for the next view to find this pixel by, and primary-hit
+    // coverage alpha summed into aux[+1].w for transparent background renders.
+    let hit_alpha = select(0.0, 1.0, met_surface);
+    let before_alpha = pt_aux[pixel * 3u + 1u].w;
     pt_aux[pixel * 3u] = first_at;
-    pt_aux[pixel * 3u + 1u] = vec4<f32>(first_normal, 0.0);
     if (pt.sample <= 1u) {
+        pt_aux[pixel * 3u + 1u] = vec4<f32>(first_normal, hit_alpha);
         pt_aux[pixel * 3u + 2u] = pt_carried(first_at, first_normal);
         pt_sum[pixel * 2u] = sample;
         pt_sum[pixel * 2u + 1u] = stats;
     } else {
+        pt_aux[pixel * 3u + 1u] = vec4<f32>(first_normal, before_alpha + hit_alpha);
         pt_sum[pixel * 2u] = before + sample;
         pt_sum[pixel * 2u + 1u] = before_stats + stats;
     }

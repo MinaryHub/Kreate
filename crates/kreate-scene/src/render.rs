@@ -55,6 +55,9 @@ pub struct RenderSettings {
     /// How much detail a video keeps, as its bit rate: 0 small, 1 balanced,
     /// 2 high.
     pub video_quality: u32,
+    /// Film Transparent: render the background as alpha = 0 so finished PNG
+    /// and EXR renders can be composited cleanly over other artwork.
+    pub transparent_background: bool,
 }
 
 impl Default for RenderSettings {
@@ -73,6 +76,7 @@ impl Default for RenderSettings {
             motion_blur: false,
             bounces: 6,
             video_quality: 2,
+            transparent_background: false,
         }
     }
 }

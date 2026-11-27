@@ -66,12 +66,19 @@ fn occt() {
         "TKShHealing",
         "TKMesh",
         "TKHLR",
-        "TKSTEP",
-        "TKSTEPBase",
-        "TKSTEPAttr",
-        "TKSTEP209",
         "TKXSBase",
     ] {
         println!("cargo:rustc-link-lib=dylib={name}");
+    }
+    // OpenCASCADE 7.8+ merged TKSTEP/TKSTEPBase/TKSTEPAttr/TKSTEP209 into TKDESTEP.
+    let has_destep = ["libTKDESTEP.so", "libTKDESTEP.dylib", "TKDESTEP.lib"]
+        .iter()
+        .any(|f| lib.join(f).exists());
+    if has_destep {
+        println!("cargo:rustc-link-lib=dylib=TKDESTEP");
+    } else {
+        for name in ["TKSTEP", "TKSTEPBase", "TKSTEPAttr", "TKSTEP209"] {
+            println!("cargo:rustc-link-lib=dylib={name}");
+        }
     }
 }

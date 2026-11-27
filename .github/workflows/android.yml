@@ -58,7 +58,11 @@ jobs:
           cargo ndk -t arm64-v8a --platform 26 --link-libcxx-shared \
             -o apps/kreate-android/gradle/app/src/main/jniLibs \
             build --release -p kreate-android
-          ls -l apps/kreate-android/gradle/app/src/main/jniLibs/arm64-v8a
+          strip="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if [ -x "$strip" ]; then
+            "$strip" --strip-unneeded apps/kreate-android/gradle/app/src/main/jniLibs/arm64-v8a/libkreate_android.so
+          fi
+          ls -lh apps/kreate-android/gradle/app/src/main/jniLibs/arm64-v8a
 
       - uses: gradle/actions/setup-gradle@v4
         with:

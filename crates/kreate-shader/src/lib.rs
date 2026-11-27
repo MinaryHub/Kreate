@@ -458,12 +458,24 @@ impl Emitter<'_> {
                         // the same way the coordinate is — and taken from the
                         // *unwrapped* UV, which is the point of passing them:
                         // see the module docs on the seam `fract` would draw.
+                        let custom_coord = if self.graph.incoming(node, 0).is_some() {
+                            Some(self.input_expr(node, 0, "vec3<f32>(uv, 0.0)")?)
+                        } else {
+                            None
+                        };
                         match projection {
                             Projection::Flat => {
-                                let _ = writeln!(
-                                    self.body,
-                                    "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + kr_texel(uv) * n{node}_rect.zw, {layer}, kr_down(uv_dx) * n{node}_rect.zw, kr_down(uv_dy) * n{node}_rect.zw);"
-                                );
+                                if let Some(coord) = custom_coord {
+                                    let _ = writeln!(
+                                        self.body,
+                                        "    let n{node}_uv = ({coord}).xy;\n    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + kr_texel(n{node}_uv) * n{node}_rect.zw, {layer}, kr_down(uv_dx) * n{node}_rect.zw, kr_down(uv_dy) * n{node}_rect.zw);"
+                                    );
+                                } else {
+                                    let _ = writeln!(
+                                        self.body,
+                                        "    let n{node}_rgba = textureSampleGrad({array}, material_sampler, n{node}_rect.xy + kr_texel(uv) * n{node}_rect.zw, {layer}, kr_down(uv_dx) * n{node}_rect.zw, kr_down(uv_dy) * n{node}_rect.zw);"
+                                    );
+                                }
                             }
                             Projection::Box => {
                                 // Three samples, one down each axis, each with
@@ -472,9 +484,10 @@ impl Emitter<'_> {
                                 // faces it. A blend of zero is a hard edge
                                 // (a high power), one an even mix.
                                 let b = slot + 1;
+                                let p_src = custom_coord.as_deref().unwrap_or("geometry.position");
                                 let _ = writeln!(
                                     self.body,
-                                    "    let n{node}_k = mix(48.0, 1.0, clamp(material.values[{b}].x, 0.0, 1.0));\n    let n{node}_a = pow(abs(geometry.normal), vec3<f32>(n{node}_k)) + vec3<f32>(1e-6);\n    let n{node}_w = n{node}_a / (n{node}_a.x + n{node}_a.y + n{node}_a.z);\n    let n{node}_p = geometry.position * material.values[{b}].y;\n    let n{node}_dx = geometry.position_dx * material.values[{b}].y;\n    let n{node}_dy = geometry.position_dy * material.values[{b}].y;"
+                                    "    let n{node}_k = mix(48.0, 1.0, clamp(material.values[{b}].x, 0.0, 1.0));\n    let n{node}_a = pow(abs(geometry.normal), vec3<f32>(n{node}_k)) + vec3<f32>(1e-6);\n    let n{node}_w = n{node}_a / (n{node}_a.x + n{node}_a.y + n{node}_a.z);\n    let n{node}_p = ({p_src}) * material.values[{b}].y;\n    let n{node}_dx = geometry.position_dx * material.values[{b}].y;\n    let n{node}_dy = geometry.position_dy * material.values[{b}].y;"
                                 );
                                 let mut taps = Vec::new();
                                 for (axis, plane) in [("x", "yz"), ("y", "xz"), ("z", "xy")] {
@@ -2479,6 +2492,89 @@ mod map_tests {
         c.make_thin();
         assert_eq!(c.constants[c.transmission_slot][1], 1.0);
         assert_eq!(c.transmission(), 1.0);
+    }
+
+    #[test]
+    fn image_node_uses_wired_mapped_uv_vector() {
+        use kreate_scene::shader::{Link, Node, NodeKind, Projection, ShaderGraph};
+
+        let mut graph = ShaderGraph::standard(
+            "MappedImage",
+            kreate_math::SceneRgb::new(1.0, 1.0, 1.0),
+            0.0,
+            0.5,
+        );
+        let tc = graph
+            .add_node(Node::new("TexCoord", NodeKind::TexCoord))
+            .unwrap();
+        let map = graph
+            .add_node(Node::new(
+                "Mapping",
+                NodeKind::Mapping {
+                    location: [0.1, 0.2, 0.0],
+                    rotation: [0.0, 0.0, 0.0],
+                    scale: [2.0, 3.0, 1.0],
+                },
+            ))
+            .unwrap();
+        let mut doc = kreate_scene::Document::new();
+        let img_id = doc.add_image(kreate_scene::Image::new(
+            "tex",
+            4,
+            4,
+            kreate_scene::PixelFormat::Rgba8,
+        ));
+        let img = graph
+            .add_node(Node::new(
+                "Image",
+                NodeKind::Image {
+                    image: Some(img_id),
+                    projection: Projection::Flat,
+                    blend: 0.2,
+                    scale: 1.0,
+                },
+            ))
+            .unwrap();
+        // TexCoord UV (output 1) -> Mapping Vector (input 0) -> Image Vector (input 0) -> Surface BaseColor (input 0)
+        graph
+            .link(Link {
+                from_node: tc,
+                from_socket: 1,
+                to_node: map,
+                to_socket: 0,
+            })
+            .expect("link tc -> map");
+        graph
+            .link(Link {
+                from_node: map,
+                from_socket: 0,
+                to_node: img,
+                to_socket: 0,
+            })
+            .expect("link map -> img");
+        graph
+            .link(Link {
+                from_node: img,
+                from_socket: 0,
+                to_node: 0,
+                to_socket: 0,
+            })
+            .expect("link img -> surface");
+
+        let compiled = compile(&graph).expect("TexCoord -> Mapping -> Image compiles");
+        assert!(
+            compiled
+                .wgsl
+                .contains(&format!("let n{img}_uv = (n{map}).xy;")),
+            "image node should sample using mapped vector coordinate:\n{}",
+            compiled.wgsl
+        );
+        // Also verify Box projection with custom vector compiles cleanly.
+        if let NodeKind::Image { projection, .. } = &mut graph.nodes[img].kind {
+            *projection = Projection::Box;
+        }
+        let boxed = compile(&graph).expect("Box projection with wired Vector compiles");
+        assert!(boxed.wgsl.contains(&format!("let n{img}_p = (n{map}) *")));
     }
 }
 

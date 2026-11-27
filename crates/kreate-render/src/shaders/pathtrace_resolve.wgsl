@@ -28,6 +28,15 @@ fn resolve_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4
     }
     let pixel = p.y * resolve.size.x + p.x;
     let s = sum[pixel * 2u];
+    // Transparent background: divide accumulated radiance by primary-hit
+    // coverage so tone mapping runs on straight RGB without dark edge halos,
+    // and emit coverage as output alpha.
+    if (resolve._pad.x != 0u) {
+        let hit_sum = aux[pixel * 3u + 1u].w;
+        let alpha = clamp(hit_sum / max(s.w, 1.0), 0.0, 1.0);
+        let rgb = select(vec3<f32>(0.0), s.rgb / max(hit_sum, 1e-4), hit_sum > 1e-4);
+        return vec4<f32>(rgb, alpha);
+    }
     // What was carried over counts for as many frames as it stands for, less
     // the pixel's own samples: it fades out as they come in, so a still view
     // still settles on its own mean.

@@ -123,6 +123,8 @@ world-pick-image = 환경 이미지...
 world-clear-image = 지우기
 material-pick-image = 이미지 열기...
 material-clear-image = 지우기
+material-save-image = 저장…
+material-reload-image = 새로고침
 material-new = 새 재질
 material-browse = 재질
 material-assign = 지정
@@ -2733,6 +2735,8 @@ param-order = 순서
 param-orient = 방향 맞춤
 param-orientation = 방향
 param-origin = 원점
+param-ortho-scale = 직교 폭
+param-orthographic = 직교 투영
 param-outline = 외곽선
 param-output = 출력
 param-parent = 부모
@@ -3014,3 +3018,8 @@ hist-shade-smooth = 부드러운 셰이딩
 hist-shade-flat = 평면 셰이딩
 hist-set-material = 재질 변경
 hist-edit-feature = 피처 수정
+param-double-sided = 양면 표시
+param-transparent-background = 투명 배경
+param-deform = 변형(Deform)
+
+

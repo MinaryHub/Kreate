@@ -140,6 +140,8 @@ pub struct ImportMaterial {
     /// glTF's `MASK`: cut away below this opacity. `None` for `OPAQUE`, and
     /// for `BLEND`, which arrives as glass — see the glTF reader.
     pub alpha_clip: Option<f32>,
+    /// glTF `doubleSided`: render both sides of thin geometry.
+    pub double_sided: bool,
     /// The layers over the plain surface: `KHR_materials_specular`'s weight,
     /// `KHR_materials_clearcoat`, `KHR_materials_sheen` and
     /// `KHR_materials_anisotropy`. Their factors; their textures are not read.
@@ -180,6 +182,7 @@ impl Default for ImportMaterial {
             transmission: 0.0,
             ior: 1.5,
             alpha_clip: None,
+            double_sided: false,
             layers: kreate_scene::shader::SurfaceLayers::default(),
         }
     }

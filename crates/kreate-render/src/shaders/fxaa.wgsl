@@ -46,7 +46,9 @@ const REDUCE_MIN: f32 = 0.0078125;
 fn fxaa_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let t = params.inv_size;
     let uv = position.xy * t;
-    let middle = tap(uv);
+    let middle_rgba = textureSampleLevel(source, source_sampler, min(uv, params.uv_max), 0.0);
+    let middle = middle_rgba.rgb;
+    let alpha = middle_rgba.a;
     let m = luma(middle);
     let nw = luma(tap(uv + vec2<f32>(-1.0, -1.0) * t));
     let ne = luma(tap(uv + vec2<f32>(1.0, -1.0) * t));
@@ -57,7 +59,7 @@ fn fxaa_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
     // No edge worth the name: the pixel as it was. Most of the picture, and
     // what keeps flat colour and fine texture from going soft.
     if (hi - lo < max(0.0312, hi * 0.125)) {
-        return vec4<f32>(middle, 1.0);
+        return vec4<f32>(middle, alpha);
     }
 
     // Across the gradient is along the edge.
@@ -72,7 +74,7 @@ fn fxaa_fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
     // is kept there.
     let f = luma(far);
     if (f < lo || f > hi) {
-        return vec4<f32>(near, 1.0);
+        return vec4<f32>(near, alpha);
     }
-    return vec4<f32>(far, 1.0);
+    return vec4<f32>(far, alpha);
 }

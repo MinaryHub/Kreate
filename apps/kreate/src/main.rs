@@ -4304,20 +4304,39 @@ impl App {
             .doc
             .world_transform(object)
             .to_scale_rotation_translation();
-        let lens = match self.doc.object(object).map(|o| &o.data) {
-            Some(kreate_scene::document::ObjectData::Camera(c)) => {
-                self.doc.camera(*c).map(|c| c.fov_y(aspect))
-            }
+        let scene_cam = match self.doc.object(object).map(|o| &o.data) {
+            Some(kreate_scene::document::ObjectData::Camera(c)) => self.doc.camera(*c),
             _ => None,
         };
         let mut destination = self.camera;
-        destination.projection = kreate_render::Projection::Perspective;
         destination.rotation = rotation.normalize();
-        destination.distance = self.camera.distance.max(1.0);
-        destination.pivot = eye + destination.forward() * destination.distance;
-        if let Some(fov) = lens.filter(|f| f.is_finite() && *f > 0.0) {
-            destination.fov_y = fov;
+        if let Some(cam) = scene_cam {
+            let fov = cam.fov_y(aspect);
+            if fov.is_finite() && fov > 0.0 {
+                destination.fov_y = fov;
+            }
+            match cam.projection {
+                kreate_scene::camera::Projection::Perspective => {
+                    destination.projection = kreate_render::Projection::Perspective;
+                    destination.distance = self.camera.distance.max(1.0);
+                }
+                kreate_scene::camera::Projection::Orthographic => {
+                    destination.projection = kreate_render::Projection::Orthographic;
+                    let safe_aspect = if aspect.is_finite() && aspect > 1e-6 {
+                        aspect
+                    } else {
+                        1.0
+                    };
+                    let desired_h = (cam.ortho_scale / safe_aspect).max(1e-4);
+                    let tan_half = (destination.fov_y * 0.5).tan().max(1e-4);
+                    destination.distance = (desired_h / (2.0 * tan_half)).max(1e-4);
+                }
+            }
+        } else {
+            destination.projection = kreate_render::Projection::Perspective;
+            destination.distance = self.camera.distance.max(1.0);
         }
+        destination.pivot = eye + destination.forward() * destination.distance;
         destination
     }
 
@@ -4514,13 +4533,21 @@ impl App {
         let Some(id) = self.doc.selection.active else {
             return;
         };
-        let Some(mesh) = self
-            .doc
-            .object(id)
-            .and_then(|o| o.mesh())
-            .and_then(|m| self.doc.mesh(m))
-        else {
-            return;
+        let eval_ctx = self.eval_ctx();
+        let evaluated = self.modifiers.evaluated(&self.doc, id, &eval_ctx);
+        let mesh: &kreate_mesh::MeshData = match &evaluated {
+            Some(m) => m.as_ref(),
+            None => {
+                let Some(m) = self
+                    .doc
+                    .object(id)
+                    .and_then(|o| o.mesh())
+                    .and_then(|m| self.doc.mesh(m))
+                else {
+                    return;
+                };
+                m
+            }
         };
         let to_world = self.doc.world_transform(id);
         let r = kreate_mesh::check::check(mesh, |p| to_world.transform_point3(p), thickness, true);
@@ -10152,7 +10179,7 @@ impl App {
                             .set_file_name("render.png")
                             .save_file()
                         {
-                            match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
+                            match save_render_image(&path, w, h, &rgba) {
                                 Ok(()) => self.status(&format!("saved {}", path.display())),
                                 Err(e) => {
                                     self.status(&format!("cannot save {}: {e}", path.display()))
@@ -10185,6 +10212,8 @@ impl App {
                 }
                 Command::PickMaterialImage { map } => self.pick_material_image(map),
                 Command::ClearMaterialImage { map } => self.clear_material_image(map),
+                Command::SaveMaterialImage { map } => self.save_material_image(map),
+                Command::ReloadMaterialImage { map } => self.reload_material_image(map),
                 Command::PickLightProfile => self.pick_light_profile(),
                 Command::ClearLightProfile => {
                     let mut params = PropertyMap::new();
@@ -10706,9 +10735,15 @@ impl App {
     /// Builds a temporary `Document` snapshot whose shown (or selected) objects
     /// carry their evaluated `MeshData` (CAD features, modifiers, curves, 3D text)
     /// so interchange exporters (`GLB`, `OBJ`, `USD`) write what is on screen.
+    ///
+    /// Skinned and shape-keyed meshes are evaluated in **rest pose** (without
+    /// baking bone skinning or morph offsets into the mesh) because the exporter
+    /// writes the armature, skin weights, and morph targets alongside the mesh;
+    /// baking them first would double-deform the exported character.
     fn evaluated_export_document(&mut self, selected_only: bool) -> Document {
-        let evaluated = self.modifiers.evaluate_scene(&self.doc, &self.eval_ctx());
-        let eval_map: std::collections::HashMap<ObjectId, Arc<MeshData>> = evaluated
+        let ctx = self.eval_ctx();
+        let evaluated = self.modifiers.evaluate_scene(&self.doc, &ctx);
+        let mut eval_map: std::collections::HashMap<ObjectId, Arc<MeshData>> = evaluated
             .into_iter()
             .map(|(id, m)| {
                 let whole = self
@@ -10721,7 +10756,7 @@ impl App {
             })
             .collect();
 
-        let keep: std::collections::HashSet<ObjectId> = self
+        let mut keep: std::collections::HashSet<ObjectId> = self
             .doc
             .objects()
             .filter_map(|(id, _)| {
@@ -10733,6 +10768,47 @@ impl App {
                 ok.then_some(id)
             })
             .collect();
+
+        // Exporting a selected skinned mesh without its armature strips its
+        // skeleton; pull the referenced armature along automatically.
+        if selected_only {
+            let extra_armatures: Vec<ObjectId> = keep
+                .iter()
+                .filter_map(|&id| {
+                    let uid = self.doc.object(id)?.skin?;
+                    self.doc.object_by_uid(uid)
+                })
+                .collect();
+            keep.extend(extra_armatures);
+        }
+
+        // For rigged or blendshaped meshes, replace the posed evaluation with
+        // rest-pose evaluation (or skip overwriting altogether when no
+        // constructive features/modifiers exist).
+        let rigged_ids: Vec<(ObjectId, bool)> = keep
+            .iter()
+            .filter_map(|&id| {
+                let o = self.doc.object(id)?;
+                if o.skin.is_some() || !o.shape_keys.is_empty() {
+                    let has_stack = !o.modifiers.is_empty()
+                        || !o.features.is_empty()
+                        || o.curve.is_some()
+                        || o.geometry_nodes.is_some();
+                    Some((id, has_stack))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (id, has_stack) in rigged_ids {
+            if has_stack {
+                if let Some(rest) = self.modifiers.evaluated_rest(&self.doc, id, &ctx) {
+                    eval_map.insert(id, rest);
+                }
+            } else {
+                eval_map.remove(&id);
+            }
+        }
 
         let mut doc = self.doc.clone();
         let all_ids: Vec<ObjectId> = doc.objects().map(|(id, _)| id).collect();
@@ -11568,6 +11644,95 @@ impl App {
         params.set("map", kreate_reflect::PropertyValue::Enum(map));
         params.set("uid", kreate_reflect::PropertyValue::Text(String::new()));
         self.run_op("material.set_image", params);
+    }
+
+    /// Exports one of the active material's textures (painted, generated, or
+    /// imported) to a standalone PNG or JPEG image file.
+    fn save_material_image(&mut self, map: u32) {
+        let Some(slot_kind) = kreate_scene::MaterialMap::ALL.get(map as usize).copied() else {
+            return;
+        };
+        let Some(active) = self.doc.selection.active else {
+            return;
+        };
+        let Some(img_id) = self
+            .doc
+            .material_at(active, self.ui.material_slot as usize)
+            .and_then(|m| m.map(slot_kind))
+        else {
+            return;
+        };
+        let Some(image) = self.doc.image(img_id) else {
+            return;
+        };
+        let default_name = if image.name.ends_with(".png")
+            || image.name.ends_with(".jpg")
+            || image.name.ends_with(".jpeg")
+        {
+            image.name.clone()
+        } else {
+            format!("{}.png", image.name)
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG", &["png"])
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .set_title("Save Texture Image")
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let w = image.width();
+        let h = image.height();
+        let rgba = kreate_io::image_import::rgba8_of(image, slot_kind.color_space());
+        match save_render_image(&path, w, h, &rgba) {
+            Ok(()) => self.status(&format!("saved {}", path.display())),
+            Err(e) => self.status(&format!("cannot save {}: {e}", path.display())),
+        }
+    }
+
+    /// Re-reads one of the active material's external image files from disk.
+    fn reload_material_image(&mut self, map: u32) {
+        let Some(slot_kind) = kreate_scene::MaterialMap::ALL.get(map as usize).copied() else {
+            return;
+        };
+        let Some(active) = self.doc.selection.active else {
+            return;
+        };
+        let Some(img_id) = self
+            .doc
+            .material_at(active, self.ui.material_slot as usize)
+            .and_then(|m| m.map(slot_kind))
+        else {
+            return;
+        };
+        let path = match self.doc.image(img_id).map(|i| &i.source) {
+            Some(kreate_scene::image::Source::File(p)) => p.clone(),
+            _ => {
+                self.status("texture has no source file on disk to reload");
+                return;
+            }
+        };
+        let reloaded = match kreate_io::load_image_file(&path, slot_kind.color_space()) {
+            Ok(img) => img,
+            Err(e) => {
+                self.status(&format!("cannot reload {}: {e}", path.display()));
+                return;
+            }
+        };
+        let name = reloaded.name.clone();
+        let new_id = self.doc.add_image(reloaded);
+        let Some(uid) = self.doc.image_uid(new_id) else {
+            return;
+        };
+        let mut params = self.material_slot_param();
+        params.set("map", kreate_reflect::PropertyValue::Enum(map));
+        params.set(
+            "uid",
+            kreate_reflect::PropertyValue::Text(uid.raw().to_string()),
+        );
+        self.run_op("material.set_image", params);
+        self.status(&format!("reloaded {name}"));
     }
 
     /// Parameters naming the slot the Material tab is showing.
@@ -23833,6 +23998,119 @@ kreate.ops.object.add_primitive(size=2.0)" }),
         // The body's and the leg's corners to take the base from.
         let own = app.build_own_snap_world();
         assert_eq!(own.verts.len(), 16);
+    }
+
+    #[test]
+    fn save_render_image_writes_both_png_and_jpeg() {
+        let dir =
+            std::env::temp_dir().join(format!("kreate-save-render-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let rgba: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 128,
+        ];
+        let png = dir.join("out.png");
+        let jpg = dir.join("out.jpg");
+        save_render_image(&png, 2, 2, &rgba).expect("PNG save must succeed");
+        save_render_image(&jpg, 2, 2, &rgba).expect("JPEG save must succeed");
+        assert!(image::open(&png).is_ok());
+        assert!(image::open(&jpg).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_through_respects_orthographic_camera_projection_and_scale() {
+        let mut app = app();
+        let mut cam = kreate_scene::Camera::new("OrthoCam");
+        cam.projection = kreate_scene::camera::Projection::Orthographic;
+        cam.ortho_scale = 12.0;
+        let cid = app.doc.add_camera(cam);
+        let obj = app.doc.add_object(kreate_scene::document::Object::new(
+            "OrthoCam",
+            kreate_scene::document::ObjectData::Camera(cid),
+        ));
+        let vp = app.view_through(obj);
+        assert_eq!(vp.projection, kreate_render::Projection::Orthographic);
+        let aspect = 16.0 / 9.0;
+        let width = vp.ortho_height() * aspect;
+        assert!(
+            (width - 12.0).abs() < 1e-3,
+            "expected ortho width 12.0, got {width}"
+        );
+    }
+
+    #[test]
+    fn evaluated_export_preserves_rest_pose_for_posed_skinned_character() {
+        let mut app = app();
+        let mut arm = kreate_scene::armature::Armature::new("Rig");
+        arm.bones.clear();
+        arm.add_bone(kreate_scene::armature::Bone {
+            name: "Root".into(),
+            head: DVec3::ZERO,
+            tail: DVec3::Z,
+            ..Default::default()
+        });
+        let arm_id = app.doc.add_armature(arm);
+        let mut rig_obj = kreate_scene::document::Object::new(
+            "Rig",
+            kreate_scene::document::ObjectData::Armature(arm_id),
+        );
+        // Pose the bone by a large 90° rotation + translation so posed != rest.
+        rig_obj.pose.entry("Root").transform.translation = DVec3::new(5.0, 0.0, 0.0);
+        rig_obj.pose.entry("Root").transform.rotation = kreate_math::DQuat::from_rotation_z(1.2);
+        let rig = app.doc.add_object(rig_obj);
+        let rig_uid = app.doc.object(rig).unwrap().uid;
+
+        let mut cube = kreate_mesh::primitives::cube(1.0);
+        let n = cube.num_verts() as usize;
+        let rest_positions: Vec<glam::Vec3> = cube.positions().to_vec();
+        cube.attributes_mut().insert(
+            &kreate_scene::skin::weight_layer("Root"),
+            kreate_mesh::attribute::Domain::Point,
+            kreate_mesh::attribute::AttrData::F32(std::sync::Arc::new(vec![1.0; n])),
+        );
+        let mesh_obj = app.doc.add_mesh_object("Character", cube);
+        app.doc.object_mut(mesh_obj).unwrap().skin = Some(rig_uid);
+
+        // Select ONLY the mesh to also verify selected_only brings along its armature.
+        app.doc.selection.clear();
+        app.doc.selection.add(mesh_obj);
+        let exported = app.evaluated_export_document(true);
+        let exp_mesh_id = exported
+            .objects()
+            .find(|(_, o)| o.name == "Character")
+            .and_then(|(_, o)| o.mesh())
+            .expect("character mesh exported");
+        let exp_positions = exported.mesh(exp_mesh_id).unwrap().positions();
+        assert_eq!(exp_positions, rest_positions.as_slice());
+        assert!(
+            exported.objects().any(|(_, o)| o.name == "Rig"),
+            "selected_only export must include the mesh's skin armature"
+        );
+    }
+}
+
+/// Writes an RGBA8 render buffer to `path`, stripping alpha to RGB8 when the
+/// target extension is JPEG (whose encoder rejects 4-channel buffers).
+fn save_render_image(
+    path: &std::path::Path,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+) -> Result<(), image::ImageError> {
+    let is_jpeg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+    if is_jpeg {
+        let mut rgb = Vec::with_capacity((w as usize) * (h as usize) * 3);
+        for &[r, g, b, _] in rgba.as_chunks::<4>().0 {
+            rgb.push(r);
+            rgb.push(g);
+            rgb.push(b);
+        }
+        image::save_buffer(path, &rgb, w, h, image::ColorType::Rgb8)
+    } else {
+        image::save_buffer(path, rgba, w, h, image::ColorType::Rgba8)
     }
 }
 

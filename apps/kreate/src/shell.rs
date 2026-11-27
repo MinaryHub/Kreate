@@ -14135,6 +14135,52 @@ fn draw_material_tab(
         if let Some(graph) = &material.graph {
             draw_node_surface_quick_controls(ui, state, graph, slot, l);
         }
+        // Surface layers (clearcoat, sheen, anisotropy, subsurface, volume
+        // attenuation) plus alpha-clip / double-sided / thin-glass still drive
+        // the compiled shader when Use Nodes is on, so keep them editable here.
+        if let Some(info) = registry.get("material.set_properties") {
+            kreate_ui::panel::section(ui, &l.panel_surface, false, |ui| {
+                let mut params = kreate_reflect::OpParams::to_map(
+                    &kreate_ops::ops::object::material_params(material, slot),
+                );
+                let text = field_menu_text(&state.catalog);
+                let out = kreate_ui::property_editor_full(
+                    ui,
+                    &state.catalog,
+                    info.id,
+                    info.schema,
+                    &mut params,
+                    |name| {
+                        matches!(
+                            name,
+                            "thin"
+                                | "alpha_clip"
+                                | "double_sided"
+                                | "specular"
+                                | "coat"
+                                | "coat_roughness"
+                                | "sheen"
+                                | "sheen_roughness"
+                                | "anisotropy"
+                                | "anisotropy_rotation"
+                                | "subsurface"
+                                | "subsurface_color"
+                                | "subsurface_radius"
+                                | "attenuation_color"
+                                | "attenuation_distance"
+                        )
+                    },
+                    |_| None,
+                    &l.key_property,
+                    |_| None,
+                    &text,
+                );
+                if out.changed {
+                    let dragging = ui.ctx().input(|i| i.pointer.any_down());
+                    send_edit(state, "material.set_properties", params, dragging);
+                }
+            });
+        }
         return;
     }
 
@@ -14165,12 +14211,33 @@ fn draw_material_tab(
                 match &assigned {
                     // i18n-exempt: an image's name is the user's own text
                     Some(name) => {
+                        let can_reload = material
+                            .map(map)
+                            .and_then(|id| doc.image(id))
+                            .is_some_and(|img| {
+                                matches!(img.source, kreate_scene::image::Source::File(_))
+                            });
                         if ui
                             .button(name)
                             .on_hover_text(&l.material_pick_image)
                             .clicked()
                         {
                             state.queue.push(Command::PickMaterialImage { map: map_id });
+                        }
+                        if ui
+                            .small_button(state.catalog.get("material-save-image"))
+                            .clicked()
+                        {
+                            state.queue.push(Command::SaveMaterialImage { map: map_id });
+                        }
+                        if can_reload
+                            && ui
+                                .small_button(state.catalog.get("material-reload-image"))
+                                .clicked()
+                        {
+                            state
+                                .queue
+                                .push(Command::ReloadMaterialImage { map: map_id });
                         }
                         if ui
                             .button(CLEAR_GLYPH)
@@ -20950,6 +21017,8 @@ mod tests {
             "world-clear-image",
             "material-pick-image",
             "material-clear-image",
+            "material-save-image",
+            "material-reload-image",
             "recover-count",
             "recover-open",
             "recover-menu",

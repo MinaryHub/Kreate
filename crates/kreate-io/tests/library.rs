@@ -537,3 +537,40 @@ fn linking_and_refreshing_carry_the_mesh_materials() {
     let refreshed = shot.material_at(linked[0], 0).expect("refreshed slot");
     assert!((refreshed.roughness - 0.65).abs() < 1e-6);
 }
+
+#[test]
+fn linking_evaluates_modifiers_and_curves_on_library_objects() {
+    let dir = scratch("link-evaluated");
+    let library = dir.join("modified.kreate");
+
+    let mut lib = Document::new();
+    let plate = lib.add_mesh_object("Plate", triangle(1.0));
+    lib.object_mut(plate)
+        .unwrap()
+        .modifiers
+        .push(kreate_scene::modifier::ModifierInstance::new(
+            kreate_scene::modifier::ModifierKind::Solidify(
+                kreate_mesh::modifiers::SolidifyParams {
+                    thickness: 0.25,
+                    offset: 0.0,
+                },
+            ),
+        ));
+    std::fs::write(
+        &library,
+        container::write(&lib, &Manifest::default(), &[]).unwrap(),
+    )
+    .unwrap();
+
+    let mut shot = Document::new();
+    let linked =
+        library::link_all(&mut shot, &dir, &library.display().to_string()).expect("linked");
+    assert_eq!(linked.len(), 1);
+    let mid = shot.object(linked[0]).unwrap().mesh().unwrap();
+    // Solidify turns a 1-face triangle into a 5-face prism.
+    assert!(
+        shot.mesh(mid).unwrap().num_faces() >= 5,
+        "linked library mesh must be evaluated, got {} faces",
+        shot.mesh(mid).unwrap().num_faces()
+    );
+}

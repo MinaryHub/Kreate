@@ -65,7 +65,7 @@ pub fn mirrored_name(name: &str) -> Option<String> {
 }
 
 /// One bone at rest.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Bone {
     pub name: String,
     /// Index into [`Armature::bones`]. Always an earlier bone, which
@@ -80,11 +80,30 @@ pub struct Bone {
     /// the parent's tail moves this head, and the other way round — Blender's
     /// Connected, what a chain extruded with `E` is.
     pub connected: bool,
+    /// Whether this bone deforms bound meshes and is exported as a skin joint.
+    /// Turn off for IK targets, pole targets, and control/mechanism bones.
+    pub deform: bool,
     /// Edit-mode selection of the two ends. On the skeleton rather than the
     /// object because it is the skeleton being edited, as Blender keeps it.
     /// A connected bone's head is its parent's tail, and its flag follows.
     pub select_head: bool,
     pub select_tail: bool,
+}
+
+impl Default for Bone {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            parent: None,
+            head: DVec3::ZERO,
+            tail: DVec3::ZERO,
+            roll: 0.0,
+            connected: false,
+            deform: true,
+            select_head: false,
+            select_tail: false,
+        }
+    }
 }
 
 impl Bone {

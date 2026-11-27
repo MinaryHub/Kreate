@@ -1660,6 +1660,8 @@ pub struct Viewport {
     /// How many times the path tracer's paths bounce: the render's setting
     /// while one runs, four otherwise.
     pub path_trace_bounces: u32,
+    /// Film Transparent: leave background pixels at alpha = 0 in path-traced output.
+    pub transparent_background: bool,
     /// Adaptive sampling: a pixel stops taking samples once the standard
     /// error of its mean is under this fraction of it. Zero traces every
     /// pixel every sample.
@@ -2901,6 +2903,7 @@ impl Viewport {
             denoise: crate::denoise::Denoise::new(device, 1, 1),
             path_trace_denoise: true,
             path_trace_bounces: 4,
+            transparent_background: false,
             path_trace_noise_threshold: 0.01,
             ssr: crate::ssr::Ssr::new(device, 1, 1),
             show_reflections: true,
@@ -3295,6 +3298,7 @@ impl Viewport {
                 self.pathtracer.noise_threshold = self.path_trace_noise_threshold;
                 // A floor under a backdrop, as the rasterised view has one.
                 self.pathtracer.ground = self.backdrop.is_some() && self.show_ground_shadow;
+                self.pathtracer.transparent_background = self.transparent_background;
                 self.pathtracer.max_bounces = self.path_trace_bounces;
                 self.pathtracer.prepare(
                     device,
@@ -5578,11 +5582,15 @@ impl Viewport {
                             // this is a linear image — clearing to the interface's
                             // grey would put display-referred paint into it, and
                             // that is the mistake §2.1 records.
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: self.world[0] as f64,
-                                g: self.world[1] as f64,
-                                b: self.world[2] as f64,
-                                a: 1.0,
+                            load: wgpu::LoadOp::Clear(if self.transparent_background {
+                                wgpu::Color::TRANSPARENT
+                            } else {
+                                wgpu::Color {
+                                    r: self.world[0] as f64,
+                                    g: self.world[1] as f64,
+                                    b: self.world[2] as f64,
+                                    a: 1.0,
+                                }
                             }),
                             store: wgpu::StoreOp::Store,
                         },
@@ -5645,9 +5653,11 @@ impl Viewport {
             );
             // The background first, at the far plane, so the geometry that
             // follows tests against it rather than the other way round.
-            pass.set_pipeline(&self.background_pipeline);
-            pass.set_bind_group(2, &self.shading_bind, &[]);
-            pass.draw(0..3, 0..1);
+            if !self.transparent_background {
+                pass.set_pipeline(&self.background_pipeline);
+                pass.set_bind_group(2, &self.shading_bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
 
             pass.set_bind_group(0, &self.globals_bind, &[]);
             pass.set_bind_group(2, &self.shading_bind, &[]);
@@ -6434,11 +6444,12 @@ impl Viewport {
         )?);
         let combined = (0..n)
             .map(|i| {
+                let a = hdr[i * 4 + 3].clamp(0.0, 1.0);
                 [
-                    hdr[i * 4] * scale,
-                    hdr[i * 4 + 1] * scale,
-                    hdr[i * 4 + 2] * scale,
-                    1.0,
+                    hdr[i * 4] * scale * a,
+                    hdr[i * 4 + 1] * scale * a,
+                    hdr[i * 4 + 2] * scale * a,
+                    a,
                 ]
             })
             .collect();

@@ -44,7 +44,9 @@ fn temporal_vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4
 fn temporal_resolve(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(position.xy);
     let last = vec2<i32>(tp.region) - 1;
-    let now = textureLoad(frame, px, 0).rgb;
+    let now_rgba = textureLoad(frame, px, 0);
+    let now = now_rgba.rgb;
+    let now_a = now_rgba.a;
     // The colours this frame has around the pixel: what the history may be.
     var lo = now;
     var hi = now;
@@ -67,14 +69,14 @@ fn temporal_resolve(@builtin(position) position: vec4<f32>) -> @location(0) vec4
     let point = here.xyz / here.w;
     let before = tp.previous * vec4<f32>(point + tp.moved.xyz, 1.0);
     if (before.w <= 0.0) {
-        return vec4<f32>(now, 1.0);
+        return vec4<f32>(now, now_a);
     }
     let was = before.xy / before.w;
     let was_uv = vec2<f32>(was.x * 0.5 + 0.5, 0.5 - was.y * 0.5);
     if (any(was_uv < vec2<f32>(0.0)) || any(was_uv > vec2<f32>(1.0))) {
-        return vec4<f32>(now, 1.0);
+        return vec4<f32>(now, now_a);
     }
-    let old = textureSampleLevel(history, history_sampler, was_uv * tp.region / vec2<f32>(textureDimensions(history)), 0.0).rgb;
-    let kept = clamp(old, lo, hi);
-    return vec4<f32>(mix(kept, now, tp.weight), 1.0);
+    let old_rgba = textureSampleLevel(history, history_sampler, was_uv * tp.region / vec2<f32>(textureDimensions(history)), 0.0);
+    let kept = clamp(old_rgba.rgb, lo, hi);
+    return vec4<f32>(mix(kept, now, tp.weight), mix(old_rgba.a, now_a, tp.weight));
 }

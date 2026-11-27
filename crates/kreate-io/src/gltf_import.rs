@@ -345,6 +345,7 @@ fn from_imported(
             ior: material.ior().unwrap_or(1.5),
             alpha_clip: (material.alpha_mode() == gltf::material::AlphaMode::Mask)
                 .then(|| material.alpha_cutoff().unwrap_or(0.5)),
+            double_sided: material.double_sided(),
             layers: layers_of(&material),
         });
     }

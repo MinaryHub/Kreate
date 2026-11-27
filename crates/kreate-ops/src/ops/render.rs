@@ -103,6 +103,8 @@ pub struct SetRenderSettingsParams {
     /// How much detail a video keeps: a smaller file, or a sharper one.
     #[param(variants("small", "balanced", "high"))]
     pub video_quality: u32,
+    /// Render the background transparent (alpha = 0) for compositing in PNG and EXR.
+    pub transparent_background: bool,
 }
 
 impl Default for SetRenderSettingsParams {
@@ -127,6 +129,7 @@ pub fn render_params(doc: &Document) -> SetRenderSettingsParams {
         motion_blur: r.motion_blur,
         bounces: r.bounces as i64,
         video_quality: r.video_quality.min(2),
+        transparent_background: r.transparent_background,
     }
 }
 
@@ -161,6 +164,7 @@ impl Operator for SetRenderSettings {
             motion_blur: params.motion_blur,
             bounces: params.bounces.clamp(1, 64) as u32,
             video_quality: params.video_quality.min(2),
+            transparent_background: params.transparent_background,
         };
         if doc.document().render == next {
             return Ok(OpResult::Cancelled);

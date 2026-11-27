@@ -239,6 +239,7 @@ pub fn automatic_weights(
     armature: &Armature,
     mesh_to_armature: DAffine3,
 ) -> Vec<(String, Vec<f32>)> {
+    let any_deform = armature.bones.iter().any(|b| b.deform);
     let segments: Vec<(DVec3, DVec3)> = armature.bones.iter().map(|b| (b.head, b.tail)).collect();
     let mut layers: Vec<Vec<f32>> = vec![vec![0.0; mesh.num_verts() as usize]; segments.len()];
     for (v, p) in mesh.positions().iter().enumerate() {
@@ -246,6 +247,7 @@ pub fn automatic_weights(
         let mut near: Vec<(usize, f64)> = segments
             .iter()
             .enumerate()
+            .filter(|(i, _)| !any_deform || armature.bones[*i].deform)
             .map(|(i, (a, b))| (i, distance_to_segment(at, *a, *b)))
             .collect();
         near.sort_by(|x, y| x.1.total_cmp(&y.1));
@@ -356,6 +358,7 @@ pub fn heat_weights(
         let ray = kreate_math::Ray::new(from.as_vec3(), (to - from).as_vec3());
         tree.raycast(&flat, &triangles, &ray, span - gap).is_none()
     };
+    let any_deform = armature.bones.iter().any(|b| b.deform);
     let near_floor = (typical * 0.1).powi(2);
     let mut nearest: Vec<Vec<usize>> = Vec::with_capacity(n);
     let mut heat: Vec<f64> = Vec::with_capacity(n);
@@ -363,6 +366,7 @@ pub fn heat_weights(
         let mut d: Vec<(usize, f64, DVec3)> = segments
             .iter()
             .enumerate()
+            .filter(|(i, _)| !any_deform || armature.bones[*i].deform)
             .map(|(i, (a, b))| {
                 let on = closest_on_segment(*p, *a, *b);
                 (i, on.distance(*p), on)
@@ -848,6 +852,41 @@ mod tests {
         assert!(low < 0.05, "the bottom stays on the first: {low}");
         assert!(high > 0.95, "the top goes with the second: {high}");
         assert!(between, "the joint is a blend");
+        // Non-deforming control/IK bones must never steal skin weights.
+        let cube = kreate_mesh::primitives::cube(1.0);
+        let mut arm = Armature::new("Rig");
+        arm.bones.clear();
+        arm.add_bone(crate::armature::Bone {
+            name: "Body".into(),
+            head: DVec3::new(0.0, 0.0, -0.5),
+            tail: DVec3::new(0.0, 0.0, 0.5),
+            deform: true,
+            ..Default::default()
+        });
+        arm.add_bone(crate::armature::Bone {
+            name: "IK_Target".into(),
+            head: DVec3::new(0.0, 0.0, 0.0),
+            tail: DVec3::new(0.1, 0.0, 0.0),
+            deform: false,
+            ..Default::default()
+        });
+        for weights in [
+            automatic_weights(&cube, &arm, DAffine3::IDENTITY),
+            heat_weights(&cube, &arm, DAffine3::IDENTITY, false),
+        ] {
+            let ik = weights
+                .iter()
+                .find(|(n, _)| *n == weight_layer("IK_Target"))
+                .map(|(_, w)| w)
+                .unwrap();
+            let body = weights
+                .iter()
+                .find(|(n, _)| *n == weight_layer("Body"))
+                .map(|(_, w)| w)
+                .unwrap();
+            assert!(ik.iter().all(|&w| w == 0.0), "IK bone got weight: {ik:?}");
+            assert!(body.iter().all(|&w| (w - 1.0).abs() < 1e-4));
+        }
     }
 }
 

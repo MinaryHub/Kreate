@@ -832,6 +832,46 @@ impl ModifierCache {
         })
     }
 
+    /// The evaluated rest-pose mesh: evaluates curves, CAD features, the
+    /// modifier stack and geometry nodes **without** baking shape keys or
+    /// armature skinning. Interchange exporters (`GLB`, `USD`) that write the
+    /// skeleton and morph targets alongside the mesh must start from this so
+    /// posed characters are not double-deformed.
+    pub fn evaluated_rest(
+        &mut self,
+        doc: &Document,
+        id: ObjectId,
+        ctx: &EvalCtx,
+    ) -> Option<Arc<MeshData>> {
+        let object = doc.object(id)?;
+        let stored = doc.mesh_arc(object.mesh()?)?;
+        let built;
+        let base = if let Some(curve) = &object.curve {
+            built = self.curve_mesh(object.uid, curve);
+            &built
+        } else if object.features.is_empty() {
+            stored
+        } else {
+            built = self.body(doc, id);
+            &built
+        };
+        let operands = operands_of(doc, id, &object.modifiers, &mut |other| {
+            let o = doc.object(other)?;
+            if let Some(curve) = &o.curve {
+                Some(self.curve_mesh(o.uid, curve))
+            } else if !o.features.is_empty() {
+                Some(self.body(doc, other))
+            } else {
+                doc.mesh_arc(o.mesh()?).cloned()
+            }
+        });
+        let stacked = self.evaluate_with(base, &object.modifiers, ctx, &operands);
+        Some(match &object.geometry_nodes {
+            Some(graph) => self.noded(&stacked, graph),
+            None => stacked,
+        })
+    }
+
     /// `input` with the object's baked cloth vertices, particles and hair laid
     /// on, at the document's frame. See [`crate::physics`].
     fn simulated(&mut self, doc: &Document, id: ObjectId, input: Arc<MeshData>) -> Arc<MeshData> {

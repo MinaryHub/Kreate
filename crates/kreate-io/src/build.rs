@@ -1568,6 +1568,7 @@ fn build_materials(
                 transmission: m.transmission,
                 ior: m.ior,
                 alpha_clip: m.alpha_clip,
+                double_sided: m.double_sided,
                 layers: m.layers,
                 ..Default::default()
             })
@@ -1692,6 +1693,7 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
             transmission: material.transmission,
             ior: material.ior,
             alpha_clip: material.alpha_clip,
+            double_sided: material.double_sided,
             layers: material.surface_layers(),
         });
     }
@@ -1924,15 +1926,25 @@ pub fn scene_from_document(doc: &Document) -> (ExportScene<'_>, Vec<LossyNote>) 
         };
         let rig_world = doc.world_transform(rig);
         let mesh_world = doc.world_transform(id);
+        let any_deform = armature.bones.iter().any(|b| b.deform);
+        let deform_indices: Vec<usize> = armature
+            .bones
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !any_deform || b.deform)
+            .map(|(i, _)| i)
+            .collect();
         nodes[*node].skin = Some(skins.len());
         skins.push(crate::ir::ExportSkin {
             name: doc.object(rig).map(|o| o.name.clone()).unwrap_or_default(),
-            joints: joints.clone(),
-            joint_names: armature.bones.iter().map(|b| b.name.clone()).collect(),
-            inverse_bind: armature
-                .bones
+            joints: deform_indices.iter().map(|&i| joints[i]).collect(),
+            joint_names: deform_indices
                 .iter()
-                .map(|b| (rig_world * b.rest()).inverse() * mesh_world)
+                .map(|&i| armature.bones[i].name.clone())
+                .collect(),
+            inverse_bind: deform_indices
+                .iter()
+                .map(|&i| (rig_world * armature.bones[i].rest()).inverse() * mesh_world)
                 .collect(),
         });
     }
@@ -2407,14 +2419,222 @@ fn export_animations(
             });
         }
     }
-    if tracks.is_empty() && weights.is_empty() {
-        return Vec::new();
+    let mut out = Vec::new();
+    if !tracks.is_empty() || !weights.is_empty() {
+        out.push(crate::ir::ExportAnimation {
+            name: "Animation".into(),
+            tracks,
+            weights,
+        });
     }
-    vec![crate::ir::ExportAnimation {
-        name: "Animation".into(),
-        tracks,
-        weights,
-    }]
+
+    // Export every additional animation clip stored as an NLA strip on any
+    // object (such as multi-clip character imports or pushed-down actions) as
+    // its own named ExportAnimation clip.
+    let mut exported_actions: std::collections::HashSet<kreate_scene::ActionId> =
+        doc.objects().filter_map(|(_, o)| o.action).collect();
+    let mut extra_clips: Vec<(kreate_scene::ActionId, String)> = Vec::new();
+    for (_, object) in doc.objects() {
+        for strip in &object.nla {
+            if exported_actions.insert(strip.action) {
+                if let Some(act) = doc.action(strip.action) {
+                    extra_clips.push((strip.action, act.name.clone()));
+                }
+            }
+        }
+    }
+    for (act_id, clip_name) in extra_clips {
+        let Some(action) = doc.action(act_id) else {
+            continue;
+        };
+        let mut clip_origin = doc.playback.start as f64;
+        for curve in action.curves.iter().filter(|c| {
+            MOVES.contains(&c.path.property.as_ref())
+                || kreate_scene::animation::parse_bone_path(&c.path.property).is_some()
+                || kreate_scene::animation::parse_shape_path(&c.path.property).is_some()
+        }) {
+            if let Some(first) = curve.keys.first() {
+                clip_origin = clip_origin.min(first.frame);
+            }
+        }
+        let mut clip_tracks = Vec::new();
+        let mut clip_weights = Vec::new();
+        for (index, (id, object)) in doc.objects().enumerate() {
+            if !object.nla.iter().any(|s| s.action == act_id) {
+                continue;
+            }
+            // Object transform tracks
+            let curves: Vec<_> = action
+                .curves
+                .iter()
+                .filter(|c| MOVES.contains(&c.path.property.as_ref()) && !c.keys.is_empty())
+                .collect();
+            if !curves.is_empty() {
+                let moves = |p: &str| curves.iter().any(|c| c.path.property.as_ref() == p);
+                let mut frames: Vec<f64> = curves
+                    .iter()
+                    .flat_map(|c| c.keys.iter().map(|k| k.frame))
+                    .collect();
+                frames.sort_by(f64::total_cmp);
+                frames.dedup();
+                if let (Some(&first), Some(&last)) = (frames.first(), frames.last()) {
+                    let mut sampled = vec![first];
+                    let mut f = first.floor() + 1.0;
+                    while f < last {
+                        sampled.push(f);
+                        f += 1.0;
+                    }
+                    if last > first {
+                        sampled.push(last);
+                    }
+                    let transforms: Vec<_> = sampled
+                        .iter()
+                        .map(|&frame| {
+                            let mut t = object.transform;
+                            kreate_scene::animation::apply_to_object(action, frame, &mut t);
+                            if object.parent.is_some() {
+                                kreate_math::DTransform::from_affine(
+                                    object.parent_inverse * t.to_affine(),
+                                )
+                            } else {
+                                t
+                            }
+                        })
+                        .collect();
+                    clip_tracks.push(crate::ir::ExportTrack {
+                        node: index,
+                        times: sampled
+                            .iter()
+                            .map(|f| ((f - clip_origin) / fps) as f32)
+                            .collect(),
+                        transforms,
+                        step: false,
+                        translation: moves("location"),
+                        rotation: moves("rotation_euler"),
+                        scale: moves("scale"),
+                    });
+                }
+            }
+            // Armature bone pose tracks
+            if let (Some((_, armature)), Some(joints)) = (doc.armature_of(id), bone_nodes.get(&id))
+            {
+                let keyed: Vec<f64> = action
+                    .curves
+                    .iter()
+                    .filter(|c| {
+                        kreate_scene::animation::parse_bone_path(&c.path.property).is_some()
+                    })
+                    .flat_map(|c| c.keys.iter().map(|k| k.frame))
+                    .collect();
+                if let (Some(first), Some(last)) = (
+                    keyed.iter().copied().reduce(f64::min),
+                    keyed.iter().copied().reduce(f64::max),
+                ) {
+                    let mut frames = vec![first];
+                    let mut f = first.floor() + 1.0;
+                    while f < last {
+                        frames.push(f);
+                        f += 1.0;
+                    }
+                    if last > first {
+                        frames.push(last);
+                    }
+                    let poses: Vec<Vec<kreate_math::DAffine3>> = frames
+                        .iter()
+                        .map(|frame| {
+                            let mut pose = kreate_scene::armature::Pose::default();
+                            kreate_scene::animation::apply_to_pose(action, *frame, &mut pose);
+                            kreate_scene::armature::posed(armature, &pose)
+                        })
+                        .collect();
+                    for (i, bone) in armature.bones.iter().enumerate() {
+                        let Some(node) = joints.get(i) else { continue };
+                        clip_tracks.push(crate::ir::ExportTrack {
+                            node: *node,
+                            times: frames
+                                .iter()
+                                .map(|f| ((f - clip_origin) / fps) as f32)
+                                .collect(),
+                            transforms: poses
+                                .iter()
+                                .map(|p| {
+                                    kreate_math::DTransform::from_affine(match bone.parent {
+                                        Some(parent) => p[parent].inverse() * p[i],
+                                        None => p[i],
+                                    })
+                                })
+                                .collect(),
+                            step: false,
+                            translation: true,
+                            rotation: true,
+                            scale: true,
+                        });
+                    }
+                }
+            }
+            // Shape-key morph weight tracks
+            if let Some(ImportNodeData::Mesh(m)) = nodes.get(index).map(|n| n.data) {
+                if let Some(names) = morph_targets.get(m).filter(|n| !n.is_empty()) {
+                    let keyed: Vec<f64> = action
+                        .curves
+                        .iter()
+                        .filter(|c| {
+                            kreate_scene::animation::parse_shape_path(&c.path.property)
+                                .is_some_and(|n| names.iter().any(|k| k == n))
+                        })
+                        .flat_map(|c| c.keys.iter().map(|k| k.frame))
+                        .collect();
+                    if let (Some(first), Some(last)) = (
+                        keyed.iter().copied().reduce(f64::min),
+                        keyed.iter().copied().reduce(f64::max),
+                    ) {
+                        let mut frames = vec![first];
+                        let mut f = first.floor() + 1.0;
+                        while f < last {
+                            frames.push(f);
+                            f += 1.0;
+                        }
+                        if last > first {
+                            frames.push(last);
+                        }
+                        let values = frames
+                            .iter()
+                            .map(|frame| {
+                                let mut keys = object.shape_keys.clone();
+                                kreate_scene::animation::apply_to_shapes(action, *frame, &mut keys);
+                                names
+                                    .iter()
+                                    .map(|n| {
+                                        keys.iter().find(|k| k.name == *n).map_or(0.0, |k| k.value)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        clip_weights.push(crate::ir::ExportWeights {
+                            node: index,
+                            times: frames
+                                .iter()
+                                .map(|f| ((f - clip_origin) / fps) as f32)
+                                .collect(),
+                            values,
+                        });
+                    }
+                }
+            }
+        }
+        if !clip_tracks.is_empty() || !clip_weights.is_empty() {
+            out.push(crate::ir::ExportAnimation {
+                name: if clip_name.is_empty() {
+                    "Clip".into()
+                } else {
+                    clip_name
+                },
+                tracks: clip_tracks,
+                weights: clip_weights,
+            });
+        }
+    }
+    out
 }
 
 /// One light, in the units an interchange format writes.

@@ -153,6 +153,7 @@ impl App {
         });
         v.path_trace_denoise = settings.denoise;
         v.path_trace_bounces = settings.bounces;
+        v.transparent_background = settings.transparent_background;
         v.path_trace_noise_threshold = quiet_enough(settings.samples);
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
@@ -577,12 +578,11 @@ impl App {
                 png.clone()
             }
             kreate_scene::render::OutputFormat::Exr => {
-                let exposure = scenelights::shot(&self.doc, self.time.rate(), self.camera.pivot)
-                    .exposure as f32;
                 let forward = (self.camera.pivot - self.camera.eye())
                     .normalize_or_zero()
                     .as_vec3();
                 let gfx = self.gfx.as_ref().ok_or("the window closed")?;
+                let exposure = gfx.viewport.display().exposure;
                 let mut passes =
                     gfx.viewport
                         .read_passes(&gfx.gpu.device, &gfx.gpu.queue, exposure, forward)?;
@@ -657,6 +657,7 @@ impl App {
                 v.path_trace_denoise,
             ) = saved.look;
             v.path_trace_bounces = 4;
+            v.transparent_background = false;
             v.path_trace_noise_threshold = quiet_enough(0);
         }
         self.camera = saved.camera;
@@ -986,9 +987,12 @@ impl App {
             }
         }
         buffer.unmap();
-        // Opaque: the target's alpha is a compositing detail, not the picture.
-        for p in pixels.as_chunks_mut::<4>().0 {
-            p[3] = 255;
+        // Keep coverage alpha when Film Transparent is enabled; otherwise mark
+        // opaque because the target's alpha is a compositing detail.
+        if !self.doc.render.transparent_background {
+            for p in pixels.as_chunks_mut::<4>().0 {
+                p[3] = 255;
+            }
         }
         Ok((w, h, pixels))
     }

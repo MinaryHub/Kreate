@@ -428,6 +428,8 @@ pub struct Material {
     /// the base colour image's alpha — is below this. glTF's `MASK` and its
     /// `alphaCutoff`: a leaf drawn on a card. `None` is solid throughout.
     pub alpha_clip: Option<f32>,
+    /// Whether both sides of thin geometry (foliage, cloth, labels) are drawn.
+    pub double_sided: bool,
     /// The layers over the plain surface: a varnish, a sheen, a brushed
     /// highlight, a specular weight. See [`crate::shader::SurfaceLayers`].
     pub layers: crate::shader::SurfaceLayers,
@@ -478,6 +480,7 @@ impl Default for Material {
             ior: 1.5,
             thin: false,
             alpha_clip: None,
+            double_sided: false,
             layers: crate::shader::SurfaceLayers::default(),
             graph: None,
             action: None,

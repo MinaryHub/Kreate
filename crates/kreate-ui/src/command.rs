@@ -141,6 +141,14 @@ pub enum Command {
     ClearMaterialImage {
         map: u32,
     },
+    /// Save the active material's texture image to a standalone PNG/JPEG/EXR file.
+    SaveMaterialImage {
+        map: u32,
+    },
+    /// Reload the active material's texture image from its source file on disk.
+    ReloadMaterialImage {
+        map: u32,
+    },
     /// Ask for an IES file and give the active light its measured shape.
     /// A command for the reason `PickMaterialImage` is: `light.set_profile`
     /// sets what the file said; the file read cannot be an operator.

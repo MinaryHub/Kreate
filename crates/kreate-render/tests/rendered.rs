@@ -4524,3 +4524,101 @@ fn shot_physical_finishes() {
     sheet.save(&out).expect("saved");
     eprintln!("{}", out.display());
 }
+
+#[test]
+fn transparent_background_writes_zero_alpha_on_empty_pixels() {
+    let gpu = gpu_or_skip!(gpu());
+    let mut viewport = Viewport::new(&gpu.device, FORMAT, SIZE, SIZE);
+    viewport.shading = ShadingMode::Rendered;
+    viewport.transparent_background = true;
+    viewport.show_grid = false;
+    viewport.show_ground_shadow = false;
+    viewport.show_wireframe = false;
+
+    let mesh = RenderMeshCpu::extract(&kreate_mesh::primitives::cube(2.0));
+    let uploaded =
+        kreate_render::GpuMesh::upload(&gpu.device, &viewport.layouts, &mesh, glam::Vec4::ONE);
+    let camera = Camera {
+        distance: 6.0,
+        ..Camera::default()
+    };
+    let graph = kreate_scene::shader::ShaderGraph::standard(
+        "test",
+        kreate_math::SceneRgb::new(0.8, 0.2, 0.2),
+        0.0,
+        0.5,
+    );
+    graph_material(&gpu, &mut viewport, &graph);
+    viewport.set_world([0.5, 0.5, 0.6]);
+    let mut draws = vec![Draw::new(&uploaded, glam::DAffine3::IDENTITY)];
+    viewport.set_lights(&gpu.device, &gpu.queue, camera.eye(), &[]);
+    viewport.prepare(&gpu.device, &gpu.queue, &camera, &mut draws);
+
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("transparent-shot"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    viewport.render(&mut encoder, &view, &draws);
+
+    let row = (SIZE * 4).div_ceil(256) * 256;
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("transparent-readback"),
+        size: (row * SIZE) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+
+    let corner_alpha = data[3];
+    let mid = ((SIZE / 2) * row + (SIZE / 2) * 4) as usize;
+    let center_alpha = data[mid + 3];
+    assert_eq!(
+        corner_alpha, 0,
+        "empty background pixel should be transparent"
+    );
+    assert!(
+        center_alpha >= 250,
+        "cube center pixel should be opaque, got alpha {center_alpha}"
+    );
+}

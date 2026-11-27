@@ -887,6 +887,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         transmission: None,
         thin: false,
         alpha_clip: None,
+        double_sided: false,
         layers: None,
         emission_uid: None,
         occlusion_uid: None,
@@ -902,6 +903,7 @@ fn a_material_that_never_touched_the_new_fields_writes_none_of_them() {
         "metallic_roughness_uid",
         "normal_uid",
         "normal_strength",
+        "double_sided",
         "emission",
     ] {
         assert!(!text.contains(field), "{field} was written: {text}");
@@ -1257,6 +1259,7 @@ fn the_render_settings_survive_a_save() {
         motion_blur: true,
         bounces: 7,
         video_quality: 1,
+        transparent_background: true,
     };
     let after = round_trip(&doc).document;
     assert_eq!(after.render, doc.render);

@@ -436,6 +436,7 @@ impl Operator for Extrude {
                     tail: parent.tail + step,
                     roll: parent.roll,
                     connected: true,
+                    deform: parent.deform,
                     select_head: false,
                     select_tail: true,
                 });
@@ -606,6 +607,8 @@ pub struct SetBoneParams {
     pub parent: String,
     /// Its head held on its parent's tail.
     pub connected: bool,
+    /// Whether this bone deforms bound meshes and exports as a skin joint.
+    pub deform: bool,
     #[param(unit = "length")]
     pub head: [f64; 3],
     #[param(unit = "length")]
@@ -625,6 +628,7 @@ pub fn bone_params(armature: &Armature, bone: usize) -> Option<SetBoneParams> {
             .map(|p| armature.bones[p].name.clone())
             .unwrap_or_default(),
         connected: b.connected,
+        deform: b.deform,
         head: b.head.to_array(),
         tail: b.tail.to_array(),
         roll: b.roll,
@@ -688,6 +692,7 @@ impl Operator for SetBone {
             let b = &mut edited.bones[i];
             b.parent = parent;
             b.connected = params.connected && parent.is_some();
+            b.deform = params.deform;
             b.head = head;
             b.tail = tail;
             b.roll = params.roll;
@@ -772,6 +777,7 @@ impl Operator for Symmetrize {
                 tail: flip(bone.tail),
                 roll: -bone.roll,
                 connected: bone.connected && parent.is_some(),
+                deform: bone.deform,
                 ..Default::default()
             };
             match edited.bone_index(&other) {
@@ -782,6 +788,7 @@ impl Operator for Symmetrize {
                     b.head = mirrored.head;
                     b.tail = mirrored.tail;
                     b.roll = mirrored.roll;
+                    b.deform = mirrored.deform;
                     b.parent = match mirrored.parent {
                         Some(p) if p < j => Some(p),
                         _ => keep,

@@ -620,7 +620,8 @@ impl NodeKind {
     fn fixed_inputs(&self) -> &'static [Socket] {
         match self {
             NodeKind::Group(_) => &[],
-            NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
+            NodeKind::Color(_) | NodeKind::Value(_) => &[],
+            NodeKind::Image { .. } => &[Socket::Coordinate],
             NodeKind::Multiply => &[Socket::Color, Socket::Color],
             NodeKind::SeparateRgb | NodeKind::NormalMap { .. } => &[Socket::Color],
             NodeKind::MultiplyValue | NodeKind::Math { .. } => &[Socket::Scalar, Socket::Scalar],
@@ -1096,7 +1097,8 @@ impl NodeKind {
                 "Alpha",
                 "Occlusion",
             ],
-            NodeKind::Color(_) | NodeKind::Value(_) | NodeKind::Image { .. } => &[],
+            NodeKind::Color(_) | NodeKind::Value(_) => &[],
+            NodeKind::Image { .. } => &["Vector"],
         }
     }
 
