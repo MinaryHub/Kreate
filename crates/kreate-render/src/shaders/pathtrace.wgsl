@@ -53,6 +53,10 @@ struct PtParams {
     // x: the floor's height. y: nonzero when there is a floor. z: how much
     // of a mirror it is.
     ground: vec4<f32>,
+    // Sub-region tile for high-resolution tiled rendering:
+    // (offset_x, offset_y, full_width, full_height). Zero full size means
+    // untiled rendering of `pt.size`.
+    tile: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> pt: PtParams;
@@ -1068,9 +1072,11 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let bell = min(sqrt(-2.0 * log(max(pt_random(), 1e-6))) * 0.4, 1.25);
     let around = 6.2831853 * pt_random();
     let jitter = vec2<f32>(0.5) + bell * vec2<f32>(cos(around), sin(around));
+    let full_w = select(pt.size.x, pt.tile.z, pt.tile.z > 0u);
+    let full_h = select(pt.size.y, pt.tile.w, pt.tile.w > 0u);
     let ndc = vec2<f32>(
-        (f32(id.x) + jitter.x) / f32(pt.size.x) * 2.0 - 1.0,
-        1.0 - (f32(id.y) + jitter.y) / f32(pt.size.y) * 2.0,
+        (f32(id.x + pt.tile.x) + jitter.x) / f32(full_w) * 2.0 - 1.0,
+        1.0 - (f32(id.y + pt.tile.y) + jitter.y) / f32(full_h) * 2.0,
     );
     let near = pt.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
     let mid = pt.inv_view_proj * vec4<f32>(ndc, 0.5, 1.0);
@@ -1092,7 +1098,7 @@ fn pt_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // How wide a pixel is, as an angle: the ray cone a texture is read over.
     // A bump reads its height one pixel's width across and one down, as the
     // viewport does from its derivatives.
-    let beside = pt.inv_view_proj * vec4<f32>(ndc + vec2<f32>(2.0 / f32(pt.size.x), 0.0), 0.5, 1.0);
+    let beside = pt.inv_view_proj * vec4<f32>(ndc + vec2<f32>(2.0 / f32(full_w), 0.0), 0.5, 1.0);
     let spread = length(normalize(beside.xyz / beside.w - near.xyz / near.w) - normalize(mid.xyz / mid.w - near.xyz / near.w));
     var travelled = 0.0;
 

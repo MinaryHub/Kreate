@@ -33,6 +33,9 @@ pub struct Report {
     pub intersecting_faces: Vec<u32>,
     /// Faces whose wall, measured straight in, is thinner than asked.
     pub thin_faces: Vec<u32>,
+    /// Faces above the build plate overhanging steeper than the angle limit
+    /// (measured from vertical +Z; default 45°).
+    pub overhang_faces: Vec<u32>,
 }
 
 impl Report {
@@ -42,14 +45,32 @@ impl Report {
     }
 }
 
-/// Runs the checks. `thickness` is the thinnest wall allowed, in the same
-/// units as `to_space` places the points; zero skips that check, and
-/// `intersections` false skips the costliest one.
+/// Runs the checks with a 45° default overhang threshold. `thickness` is the
+/// thinnest wall allowed, in the same units as `to_space` places the points;
+/// zero skips that check, and `intersections` false skips the costliest one.
 pub fn check(
     mesh: &MeshData,
     to_space: impl Fn(DVec3) -> DVec3,
     thickness: f64,
     intersections: bool,
+) -> Report {
+    check_with_overhang(
+        mesh,
+        to_space,
+        thickness,
+        intersections,
+        45.0_f64.to_radians(),
+    )
+}
+
+/// Runs all printability checks with a configurable overhang limit from
+/// vertical (`overhang_angle` in radians; 0 skips overhang detection).
+pub fn check_with_overhang(
+    mesh: &MeshData,
+    to_space: impl Fn(DVec3) -> DVec3,
+    thickness: f64,
+    intersections: bool,
+    overhang_angle: f64,
 ) -> Report {
     let points: Vec<DVec3> = mesh
         .positions()
@@ -107,15 +128,33 @@ pub fn check(
     // Triangles, for the area, the intersections and the walls. Fan per face.
     let mut tris: Vec<[u32; 3]> = Vec::new();
     let mut tri_face: Vec<u32> = Vec::new();
+    let overhang_sin = if overhang_angle > 0.0 && overhang_angle < std::f64::consts::FRAC_PI_2 {
+        Some(overhang_angle.sin())
+    } else {
+        None
+    };
+    let plate_eps = size * 1e-4;
     for f in 0..mesh.num_faces() {
         let ring = mesh.face_verts(f);
         let mut area = DVec3::ZERO;
+        let mut face_min_z = f64::INFINITY;
         for i in 0..ring.len() {
-            area += points[ring[i] as usize].cross(points[ring[(i + 1) % ring.len()] as usize]);
+            let p = points[ring[i] as usize];
+            face_min_z = face_min_z.min(p.z);
+            area += p.cross(points[ring[(i + 1) % ring.len()] as usize]);
         }
-        if ring.len() < 3 || area.length() * 0.5 <= tiny_area {
+        let area_len = area.length();
+        if ring.len() < 3 || area_len * 0.5 <= tiny_area {
             report.degenerate_faces.push(f);
             continue;
+        }
+        // Overhang check: face sits strictly above the build plate and points
+        // downward steeper than the overhang angle from vertical (+Z).
+        if let Some(limit_sin) = overhang_sin {
+            let nz = area.z / area_len;
+            if face_min_z > lo.z + plate_eps && nz < -limit_sin - 1e-6 {
+                report.overhang_faces.push(f);
+            }
         }
         for i in 1..ring.len() - 1 {
             tris.push([ring[0], ring[i], ring[i + 1]]);
@@ -160,8 +199,9 @@ pub fn check(
         .filter(|f| crossing[*f as usize])
         .collect();
 
-    // Walls: straight in from each face's middle, against its normal, to the
-    // next surface. Closer than asked is thin.
+    // Walls: straight in from each face's centroid AND interior midpoints
+    // toward each vertex (catching thin spots on large faces), against its
+    // normal, to the next surface. Closer than asked is thin.
     if thickness > 0.0 {
         let mut thin = vec![false; mesh.num_faces() as usize];
         for f in 0..mesh.num_faces() {
@@ -180,12 +220,23 @@ pub fn check(
             if normal == DVec3::ZERO {
                 continue;
             }
-            // Started a hair inside, so the face itself is not the answer.
-            let start = centre - normal * (size * 1e-6) - middle;
-            let ray = Ray::new(start.as_vec3(), (-normal).as_vec3());
-            if let Some(hit) = bvh.raycast(&local, &tris, &ray, thickness as f32) {
-                if tri_face[hit.primitive as usize] != f && (hit.t as f64) < thickness {
-                    thin[f as usize] = true;
+            let eps_in = normal * (size * 1e-6);
+            // Sample centroid first, then midpoints between centroid and corners
+            // (capped at 8 samples for high-gon faces).
+            let step = (ring.len() / 8).max(1);
+            let mut samples = Vec::with_capacity(1 + ring.len().min(8));
+            samples.push(centre);
+            for idx in (0..ring.len()).step_by(step).take(8) {
+                samples.push(centre.lerp(points[ring[idx] as usize], 0.5));
+            }
+            for sample in samples {
+                let start = sample - eps_in - middle;
+                let ray = Ray::new(start.as_vec3(), (-normal).as_vec3());
+                if let Some(hit) = bvh.raycast(&local, &tris, &ray, thickness as f32) {
+                    if tri_face[hit.primitive as usize] != f && (hit.t as f64) < thickness {
+                        thin[f as usize] = true;
+                        break;
+                    }
                 }
             }
         }

@@ -371,17 +371,24 @@ pub enum ConstraintKind {
     /// Its own offset from where its parent carries its rest, in its rest's
     /// axes, held between `min` and `max` (metres): a slider's travel.
     LimitLocation { min: DVec3, max: DVec3 },
+    /// Copies the target's full location, rotation, and scale.
+    CopyTransforms,
+    /// Dynamic parenting: follows the target's movement relative to rest
+    /// (picking up a prop or switching hand space mid-shot).
+    ChildOf,
 }
 
 impl ConstraintKind {
     /// Every kind, in the order the menus and the operators number them.
-    pub const NAMES: [&'static str; 6] = [
+    pub const NAMES: [&'static str; 8] = [
         "copy_location",
         "copy_rotation",
         "copy_scale",
         "damped_track",
         "limit_rotation",
         "limit_location",
+        "copy_transforms",
+        "child_of",
     ];
 
     pub fn index(&self) -> u32 {
@@ -392,6 +399,8 @@ impl ConstraintKind {
             Self::DampedTrack => 3,
             Self::LimitRotation { .. } => 4,
             Self::LimitLocation { .. } => 5,
+            Self::CopyTransforms => 6,
+            Self::ChildOf => 7,
         }
     }
 
@@ -413,6 +422,8 @@ impl ConstraintKind {
                 min: DVec3::splat(-1000.0),
                 max: DVec3::splat(1000.0),
             },
+            6 => Self::CopyTransforms,
+            7 => Self::ChildOf,
             _ => return None,
         })
     }
@@ -431,8 +442,12 @@ impl ConstraintKind {
 pub struct BoneConstraint {
     pub bone: String,
     pub kind: ConstraintKind,
-    /// The bone it reads, by name. Unused by a limit.
+    /// The bone it reads, by name. Unused by a limit or when `target_object`
+    /// points directly at an external scene object.
     pub target: String,
+    /// Optional external scene object target (`Uid`), allowing constraints
+    /// such as `ChildOf` or `CopyTransforms` to track props outside the rig.
+    pub target_object: Option<kreate_reflect::Uid>,
     /// How much of the constraint's answer the bone takes, 0 to 1.
     pub influence: f64,
     pub enabled: bool,
@@ -490,12 +505,22 @@ impl Pose {
 /// at rest, then its own pose: `P_parent · (R_parent⁻¹ · R) · L`. For a root
 /// the parent is the armature itself: `R · L`.
 pub fn posed(armature: &Armature, pose: &Pose) -> Vec<DAffine3> {
+    posed_with_targets(armature, pose, &|_| None)
+}
+
+/// Like [`posed`], additionally resolving constraints that target external
+/// scene objects (`target_object`) into armature space via `resolve_object`.
+pub fn posed_with_targets(
+    armature: &Armature,
+    pose: &Pose,
+    resolve_object: &dyn Fn(kreate_reflect::Uid) -> Option<DAffine3>,
+) -> Vec<DAffine3> {
     let mut frames = posed_fk(armature, pose);
     for ik in pose.ik.iter().filter(|c| c.enabled) {
         solve_ik(armature, pose, &mut frames, ik);
     }
     for c in pose.constraints.iter().filter(|c| c.enabled) {
-        apply_constraint(armature, &mut frames, c);
+        apply_constraint(armature, &mut frames, c, resolve_object);
     }
     frames
 }
@@ -503,7 +528,12 @@ pub fn posed(armature: &Armature, pose: &Pose) -> Vec<DAffine3> {
 /// One bone constraint, applied to the frames as they stand. The bones below
 /// the constrained one are carried along rigidly, so what a constraint or an
 /// IK solve earlier did to them is kept.
-fn apply_constraint(armature: &Armature, frames: &mut [DAffine3], c: &BoneConstraint) {
+fn apply_constraint(
+    armature: &Armature,
+    frames: &mut [DAffine3],
+    c: &BoneConstraint,
+    resolve_object: &dyn Fn(kreate_reflect::Uid) -> Option<DAffine3>,
+) {
     let Some(i) = armature.bone_index(&c.bone) else {
         return;
     };
@@ -511,27 +541,64 @@ fn apply_constraint(armature: &Armature, frames: &mut [DAffine3], c: &BoneConstr
     if t == 0.0 {
         return;
     }
-    let target = armature.bone_index(&c.target);
-    if c.kind.has_target() && (target.is_none() || target == Some(i)) {
+    // Resolve target frame (and rest frame for ChildOf): prefer an external
+    // object target when set, otherwise another bone in the same armature.
+    let target_pair: Option<(DAffine3, DAffine3)> = if let Some(uid) = c.target_object {
+        resolve_object(uid).map(|m| (m, DAffine3::IDENTITY))
+    } else {
+        armature
+            .bone_index(&c.target)
+            .filter(|&j| j != i)
+            .map(|j| (frames[j], armature.bones[j].rest()))
+    };
+    if c.kind.has_target() && target_pair.is_none() {
         return;
     }
     let before = frames[i];
     let (scale, rotation, translation) = before.to_scale_rotation_translation();
     let after = match &c.kind {
         ConstraintKind::CopyLocation => {
-            let goal = frames[target.expect("checked")].translation;
+            let goal = target_pair.expect("checked").0.translation;
             DAffine3::from_scale_rotation_translation(scale, rotation, translation.lerp(goal, t))
         }
         ConstraintKind::CopyRotation => {
-            let (_, goal, _) = frames[target.expect("checked")].to_scale_rotation_translation();
+            let (_, goal, _) = target_pair
+                .expect("checked")
+                .0
+                .to_scale_rotation_translation();
             DAffine3::from_scale_rotation_translation(scale, rotation.slerp(goal, t), translation)
         }
         ConstraintKind::CopyScale => {
-            let (goal, _, _) = frames[target.expect("checked")].to_scale_rotation_translation();
+            let (goal, _, _) = target_pair
+                .expect("checked")
+                .0
+                .to_scale_rotation_translation();
             DAffine3::from_scale_rotation_translation(scale.lerp(goal, t), rotation, translation)
         }
+        ConstraintKind::CopyTransforms => {
+            let (gs, gr, gt) = target_pair
+                .expect("checked")
+                .0
+                .to_scale_rotation_translation();
+            DAffine3::from_scale_rotation_translation(
+                scale.lerp(gs, t),
+                rotation.slerp(gr, t),
+                translation.lerp(gt, t),
+            )
+        }
+        ConstraintKind::ChildOf => {
+            let (target_posed, target_rest) = target_pair.expect("checked");
+            let delta = target_posed * target_rest.inverse();
+            let carried = delta * before;
+            let (gs, gr, gt) = carried.to_scale_rotation_translation();
+            DAffine3::from_scale_rotation_translation(
+                scale.lerp(gs, t),
+                rotation.slerp(gr, t),
+                translation.lerp(gt, t),
+            )
+        }
         ConstraintKind::DampedTrack => {
-            let to = frames[target.expect("checked")].translation - translation;
+            let to = target_pair.expect("checked").0.translation - translation;
             let along = before.matrix3.mul_vec3(DVec3::Y);
             if to.length_squared() < 1e-18 || along.length_squared() < 1e-18 {
                 return;
@@ -1006,6 +1073,7 @@ mod tests {
             bone: "Hand".into(),
             kind,
             target: target.into(),
+            target_object: None,
             influence,
             enabled: true,
         }

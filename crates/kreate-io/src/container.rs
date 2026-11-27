@@ -561,6 +561,9 @@ pub struct KeyRecord {
     /// A hand-set slope, value per frame; absent for auto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slope: Option<f64>,
+    /// Optional incoming (left) handle slope when broken from `slope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slope_in: Option<f64>,
 }
 
 /// One modifier: its kind by its stable id, whether it is on, and the
@@ -633,6 +636,13 @@ pub struct ModifierRecord {
     pub shift: Option<[f32; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<bool>,
+    /// Weighted Normal modifier settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_sharp: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_angle: Option<bool>,
 }
 
 fn enabled_default() -> bool {
@@ -685,6 +695,12 @@ fn modifier_record(m: &kreate_scene::modifier::ModifierInstance) -> Option<Modif
             r.count = Some(p.turns);
         }
         K::Decimate(p) => r.ratio = Some(p.ratio),
+        K::WeightedNormal(p) => {
+            r.weight = Some(p.weight);
+            r.angle = Some(p.threshold);
+            r.keep_sharp = Some(p.keep_sharp);
+            r.face_angle = Some(p.face_angle);
+        }
         K::Shrinkwrap(m) => {
             r.operand = Some(m.target.raw());
             r.mode = Some(m.params.mode.tag().to_string());
@@ -839,6 +855,15 @@ fn modifier_from(r: &ModifierRecord) -> Option<kreate_scene::modifier::ModifierI
                 },
             })
         }
+        "weighted_normal" => {
+            let d = kreate_mesh::modifiers::WeightedNormalParams::default();
+            K::WeightedNormal(kreate_mesh::modifiers::WeightedNormalParams {
+                weight: r.weight.unwrap_or(d.weight),
+                threshold: r.angle.unwrap_or(d.threshold),
+                keep_sharp: r.keep_sharp.unwrap_or(d.keep_sharp),
+                face_angle: r.face_angle.unwrap_or(d.face_angle),
+            })
+        }
         "boolean" => K::Boolean(BooleanModifier {
             operand: kreate_scene::Uid::from_raw(r.operand.unwrap_or(0)),
             op: match r.operation.as_deref() {
@@ -888,6 +913,14 @@ pub struct NlaStripRecord {
     /// Replace when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub blend_in: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub blend_out: f64,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// One bone constraint: its kind by name, so a reader that does not know a
@@ -898,6 +931,8 @@ pub struct ConstraintRecord {
     pub kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_object: Option<u64>,
     #[serde(default = "full_influence")]
     pub influence: f64,
     #[serde(default = "enabled_default")]
@@ -1990,15 +2025,26 @@ pub struct UnknownEntry {
     pub bytes: Vec<u8>,
 }
 
-/// Serialises a document into a `.kreate` archive.
+/// Serialises a document into a `.kreate` archive in memory.
 pub fn write(
     document: &Document,
     manifest: &Manifest,
     unknown: &[UnknownEntry],
 ) -> Result<Vec<u8>, ContainerError> {
-    let mut buffer = Cursor::new(Vec::new());
+    let buffer = write_to(Cursor::new(Vec::new()), document, manifest, unknown)?;
+    Ok(buffer.into_inner())
+}
+
+/// Streams a `.kreate` archive directly into `writer` without buffering the
+/// entire zip archive in RAM.
+pub fn write_to<W: Write + Seek>(
+    mut writer: W,
+    document: &Document,
+    manifest: &Manifest,
+    unknown: &[UnknownEntry],
+) -> Result<W, ContainerError> {
     {
-        let mut zip = zip::ZipWriter::new(&mut buffer);
+        let mut zip = zip::ZipWriter::new(&mut writer);
 
         // Zeroed, not "now". A zip stores a modification time per entry, and
         // taking it from the clock would make two saves of an unchanged document
@@ -2160,6 +2206,7 @@ pub fn write(
                                     .then(|| k.interpolation.tag().to_string()),
                                     selected: k.selected,
                                     slope: k.slope,
+                                    slope_in: k.slope_in,
                                 })
                                 .collect(),
                         })
@@ -2468,6 +2515,7 @@ pub fn write(
                                     [c.kind.index() as usize]
                                     .to_string(),
                                 target: c.target.clone(),
+                                target_object: c.target_object.map(|u| u.raw()),
                                 influence: c.influence,
                                 enabled: c.enabled,
                                 min,
@@ -2542,6 +2590,8 @@ pub fn write(
                             mute: s.mute,
                             blend: (s.blend != kreate_scene::nla::NlaBlend::Replace)
                                 .then(|| s.blend.tag().to_string()),
+                            blend_in: s.blend_in,
+                            blend_out: s.blend_out,
                         })
                     })
                     .collect(),
@@ -2610,25 +2660,28 @@ pub fn write(
 
         {
             use rayon::prelude::*;
+            const STREAM_BATCH: usize = 8;
             let meshes_vec: Vec<(usize, &kreate_mesh::MeshData)> = document
                 .meshes()
                 .enumerate()
                 .map(|(slot, (_, m))| (slot, m))
                 .collect();
-            let encoded_meshes: Vec<(usize, Vec<u8>)> = if meshes_vec.len() > 1 {
-                meshes_vec
-                    .into_par_iter()
-                    .map(|(slot, mesh)| (slot, crate::kmesh::write(mesh, &[])))
-                    .collect()
-            } else {
-                meshes_vec
-                    .into_iter()
-                    .map(|(slot, mesh)| (slot, crate::kmesh::write(mesh, &[])))
-                    .collect()
-            };
-            for (slot, bytes) in encoded_meshes {
-                zip.start_file(format!("{MESH_DIR}{}.kmesh", mesh_key(slot)), binary)?;
-                zip.write_all(&bytes)?;
+            for chunk in meshes_vec.chunks(STREAM_BATCH) {
+                let encoded: Vec<(usize, Vec<u8>)> = if chunk.len() > 1 {
+                    chunk
+                        .par_iter()
+                        .map(|&(slot, mesh)| (slot, crate::kmesh::write(mesh, &[])))
+                        .collect()
+                } else {
+                    chunk
+                        .iter()
+                        .map(|&(slot, mesh)| (slot, crate::kmesh::write(mesh, &[])))
+                        .collect()
+                };
+                for (slot, bytes) in encoded {
+                    zip.start_file(format!("{MESH_DIR}{}.kmesh", mesh_key(slot)), binary)?;
+                    zip.write_all(&bytes)?;
+                }
             }
 
             // STORED like the meshes, and for the same reason: a deflated entry
@@ -2640,20 +2693,22 @@ pub fn write(
                 .filter(|(_, (_, image))| image.resident_tiles() > 0)
                 .map(|(slot, (_, image))| (slot, image))
                 .collect();
-            let encoded_images: Vec<(usize, Vec<u8>)> = if images_vec.len() > 1 {
-                images_vec
-                    .into_par_iter()
-                    .map(|(slot, image)| (slot, crate::ktile::write(image)))
-                    .collect()
-            } else {
-                images_vec
-                    .into_iter()
-                    .map(|(slot, image)| (slot, crate::ktile::write(image)))
-                    .collect()
-            };
-            for (slot, bytes) in encoded_images {
-                zip.start_file(format!("{IMAGE_DIR}{}.ktile", mesh_key(slot)), binary)?;
-                zip.write_all(&bytes)?;
+            for chunk in images_vec.chunks(STREAM_BATCH) {
+                let encoded: Vec<(usize, Vec<u8>)> = if chunk.len() > 1 {
+                    chunk
+                        .par_iter()
+                        .map(|&(slot, image)| (slot, crate::ktile::write(image)))
+                        .collect()
+                } else {
+                    chunk
+                        .iter()
+                        .map(|&(slot, image)| (slot, crate::ktile::write(image)))
+                        .collect()
+                };
+                for (slot, bytes) in encoded {
+                    zip.start_file(format!("{IMAGE_DIR}{}.ktile", mesh_key(slot)), binary)?;
+                    zip.write_all(&bytes)?;
+                }
             }
         }
 
@@ -2672,7 +2727,7 @@ pub fn write(
         }
         zip.finish()?;
     }
-    Ok(buffer.into_inner())
+    Ok(writer)
 }
 
 /// Parses a `.kreate` archive from an in-memory or memory-mapped byte slice,
@@ -2947,6 +3002,7 @@ fn read_as_written_inner<R: Read + Seek>(
                             .unwrap_or_default(),
                         selected: k.selected,
                         slope: k.slope.filter(|s| s.is_finite()),
+                        slope_in: k.slope_in.filter(|s| s.is_finite()),
                     })
                     .collect();
                 made.extrapolation = curve
@@ -3270,6 +3326,8 @@ fn read_as_written_inner<R: Read + Seek>(
                         .as_deref()
                         .and_then(kreate_scene::nla::NlaBlend::from_tag)
                         .unwrap_or_default(),
+                    blend_in: r.blend_in.max(0.0),
+                    blend_out: r.blend_out.max(0.0),
                 })
             })
             .collect();
@@ -3295,6 +3353,10 @@ fn read_as_written_inner<R: Read + Seek>(
                         bone: r.bone.clone(),
                         kind,
                         target: r.target.clone(),
+                        target_object: r
+                            .target_object
+                            .filter(|&u| u != 0)
+                            .map(kreate_scene::Uid::from_raw),
                         influence: r.influence,
                         enabled: r.enabled,
                     })
@@ -3669,10 +3731,6 @@ pub struct FeatureRecord {
 
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0
-}
-
-fn is_zero_f64(v: &f64) -> bool {
-    *v == 0.0
 }
 
 fn feature_record(f: &kreate_scene::feature::Feature) -> FeatureRecord {

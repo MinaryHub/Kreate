@@ -619,6 +619,7 @@ impl Document {
                     bone: f.name.clone(),
                     kind,
                     target: String::new(),
+                    target_object: None,
                     influence: 1.0,
                     enabled: true,
                 })
@@ -724,6 +725,7 @@ impl Document {
                     max: DVec3::ZERO,
                 },
                 target: String::new(),
+                target_object: None,
                 influence: 1.0,
                 enabled: true,
             });

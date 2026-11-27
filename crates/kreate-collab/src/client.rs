@@ -27,9 +27,14 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Connects and says hello. The relay's answer arrives through
-    /// [`Connection::poll`].
+    /// Connects and says hello. Addresses prefixed with `tls://` negotiate TLS
+    /// using the operating system's root certificate store. The relay's answer
+    /// arrives through [`Connection::poll`].
     pub fn open(addr: &str, name: &str, room: &str, key: &str) -> io::Result<Self> {
+        if let Some((sni, dial)) = crate::tls::parse_tls_addr(addr) {
+            let tls_cfg = crate::tls::default_client_config()?;
+            return Self::open_tls_with_config(&dial, sni, tls_cfg, name, room, key);
+        }
         let target = addr
             .to_socket_addrs()?
             .next()
@@ -73,6 +78,50 @@ impl Connection {
                 }
             })?;
         Ok(Self { tx, rx, stream })
+    }
+
+    /// Connects over TLS using a caller-supplied `rustls::ClientConfig` (for
+    /// custom enterprise CAs or self-signed studio relays).
+    pub fn open_tls_with_config(
+        dial_addr: &str,
+        server_name: rustls::pki_types::ServerName<'static>,
+        tls_config: std::sync::Arc<rustls::ClientConfig>,
+        name: &str,
+        room: &str,
+        key: &str,
+    ) -> io::Result<Self> {
+        let target = dial_addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such address"))?;
+        let mut stream = TcpStream::connect_timeout(&target, Duration::from_secs(5))?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let mut conn = rustls::ClientConnection::new(tls_config, server_name)
+            .map_err(|e| io::Error::other(format!("tls client init: {e}")))?;
+        while conn.is_handshaking() {
+            conn.complete_io(&mut stream)?;
+        }
+        let hello = Frame::new(Msg::Hello {
+            protocol: PROTOCOL,
+            name: name.into(),
+            room: room.into(),
+            key: key.into(),
+        });
+        crate::tls::write_client_frame(&mut conn, &mut stream, &hello)?;
+        let handle = stream.try_clone()?;
+        let (tx, out) = mpsc::channel::<Frame>();
+        let (inbox, rx) = mpsc::channel::<Incoming>();
+        thread::Builder::new()
+            .name("kreate-collab-tls".into())
+            .spawn(move || {
+                crate::tls::pump_client_tls(stream, conn, out, inbox);
+            })?;
+        Ok(Self {
+            tx,
+            rx,
+            stream: handle,
+        })
     }
 
     pub fn send(&self, frame: Frame) {

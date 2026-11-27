@@ -10,13 +10,17 @@ use kreate_scene::{Changes, Document};
 use crate::client::{Connection, Incoming};
 use crate::relay::{Relay, RelayConfig};
 use crate::replica::Replica;
-use crate::wire::{Frame, Msg, Peer, Presence};
+use crate::wire::{Frame, Msg, Peer, Presence, Role};
 
 /// How often one's own edits go out while they are being made: a drag is
 /// seen moving, without a patch per frame.
 const SEND_EVERY: Duration = Duration::from_millis(50);
 /// How often where one is looking goes out.
 const LOOK_EVERY: Duration = Duration::from_millis(100);
+/// Initial delay before attempting an automatic reconnect after a drop.
+const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+/// Maximum exponential-backoff delay between reconnect attempts.
+const RECONNECT_MAX: Duration = Duration::from_secs(15);
 
 /// Something the application may want to tell the person.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,7 +36,12 @@ pub enum SessionEvent {
     Changed(Changes),
     Joined(Peer),
     Left(Peer),
-    /// The relay would not let us in, or the line went.
+    /// The connection dropped unexpectedly and the session is retrying.
+    Reconnecting {
+        reason: String,
+        retry_in_secs: u64,
+    },
+    /// The relay would not let us in, or the line went permanently.
     Closed(String),
 }
 
@@ -41,6 +50,7 @@ enum State {
     Knocking,
     AwaitingScene,
     Live,
+    Reconnecting,
     Closed,
 }
 
@@ -53,14 +63,22 @@ pub struct Session {
     state: State,
     /// Where the relay is, as typed or as hosted.
     pub address: String,
+    connect_addr: String,
+    room: String,
+    key: String,
     pub name: String,
     pub color: [u8; 3],
+    pub role: Role,
     pub peers: BTreeMap<u16, Peer>,
     pub looks: HashMap<u16, Presence>,
     /// Who is editing the inside of what: object identity → participant.
     pub locks: BTreeMap<u64, u16>,
     last_send: Instant,
     last_look: Option<(Presence, Instant)>,
+    auto_reconnect: bool,
+    reconnect_at: Option<Instant>,
+    reconnect_backoff: Duration,
+    reconnect_initial: Duration,
 }
 
 impl Session {
@@ -79,12 +97,13 @@ impl Session {
         let mut session = Self::join(&local, name, key)?;
         session.address = format!("{}:{}", lan_address(), relay.addr().port());
         session.relay = Some(relay);
+        session.auto_reconnect = false;
         Ok(session)
     }
 
     /// Joins the session at `address`. Its scene replaces the one open here.
     pub fn join(address: &str, name: &str, key: &str) -> io::Result<Self> {
-        let address = if address.contains(':') {
+        let address = if address.starts_with("tls://") || address.contains(':') {
             address.to_string()
         } else {
             format!("{address}:{}", crate::wire::DEFAULT_PORT)
@@ -95,15 +114,29 @@ impl Session {
             relay: None,
             replica: None,
             state: State::Knocking,
+            connect_addr: address.clone(),
             address,
+            room: "main".into(),
+            key: key.into(),
             name: name.into(),
             color: [255, 255, 255],
+            role: Role::Editor,
             peers: BTreeMap::new(),
             looks: HashMap::new(),
             locks: BTreeMap::new(),
             last_send: Instant::now(),
             last_look: None,
+            auto_reconnect: true,
+            reconnect_at: None,
+            reconnect_backoff: RECONNECT_INITIAL,
+            reconnect_initial: RECONNECT_INITIAL,
         })
+    }
+
+    /// Overrides the initial reconnect backoff (for tests).
+    pub fn set_reconnect_backoff(&mut self, initial: Duration) {
+        self.reconnect_initial = initial;
+        self.reconnect_backoff = initial;
     }
 
     pub fn is_hosting(&self) -> bool {
@@ -112,6 +145,10 @@ impl Session {
 
     pub fn is_live(&self) -> bool {
         self.state == State::Live
+    }
+
+    pub fn is_reconnecting(&self) -> bool {
+        self.state == State::Reconnecting
     }
 
     pub fn is_closed(&self) -> bool {
@@ -132,6 +169,29 @@ impl Session {
     /// elsewhere, and says where this participant is looking.
     pub fn tick(&mut self, doc: &mut Document, look: Option<Presence>) -> Vec<SessionEvent> {
         let mut events = Vec::new();
+        if self.state == State::Reconnecting {
+            if let Some(due) = self.reconnect_at {
+                if Instant::now() >= due {
+                    match Connection::open(&self.connect_addr, &self.name, &self.room, &self.key) {
+                        Ok(conn) => {
+                            self.conn = conn;
+                            self.state = State::Knocking;
+                            self.reconnect_at = None;
+                            self.peers.clear();
+                            self.looks.clear();
+                            self.locks.clear();
+                        }
+                        Err(_) => {
+                            let next = (self.reconnect_backoff * 2).min(RECONNECT_MAX);
+                            self.reconnect_backoff = next;
+                            self.reconnect_at = Some(Instant::now() + next);
+                        }
+                    }
+                }
+            }
+            return events;
+        }
+
         let arrived = self.conn.poll();
         let remote_edit = arrived
             .iter()
@@ -146,9 +206,20 @@ impl Session {
             match item {
                 Incoming::Frame(frame) => self.take(frame, doc, &mut events),
                 Incoming::Closed(reason) => {
-                    if self.state != State::Closed {
-                        self.state = State::Closed;
-                        events.push(SessionEvent::Closed(reason));
+                    if self.state != State::Closed && self.state != State::Reconnecting {
+                        if self.auto_reconnect && !self.is_hosting() && self.state == State::Live {
+                            let delay = self.reconnect_backoff;
+                            self.reconnect_backoff = (delay * 2).min(RECONNECT_MAX);
+                            self.reconnect_at = Some(Instant::now() + delay);
+                            self.state = State::Reconnecting;
+                            events.push(SessionEvent::Reconnecting {
+                                reason,
+                                retry_in_secs: delay.as_secs().max(1),
+                            });
+                        } else {
+                            self.state = State::Closed;
+                            events.push(SessionEvent::Closed(reason));
+                        }
                     }
                 }
             }
@@ -171,7 +242,7 @@ impl Session {
 
     /// Sends whatever changed here now, without waiting for the next turn.
     pub fn flush(&mut self, doc: &Document) {
-        if self.state != State::Live {
+        if self.state != State::Live || self.role == Role::Viewer {
             return;
         }
         if let Some(replica) = &mut self.replica {
@@ -200,7 +271,9 @@ impl Session {
 
     /// Asks to edit the inside of `uid` alone.
     pub fn lock(&mut self, uid: u64) {
-        self.conn.send(Frame::new(Msg::Lock { uid }));
+        if self.role == Role::Editor {
+            self.conn.send(Frame::new(Msg::Lock { uid }));
+        }
     }
 
     pub fn unlock(&mut self, uid: u64) {
@@ -223,11 +296,14 @@ impl Session {
                 color,
                 peers,
                 seeded,
+                role,
             } => {
                 self.color = color;
+                self.role = role;
+                self.reconnect_backoff = self.reconnect_initial;
                 self.peers = peers.into_iter().map(|p| (p.site, p)).collect();
                 let mut replica = Replica::new(doc, site);
-                if seeded {
+                if seeded || role == Role::Viewer {
                     self.state = State::AwaitingScene;
                 } else {
                     if let Some(bytes) = replica.seed(doc) {
@@ -246,6 +322,7 @@ impl Session {
                             events.push(SessionEvent::SceneReplaced);
                         }
                         Err(e) => {
+                            self.auto_reconnect = false;
                             self.state = State::Closed;
                             events.push(SessionEvent::Closed(e.to_string()));
                         }
@@ -269,6 +346,7 @@ impl Session {
                         // with the session from here on, with nothing to say
                         // so. Ended instead, to be joined again.
                         Err(e) => {
+                            self.auto_reconnect = false;
                             self.state = State::Closed;
                             events.push(SessionEvent::Closed(format!(
                                 "an edit from the session could not be read ({e}); join again"
@@ -299,6 +377,7 @@ impl Session {
                 self.locks = held.into_iter().collect();
             }
             Msg::Refused { reason } => {
+                self.auto_reconnect = false;
                 self.state = State::Closed;
                 events.push(SessionEvent::Closed(reason));
             }
@@ -382,6 +461,7 @@ mod tests {
         }
         assert!(closed);
         assert!(!guest.is_live());
+        assert!(guest.is_closed());
     }
 
     #[test]
@@ -407,5 +487,75 @@ mod tests {
         assert_eq!(guest.held_by_other(42).map(|p| p.site), Some(host_site));
         assert_eq!(host.held_by_other(42), None, "one's own lock");
         assert_eq!(guest.looks.get(&host_site).map(|l| l.eye), Some(look.eye));
+    }
+
+    #[test]
+    fn session_reconnects_after_relay_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "kreate-reconnect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let relay = Relay::start(
+            "127.0.0.1:0",
+            RelayConfig {
+                state_dir: Some(dir.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let addr = relay.addr();
+        let at = format!("127.0.0.1:{}", addr.port());
+
+        let mut doc = Document::new();
+        doc.add_mesh_object("Survivor", kreate_mesh::primitives::cube(2.0));
+        let mut client = Session::join(&at, "Client", "").unwrap();
+        client.set_reconnect_backoff(Duration::from_millis(40));
+        settle(&mut [(&mut client, &mut doc)]);
+        assert!(client.is_live());
+
+        // Drop the relay: client should enter Reconnecting, not Closed.
+        drop(relay);
+        let mut saw_reconnecting = false;
+        for _ in 0..50 {
+            for ev in client.tick(&mut doc, None) {
+                if matches!(ev, SessionEvent::Reconnecting { .. }) {
+                    saw_reconnecting = true;
+                }
+            }
+            if saw_reconnecting {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saw_reconnecting, "expected automatic reconnect attempt");
+        assert!(client.is_reconnecting());
+
+        // Bring the relay back on the same port with persisted state.
+        let _relay2 = Relay::start(
+            &at,
+            RelayConfig {
+                state_dir: Some(dir.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..100 {
+            client.tick(&mut doc, None);
+            if client.is_live() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            client.is_live(),
+            "client should recover after relay restarts"
+        );
+        assert_eq!(doc.object_count(), 1);
+        assert_eq!(doc.objects().next().unwrap().1.name, "Survivor");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

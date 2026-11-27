@@ -8,6 +8,7 @@
 pub mod anim;
 pub mod arch;
 pub mod armature;
+pub mod bake;
 pub mod collection;
 pub mod curve;
 pub mod datum;
@@ -44,6 +45,7 @@ pub fn register_builtin(registry: &mut crate::operator::OperatorRegistry) {
     anim::register(registry);
     arch::register(registry);
     armature::register(registry);
+    bake::register(registry);
     collection::register(registry);
     driver::register(registry);
     geo::register(registry);

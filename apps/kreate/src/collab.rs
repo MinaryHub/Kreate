@@ -138,6 +138,13 @@ impl App {
                         .get_args("collab-peer-left", &[("name", &peer.name)]);
                     self.status(&message);
                 }
+                SessionEvent::Reconnecting { reason, .. } => {
+                    let message = self
+                        .ui
+                        .catalog
+                        .get_args("collab-closed", &[("reason", &reason)]);
+                    self.status(&message);
+                }
                 SessionEvent::Closed(reason) => {
                     let message = self
                         .ui

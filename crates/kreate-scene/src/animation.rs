@@ -87,6 +87,11 @@ pub struct Keyframe {
     /// handle changes. Blender's handles can also be lengthened; that is the
     /// weighted-tangent feature, and it is not this one.
     pub slope: Option<f64>,
+    /// Optional incoming (left) Bézier handle slope in value per frame. When
+    /// `None`, the left handle mirrors `slope` (aligned tangent); when `Some`,
+    /// the key has broken/independent left and right tangents (e.g. a crisp
+    /// bounce off the floor).
+    pub slope_in: Option<f64>,
 }
 
 /// Two keys closer than this are the same key: a key inserted where one
@@ -162,6 +167,7 @@ impl FCurve {
             interpolation,
             selected: true,
             slope: None,
+            slope_in: None,
         };
         match self
             .keys
@@ -173,6 +179,7 @@ impl FCurve {
             Some(at) => {
                 self.keys[at] = Keyframe {
                     slope: self.keys[at].slope,
+                    slope_in: self.keys[at].slope_in,
                     ..key
                 }
             }
@@ -245,7 +252,13 @@ impl FCurve {
         match a.interpolation {
             Interpolation::Constant => 0.0,
             Interpolation::Linear => (b.value - a.value) / (b.frame - a.frame),
-            Interpolation::Bezier => self.slope(at),
+            Interpolation::Bezier => {
+                if start {
+                    self.slope_in(at)
+                } else {
+                    self.slope_out(at)
+                }
+            }
         }
     }
 
@@ -267,11 +280,9 @@ impl FCurve {
             Interpolation::Constant => a.value,
             Interpolation::Linear => a.value + (b.value - a.value) * t,
             Interpolation::Bezier => {
-                // Hermite with the auto-clamped slopes. Blender's Bézier with
-                // handles a third of the way along each side is exactly this:
-                // its frame is linear in the curve parameter, so the value is
-                // a cubic in the frame with these end slopes.
-                let (m0, m1) = (self.slope(i) * span, self.slope(next) * span);
+                // Hermite with independent outgoing (right) and incoming (left)
+                // handle slopes, falling back to auto-clamped slopes.
+                let (m0, m1) = (self.slope_out(i) * span, self.slope_in(next) * span);
                 let t2 = t * t;
                 let t3 = t2 * t;
                 (2.0 * t3 - 3.0 * t2 + 1.0) * a.value
@@ -280,6 +291,20 @@ impl FCurve {
                     + (t3 - t2) * m1
             }
         })
+    }
+
+    /// Outgoing (right) handle slope at key `i`, in value per frame.
+    pub fn slope_out(&self, i: usize) -> f64 {
+        self.slope(i)
+    }
+
+    /// Incoming (left) handle slope at key `i`, in value per frame. Uses
+    /// `slope_in` when explicitly broken, otherwise mirrors `slope(i)`.
+    pub fn slope_in(&self, i: usize) -> f64 {
+        if let Some(slope_in) = self.keys.get(i).and_then(|k| k.slope_in) {
+            return slope_in;
+        }
+        self.slope(i)
     }
 
     /// The auto-clamped slope at key `i`, in value per frame.
@@ -1195,6 +1220,7 @@ mod tests {
                 interpolation: Interpolation::Linear,
                 selected: false,
                 slope: None,
+                slope_in: None,
             },
             Keyframe {
                 frame: 1.0,
@@ -1202,6 +1228,7 @@ mod tests {
                 interpolation: Interpolation::Linear,
                 selected: false,
                 slope: None,
+                slope_in: None,
             },
             Keyframe {
                 frame: 5.0,
@@ -1209,6 +1236,7 @@ mod tests {
                 interpolation: Interpolation::Linear,
                 selected: false,
                 slope: None,
+                slope_in: None,
             },
             Keyframe {
                 frame: f64::NAN,
@@ -1216,6 +1244,7 @@ mod tests {
                 interpolation: Interpolation::Linear,
                 selected: false,
                 slope: None,
+                slope_in: None,
             },
         ];
         c.normalise();

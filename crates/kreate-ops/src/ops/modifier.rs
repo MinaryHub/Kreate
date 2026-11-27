@@ -21,8 +21,8 @@
 
 use kreate_mesh::modifiers::{
     ArrayParams, BevelParams, BooleanOp, DecimateParams, DeformMode, DisplaceParams, MirrorParams,
-    ScrewParams, ShrinkwrapParams, SimpleDeformParams, SolidifyParams, SubdivideParams, WeldParams,
-    WrapMode,
+    ScrewParams, ShrinkwrapParams, SimpleDeformParams, SolidifyParams, SubdivideParams,
+    WeightedNormalParams, WeldParams, WrapMode,
 };
 use kreate_ops_derive::OpParams;
 use kreate_scene::modifier::{BooleanModifier, ModifierInstance, ModifierKind};
@@ -46,6 +46,7 @@ pub const KINDS: &[&str] = &[
     "screw",
     "decimate",
     "shrinkwrap",
+    "weighted_normal",
 ];
 
 fn kind_of(index: u32) -> ModifierKind {
@@ -63,6 +64,7 @@ fn kind_of(index: u32) -> ModifierKind {
         11 => ModifierKind::Screw(ScrewParams::default()),
         12 => ModifierKind::Decimate(DecimateParams::default()),
         13 => ModifierKind::Shrinkwrap(kreate_scene::modifier::ShrinkwrapModifier::default()),
+        14 => ModifierKind::WeightedNormal(WeightedNormalParams::default()),
         _ => ModifierKind::Array(ArrayParams::default()),
     }
 }
@@ -105,7 +107,8 @@ pub struct AddParams {
         "simple_deform",
         "screw",
         "decimate",
-        "shrinkwrap"
+        "shrinkwrap",
+        "weighted_normal"
     ))]
     pub kind: u32,
 }
@@ -508,6 +511,24 @@ pub fn setter_params(
             p.set(
                 "offset",
                 kreate_reflect::PropertyValue::Float(m.params.offset as f64),
+            );
+        }
+        ModifierKind::WeightedNormal(w) => {
+            p.set(
+                "weight",
+                kreate_reflect::PropertyValue::Float(w.weight as f64),
+            );
+            p.set(
+                "threshold",
+                kreate_reflect::PropertyValue::Float(w.threshold as f64),
+            );
+            p.set(
+                "keep_sharp",
+                kreate_reflect::PropertyValue::Bool(w.keep_sharp),
+            );
+            p.set(
+                "face_angle",
+                kreate_reflect::PropertyValue::Bool(w.face_angle),
             );
         }
         ModifierKind::Array(a) => {
@@ -1651,6 +1672,74 @@ pub(crate) fn bake_last(
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct SetWeightedNormalParams {
+    #[param(min = 0, unit = "count")]
+    pub index: u32,
+    /// Area weighting factor (1..=100); larger faces dominate thin bevels.
+    #[param(min = 1.0, max = 100.0, step = 1.0)]
+    pub weight: f64,
+    /// Angle threshold above which sharp edges split smoothing groups.
+    #[param(min = 0.0, max = 3.15, unit = "angle")]
+    pub threshold: f64,
+    /// Respect sharp edge marks and angle splits.
+    pub keep_sharp: bool,
+    /// Weight corners by interior face angle as well as area.
+    pub face_angle: bool,
+}
+
+impl Default for SetWeightedNormalParams {
+    fn default() -> Self {
+        let d = WeightedNormalParams::default();
+        Self {
+            index: 0,
+            weight: d.weight as f64,
+            threshold: d.threshold as f64,
+            keep_sharp: d.keep_sharp,
+            face_angle: d.face_angle,
+        }
+    }
+}
+
+/// Sets a weighted normal modifier's parameters.
+pub struct SetWeightedNormal;
+
+impl Operator for SetWeightedNormal {
+    type Params = SetWeightedNormalParams;
+    fn id() -> &'static str {
+        "object.modifier_set_weighted_normal"
+    }
+    fn label() -> &'static str {
+        "Weighted Normal Modifier"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        target(doc).is_some()
+    }
+    fn current(
+        _ctx: &Context,
+        doc: &Document,
+        given: &crate::property::PropertyMap,
+    ) -> Option<Self::Params> {
+        current_modifier(doc, given, "weighted_normal")
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        set_kind(
+            doc,
+            params.index,
+            ModifierKind::WeightedNormal(WeightedNormalParams {
+                weight: params.weight.clamp(1.0, 100.0) as f32,
+                threshold: params.threshold.clamp(0.0, std::f64::consts::PI) as f32,
+                keep_sharp: params.keep_sharp,
+                face_angle: params.face_angle,
+            }),
+        )
+    }
+}
+
 pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<Boolean>();
     registry.register::<SetSolidify>();
@@ -1664,6 +1753,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<SetScrew>();
     registry.register::<SetDecimate>();
     registry.register::<SetShrinkwrap>();
+    registry.register::<SetWeightedNormal>();
     registry.register::<Add>();
     registry.register::<Apply>();
     registry.register::<Remove>();
@@ -2162,6 +2252,7 @@ mod tests {
             "object.modifier_set_bevel",
             "object.modifier_set_boolean",
             "object.modifier_set_path_array",
+            "object.modifier_set_weighted_normal",
             "object.modifier_apply",
         ] {
             assert!(r.get(id).is_some(), "{id} is not registered");
@@ -2172,7 +2263,7 @@ mod tests {
     fn the_add_menu_and_the_kind_list_agree() {
         // The variant list drives the dropdown; `kind_of` turns the choice into a
         // modifier. They are two lists and would otherwise drift apart silently.
-        assert_eq!(KINDS.len(), 14);
+        assert_eq!(KINDS.len(), 15);
         for (i, name) in KINDS.iter().enumerate() {
             assert_eq!(kind_of(i as u32).id(), *name);
         }

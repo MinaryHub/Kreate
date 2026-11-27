@@ -982,8 +982,7 @@ impl Document {
     /// in a number counts on from its stem, so a copy of `Cube.001` is
     /// `Cube.002` rather than `Cube.001.001`.
     pub fn unique_object_name(&self, name: &str) -> String {
-        let taken = |n: &str| self.objects.iter().any(|(_, o)| o.name == n);
-        if name.is_empty() || !taken(name) {
+        if name.is_empty() || !self.objects.iter().any(|(_, o)| o.name == name) {
             return name.to_string();
         }
         let stem = match name.rsplit_once('.') {
@@ -994,9 +993,11 @@ impl Document {
             }
             _ => name,
         };
+        let existing: std::collections::HashSet<&str> =
+            self.objects.iter().map(|(_, o)| o.name.as_str()).collect();
         (1..)
             .map(|i| format!("{stem}.{i:03}"))
-            .find(|n| !taken(n))
+            .find(|n| !existing.contains(n.as_str()))
             .expect("names run out after integers")
     }
 
@@ -1845,6 +1846,33 @@ impl Document {
         true
     }
 
+    /// An armature object's bones, posed, in armature space (resolving any
+    /// bone constraints that target external scene objects).
+    pub fn posed_bones_local(&self, armature_obj: ObjectId) -> Vec<DAffine3> {
+        let Some((_, armature)) = self.armature_of(armature_obj) else {
+            return Vec::new();
+        };
+        let Some(o) = self.object(armature_obj) else {
+            return Vec::new();
+        };
+        let has_external = o
+            .pose
+            .constraints
+            .iter()
+            .any(|c| c.enabled && c.target_object.is_some());
+        if !has_external {
+            return crate::armature::posed(armature, &o.pose);
+        }
+        let inv_world = self.world_transform(armature_obj).inverse();
+        crate::armature::posed_with_targets(armature, &o.pose, &|uid| {
+            let target_id = self.object_by_uid(uid)?;
+            if target_id == armature_obj {
+                return None;
+            }
+            Some(inv_world * self.world_transform(target_id))
+        })
+    }
+
     /// The armature a bound mesh object follows, and the matrices its bones
     /// move its vertices by, in its own space — or `None` when it follows
     /// nothing, or something that is no longer an armature.
@@ -1853,23 +1881,20 @@ impl Document {
         let (id, armature) = self.armature_of(target)?;
         let mesh_to_armature =
             self.world_transform(target).inverse() * self.world_transform(object);
-        let pose = &self.object(target)?.pose;
-        Some((
-            id,
-            crate::skin::skin_matrices(armature, pose, mesh_to_armature),
-        ))
+        let back = mesh_to_armature.inverse();
+        let frames = self.posed_bones_local(target);
+        let matrices = frames
+            .iter()
+            .zip(&armature.bones)
+            .map(|(p, bone)| back * *p * bone.rest().inverse() * mesh_to_armature)
+            .collect();
+        Some((id, matrices))
     }
 
     /// An armature object's bones, posed, in world space.
     pub fn posed_bones(&self, object: ObjectId) -> Vec<DAffine3> {
-        let Some((_, armature)) = self.armature_of(object) else {
-            return Vec::new();
-        };
-        let Some(o) = self.object(object) else {
-            return Vec::new();
-        };
         let world = self.world_transform(object);
-        crate::armature::posed(armature, &o.pose)
+        self.posed_bones_local(object)
             .into_iter()
             .map(|f| world * f)
             .collect()
@@ -2162,7 +2187,7 @@ impl Document {
                 let Some(local) = strip.action_frame(frame) else {
                     continue;
                 };
-                let t = strip.influence.clamp(0.0, 1.0);
+                let t = strip.effective_influence(frame);
                 if t <= 0.0 {
                     continue;
                 }

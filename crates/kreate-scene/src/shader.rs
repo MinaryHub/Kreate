@@ -657,14 +657,19 @@ impl NodeKind {
                 Socket::Vector,
             ],
             // Base colour, metallic, roughness, normal, a tint on the glow,
-            // opacity, and occlusion — each new one last, so the sockets
-            // files name keep their numbers.
+            // opacity, occlusion, coat, anisotropy, transmission, and
+            // subsurface — each new one last, so the sockets files name keep
+            // their numbers.
             NodeKind::Surface { .. } => &[
                 Socket::Color,
                 Socket::Scalar,
                 Socket::Scalar,
                 Socket::Vector,
                 Socket::Color,
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
+                Socket::Scalar,
                 Socket::Scalar,
                 Socket::Scalar,
             ],
@@ -1096,6 +1101,10 @@ impl NodeKind {
                 "Emission",
                 "Alpha",
                 "Occlusion",
+                "Coat",
+                "Anisotropy",
+                "Transmission",
+                "Subsurface",
             ],
             NodeKind::Color(_) | NodeKind::Value(_) => &[],
             NodeKind::Image { .. } => &["Vector"],
@@ -1447,9 +1456,10 @@ impl ShaderGraph {
                 Some(NodeKind::NormalMap { .. })
                 | Some(NodeKind::SeparateRgb)
                 | Some(NodeKind::MultiplyValue) => true,
-                // Metallic, roughness and the normal are numbers; the base
-                // colour, the glow's tint and an alpha are not about which.
-                Some(NodeKind::Surface { .. }) => matches!(l.to_socket, 1..=3 | 6),
+                // Metallic, roughness, normal, occlusion, coat, anisotropy,
+                // transmission, and subsurface are scalar/vector data; base
+                // colour, glow tint, and alpha are sRGB/colour.
+                Some(NodeKind::Surface { .. }) => matches!(l.to_socket, 1..=3 | 6..=10),
                 _ => false,
             }
         });

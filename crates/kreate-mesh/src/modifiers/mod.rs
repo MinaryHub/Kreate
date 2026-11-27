@@ -37,6 +37,7 @@ pub mod simple_deform;
 pub mod solidify;
 pub mod subdivide;
 pub mod triangulate;
+pub mod weighted_normal;
 pub mod weld;
 
 pub use array::{array, ArrayParams};
@@ -52,6 +53,7 @@ pub use simple_deform::{simple_deform, DeformMode, SimpleDeformParams};
 pub use solidify::{solidify, SolidifyParams};
 pub use subdivide::{subdivide, SubdivideParams};
 pub use triangulate::triangulate;
+pub use weighted_normal::{weighted_normal, WeightedNormalParams};
 pub use weld::{weld, WeldParams};
 
 use crate::attribute::{AttributeStore, Domain};

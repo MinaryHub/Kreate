@@ -961,6 +961,12 @@ pub struct NlaStripParams {
     /// How its values meet what is under it.
     #[param(variants("replace", "add", "subtract", "multiply"))]
     pub blend: u32,
+    /// Frames to ramp influence in from the strip's start.
+    #[param(min = 0.0, max = 10000.0)]
+    pub blend_in: f64,
+    /// Frames to ramp influence out before the strip's end.
+    #[param(min = 0.0, max = 10000.0)]
+    pub blend_out: f64,
 }
 
 impl Default for NlaStripParams {
@@ -974,6 +980,8 @@ impl Default for NlaStripParams {
             extend: 1,
             mute: false,
             blend: 0,
+            blend_in: 0.0,
+            blend_out: 0.0,
         }
     }
 }
@@ -989,6 +997,8 @@ pub fn nla_strip_params(index: usize, s: &kreate_scene::nla::NlaStrip) -> NlaStr
         extend: s.extend.index(),
         mute: s.mute,
         blend: s.blend.index(),
+        blend_in: s.blend_in,
+        blend_out: s.blend_out,
     }
 }
 
@@ -1035,6 +1045,8 @@ impl Operator for NlaStripSet {
                 .get(params.blend as usize)
                 .copied()
                 .unwrap_or_default(),
+            blend_in: params.blend_in.max(0.0),
+            blend_out: params.blend_out.max(0.0),
             ..s.clone()
         };
         if *s == wanted {
@@ -1514,6 +1526,9 @@ pub struct SetKeySlopeParams {
     pub frame: f64,
     /// Value per frame.
     pub slope: f64,
+    /// Which handle side to set: both (aligned), out (right), or in (left / broken).
+    #[param(variants("both", "out", "in"))]
+    pub side: u32,
 }
 
 /// Sets one key's slope: what dragging its handle in the graph editor means.
@@ -1561,10 +1576,30 @@ impl Operator for SetKeySlope {
         else {
             return Ok(OpResult::Cancelled);
         };
-        if key.slope == Some(params.slope) {
-            return Ok(OpResult::Cancelled);
+        match params.side {
+            1 => {
+                if key.slope == Some(params.slope) {
+                    return Ok(OpResult::Cancelled);
+                }
+                if key.slope_in.is_none() {
+                    key.slope_in = key.slope;
+                }
+                key.slope = Some(params.slope);
+            }
+            2 => {
+                if key.slope_in == Some(params.slope) {
+                    return Ok(OpResult::Cancelled);
+                }
+                key.slope_in = Some(params.slope);
+            }
+            _ => {
+                if key.slope == Some(params.slope) && key.slope_in.is_none() {
+                    return Ok(OpResult::Cancelled);
+                }
+                key.slope = Some(params.slope);
+                key.slope_in = None;
+            }
         }
-        key.slope = Some(params.slope);
         Ok(OpResult::Finished)
     }
 }

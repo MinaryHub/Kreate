@@ -38,13 +38,18 @@ const CONTEXT: u32 = 32_768;
 /// about the scene uses. Every tool, with every description, is thousands
 /// of words a small model reads before each answer — on a laptop, most of
 /// the wait.
-const LOCAL_TOOLS: [&str; 10] = [
+const LOCAL_TOOLS: [&str; 15] = [
     "get_scene",
     "get_context",
     "list_operators",
     "run_script",
     "get_mesh",
+    "get_drawing",
+    "measure",
+    "analyze_mesh",
+    "check_overlaps",
     "capture_viewport",
+    "render_image",
     "undo",
     "timeline",
     "search_assets",
@@ -202,13 +207,13 @@ impl Stop {
         self.stopped.store(true, Ordering::SeqCst);
     }
 
-    fn stopped(&self) -> bool {
+    pub(crate) fn stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
 }
 
 /// `kreate-mcp`, spoken to as an MCP client speaks: one JSON message a line.
-struct Connector {
+pub(crate) struct Connector {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -216,8 +221,9 @@ struct Connector {
 }
 
 impl Connector {
-    fn start(path: &Path) -> Result<Self, String> {
+    pub(crate) fn start(path: &Path) -> Result<Self, String> {
         let mut child = quiet_command(path)
+            .env("KREATE_BRIDGE_PID", std::process::id().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -233,13 +239,13 @@ impl Connector {
         })
     }
 
-    fn send(&mut self, message: &Value) -> Result<(), String> {
+    pub(crate) fn send(&mut self, message: &Value) -> Result<(), String> {
         writeln!(self.input, "{message}")
             .and_then(|_| self.input.flush())
             .map_err(|e| format!("kreate-mcp stopped listening: {e}"))
     }
 
-    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    pub(crate) fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next;
         self.next += 1;
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
@@ -460,10 +466,11 @@ fn run(
             return Err("stopped".into());
         }
         answer_now |= round == MAX_ROUNDS;
-        let messages = history
-            .lock()
-            .map_err(|_| "the conversation was lost")?
-            .clone();
+        let messages = {
+            let mut h = history.lock().map_err(|_| "the conversation was lost")?;
+            crate::ai_api::prune_history(&mut h, (CONTEXT as usize) * 3);
+            h.clone()
+        };
         let mut body = json!({
             "model": model.name,
             "messages": messages,

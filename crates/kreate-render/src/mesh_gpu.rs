@@ -528,7 +528,7 @@ impl RenderMeshCpu {
     /// correctly on screen.
     pub fn extract_with_auto_smooth(mesh: &MeshData, angle_threshold: f32) -> Self {
         let tri = mesh.triangulate_corners();
-        let corner_normals = mesh.compute_corner_normals(angle_threshold);
+        let corner_normals = mesh.resolved_corner_normals(angle_threshold);
         // Per corner, like the normals: a seam is two coordinates at one
         // position, which is what a seam *is*.
         let corner_uvs = mesh.attributes().get_f32x2(names::UV);

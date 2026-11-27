@@ -33,6 +33,8 @@ struct Header {
     settings: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pos_patches: Vec<PosPatchMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tile_patches: Vec<TilePatchMeta>,
 }
 
 /// Metadata for a mesh whose topology, material slots, and non-position
@@ -46,6 +48,36 @@ struct PosPatchMeta {
     /// `false`: payload holds `num_verts` `[f32; 3]` 12-byte records.
     sparse: bool,
     count: u32,
+}
+
+/// Metadata for an image whose dimensions, format, and metadata match the
+/// agreed base, allowing only modified 128×128 tiles to travel across the wire.
+#[derive(Serialize, Deserialize)]
+struct TilePatchMeta {
+    uid: u64,
+    width: u32,
+    height: u32,
+    format: String,
+    /// `(tile_x, tile_y, present)` entries; when `present` is true, the next
+    /// `TILE * TILE * bytes_per_pixel` bytes in `tile_blob` store that tile.
+    tiles: Vec<(u32, u32, bool)>,
+}
+
+/// Inspects a sync patch header without decoding its container body, returning
+/// every datablock UID touched (`changed` with its kind, or `removed` with `None`).
+pub fn peek_touched_uids(bytes: &[u8]) -> Option<Vec<(Option<DatablockKind>, u64)>> {
+    let unpacked = unwrap_compressed(bytes).ok()?;
+    let raw = unpacked.as_ref();
+    let len = u32::from_be_bytes(raw.get(..4)?.try_into().ok()?) as usize;
+    let header: Header = serde_json::from_slice(raw.get(4..4 + len)?).ok()?;
+    let mut out = Vec::with_capacity(header.changed.len() + header.removed.len());
+    for (k, u) in header.changed {
+        out.push((DatablockKind::from_id(&k), u));
+    }
+    for u in header.removed {
+        out.push((None, u));
+    }
+    Some(out)
 }
 
 /// What can go wrong reading a patch.
@@ -97,8 +129,7 @@ pub fn encode(doc: &Document, changes: &Changes) -> Result<Vec<u8>, ContainerErr
 }
 
 /// Encodes `changes` from `doc` against an agreed `base` document, emitting
-/// compact vertex-position deltas whenever a mesh changed only in its vertex
-/// coordinates (e.g. sculpting or edit-mode transforms).
+/// compact vertex-position deltas and image-tile deltas whenever possible.
 pub fn encode_since(
     base: &Document,
     doc: &Document,
@@ -115,6 +146,8 @@ fn encode_inner(
     let mut container_changes = changes.clone();
     let mut pos_patches = Vec::new();
     let mut pos_blob = Vec::new();
+    let mut tile_patches = Vec::new();
+    let mut tile_blob = Vec::new();
 
     if let Some(base) = base {
         let slot_uids = |d: &Document, m: kreate_scene::MeshId| -> Vec<Option<Uid>> {
@@ -124,6 +157,66 @@ fn encode_inner(
                 .collect()
         };
         for &(kind, uid) in &changes.changed {
+            if kind == DatablockKind::Image {
+                let (Some(base_id), Some(cur_id)) = (base.image_by_uid(uid), doc.image_by_uid(uid))
+                else {
+                    continue;
+                };
+                let (Some(base_img), Some(cur_img)) = (base.image(base_id), doc.image(cur_id))
+                else {
+                    continue;
+                };
+                if base_img.name != cur_img.name
+                    || base_img.linkage != cur_img.linkage
+                    || base_img.width() != cur_img.width()
+                    || base_img.height() != cur_img.height()
+                    || base_img.format != cur_img.format
+                    || base_img.color_space != cur_img.color_space
+                    || base_img.source != cur_img.source
+                {
+                    continue;
+                }
+                let (across, down) = cur_img.tile_counts();
+                let mut changed_tiles: Vec<(u32, u32, Option<Arc<kreate_scene::image::Tile>>)> =
+                    Vec::new();
+                for ty in 0..down {
+                    for tx in 0..across {
+                        let a = base_img.tile_handle(tx, ty);
+                        let b = cur_img.tile_handle(tx, ty);
+                        let same = match (&a, &b) {
+                            (None, None) => true,
+                            (Some(x), Some(y)) => Arc::ptr_eq(x, y) || x.bytes() == y.bytes(),
+                            _ => false,
+                        };
+                        if !same {
+                            changed_tiles.push((tx, ty, b));
+                        }
+                    }
+                }
+                let resident = cur_img.resident_tiles();
+                if !changed_tiles.is_empty() && changed_tiles.len() < resident {
+                    container_changes
+                        .changed
+                        .remove(&(DatablockKind::Image, uid));
+                    let mut meta_tiles = Vec::with_capacity(changed_tiles.len());
+                    for (tx, ty, tile) in changed_tiles {
+                        if let Some(t) = tile {
+                            meta_tiles.push((tx, ty, true));
+                            tile_blob.extend_from_slice(t.bytes());
+                        } else {
+                            meta_tiles.push((tx, ty, false));
+                        }
+                    }
+                    tile_patches.push(TilePatchMeta {
+                        uid: uid.raw(),
+                        width: cur_img.width(),
+                        height: cur_img.height(),
+                        format: cur_img.format.id().to_string(),
+                        tiles: meta_tiles,
+                    });
+                }
+                continue;
+            }
             if kind != DatablockKind::Mesh {
                 continue;
             }
@@ -187,6 +280,8 @@ fn encode_inner(
         }
     }
 
+    let has_pos = !pos_patches.is_empty();
+    let has_tile = !tile_patches.is_empty();
     let header = Header {
         changed: changes
             .changed
@@ -196,16 +291,21 @@ fn encode_inner(
         removed: changes.removed.iter().map(|u| u.raw()).collect(),
         settings: changes.settings,
         pos_patches,
+        tile_patches,
     };
     let header_bytes = serde_json::to_vec(&header).expect("a header always serialises");
     let body = container::write(&doc.patch(&container_changes), &Manifest::default(), &[])?;
-    let has_pos = !pos_blob.is_empty();
-    let mut raw = Vec::with_capacity(8 + header_bytes.len() + pos_blob.len() + body.len());
+    let mut raw =
+        Vec::with_capacity(12 + header_bytes.len() + pos_blob.len() + tile_blob.len() + body.len());
     raw.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
     raw.extend_from_slice(&header_bytes);
     if has_pos {
         raw.extend_from_slice(&(pos_blob.len() as u32).to_be_bytes());
         raw.extend_from_slice(&pos_blob);
+    }
+    if has_tile {
+        raw.extend_from_slice(&(tile_blob.len() as u32).to_be_bytes());
+        raw.extend_from_slice(&tile_blob);
     }
     raw.extend_from_slice(&body);
     Ok(wrap_compressed(&raw))
@@ -255,6 +355,21 @@ fn decode_inner(
         cursor += 4;
         let slice = raw.get(cursor..cursor + plen).ok_or(SyncError::Short)?;
         cursor += plen;
+        slice
+    } else {
+        &[][..]
+    };
+
+    let tile_slice = if !header.tile_patches.is_empty() {
+        let tlen = u32::from_be_bytes(
+            raw.get(cursor..cursor + 4)
+                .ok_or(SyncError::Short)?
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        cursor += 4;
+        let slice = raw.get(cursor..cursor + tlen).ok_or(SyncError::Short)?;
+        cursor += tlen;
         slice
     } else {
         &[][..]
@@ -338,6 +453,50 @@ fn decode_inner(
             };
             doc.set_mesh_slots(patch_mesh_id, patch_slots);
         }
+
+        let mut tile_at = 0usize;
+        for meta in &header.tile_patches {
+            let Some(format) = kreate_scene::PixelFormat::from_id(&meta.format) else {
+                return Err(SyncError::Short);
+            };
+            let tile_bytes = (kreate_scene::image::TILE * kreate_scene::image::TILE) as usize
+                * format.bytes_per_pixel();
+            let uid = Uid::from_raw(meta.uid);
+            let existing_img = existing
+                .image_by_uid(uid)
+                .and_then(|id| existing.image(id))
+                .filter(|img| {
+                    img.width() == meta.width && img.height() == meta.height && img.format == format
+                });
+            let mut updated = existing_img.cloned();
+            for &(tx, ty, present) in &meta.tiles {
+                if present {
+                    let chunk = tile_slice
+                        .get(tile_at..tile_at + tile_bytes)
+                        .ok_or(SyncError::Short)?;
+                    tile_at += tile_bytes;
+                    if let Some(img) = updated.as_mut() {
+                        let mut tile = kreate_scene::image::Tile::blank(format);
+                        tile.bytes_mut().copy_from_slice(chunk);
+                        img.set_tile(tx, ty, Some(Arc::new(tile)));
+                    }
+                } else if let Some(img) = updated.as_mut() {
+                    img.set_tile(tx, ty, None);
+                }
+            }
+            if let Some(img) = updated {
+                match doc.image_by_uid(uid) {
+                    Some(id) => {
+                        if let Some(slot) = doc.image_mut(id) {
+                            *slot = img;
+                        }
+                    }
+                    None => {
+                        doc.restore_image(img, uid);
+                    }
+                }
+            }
+        }
     }
 
     let changes = Changes {
@@ -391,6 +550,11 @@ mod tests {
         a.object_mut(cube).unwrap().transform.translation.x = 4.0;
         let changes = a.changes_since(&base);
         let bytes = encode(&a, &changes).unwrap();
+        let touched = peek_touched_uids(&bytes).expect("header peeks");
+        assert!(touched.contains(&(
+            Some(DatablockKind::Object),
+            a.object(cube).unwrap().uid.raw()
+        )));
         apply(&mut b, &bytes).unwrap();
         let (_, cube_b) = b.objects().next().unwrap();
         assert_eq!(cube_b.transform.translation.x, 4.0);
@@ -445,6 +609,54 @@ mod tests {
         assert!(
             b_before.only_positions_differ(b_after),
             "receiver MeshData must preserve topology & UV Arc pointers so GPU repositions in place"
+        );
+    }
+
+    #[test]
+    fn paint_dab_travels_as_tiny_tile_delta_and_shares_untouched_tiles() {
+        let mut a = Document::new();
+        let mut img = Image::new("Paint", 512, 512, PixelFormat::Rgba8);
+        // Populate all 4x4 tiles with varied pseudo-noise so zlib does not collapse full image.
+        for ty in 0..4 {
+            for tx in 0..4 {
+                let tile = img.tile_mut(tx, ty).unwrap();
+                for (i, b) in tile.bytes_mut().iter_mut().enumerate() {
+                    *b = ((i as u32 * 31 + tx * 97 + ty * 173) % 251) as u8;
+                }
+            }
+        }
+        let img_a = a.add_image(img);
+
+        let mut b = Document::new();
+        apply(&mut b, &encode_all(&a).unwrap()).unwrap();
+        let img_b = b.images().next().unwrap().0;
+        let untouched_before = b.image(img_b).unwrap().tile_handle(3, 3).unwrap();
+
+        let base = a.clone();
+        // Paint only inside tile (0, 0).
+        {
+            let tile = a.image_mut(img_a).unwrap().tile_mut(0, 0).unwrap();
+            tile.bytes_mut()[0..4].copy_from_slice(&[255, 10, 20, 255]);
+        }
+        let changes = a.changes_since(&base);
+        let full_bytes = encode(&a, &changes).unwrap();
+        let delta_bytes = encode_since(&base, &a, &changes).unwrap();
+        assert!(
+            delta_bytes.len() * 4 < full_bytes.len(),
+            "tile delta ({} B) should be far smaller than full image patch ({} B)",
+            delta_bytes.len(),
+            full_bytes.len()
+        );
+
+        apply(&mut b, &delta_bytes).unwrap();
+        assert_eq!(
+            &b.image(img_b).unwrap().tile(0, 0).unwrap().bytes()[0..4],
+            &[255, 10, 20, 255]
+        );
+        let untouched_after = b.image(img_b).unwrap().tile_handle(3, 3).unwrap();
+        assert!(
+            Arc::ptr_eq(&untouched_before, &untouched_after),
+            "untouched tiles must keep their existing Arc pointers"
         );
     }
 }

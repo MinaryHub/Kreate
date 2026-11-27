@@ -35,7 +35,14 @@ fn find(
     target: &str,
 ) -> Option<(kreate_scene::ObjectId, String, u8, Option<usize>)> {
     let (uid, property, index) = super::anim::parse_curve(target)?;
-    if !DRIVABLE.contains(&property.as_str()) || index > 2 {
+    let is_shape = property
+        .strip_prefix("shape:")
+        .is_some_and(|n| !n.is_empty());
+    if is_shape {
+        if index != 0 {
+            return None;
+        }
+    } else if !DRIVABLE.contains(&property.as_str()) || index > 2 {
         return None;
     }
     let object = doc.object_by_uid(Uid::from_raw(uid)).filter(|_| uid != 0)?;
@@ -71,7 +78,7 @@ pub struct AddDriverParams {
     pub expression: String,
 }
 
-/// Puts a driver on one component of an object's transform.
+/// Puts a driver on one component of an object's transform or a shape key.
 pub struct AddDriver;
 
 impl Operator for AddDriver {
@@ -96,12 +103,19 @@ impl Operator for AddDriver {
         let expression = if params.expression.trim().is_empty() {
             // The value now, written so that it reads back as the same number:
             // `{}` on an f64 is the shortest text that parses to it exactly.
-            let now = doc
-                .document()
-                .object(object)
-                .and_then(|o| kreate_scene::animation::read_object(&o.transform, &property))
-                .map(|v| v[index as usize])
-                .unwrap_or(0.0);
+            let now = if let Some(shape_name) = property.strip_prefix("shape:") {
+                doc.document()
+                    .object(object)
+                    .and_then(|o| o.shape_keys.iter().find(|k| k.name == shape_name))
+                    .map(|k| k.value as f64)
+                    .unwrap_or(0.0)
+            } else {
+                doc.document()
+                    .object(object)
+                    .and_then(|o| kreate_scene::animation::read_object(&o.transform, &property))
+                    .map(|v| v[index as usize])
+                    .unwrap_or(0.0)
+            };
             format!("{now}")
         } else {
             params.expression.clone()
@@ -230,6 +244,9 @@ pub struct VariableParams {
     pub object: String,
     #[param(variants("location", "rotation_euler", "scale"))]
     pub property: u32,
+    /// Optional explicit property path (e.g. `bone:Forearm.rotation_euler` or
+    /// `shape:Smile`); overrides `property` when non-empty.
+    pub path: String,
     #[param(min = 0, max = 2, unit = "count")]
     pub index: u32,
 }
@@ -264,10 +281,15 @@ impl Operator for SetDriverVariable {
                 Err(_) => return Ok(OpResult::Cancelled),
             },
         };
+        let property = if !params.path.trim().is_empty() {
+            params.path.trim().into()
+        } else {
+            DRIVABLE[(params.property as usize).min(2)].into()
+        };
         let value = DriverVariable {
             name: params.name.clone(),
             target,
-            property: DRIVABLE[(params.property as usize).min(2)].into(),
+            property,
             index: params.index.min(2) as u8,
         };
         let Some(d) = driver_mut(doc, &params.target) else {

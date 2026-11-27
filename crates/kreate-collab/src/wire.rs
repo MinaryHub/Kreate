@@ -45,6 +45,15 @@ pub struct Presence {
     pub editing: Option<u64>,
 }
 
+/// A participant's permission level inside a shared room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    #[default]
+    Editor,
+    Viewer,
+}
+
 /// Someone in the session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Peer {
@@ -52,6 +61,8 @@ pub struct Peer {
     pub name: String,
     /// Their colour, sRGB.
     pub color: [u8; 3],
+    #[serde(default)]
+    pub role: Role,
 }
 
 /// One message's header.
@@ -88,6 +99,8 @@ pub enum Msg {
         color: [u8; 3],
         peers: Vec<Peer>,
         seeded: bool,
+        #[serde(default)]
+        role: Role,
     },
     /// The session's scene as it stands; the body is a patch of all of it.
     Snapshot {

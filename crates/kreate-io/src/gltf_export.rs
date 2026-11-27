@@ -85,6 +85,14 @@ pub struct GltfExportOptions {
     pub normals: bool,
     /// The angle beyond which adjacent faces stop sharing a normal.
     pub auto_smooth_angle: f32,
+    /// Write a `TANGENT` attribute (`VEC4`, MikkTSpace/glTF handedness) when
+    /// both normals and UVs are present. On by default so game engines share
+    /// the exact tangent basis used by the texture baker.
+    pub tangents: bool,
+    /// When `Some(quality)` (1..=100), encode opaque colour images as JPEG to
+    /// shrink `.glb` size for real-time engines; normal, ORM, and transparent
+    /// images remain lossless PNG.
+    pub texture_jpeg_quality: Option<u8>,
 }
 
 impl Default for GltfExportOptions {
@@ -94,6 +102,8 @@ impl Default for GltfExportOptions {
             record_ngons: true,
             normals: true,
             auto_smooth_angle: DEFAULT_AUTO_SMOOTH,
+            tangents: true,
+            texture_jpeg_quality: None,
         }
     }
 }
@@ -104,11 +114,13 @@ impl Default for GltfExportOptions {
 /// exact. Exact is what is wanted: two corners either carry the same value and
 /// share a vertex, or they do not. An epsilon here would silently merge a seam
 /// that the author placed one texel apart.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct VertexKey {
     vertex: u32,
     uv: [u32; 2],
+    extra_uvs: Vec<[u32; 2]>,
     normal: [u32; 3],
+    tangent: [u32; 4],
     color: [u32; 4],
 }
 
@@ -181,7 +193,7 @@ pub fn write_gltf_scene(
 
     // The textures before the meshes, so that a material emitted while the
     // meshes are written can name one by the scene's own image index.
-    write_textures(&scene.images, &mut root, &mut bin, &mut notes);
+    write_textures(scene, options, &mut root, &mut bin, &mut notes);
 
     for (index, (name, mesh)) in scene.meshes.iter().enumerate() {
         let mesh_index = root.meshes.len() as u32;
@@ -886,6 +898,27 @@ fn write_mesh(
 ) -> Vec<json::mesh::Primitive> {
     let positions = mesh.positions();
     let uvs = mesh.attributes().get_f32x2(names::UV);
+    // Additional corner UV sets (e.g. lightmaps `uv2`, `uv_lightmap`), sorted
+    // by name for deterministic TEXCOORD_1..N assignment.
+    let mut extra_uv_layers: Vec<(&str, &[Vec2])> = mesh
+        .attributes()
+        .iter()
+        .filter_map(|l| {
+            if l.name.starts_with("uv")
+                && &*l.name != names::UV
+                && l.domain == kreate_mesh::attribute::Domain::Corner
+            {
+                if let kreate_mesh::attribute::AttrData::F32x2(v) = &l.data {
+                    if v.len() == mesh.num_corners() as usize {
+                        return Some((&*l.name, v.as_slice()));
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+    extra_uv_layers.sort_by_key(|(n, _)| *n);
+
     // The vertex colours, as COLOR_0: per corner, from a corner layer or a
     // point one.
     let colors: Option<Vec<glam::Vec4>> = mesh.attributes().get(names::COLOR).and_then(|l| {
@@ -916,6 +949,13 @@ fn write_mesh(
     } else {
         computed = mesh.compute_corner_normals(options.auto_smooth_angle);
         Some(&computed)
+    };
+    let tangents: Option<Vec<[f32; 4]>> = if options.tangents {
+        normals
+            .zip(uvs)
+            .map(|(n, _)| kreate_mesh::tangents::compute_corner_tangents(mesh, n))
+    } else {
+        None
     };
 
     let face_materials = mesh.attributes().get_i32(names::MATERIAL_INDEX);
@@ -963,7 +1003,10 @@ fn write_mesh(
         let mut seen: HashMap<VertexKey, u32> = HashMap::new();
         let mut out_positions: Vec<Vec3> = Vec::new();
         let mut out_uvs: Vec<Vec2> = Vec::new();
+        let mut out_extra_uvs: Vec<Vec<Vec2>> =
+            (0..extra_uv_layers.len()).map(|_| Vec::new()).collect();
         let mut out_normals: Vec<Vec3> = Vec::new();
+        let mut out_tangents: Vec<[f32; 4]> = Vec::new();
         let mut out_colors: Vec<glam::Vec4> = Vec::new();
         let mut out_vertex: Vec<u32> = Vec::new();
         let mut out_joints: Vec<[u16; 4]> = Vec::new();
@@ -981,18 +1024,36 @@ fn write_mesh(
                 let uv = uvs
                     .map(|u| UvOrigin::TopLeft.from_kreate(u[c]))
                     .unwrap_or(Vec2::ZERO);
+                let extra: Vec<Vec2> = extra_uv_layers
+                    .iter()
+                    .map(|(_, layer)| UvOrigin::TopLeft.from_kreate(layer[c]))
+                    .collect();
                 let normal = normals.map(|n| to_gltf * n[c]).unwrap_or(Vec3::Y);
+                let tangent = tangents.as_ref().map_or([1.0, 0.0, 0.0, 1.0], |ts| {
+                    let t = ts[c];
+                    let tv = to_gltf * Vec3::new(t[0], t[1], t[2]);
+                    [tv.x, tv.y, tv.z, t[3]]
+                });
                 let color = colors.as_ref().map_or(glam::Vec4::ONE, |k| k[c]);
                 let key = VertexKey {
                     vertex,
                     uv: [uv.x.to_bits(), uv.y.to_bits()],
+                    extra_uvs: extra
+                        .iter()
+                        .map(|e| [e.x.to_bits(), e.y.to_bits()])
+                        .collect(),
                     normal: [normal.x.to_bits(), normal.y.to_bits(), normal.z.to_bits()],
+                    tangent: tangent.map(f32::to_bits),
                     color: color.to_array().map(f32::to_bits),
                 };
                 let index = *seen.entry(key).or_insert_with(|| {
                     out_positions.push(to_gltf * positions[vertex as usize]);
                     out_uvs.push(uv);
+                    for (slot, e) in out_extra_uvs.iter_mut().zip(&extra) {
+                        slot.push(*e);
+                    }
                     out_normals.push(normal);
+                    out_tangents.push(tangent);
                     out_colors.push(color);
                     out_vertex.push(vertex);
                     if let Some((skin, _)) = &skinning {
@@ -1074,6 +1135,21 @@ fn write_mesh(
                 ),
             );
         }
+        if tangents.is_some() {
+            let view = push_view(root, bin, bytemuck::cast_slice(&out_tangents), ARRAY_BUFFER);
+            attributes.insert(
+                Checked::Valid(json::mesh::Semantic::Tangents),
+                push_accessor(
+                    root,
+                    view,
+                    out_tangents.len(),
+                    json::accessor::ComponentType::F32,
+                    json::accessor::Type::Vec4,
+                    None,
+                    None,
+                ),
+            );
+        }
         if uvs.is_some() {
             let view = push_view(root, bin, bytemuck::cast_slice(&out_uvs), ARRAY_BUFFER);
             attributes.insert(
@@ -1082,6 +1158,21 @@ fn write_mesh(
                     root,
                     view,
                     out_uvs.len(),
+                    json::accessor::ComponentType::F32,
+                    json::accessor::Type::Vec2,
+                    None,
+                    None,
+                ),
+            );
+        }
+        for (extra_i, extra_uv) in out_extra_uvs.iter().enumerate() {
+            let view = push_view(root, bin, bytemuck::cast_slice(extra_uv), ARRAY_BUFFER);
+            attributes.insert(
+                Checked::Valid(json::mesh::Semantic::TexCoords((extra_i + 1) as u32)),
+                push_accessor(
+                    root,
+                    view,
+                    extra_uv.len(),
                     json::accessor::ComponentType::F32,
                     json::accessor::Type::Vec2,
                     None,
@@ -1292,13 +1383,30 @@ fn ngon_extension(
 /// bytes the document stores; whether they are colour or numbers is said by
 /// the slot that points at them, which is glTF's rule and the document's.
 fn write_textures(
-    images: &[crate::ir::ImportImage],
+    scene: &ExportScene<'_>,
+    options: &GltfExportOptions,
     root: &mut json::Root,
     bin: &mut Vec<u8>,
     notes: &mut Vec<LossyNote>,
 ) {
+    let images = &scene.images;
     if images.is_empty() {
         return;
+    }
+    // Data maps (normal, metallic-roughness, occlusion) must always stay
+    // lossless PNG so quantization never corrupts vectors or scalar channels.
+    let mut data_images: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for m in &scene.materials {
+        for idx in [
+            m.normal_texture,
+            m.metallic_roughness_texture,
+            m.occlusion_texture,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            data_images.insert(idx);
+        }
     }
     // One sampler for all of them: repeat, with mipmaps — what a material
     // map on a surface means, and what the viewport does.
@@ -1310,38 +1418,78 @@ fn write_textures(
         ..Default::default()
     });
     for (index, image) in images.iter().enumerate() {
-        let png = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
-            .and_then(|pixels| {
-                let mut out = std::io::Cursor::new(Vec::new());
-                image::DynamicImage::ImageRgba8(pixels)
-                    .write_to(&mut out, image::ImageFormat::Png)
-                    .ok()
-                    .map(|_| out.into_inner())
-            });
+        let is_opaque = image
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| px[3] == 255);
+        let use_jpeg = options
+            .texture_jpeg_quality
+            .filter(|_| is_opaque && !data_images.contains(&index));
+
+        let (encoded, mime) = if let Some(quality) = use_jpeg {
+            let mut rgb = Vec::with_capacity((image.width as usize) * (image.height as usize) * 3);
+            for px in image.pixels.as_chunks::<4>().0 {
+                rgb.push(px[0]);
+                rgb.push(px[1]);
+                rgb.push(px[2]);
+            }
+            let mut out = Vec::new();
+            let mut enc =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100));
+            if enc
+                .encode(
+                    &rgb,
+                    image.width,
+                    image.height,
+                    image::ExtendedColorType::Rgb8,
+                )
+                .is_ok()
+            {
+                (Some(out), "image/jpeg")
+            } else {
+                (None, "image/png")
+            }
+        } else {
+            let png = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
+                .and_then(|pixels| {
+                    let mut out = std::io::Cursor::new(Vec::new());
+                    image::DynamicImage::ImageRgba8(pixels)
+                        .write_to(&mut out, image::ImageFormat::Png)
+                        .ok()
+                        .map(|_| out.into_inner())
+                });
+            (png, "image/png")
+        };
+
         // An image that will not encode still gets its slot in the table, as a
         // one-pixel white stand-in: dropping it would shift every later
         // texture index onto its neighbour's picture.
-        let png = png.unwrap_or_else(|| {
-            notes.push(LossyNote::Unsupported {
-                what: format!(
-                    "{}: the image could not be encoded and was written blank",
-                    image.name
-                ),
-            });
-            let mut out = std::io::Cursor::new(Vec::new());
-            image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-                1,
-                1,
-                image::Rgba([255, 255, 255, 255]),
-            ))
-            .write_to(&mut out, image::ImageFormat::Png)
-            .expect("a one-pixel image encodes");
-            out.into_inner()
-        });
-        let view = push_view(root, bin, &png, None);
+        let (bytes, mime) = match encoded {
+            Some(bytes) => (bytes, mime),
+            None => {
+                notes.push(LossyNote::Unsupported {
+                    what: format!(
+                        "{}: the image could not be encoded and was written blank",
+                        image.name
+                    ),
+                });
+                let mut out = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                    1,
+                    1,
+                    image::Rgba([255, 255, 255, 255]),
+                ))
+                .write_to(&mut out, image::ImageFormat::Png)
+                .expect("a one-pixel image encodes");
+                (out.into_inner(), "image/png")
+            }
+        };
+        let view = push_view(root, bin, &bytes, None);
         root.images.push(json::Image {
             buffer_view: Some(view),
-            mime_type: Some(json::image::MimeType("image/png".to_string())),
+            mime_type: Some(json::image::MimeType(mime.to_string())),
             name: Some(image.name.clone()),
             uri: None,
             extensions: None,
@@ -1659,18 +1807,6 @@ fn note_dropped_attributes(
                     what: format!("{name}: {what} were dropped; glTF stores none"),
                 });
             }
-        }
-        // A second UV set is data the author made on purpose, and glTF can carry
-        // it as TEXCOORD_1 — this exporter simply does not yet, which is worth
-        // saying plainly rather than leaving to be discovered.
-        let extra_uvs = attrs
-            .iter()
-            .filter(|l| l.name.starts_with("uv") && &*l.name != names::UV)
-            .count();
-        if extra_uvs > 0 {
-            notes.push(LossyNote::Unsupported {
-                what: format!("{name}: {extra_uvs} additional UV sets were dropped"),
-            });
         }
         if !options.normals && attrs.get(names::SHADE_SMOOTH).is_some() {
             notes.push(LossyNote::Unsupported {

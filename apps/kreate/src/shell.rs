@@ -515,7 +515,11 @@ pub struct ShellState {
     pub sketch_slice: bool,
     /// What the last Mesh Check found, and on which object: counts in the
     /// order of `kreate_ops::ops::mesh::CHECK_ISSUES`.
-    pub mesh_check: Option<(ObjectId, [usize; 7])>,
+    pub mesh_check: Option<(ObjectId, [usize; 8])>,
+    /// Selected 3D printer build-volume preset (0=220x220x250, 1=256x256x256, 2=300x300x300 mm).
+    pub print_bed_preset: u32,
+    /// Most recent autosave failure message to show in a warning badge.
+    pub autosave_error: Option<String>,
     /// Circle select's brush radius in interface points, while `C` is on.
     pub circle_select: Option<f32>,
     /// What a snapping drag has caught, for a marker on it.
@@ -1081,6 +1085,8 @@ impl Default for ShellState {
             check_thickness: 0.001,
             sketch_slice: false,
             mesh_check: None,
+            print_bed_preset: 0,
+            autosave_error: None,
             circle_select: None,
             snap_target: None,
             rename: None,
@@ -1438,6 +1444,7 @@ fn setter_for(kind: &ModifierKind) -> &'static str {
         ModifierKind::Screw(_) => "object.modifier_set_screw",
         ModifierKind::Decimate(_) => "object.modifier_set_decimate",
         ModifierKind::Shrinkwrap(_) => "object.modifier_set_shrinkwrap",
+        ModifierKind::WeightedNormal(_) => "object.modifier_set_weighted_normal",
     }
 }
 
@@ -1677,6 +1684,12 @@ pub struct TexturePaintSettings {
     /// Its radius on screen, in points.
     pub radius: f32,
     pub strength: f32,
+    /// 0=BaseColor, 1=Roughness, 2=Metallic, 3=Emission, 4=Erase, 5=VertexColor.
+    pub channel: u32,
+    /// Scalar target value for Roughness / Metallic painting (0..=1).
+    pub value: f32,
+    /// Mirror dabs across local X=0.
+    pub symmetry_x: bool,
 }
 
 impl Default for TexturePaintSettings {
@@ -1685,6 +1698,9 @@ impl Default for TexturePaintSettings {
             color: [0.8, 0.1, 0.1],
             radius: 30.0,
             strength: 1.0,
+            channel: 0,
+            value: 0.5,
+            symmetry_x: false,
         }
     }
 }
@@ -4380,11 +4396,41 @@ fn draw_brush_settings(
     area: u32,
     mode: kreate_ops::operator::Mode,
 ) {
-    // The texture brush, in its header: its colour, size and strength, and
-    // something to paint on.
+    // The texture brush, in its header: channel, colour/value, size, strength,
+    // X-symmetry, and texture/bake actions.
     if mode.acts_on() == kreate_ops::mode::ActsOn::Texture {
-        let t = &mut state.texture_paint;
-        ui.color_edit_button_rgb(&mut t.color);
+        let ch_names = [
+            state.catalog.get("paint-channel-base-color"),
+            state.catalog.get("paint-channel-roughness"),
+            state.catalog.get("paint-channel-metallic"),
+            state.catalog.get("paint-channel-emission"),
+            state.catalog.get("paint-channel-erase"),
+            state.catalog.get("paint-channel-vertex-color"),
+        ];
+        let cur = state.texture_paint.channel.min(5) as usize;
+        egui::ComboBox::from_id_salt(("paint-channel", area))
+            .width(96.0)
+            .selected_text(ch_names[cur].as_str())
+            .show_ui(ui, |ui| {
+                for (i, label) in ch_names.iter().enumerate() {
+                    ui.selectable_value(&mut state.texture_paint.channel, i as u32, label.as_str());
+                }
+            });
+        match state.texture_paint.channel {
+            1 | 2 => {
+                ui.label(state.catalog.get("paint-value"));
+                ui.add(
+                    egui::DragValue::new(&mut state.texture_paint.value)
+                        .range(0.0..=1.0)
+                        .speed(0.01)
+                        .max_decimals(2),
+                );
+            }
+            4 => {}
+            _ => {
+                ui.color_edit_button_rgb(&mut state.texture_paint.color);
+            }
+        }
         ui.label(state.catalog.get("paint-radius"));
         ui.add(
             egui::DragValue::new(&mut state.texture_paint.radius)
@@ -4399,12 +4445,49 @@ fn draw_brush_settings(
                 .speed(0.01)
                 .max_decimals(2),
         );
-        if ui
+        ui.toggle_value(
+            &mut state.texture_paint.symmetry_x,
+            state.catalog.get("paint-symmetry-x"),
+        );
+        if state.texture_paint.channel == 5 {
+            if ui
+                .button(state.catalog.get("op-paint-fill-vertex-color"))
+                .on_hover_text(state.catalog.get("op-paint-fill-vertex-color-desc"))
+                .clicked()
+            {
+                let mut p = PropertyMap::new();
+                p.set(
+                    "color",
+                    kreate_reflect::PropertyValue::Vec3(
+                        state.texture_paint.color.map(|c| c as f64),
+                    ),
+                );
+                state.queue.run("paint.fill_vertex_color", p);
+            }
+        } else if ui
             .button(state.catalog.get("op-paint-new-texture"))
             .on_hover_text(state.catalog.get("op-paint-new-texture-desc"))
             .clicked()
         {
-            state.queue.run("paint.new_texture", PropertyMap::new());
+            let map_idx = match state.texture_paint.channel {
+                1 | 2 => 1u32,
+                3 => 2u32,
+                _ => 0u32,
+            };
+            let mut p = PropertyMap::new();
+            p.set(
+                "slot",
+                kreate_reflect::PropertyValue::Int(state.material_slot as i64),
+            );
+            p.set("map", kreate_reflect::PropertyValue::Enum(map_idx));
+            state.queue.run("paint.new_texture", p);
+        }
+        if ui
+            .button(state.catalog.get("op-mesh-bake-textures"))
+            .on_hover_text(state.catalog.get("op-mesh-bake-textures-desc"))
+            .clicked()
+        {
+            state.queue.run("mesh.bake_textures", PropertyMap::new());
         }
         ui.separator();
     }
@@ -7534,10 +7617,75 @@ fn draw_mesh_check_panel(ui: &mut Ui, state: &mut ShellState, doc: &Document, ob
             }
         });
         let thickness = state.check_thickness;
-        if ui.button(state.catalog.get("check-run")).clicked() {
-            let mut p = PropertyMap::new();
-            p.set("thickness", kreate_reflect::PropertyValue::Float(thickness));
-            state.queue.dispatch("app.mesh_check", p);
+        ui.horizontal(|ui| {
+            if ui.button(state.catalog.get("check-run")).clicked() {
+                let mut p = PropertyMap::new();
+                p.set("thickness", kreate_reflect::PropertyValue::Float(thickness));
+                state.queue.dispatch("app.mesh_check", p);
+            }
+            if ui
+                .button(state.catalog.get("op-mesh-repair-manifold"))
+                .on_hover_text(state.catalog.get("op-mesh-repair-manifold-desc"))
+                .clicked()
+            {
+                state.queue.run("mesh.repair_manifold", PropertyMap::new());
+            }
+        });
+        // 3D printer build-volume check (in mm).
+        const BEDS: [(&str, [f64; 3]); 3] = [
+            ("220 × 220 × 250 mm", [220.0, 220.0, 250.0]),
+            ("256 × 256 × 256 mm", [256.0, 256.0, 256.0]),
+            ("300 × 300 × 300 mm", [300.0, 300.0, 300.0]),
+        ];
+        let preset_idx = (state.print_bed_preset as usize).min(BEDS.len() - 1);
+        ui.horizontal(|ui| {
+            ui.label(state.catalog.get("print-bed-label"));
+            // i18n-exempt: numeric bed dimensions in mm
+            egui::ComboBox::from_id_salt("print-bed-preset")
+                .selected_text(BEDS[preset_idx].0)
+                .show_ui(ui, |ui| {
+                    for (i, (label, _)) in BEDS.iter().enumerate() {
+                        // i18n-exempt: numeric bed dimensions in mm
+                        ui.selectable_value(&mut state.print_bed_preset, i as u32, *label);
+                    }
+                });
+        });
+        if let Some(mesh_id) = doc.object(object).and_then(|o| o.mesh()) {
+            if let Some(mesh) = doc.mesh(mesh_id) {
+                let to_world = doc.world_transform(object);
+                let (mut lo, mut hi) = (
+                    kreate_math::DVec3::splat(f64::INFINITY),
+                    kreate_math::DVec3::splat(f64::NEG_INFINITY),
+                );
+                for p in mesh.positions() {
+                    let wp = to_world.transform_point3(p.as_dvec3());
+                    lo = lo.min(wp);
+                    hi = hi.max(wp);
+                }
+                if lo.x.is_finite() {
+                    let size_mm = (hi - lo) * 1000.0;
+                    let bed = BEDS[preset_idx].1;
+                    let fits = size_mm.x <= bed[0] && size_mm.y <= bed[1] && size_mm.z <= bed[2];
+                    let key = if fits {
+                        "print-bed-fits"
+                    } else {
+                        "print-bed-exceeds"
+                    };
+                    let sx = format!("{:.1}", size_mm.x);
+                    let sy = format!("{:.1}", size_mm.y);
+                    let sz = format!("{:.1}", size_mm.z);
+                    let msg = state.catalog.format(
+                        key,
+                        kreate_i18n::TextKind::Ui,
+                        &[("x", &sx), ("y", &sy), ("z", &sz)],
+                    );
+                    if fits {
+                        ui.weak(msg);
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(235, 110, 80), msg);
+                    }
+                }
+            }
         }
         let Some((_, counts)) = state.mesh_check.filter(|(o, _)| *o == object) else {
             return;
@@ -7555,6 +7703,7 @@ fn draw_mesh_check_panel(ui: &mut Ui, state: &mut ShellState, doc: &Document, ob
                 "check-loose",
                 "check-intersecting",
                 "check-thin",
+                "check-overhang",
             ]
             .iter()
             .enumerate()
@@ -9011,6 +9160,11 @@ fn draw_render_tab(
         }
     });
     ui.weak(&l.render_hint);
+    if kreate_render::oidn::available() {
+        ui.weak(state.catalog.get("render-oidn-ready"));
+    } else {
+        ui.weak(state.catalog.get("render-oidn-builtin"));
+    }
     ui.separator();
     // The room a part is shown in when the scene brings no light of its own:
     // Fusion's environment library. What it lights, what its metal reflects
@@ -14087,6 +14241,14 @@ fn draw_material_tab(
             }
         });
     }
+    if doc.object(object).is_some_and(|o| o.mesh().is_some())
+        && ui
+            .button(state.catalog.get("op-mesh-bake-textures"))
+            .on_hover_text(state.catalog.get("op-mesh-bake-textures-desc"))
+            .clicked()
+    {
+        state.queue.run("mesh.bake_textures", PropertyMap::new());
+    }
     ui.separator();
 
     // An empty slot, or no slots at all. Both want the same button, because
@@ -15677,6 +15839,7 @@ const KIND_KEYS: &[&str] = &[
     "modifier-screw",
     "modifier-decimate",
     "modifier-shrinkwrap",
+    "modifier-weighted-normal",
 ];
 
 /// The built-in English catalog.
@@ -16851,6 +17014,23 @@ fn draw_app_bar(ui: &mut Ui, state: &mut ShellState, l: &Labels, can_undo: bool,
                 state
                     .queue
                     .push(Command::RecoverDocument { path: latest_path });
+            }
+        }
+        if let Some(err) = state.autosave_error.clone() {
+            let warn = egui::Color32::from_rgb(235, 110, 80);
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(state.catalog.get("autosave-failed-badge"))
+                            .color(warn)
+                            .strong(),
+                    )
+                    .stroke(egui::Stroke::new(1.0, warn)),
+                )
+                .on_hover_text(err)
+                .clicked()
+            {
+                state.autosave_error = None;
             }
         }
         if let Some(collab) = &state.collab_view {

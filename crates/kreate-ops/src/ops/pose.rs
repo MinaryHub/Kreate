@@ -756,11 +756,15 @@ pub struct ConstraintParams {
         "copy_scale",
         "damped_track",
         "limit_rotation",
-        "limit_location"
+        "limit_location",
+        "copy_transforms",
+        "child_of"
     ))]
     pub kind: u32,
     /// The bone it reads; empty when adding takes the other selected bone.
     pub target: String,
+    /// Optional external object name to target instead of a bone on this armature.
+    pub target_object: String,
     #[param(min = 0.0, max = 1.0)]
     pub influence: f64,
     pub enabled: bool,
@@ -778,6 +782,7 @@ impl Default for ConstraintParams {
             bone: String::new(),
             kind: 0,
             target: String::new(),
+            target_object: String::new(),
             influence: 1.0,
             enabled: true,
             min: [-180.0; 3],
@@ -788,7 +793,7 @@ impl Default for ConstraintParams {
 
 impl ConstraintParams {
     /// The constraint these describe, on `bone`.
-    fn constraint(&self, bone: String) -> Option<armature::BoneConstraint> {
+    fn constraint(&self, doc: &Document, bone: String) -> Option<armature::BoneConstraint> {
         let mut kind = armature::ConstraintKind::from_index(self.kind)?;
         match &mut kind {
             armature::ConstraintKind::LimitRotation { min, max } => {
@@ -801,10 +806,20 @@ impl ConstraintParams {
             }
             _ => {}
         }
+        let target_object = if self.target_object.trim().is_empty() {
+            None
+        } else {
+            let trimmed = self.target_object.trim();
+            doc.objects()
+                .find(|(_, o)| o.name == trimmed)
+                .and_then(|(id, _)| doc.object_uid(id))
+                .or_else(|| trimmed.parse::<u64>().ok().map(kreate_scene::Uid::from_raw))
+        };
         Some(armature::BoneConstraint {
             bone,
             kind,
             target: self.target.clone(),
+            target_object,
             influence: self.influence.clamp(0.0, 1.0),
             enabled: self.enabled,
         })
@@ -826,6 +841,10 @@ pub fn constraint_params(index: usize, c: &armature::BoneConstraint) -> Constrai
         bone: c.bone.clone(),
         kind: c.kind.index(),
         target: c.target.clone(),
+        target_object: c
+            .target_object
+            .map(|u| u.raw().to_string())
+            .unwrap_or_default(),
         influence: c.influence,
         enabled: c.enabled,
         min,
@@ -834,8 +853,9 @@ pub fn constraint_params(index: usize, c: &armature::BoneConstraint) -> Constrai
 }
 
 /// A bone constraint on the active bone: Copy Location, Copy Rotation, Copy
-/// Scale, Damped Track or Limit Rotation. Blender's Shift+Ctrl+C. The target
-/// is the other selected bone when none is named.
+/// Scale, Damped Track, Limit Rotation, Limit Location, Copy Transforms or
+/// Child Of. Blender's Shift+Ctrl+C. The target is the other selected bone
+/// when none is named.
 pub struct AddConstraint;
 
 impl Operator for AddConstraint {
@@ -862,7 +882,7 @@ impl Operator for AddConstraint {
             return Err(OpError::Failed("no active bone to constrain".into()));
         };
         let mut params = params.clone();
-        if params.target.is_empty() {
+        if params.target.is_empty() && params.target_object.trim().is_empty() {
             let (_, armature) = d.armature_of(object).expect("posed");
             let pose = &d.object(object).expect("posed").pose;
             params.target = armature
@@ -872,7 +892,7 @@ impl Operator for AddConstraint {
                 .find(|n| *n != bone && pose.is_selected(n))
                 .unwrap_or_default();
         }
-        let Some(constraint) = params.constraint(bone) else {
+        let Some(constraint) = params.constraint(d, bone) else {
             return Err(OpError::Failed("no such constraint".into()));
         };
         let Some(o) = doc.document_mut().object_mut(object) else {
@@ -905,14 +925,22 @@ impl Operator for SetConstraint {
         let Some(object) = posed_object(doc.document()) else {
             return Ok(OpResult::Cancelled);
         };
+        let bone = match doc
+            .document()
+            .object(object)
+            .and_then(|o| o.pose.constraints.get(params.index as usize))
+        {
+            Some(c) => c.bone.clone(),
+            None => return Ok(OpResult::Cancelled),
+        };
+        let Some(wanted) = params.constraint(doc.document(), bone) else {
+            return Err(OpError::Failed("no such constraint".into()));
+        };
         let Some(o) = doc.document_mut().object_mut(object) else {
             return Ok(OpResult::Cancelled);
         };
         let Some(c) = o.pose.constraints.get_mut(params.index as usize) else {
             return Ok(OpResult::Cancelled);
-        };
-        let Some(wanted) = params.constraint(c.bone.clone()) else {
-            return Err(OpError::Failed("no such constraint".into()));
         };
         if *c == wanted {
             return Ok(OpResult::Cancelled);

@@ -769,10 +769,8 @@ impl Socket {
         dir.map(|d| d.join("bridge.json"))
     }
 
-    fn connect(&mut self) -> Result<(), String> {
-        const NOT_RUNNING: &str = "Kreate is not running, or was started before the connector existed. Start Kreate and try again.";
-        let path = Self::info_path().ok_or("cannot find Kreate's settings folder")?;
-        let text = std::fs::read_to_string(&path).map_err(|_| NOT_RUNNING.to_string())?;
+    fn try_connect_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let info: Value =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let port = info
@@ -784,11 +782,53 @@ impl Socket {
             .and_then(Value::as_str)
             .ok_or("no token in bridge.json")?
             .to_string();
-        let stream = std::net::TcpStream::connect(("127.0.0.1", port))
-            .map_err(|_| NOT_RUNNING.to_string())?;
+        let stream =
+            std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
         let reader = std::io::BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
         self.stream = Some((reader, stream, token));
         Ok(())
+    }
+
+    fn connect(&mut self) -> Result<(), String> {
+        const NOT_RUNNING: &str = "Kreate is not running, or was started before the connector existed. Start Kreate and try again.";
+        let path = Self::info_path().ok_or("cannot find Kreate's settings folder")?;
+        if let Some(dir) = path.parent() {
+            let bridges_dir = dir.join("bridges");
+            // Explicit PID targeting for multi-instance sessions.
+            if let Ok(pid) = std::env::var("KREATE_BRIDGE_PID") {
+                let target = bridges_dir.join(format!("{}.json", pid.trim()));
+                if self.try_connect_file(&target).is_ok() {
+                    return Ok(());
+                }
+            }
+            // Prefer legacy `bridge.json` if live; otherwise probe newest live
+            // `bridges/<pid>.json` (cleaning up stale files from crashed runs).
+            if self.try_connect_file(&path).is_ok() {
+                return Ok(());
+            }
+            if let Ok(entries) = std::fs::read_dir(&bridges_dir) {
+                let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                    .map(|e| {
+                        let mtime = e
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::UNIX_EPOCH);
+                        (mtime, e.path())
+                    })
+                    .collect();
+                candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
+                for (_, candidate) in candidates {
+                    if self.try_connect_file(&candidate).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            return Err(NOT_RUNNING.to_string());
+        }
+        self.try_connect_file(&path)
+            .map_err(|_| NOT_RUNNING.to_string())
     }
 
     /// One request and its answer. The error says whether the request was

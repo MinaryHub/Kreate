@@ -229,8 +229,8 @@ pub struct PtImage<'a> {
 /// array — what a compute pass can index by number — and so all are as big
 /// as the largest. Five hundred and twelve, nearest texel, was what labels
 /// and wood grain came out of a render at, softer than the viewport.
-const IMAGE_MAX: u32 = 2048;
-const IMAGE_BUDGET: u64 = 256 << 20;
+const IMAGE_MAX: u32 = 4096;
+const IMAGE_BUDGET: u64 = 512 << 20;
 
 /// The side every layer of `images` is made: the largest of them to the
 /// power of two at or above it, no more than [`IMAGE_MAX`], and halved
@@ -368,6 +368,8 @@ struct Params {
     /// x: the floor's height in the world. y: nonzero when there is one.
     /// z: how much of a mirror it is.
     ground: [f32; 4],
+    /// Optional sub-region tile `[offset_x, offset_y, full_w, full_h]`.
+    tile: [u32; 4],
 }
 
 /// How much of what stands on the floor it shows, looking straight down; a
@@ -856,6 +858,8 @@ pub struct PathTracer {
     pub ground: bool,
     /// Film Transparent: leave background rays at alpha = 0.
     pub transparent_background: bool,
+    /// Optional sub-region tile `[offset_x, offset_y, full_w, full_h]`.
+    pub tile: Option<[u32; 4]>,
     /// A baked gas the paths travel through: group 1.
     volume: PtVolumeGpu,
     /// The rays are asked of the device's ray tracing, not walked in the
@@ -1320,6 +1324,7 @@ impl PathTracer {
             sample: 0,
             ground: false,
             transparent_background: false,
+            tile: None,
             noise_threshold: 0.01,
             max_bounces: 4,
             volume,
@@ -2011,10 +2016,12 @@ impl PathTracer {
         // finds its first hit on the last frame's picture and carries that
         // pixel's mean over, while its own samples are few.
         let here = (projection * view, eye);
-        let before = self.previous.filter(|_| self.history_ok);
+        let before = self
+            .previous
+            .filter(|_| self.history_ok && self.tile.is_none());
         self.reproject_now = sample <= 1 && before.is_some();
         self.previous = Some(here);
-        self.history_ok = true;
+        self.history_ok = self.tile.is_none();
         let (prev_view_proj, prev_eye) = before.unwrap_or(here);
         let moved = (prev_eye - eye).as_vec3();
         // The view's rows are the camera's axes in the world.
@@ -2054,6 +2061,7 @@ impl PathTracer {
                 FLOOR_REFLECTION,
                 0.0,
             ],
+            tile: self.tile.unwrap_or([0, 0, region.0, region.1]),
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
         queue.write_buffer(

@@ -830,6 +830,18 @@ impl MeshData {
     /// walk. Breaking is the deterministic answer, it is what other tools of
     /// this kind do, and a non-manifold edge is usually a mistake the user
     /// wants to see rather than have smoothed over.
+    /// Returns authored per-corner `CUSTOM_NORMAL` values when present and
+    /// matching the corner count, otherwise computes smooth/sharp corner
+    /// normals using `angle_threshold`.
+    pub fn resolved_corner_normals(&self, angle_threshold: f32) -> std::borrow::Cow<'_, [Vec3]> {
+        if let Some(custom) = self.attributes.get_f32x3(names::CUSTOM_NORMAL) {
+            if custom.len() == self.corner_verts.len() {
+                return std::borrow::Cow::Borrowed(custom);
+            }
+        }
+        std::borrow::Cow::Owned(self.compute_corner_normals(angle_threshold))
+    }
+
     pub fn compute_corner_normals(&self, angle_threshold: f32) -> Vec<Vec3> {
         use rayon::prelude::*;
         let face_normals = self.compute_face_normals();

@@ -130,6 +130,184 @@ pub fn write(
     out
 }
 
+/// OpenEXR ZIP16 compression (`compression = 3`): 16-scanline chunks with
+/// OpenEXR's byte interleave + delta predictor + zlib deflate. Typically 3-8x
+/// smaller than uncompressed EXR while remaining 100% lossless and readable by
+/// Blender, Nuke, DaVinci Resolve, Photoshop, and [`read`].
+pub fn write_zip16(
+    width: u32,
+    height: u32,
+    channels: &[Channel<'_>],
+    strings: &[(&str, &str)],
+) -> Vec<u8> {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write as _;
+
+    const BLOCK_LINES: usize = 16;
+    let pixels = width as usize * height as usize;
+    for c in channels {
+        assert_eq!(
+            c.values.len(),
+            pixels,
+            "channel {} has the wrong number of values",
+            c.name
+        );
+    }
+    let mut order: Vec<&Channel<'_>> = channels.iter().collect();
+    order.sort_by(|a, b| a.name.cmp(b.name));
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&2u32.to_le_bytes());
+
+    let mut list = Vec::new();
+    for c in &order {
+        list.extend_from_slice(c.name.as_bytes());
+        list.push(0);
+        list.extend_from_slice(&(if c.full_float { FLOAT } else { HALF }).to_le_bytes());
+        list.extend_from_slice(&[0, 0, 0, 0]);
+        list.extend_from_slice(&1i32.to_le_bytes());
+        list.extend_from_slice(&1i32.to_le_bytes());
+    }
+    list.push(0);
+    attribute(&mut out, "channels", "chlist", &list);
+    // OpenEXR compression enum: 3 = ZIP_COMPRESSION (16 scanlines per block).
+    attribute(&mut out, "compression", "compression", &[3]);
+    let mut window = Vec::new();
+    for v in [0i32, 0, width as i32 - 1, height as i32 - 1] {
+        window.extend_from_slice(&v.to_le_bytes());
+    }
+    attribute(&mut out, "dataWindow", "box2i", &window);
+    attribute(&mut out, "displayWindow", "box2i", &window);
+    attribute(&mut out, "lineOrder", "lineOrder", &[0]);
+    attribute(&mut out, "pixelAspectRatio", "float", &1.0f32.to_le_bytes());
+    let mut centre = Vec::new();
+    centre.extend_from_slice(&0.0f32.to_le_bytes());
+    centre.extend_from_slice(&0.0f32.to_le_bytes());
+    attribute(&mut out, "screenWindowCenter", "v2f", &centre);
+    attribute(
+        &mut out,
+        "screenWindowWidth",
+        "float",
+        &1.0f32.to_le_bytes(),
+    );
+    for (name, value) in strings {
+        attribute(&mut out, name, "string", value.as_bytes());
+    }
+    out.push(0);
+
+    let line_bytes: usize = order
+        .iter()
+        .map(|c| if c.full_float { 4 } else { 2 })
+        .sum::<usize>()
+        * width as usize;
+    let num_blocks = (height as usize).div_ceil(BLOCK_LINES);
+
+    // Pre-compress each 16-scanline block so we know exact chunk offsets.
+    let mut blocks: Vec<(i32, Vec<u8>)> = Vec::with_capacity(num_blocks);
+    let mut raw = Vec::with_capacity(line_bytes * BLOCK_LINES);
+    for block_idx in 0..num_blocks {
+        let y0 = block_idx * BLOCK_LINES;
+        let y1 = (y0 + BLOCK_LINES).min(height as usize);
+        raw.clear();
+        for y in y0..y1 {
+            for c in &order {
+                let row = &c.values[y * width as usize..(y + 1) * width as usize];
+                if c.full_float {
+                    for v in row {
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                } else {
+                    for v in row {
+                        raw.extend_from_slice(&half::f16::from_f32(*v).to_le_bytes());
+                    }
+                }
+            }
+        }
+        let encoded = exr_zip_encode(&raw);
+        let mut enc = ZlibEncoder::new(Vec::with_capacity(encoded.len()), Compression::default());
+        let compressed = if enc.write_all(&encoded).is_ok() {
+            enc.finish().ok()
+        } else {
+            None
+        };
+        // Per OpenEXR spec: if compressed data is not strictly smaller than
+        // raw, store the raw bytes uncompressed (reader checks `packed < raw`).
+        let payload = match compressed {
+            Some(c) if c.len() < raw.len() => c,
+            _ => raw.clone(),
+        };
+        blocks.push((y0 as i32, payload));
+    }
+
+    let table_at = out.len();
+    let mut offset = (table_at + 8 * num_blocks) as u64;
+    for (_, payload) in &blocks {
+        out.extend_from_slice(&offset.to_le_bytes());
+        offset += 8 + payload.len() as u64;
+    }
+    for (y0, payload) in blocks {
+        out.extend_from_slice(&y0.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+        out.extend_from_slice(&payload);
+    }
+    out
+}
+
+/// OpenEXR ZIP forward transform: separate even/odd bytes, then apply delta
+/// predictor `(b[i] - b[i-1] + 128) & 0xff`.
+fn exr_zip_encode(raw: &[u8]) -> Vec<u8> {
+    let n = raw.len();
+    let mut tmp = vec![0u8; n];
+    let half = n.div_ceil(2);
+    for (i, &b) in raw.iter().enumerate() {
+        if i % 2 == 0 {
+            tmp[i / 2] = b;
+        } else {
+            tmp[half + i / 2] = b;
+        }
+    }
+    if n > 1 {
+        let mut prev = tmp[0];
+        for b in &mut tmp[1..] {
+            let cur = *b;
+            let diff = cur.wrapping_sub(prev).wrapping_add(128);
+            prev = cur;
+            *b = diff;
+        }
+    }
+    tmp
+}
+
+/// Inverse of [`exr_zip_encode`]: undo delta predictor and re-interleave bytes.
+fn exr_zip_decode(buf: &mut [u8]) -> Vec<u8> {
+    let n = buf.len();
+    if n > 1 {
+        for i in 1..n {
+            buf[i] = buf[i - 1].wrapping_add(buf[i]).wrapping_sub(128);
+        }
+    }
+    let mut out = vec![0u8; n];
+    let half = n.div_ceil(2);
+    let mut t1 = 0;
+    let mut t2 = half;
+    let mut s = 0;
+    while s < n {
+        if s < n {
+            out[s] = buf[t1];
+            t1 += 1;
+            s += 1;
+        }
+        if s < n {
+            out[s] = buf[t2];
+            t2 += 1;
+            s += 1;
+        }
+    }
+    out
+}
+
 /// MurmurHash3, 32-bit, seed zero: what Cryptomatte hashes names with.
 pub fn murmur3_32(bytes: &[u8]) -> u32 {
     const C1: u32 = 0xcc9e_2d51;
@@ -222,8 +400,12 @@ pub struct Read {
     pub strings: Vec<(String, String)>,
 }
 
-/// Reads an uncompressed, single-part, scanline EXR — what [`write`] makes.
+/// Reads a single-part scanline EXR (uncompressed, ZIPS, or ZIP16) — what
+/// [`write`] and [`write_zip16`] make.
 pub fn read(bytes: &[u8]) -> Result<Read, String> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read as _;
+
     let mut at = 0usize;
     let take = |at: &mut usize, n: usize| -> Result<&[u8], String> {
         let slice = bytes.get(*at..*at + n).ok_or("the file ends early")?;
@@ -250,6 +432,7 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
     let mut list: Vec<(String, i32)> = Vec::new();
     let mut window = None;
     let mut strings = Vec::new();
+    let mut compression = 0u8;
     loop {
         let name = text(&mut at)?;
         if name.is_empty() {
@@ -278,8 +461,9 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
                 }
             }
             ("compression", _) => {
-                if value.first() != Some(&0) {
-                    return Err("only uncompressed files are read".into());
+                compression = *value.first().ok_or("empty compression attribute")?;
+                if !matches!(compression, 0 | 2 | 3) {
+                    return Err(format!("unsupported EXR compression {compression}"));
                 }
             }
             ("dataWindow", "box2i") => {
@@ -297,21 +481,59 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
     }
     let (x0, y0, x1, y1) = window.ok_or("no data window")?;
     let (width, height) = ((x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32);
-    at += 8 * height as usize;
+    let block_lines = match compression {
+        3 => 16usize,
+        _ => 1usize,
+    };
+    let num_blocks = (height as usize).div_ceil(block_lines);
+    let line_bytes: usize = list
+        .iter()
+        .map(|(_, k)| if *k == FLOAT { 4 } else { 2 })
+        .sum::<usize>()
+        * width as usize;
+
+    // Skip offset table.
+    take(&mut at, 8 * num_blocks)?;
+
     let mut channels: Vec<(String, Vec<f32>)> = list
         .iter()
         .map(|(n, _)| (n.clone(), Vec::with_capacity((width * height) as usize)))
         .collect();
-    for _ in 0..height {
-        take(&mut at, 8)?;
-        for (i, (_, kind)) in list.iter().enumerate() {
-            for _ in 0..width {
-                let v = if *kind == FLOAT {
-                    f32::from_le_bytes(take(&mut at, 4)?.try_into().unwrap())
-                } else {
-                    half::f16::from_le_bytes(take(&mut at, 2)?.try_into().unwrap()).to_f32()
-                };
-                channels[i].1.push(v);
+    for block in 0..num_blocks {
+        let lines_in_block = block_lines.min(height as usize - block * block_lines);
+        let expected_raw = lines_in_block * line_bytes;
+        let _y = i32::from_le_bytes(take(&mut at, 4)?.try_into().unwrap());
+        let packed_len = i32::from_le_bytes(take(&mut at, 4)?.try_into().unwrap()) as usize;
+        let packed = take(&mut at, packed_len)?;
+        let decoded_owned;
+        let raw: &[u8] = if compression == 0 || packed_len == expected_raw {
+            packed
+        } else {
+            let mut dec = ZlibDecoder::new(packed);
+            let mut tmp = Vec::with_capacity(expected_raw);
+            dec.read_to_end(&mut tmp)
+                .map_err(|e| format!("corrupt EXR zip block: {e}"))?;
+            if tmp.len() != expected_raw {
+                return Err("EXR zip block size mismatch".into());
+            }
+            decoded_owned = exr_zip_decode(&mut tmp);
+            &decoded_owned
+        };
+        let mut cursor = 0usize;
+        for _ in 0..lines_in_block {
+            for (i, (_, kind)) in list.iter().enumerate() {
+                for _ in 0..width {
+                    let v = if *kind == FLOAT {
+                        let s = raw.get(cursor..cursor + 4).ok_or("truncated EXR line")?;
+                        cursor += 4;
+                        f32::from_le_bytes(s.try_into().unwrap())
+                    } else {
+                        let s = raw.get(cursor..cursor + 2).ok_or("truncated EXR line")?;
+                        cursor += 2;
+                        half::f16::from_le_bytes(s.try_into().unwrap()).to_f32()
+                    };
+                    channels[i].1.push(v);
+                }
             }
         }
     }
@@ -433,5 +655,48 @@ mod tests {
         let offset = u64::from_le_bytes(bytes[table..table + 8].try_into().unwrap()) as usize;
         assert_eq!(offset, table + 8);
         assert_eq!(&bytes[offset..offset + 4], &0i32.to_le_bytes());
+    }
+
+    #[test]
+    fn zip16_roundtrips_and_compresses_smaller_than_uncompressed() {
+        let (w, h) = (32u32, 20u32); // 2 blocks: 16 lines + 4 lines
+        let n = (w * h) as usize;
+        let r: Vec<f32> = (0..n).map(|i| (i % 32) as f32 / 31.0).collect();
+        let g = vec![0.25f32; n];
+        let id: Vec<f32> = (0..n)
+            .map(|i| cryptomatte_id(if i < n / 2 { "Cube" } else { "Sphere" }))
+            .collect();
+        let channels = [
+            Channel {
+                name: "R",
+                values: &r,
+                full_float: false,
+            },
+            Channel {
+                name: "G",
+                values: &g,
+                full_float: false,
+            },
+            Channel {
+                name: "CryptoObject00.R",
+                values: &id,
+                full_float: true,
+            },
+        ];
+        let raw_exr = write(w, h, &channels, &[("software", "Kreate")]);
+        let zip_exr = write_zip16(w, h, &channels, &[("software", "Kreate")]);
+        assert!(
+            zip_exr.len() < raw_exr.len() / 2,
+            "ZIP16 should be much smaller: {} vs {}",
+            zip_exr.len(),
+            raw_exr.len()
+        );
+        let back = read(&zip_exr).expect("reads zip16");
+        assert_eq!((back.width, back.height), (w, h));
+        assert_eq!(back.channels[0].1, id, "full-float IDs survive ZIP16");
+        assert_eq!(back.channels[1].1, g);
+        for (got, want) in back.channels[2].1.iter().zip(&r) {
+            assert!((got - want).abs() < 1e-3);
+        }
     }
 }

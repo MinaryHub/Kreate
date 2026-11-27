@@ -614,7 +614,7 @@ fn write_mesh(
         "{inner}int[] faceVertexIndices = [{}]",
         list(&mut mesh.corner_verts().iter().map(|v| v.to_string()))
     );
-    let normals: Vec<Vec3> = mesh.compute_corner_normals(30f32.to_radians());
+    let normals = mesh.resolved_corner_normals(30f32.to_radians());
     let _ =
         writeln!(
         out,

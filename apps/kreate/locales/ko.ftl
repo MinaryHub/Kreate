@@ -3021,5 +3021,51 @@ hist-edit-feature = 피처 수정
 param-double-sided = 양면 표시
 param-transparent-background = 투명 배경
 param-deform = 변형(Deform)
+modifier-weighted-normal = 가중 법선
+op-object-modifier-set-weighted-normal = 가중 법선 모디파이어
+op-object-modifier-set-weighted-normal-desc = 면적과 각도 비중으로 법선을 계산해 베벨 옆 넓은 평면이 깔끔하게 보이도록 합니다.
+op-mesh-bake-textures = 텍스처 굽기(Bake)
+op-mesh-bake-textures-desc = 선택한 하이폴리 메쉬의 노멀·AO·색상·거칠기·높이·곡률을 활성 메쉬의 UV에 구워 냅니다.
+op-paint-vertex-color-stroke = 버텍스 컬러 칠하기
+op-paint-vertex-color-stroke-desc = 활성 메쉬의 각 꼭짓점에 직접 색상을 칠합니다.
+op-paint-fill-vertex-color = 버텍스 컬러 채우기
+op-paint-fill-vertex-color-desc = 활성 메쉬의 모든 꼭짓점을 선택한 색으로 한 번에 채웁니다.
+paint-channel-base-color = 기본 색
+paint-channel-roughness = 거칠기
+paint-channel-metallic = 금속성
+paint-channel-emission = 발광
+paint-channel-erase = 지우개
+paint-channel-vertex-color = 버텍스 컬러
+paint-value = 값
+paint-symmetry-x = X 대칭
+param-keep-sharp = 날카로운 모서리 유지
+param-face-angle = 면 각도 반영
+param-cage-extrusion = 케이지 확장
+param-max-ray-distance = 최대 탐색 거리
+param-ao-samples = AO 샘플 수
+param-ao-distance = AO 거리
+param-flip-normal-y = DirectX 노멀(-Y)
+param-assign = 재질에 자동 연결
+param-channel = 채널
+param-blend-in = 들어오기 블렌드
+param-blend-out = 나가기 블렌드
+param-target-object = 대상 오브젝트
+param-amounts = 적용량
+render-oidn-ready = 노이즈 제거기: Intel Open Image Denoise (OIDN) 사용 중
+render-oidn-builtin = 노이즈 제거기: 내장 필터 사용 중 (OIDN 설치 시 AI 노이즈 제거 자동 활성화)
+check-overhang = 오버행 (>45°)
+op-mesh-repair-manifold = 메쉬 자동 수리 (매니폴드)
+op-mesh-repair-manifold-desc = 3D 프린팅을 위해 떠 있는 꼭짓점을 제거하고, 열린 구멍을 막고, 뒤집힌 면 방향을 바깥쪽으로 정렬합니다.
+param-fill-holes = 구멍 메우기
+param-remove-loose = 고립 꼭짓점 제거
+param-fix-normals = 면 방향 정렬
+print-bed-label = 프린터 베드
+print-bed-fits = 베드 안에 들어감 ({ $x } × { $y } × { $z } mm)
+print-bed-exceeds = 베드 크기 초과 ({ $x } × { $y } × { $z } mm)
+autosave-failed-badge = 자동 저장 실패
+
+
+
+
 
 

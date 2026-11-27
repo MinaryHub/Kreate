@@ -63,6 +63,9 @@ pub struct Bridge {
     requests: Receiver<Request>,
     /// Where the port and token were written, removed when the bridge goes.
     info: PathBuf,
+    /// Per-PID discovery file (`bridges/<pid>.json`) so multiple Kreate windows
+    /// do not overwrite each other.
+    pid_info: Option<PathBuf>,
     pub port: u16,
 }
 
@@ -77,13 +80,32 @@ impl Drop for Bridge {
     fn drop(&mut self) {
         // A file naming a port nobody answers on would send the connector to
         // whatever opened that port next.
-        let _ = std::fs::remove_file(&self.info);
+        if let Some(pid_path) = &self.pid_info {
+            let _ = std::fs::remove_file(pid_path);
+        }
+        // Only remove legacy `bridge.json` if it still points to this PID.
+        let mine = std::fs::read_to_string(&self.info)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
+            .is_none_or(|pid| pid == u64::from(std::process::id()));
+        if mine {
+            let _ = std::fs::remove_file(&self.info);
+        }
     }
 }
 
 /// Where the connector finds the port and the token.
 pub fn info_path() -> Option<PathBuf> {
     crate::prefs::config_dir().map(|dir| dir.join("bridge.json"))
+}
+
+/// Per-process bridge discovery file beside `info`.
+fn pid_info_path(info: &Path) -> Option<PathBuf> {
+    info.parent().map(|dir| {
+        dir.join("bridges")
+            .join(format!("{}.json", std::process::id()))
+    })
 }
 
 /// A token nobody can guess: 128 bits from the operating system's secure
@@ -138,7 +160,12 @@ pub fn start(info: &Path, wake: impl Fn() + Send + Sync + 'static) -> std::io::R
     let port = listener.local_addr()?.port();
     let token = new_token()?;
     let record = serde_json::json!({ "port": port, "token": token, "pid": std::process::id() });
-    write_owner_only(info, record.to_string().as_bytes())?;
+    let payload = record.to_string();
+    write_owner_only(info, payload.as_bytes())?;
+    let pid_info = pid_info_path(info);
+    if let Some(ref pid_path) = pid_info {
+        let _ = write_owner_only(pid_path, payload.as_bytes());
+    }
 
     let (tx, rx) = mpsc::channel();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
@@ -155,6 +182,7 @@ pub fn start(info: &Path, wake: impl Fn() + Send + Sync + 'static) -> std::io::R
     Ok(Bridge {
         requests: rx,
         info: info.to_path_buf(),
+        pid_info,
         port,
     })
 }

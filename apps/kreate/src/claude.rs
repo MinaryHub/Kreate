@@ -1052,6 +1052,15 @@ impl Chat {
         if provider == Provider::Ollama {
             return self.send_local(words, attachments);
         }
+        // When an API key is configured (in Kreate's key store or environment),
+        // talk directly to Anthropic / OpenAI / Gemini over HTTPS + kreate-mcp
+        // with no external CLI binary required. Set `KREATE_USE_CLI=1` to force
+        // the external CLI even when a key is present.
+        if let Some(api_key) = crate::ai_api::api_key_for(provider) {
+            if std::env::var_os("KREATE_USE_CLI").is_none() || find_cli(provider).is_none() {
+                return self.send_direct_api(provider, api_key, words);
+            }
+        }
         // Claude Code's turn, as JSON on its input, when it carries more than
         // words.
         let mut stdin_turn: Option<String> = None;
@@ -1292,6 +1301,47 @@ impl Chat {
                 words,
                 pictures,
                 think,
+                connector,
+                SYSTEM_PROMPT,
+                halt,
+                tx,
+                wake,
+            )
+        });
+        self.turn = Some(Turn {
+            child: None,
+            stop: Some(stop),
+            events: rx,
+        });
+        Ok(())
+    }
+
+    /// Runs a turn directly against Anthropic, OpenAI, or Gemini HTTPS APIs
+    /// using Kreate's own MCP tool loop — no external CLI binary required.
+    fn send_direct_api(
+        &mut self,
+        provider: Provider,
+        api_key: String,
+        words: String,
+    ) -> Result<(), String> {
+        let connector = find_connector().ok_or(
+            "kreate-mcp was not found next to Kreate. Build it with `cargo build -p kreate-mcp`.",
+        )?;
+        let model = crate::ai_api::default_model(provider, self.cli_model.as_deref());
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(crate::ollama::Stop::default());
+        let (history, wake, halt) = (
+            Arc::clone(&self.local),
+            Arc::clone(&self.wake),
+            Arc::clone(&stop),
+        );
+        std::thread::spawn(move || {
+            crate::ai_api::turn(
+                provider,
+                api_key,
+                model,
+                history,
+                words,
                 connector,
                 SYSTEM_PROMPT,
                 halt,

@@ -56,7 +56,19 @@ impl App {
         }
         // An animation starts through the camera its first frame is cut to.
         let camera = self.scene_camera(None).unwrap_or(camera);
-        self.wanted_viewport = (settings.width, settings.height);
+        let shutter = self.shutter_of(camera);
+        let motion_blur_active = settings.motion_blur && shutter > 0.0;
+        let tiles = if !motion_blur_active
+            && (settings.width > TileGrid::TILE_SIZE || settings.height > TileGrid::TILE_SIZE)
+        {
+            Some(TileGrid::new(settings.width, settings.height))
+        } else {
+            None
+        };
+        self.wanted_viewport = tiles
+            .as_ref()
+            .and_then(|t| t.current_rect().map(|[_, _, tw, th]| (tw, th)))
+            .unwrap_or((settings.width, settings.height));
         self.render_job = Some(RenderJob {
             camera,
             settings,
@@ -69,14 +81,14 @@ impl App {
             drawn: 0,
             ids: None,
             blur: None,
+            tiles,
             written: Vec::new(),
             video: None,
             denoised: false,
         });
         // Motion blur: the shutter, as a fraction of a frame, from the
         // camera; a closed one has nothing to smear.
-        let shutter = self.shutter_of(camera);
-        if self.doc.render.motion_blur && shutter > 0.0 {
+        if motion_blur_active {
             let base = frames.map_or(self.doc.playback.frame, |(first, _)| first as f64);
             let samples = self.doc.render.samples;
             if let Some(gfx) = self.gfx.as_mut() {
@@ -89,6 +101,9 @@ impl App {
                     shutter,
                     base,
                     sum: Vec::new(),
+                    albedo_sum: Vec::new(),
+                    normal_sum: Vec::new(),
+                    denoised_mean: None,
                 });
             }
             self.set_frame(Blur::time(base, shutter, 0, Blur::steps_for(samples)));
@@ -135,6 +150,8 @@ impl App {
         job.drawn = 0;
         let settings = job.settings.clone();
         let blurred = job.blur.is_some();
+        let tile_uniform = job.tiles.as_ref().and_then(|t| t.current_uniform());
+        let tiled = job.tiles.is_some();
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
@@ -151,9 +168,11 @@ impl App {
         } else {
             settings.samples
         });
-        v.path_trace_denoise = settings.denoise;
+        // Tiled renders denoise once on the stitched full frame (no tile seams).
+        v.path_trace_denoise = settings.denoise && !tiled;
         v.path_trace_bounces = settings.bounces;
         v.transparent_background = settings.transparent_background;
+        v.path_trace_tile = tile_uniform;
         v.path_trace_noise_threshold = quiet_enough(settings.samples);
         self.redraw.set(RedrawReason::SCENE_CHANGED);
     }
@@ -169,9 +188,15 @@ impl App {
             self.apply_render_look();
             return;
         }
+        let tile_info = job.tiles.as_ref().and_then(|t| {
+            t.current_rect()
+                .map(|r| (t.index, t.rects.len(), r, [r[0], r[1], t.full_w, t.full_h]))
+        });
         let (drawn, size, started) = (
             job.drawn,
-            (job.settings.width, job.settings.height),
+            tile_info
+                .map(|(_, _, [_, _, tw, th], _)| (tw, th))
+                .unwrap_or((job.settings.width, job.settings.height)),
             job.started,
         );
         let frames = job.frames;
@@ -183,6 +208,9 @@ impl App {
         // the old size, the old frame — so they are drawn and not judged.
         if drawn <= 3 {
             self.wanted_viewport = size;
+            if let (Some(gfx), Some((_, _, _, uniform))) = (self.gfx.as_mut(), tile_info) {
+                gfx.viewport.path_trace_tile = Some(uniform);
+            }
             self.aim_render_camera();
         }
         self.redraw.set(RedrawReason::ACCUMULATE);
@@ -195,19 +223,26 @@ impl App {
             && !v.accumulating()
             && ((traced && samples > 0) || (!traced && started.elapsed().as_secs() >= 5));
         if !settled {
-            let detail = match moment {
-                Some((m, steps)) => format!("shutter {}/{steps}", m + 1),
-                None => format!("{samples}/{total} samples"),
+            let detail = match (moment, tile_info) {
+                (Some((m, steps)), _) => format!("shutter {}/{steps}", m + 1),
+                (None, Some((ti, tn, _, _))) => {
+                    format!("tile {}/{tn}: {samples}/{total} samples", ti + 1)
+                }
+                (None, None) => format!("{samples}/{total} samples"),
             };
             let progress = match frames {
                 Some((f, end)) => format!("rendering frame {f} of {end}: {detail}"),
                 None => format!("rendering: {detail}"),
             };
             // How far through, for the bar: the frames done and this one's
-            // share of its samples, or of its shutter.
-            let share = match moment {
-                Some((m, steps)) => m as f32 / steps.max(1) as f32,
-                None => (samples as f32 / total.max(1) as f32).min(1.0),
+            // share of its samples, tiles, or shutter.
+            let share = match (moment, tile_info) {
+                (Some((m, steps)), _) => m as f32 / steps.max(1) as f32,
+                (None, Some((ti, tn, _, _))) => {
+                    let s = (samples as f32 / total.max(1) as f32).min(1.0);
+                    (ti as f32 + s) / tn.max(1) as f32
+                }
+                (None, None) => (samples as f32 / total.max(1) as f32).min(1.0),
             };
             let fraction = match frames {
                 Some((f, end)) => {
@@ -249,11 +284,114 @@ impl App {
             ));
             return;
         }
+        // Tiled 4K/8K render: copy this finished tile into the full-frame
+        // stitched buffers and move to the next tile until all tiles are done.
+        if let Some((ti, tn, [tx, ty, tw, th], _)) = tile_info {
+            let forward = (self.camera.pivot - self.camera.eye())
+                .normalize_or_zero()
+                .as_vec3();
+            let exposure = self
+                .gfx
+                .as_ref()
+                .map_or(0.0, |g| g.viewport.display().exposure);
+            let read_res = self
+                .gfx
+                .as_ref()
+                .ok_or("the window closed".to_string())
+                .and_then(|g| {
+                    let passes =
+                        g.viewport
+                            .read_passes(&g.gpu.device, &g.gpu.queue, exposure, forward)?;
+                    let traced = g.viewport.read_traced(&g.gpu.device, &g.gpu.queue).ok();
+                    Ok((passes, traced))
+                });
+            let Ok((passes, traced)) = read_res else {
+                self.finish_render_job("tiled render: tile could not be read back");
+                return;
+            };
+            let job = self.render_job.as_mut().expect("checked");
+            let grid = job.tiles.as_mut().expect("checked");
+            grid.exposure = exposure;
+            let fw = grid.full_w as usize;
+            let cw = passes.width.min(tw) as usize;
+            let ch = passes.height.min(th) as usize;
+            for row in 0..ch {
+                let dst_y = ty as usize + row;
+                let dst_base = dst_y * fw + tx as usize;
+                let src_base = row * passes.width as usize;
+                grid.combined[dst_base..dst_base + cw]
+                    .copy_from_slice(&passes.combined[src_base..src_base + cw]);
+                grid.normal_pass[dst_base..dst_base + cw]
+                    .copy_from_slice(&passes.normal[src_base..src_base + cw]);
+                grid.depth[dst_base..dst_base + cw]
+                    .copy_from_slice(&passes.depth[src_base..src_base + cw]);
+                if let Some(ref g) = traced {
+                    if g.width == passes.width && g.height == passes.height {
+                        grid.albedo[dst_base..dst_base + cw]
+                            .copy_from_slice(&g.albedo[src_base..src_base + cw]);
+                        grid.normal_oidn[dst_base..dst_base + cw]
+                            .copy_from_slice(&g.normal[src_base..src_base + cw]);
+                    }
+                }
+            }
+            grid.index += 1;
+            if ti + 1 < tn {
+                let next_rect = grid.current_rect().expect("more tiles");
+                let next_uniform = grid.current_uniform();
+                job.drawn = 0;
+                self.wanted_viewport = (next_rect[2], next_rect[3]);
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.viewport.path_trace_tile = next_uniform;
+                    gfx.viewport.restart_accumulation();
+                }
+                self.redraw.set(RedrawReason::SCENE_CHANGED);
+                return;
+            }
+            grid.done = true;
+            // Run Open Image Denoise once on the full stitched frame (zero tile seams).
+            if job.settings.denoise && kreate_render::oidn::available() {
+                let exposure_scale = 2.0f32.powf(grid.exposure);
+                let inv_scale = if exposure_scale > 1e-8 {
+                    1.0 / exposure_scale
+                } else {
+                    1.0
+                };
+                let color: Vec<[f32; 3]> = grid
+                    .combined
+                    .iter()
+                    .map(|c| [c[0] * inv_scale, c[1] * inv_scale, c[2] * inv_scale])
+                    .collect();
+                let started_oidn = Instant::now();
+                match kreate_render::oidn::denoise(&kreate_render::oidn::Noisy {
+                    width: grid.full_w as usize,
+                    height: grid.full_h as usize,
+                    color: &color,
+                    albedo: &grid.albedo,
+                    normal: &grid.normal_oidn,
+                }) {
+                    Ok(clean) => {
+                        for (dst, rgb) in grid.combined.iter_mut().zip(&clean) {
+                            dst[0] = rgb[0] * exposure_scale;
+                            dst[1] = rgb[1] * exposure_scale;
+                            dst[2] = rgb[2] * exposure_scale;
+                        }
+                        tracing::info!(
+                            "denoised tiled {}x{} render with OIDN in {:.2} s",
+                            grid.full_w,
+                            grid.full_h,
+                            started_oidn.elapsed().as_secs_f32()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Open Image Denoise (tiled): {e}");
+                    }
+                }
+            }
+        }
         // The samples are in. With Open Image Denoise installed, the picture
         // is filtered by it rather than by the view's own blur: read back,
         // denoised on the CPU, put in place of the mean, and shown for a
-        // frame before it is written. A motion-blurred picture is the mean
-        // of several and is left to the view's filter.
+        // frame before it is written.
         if self.denoise_with_oidn() {
             return;
         }
@@ -263,27 +401,27 @@ impl App {
             let forward = (self.camera.pivot - self.camera.eye())
                 .normalize_or_zero()
                 .as_vec3();
-            // The exposure the picture is shown at, whatever set it: the
-            // scene's meter, or the studio's own when it lights the scene.
-            // Metered here, a scene with no lamp read as an unlit one and
-            // was shown stops too bright.
             let exposure = self
                 .gfx
                 .as_ref()
                 .map_or(0.0, |g| g.viewport.display().exposure);
-            let passes = self
+            let read_res = self
                 .gfx
                 .as_ref()
                 .ok_or("the window closed".to_string())
                 .and_then(|g| {
-                    g.viewport
-                        .read_passes(&g.gpu.device, &g.gpu.queue, exposure, forward)
+                    let passes =
+                        g.viewport
+                            .read_passes(&g.gpu.device, &g.gpu.queue, exposure, forward)?;
+                    let traced = g.viewport.read_traced(&g.gpu.device, &g.gpu.queue).ok();
+                    Ok((passes, traced))
                 });
-            let Ok(passes) = passes else {
+            let Ok((passes, traced)) = read_res else {
                 self.finish_render_job("motion blur: the picture could not be read back");
                 return;
             };
             let job = self.render_job.as_mut().expect("checked");
+            let denoise_on = job.settings.denoise;
             let blur = job.blur.as_mut().expect("checked");
             if blur.sum.len() != passes.combined.len() {
                 blur.sum = vec![[0.0; 4]; passes.combined.len()];
@@ -293,12 +431,92 @@ impl App {
                     s[i] += c[i];
                 }
             }
+            if let Some(ref g) = traced {
+                if blur.albedo_sum.len() != g.albedo.len() {
+                    blur.albedo_sum = vec![[0.0; 3]; g.albedo.len()];
+                    blur.normal_sum = vec![[0.0; 3]; g.normal.len()];
+                }
+                for (a, b) in blur.albedo_sum.iter_mut().zip(&g.albedo) {
+                    a[0] += b[0];
+                    a[1] += b[1];
+                    a[2] += b[2];
+                }
+                for (a, b) in blur.normal_sum.iter_mut().zip(&g.normal) {
+                    a[0] += b[0];
+                    a[1] += b[1];
+                    a[2] += b[2];
+                }
+            }
             blur.step += 1;
             if blur.step < blur.steps {
                 let t = Blur::time(blur.base, blur.shutter, blur.step, blur.steps);
                 job.drawn = 0;
                 self.set_frame(t);
                 return;
+            }
+            // Run OIDN on the final motion-blur averaged linear buffer.
+            if denoise_on && kreate_render::oidn::available() {
+                let n = blur.steps.max(1) as f32;
+                let exposure_scale = 2.0f32.powf(exposure);
+                let inv_scale = if exposure_scale > 1e-8 {
+                    1.0 / exposure_scale
+                } else {
+                    1.0
+                };
+                let color: Vec<[f32; 3]> = blur
+                    .sum
+                    .iter()
+                    .map(|c| {
+                        [
+                            (c[0] / n) * inv_scale,
+                            (c[1] / n) * inv_scale,
+                            (c[2] / n) * inv_scale,
+                        ]
+                    })
+                    .collect();
+                let albedo: Vec<[f32; 3]> = if blur.albedo_sum.len() == color.len() {
+                    blur.albedo_sum
+                        .iter()
+                        .map(|v| [v[0] / n, v[1] / n, v[2] / n])
+                        .collect()
+                } else {
+                    vec![[1.0; 3]; color.len()]
+                };
+                let normal: Vec<[f32; 3]> = if blur.normal_sum.len() == color.len() {
+                    blur.normal_sum
+                        .iter()
+                        .map(|v| [v[0] / n, v[1] / n, v[2] / n])
+                        .collect()
+                } else {
+                    vec![[0.0; 3]; color.len()]
+                };
+                match kreate_render::oidn::denoise(&kreate_render::oidn::Noisy {
+                    width: passes.width as usize,
+                    height: passes.height as usize,
+                    color: &color,
+                    albedo: &albedo,
+                    normal: &normal,
+                }) {
+                    Ok(clean) => {
+                        let mean: Vec<[f32; 4]> = blur
+                            .sum
+                            .iter()
+                            .zip(&clean)
+                            .map(|(orig, rgb)| {
+                                [
+                                    rgb[0] * exposure_scale,
+                                    rgb[1] * exposure_scale,
+                                    rgb[2] * exposure_scale,
+                                    (orig[3] / n).clamp(0.0, 1.0),
+                                ]
+                            })
+                            .collect();
+                        blur.denoised_mean = Some(mean);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Open Image Denoise (motion blur): {e}");
+                    }
+                }
             }
         }
         let job = self.render_job.as_ref().expect("checked");
@@ -391,7 +609,9 @@ impl App {
         let Some(job) = self.render_job.as_mut() else {
             return false;
         };
-        if job.denoised || !job.settings.denoise || job.blur.is_some() {
+        // Tiled renders and motion-blur renders run OIDN on their stitched /
+        // averaged linear buffer directly.
+        if job.denoised || !job.settings.denoise || job.blur.is_some() || job.tiles.is_some() {
             return false;
         }
         job.denoised = true;
@@ -457,16 +677,27 @@ impl App {
             job.drawn = 0;
             job.ids = None;
             job.denoised = false;
+            if let Some(grid) = job.tiles.as_mut() {
+                grid.reset();
+                if let Some(rect) = grid.current_rect() {
+                    self.wanted_viewport = (rect[2], rect[3]);
+                }
+            }
             // The next frame is filtered as the settings say until its own
             // samples are in: the last one's denoising turned the view's off.
-            let denoise = job.settings.denoise;
+            let denoise = job.settings.denoise && job.tiles.is_none();
+            let tile_uniform = job.tiles.as_ref().and_then(|t| t.current_uniform());
             if let Some(gfx) = self.gfx.as_mut() {
                 gfx.viewport.path_trace_denoise = denoise;
+                gfx.viewport.path_trace_tile = tile_uniform;
             }
             if let Some(blur) = job.blur.as_mut() {
                 blur.step = 0;
                 blur.base = (f + 1) as f64;
                 blur.sum.clear();
+                blur.albedo_sum.clear();
+                blur.normal_sum.clear();
+                blur.denoised_mean = None;
                 let t = Blur::time(blur.base, blur.shutter, 0, blur.steps);
                 self.set_frame(t);
             }
@@ -493,9 +724,44 @@ impl App {
     }
 
     /// The picture on screen as raw RGBA8 rows, its size, and — for a
-    /// motion-blurred one — the scene-linear mean it was made from.
+    /// motion-blurred or tiled one — the scene-linear mean it was made from.
     #[allow(clippy::type_complexity)]
     fn rendered_rgba(&self) -> Result<(u32, u32, Vec<u8>, Option<Vec<[f32; 4]>>), String> {
+        let transparent = self
+            .render_job
+            .as_ref()
+            .is_some_and(|j| j.settings.transparent_background);
+        let view = kreate_math::DisplayTransform {
+            view: self
+                .gfx
+                .as_ref()
+                .map_or(kreate_math::ViewTransform::AgX, |g| {
+                    g.viewport.display().view
+                }),
+            exposure: 0.0,
+        };
+        // Tiled 4K/8K render: tonemap the stitched full-frame linear buffer.
+        if let Some(grid) = self
+            .render_job
+            .as_ref()
+            .and_then(|j| j.tiles.as_ref())
+            .filter(|g| g.done)
+        {
+            let mut rgba = Vec::with_capacity(grid.combined.len() * 4);
+            for c in &grid.combined {
+                let s = view
+                    .apply(kreate_math::SceneRgb::new(c[0], c[1], c[2]))
+                    .encode();
+                rgba.extend([s.r, s.g, s.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                let a = if transparent {
+                    (c[3].clamp(0.0, 1.0) * 255.0).round() as u8
+                } else {
+                    255
+                };
+                rgba.push(a);
+            }
+            return Ok((grid.full_w, grid.full_h, rgba, Some(grid.combined.clone())));
+        }
         // A motion-blurred picture is the mean of the shutter's moments,
         // shown through the same view transform on the CPU; any other is the
         // one on screen.
@@ -504,10 +770,24 @@ impl App {
             .as_ref()
             .and_then(|j| j.blur.as_ref())
             .map(|b| {
+                if let Some(ref clean) = b.denoised_mean {
+                    return clean.clone();
+                }
                 let n = b.steps.max(1) as f32;
                 b.sum
                     .iter()
-                    .map(|c| [c[0] / n, c[1] / n, c[2] / n, 1.0])
+                    .map(|c| {
+                        [
+                            c[0] / n,
+                            c[1] / n,
+                            c[2] / n,
+                            if transparent {
+                                (c[3] / n).clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            },
+                        ]
+                    })
                     .collect()
             });
 
@@ -518,24 +798,18 @@ impl App {
                     .as_ref()
                     .map(|g| g.viewport.render_size())
                     .ok_or("the window closed")?;
-                // The look the picture is shown in; its exposure is in the
-                // mean already.
-                let view = kreate_math::DisplayTransform {
-                    view: self
-                        .gfx
-                        .as_ref()
-                        .map_or(kreate_math::ViewTransform::AgX, |g| {
-                            g.viewport.display().view
-                        }),
-                    exposure: 0.0,
-                };
                 let mut rgba = Vec::with_capacity(mean.len() * 4);
                 for c in mean {
                     let s = view
                         .apply(kreate_math::SceneRgb::new(c[0], c[1], c[2]))
                         .encode();
                     rgba.extend([s.r, s.g, s.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
-                    rgba.push(255);
+                    let a = if transparent {
+                        (c[3].clamp(0.0, 1.0) * 255.0).round() as u8
+                    } else {
+                        255
+                    };
+                    rgba.push(a);
                 }
                 if rgba.len() != (w as usize) * (h as usize) * 4 {
                     return Err("the blurred picture has the wrong size".to_string());
@@ -578,17 +852,36 @@ impl App {
                 png.clone()
             }
             kreate_scene::render::OutputFormat::Exr => {
-                let forward = (self.camera.pivot - self.camera.eye())
-                    .normalize_or_zero()
-                    .as_vec3();
-                let gfx = self.gfx.as_ref().ok_or("the window closed")?;
-                let exposure = gfx.viewport.display().exposure;
-                let mut passes =
-                    gfx.viewport
-                        .read_passes(&gfx.gpu.device, &gfx.gpu.queue, exposure, forward)?;
-                if let Some(mean) = blurred {
-                    passes.combined = mean;
-                }
+                let passes = if let Some(grid) = self
+                    .render_job
+                    .as_ref()
+                    .and_then(|j| j.tiles.as_ref())
+                    .filter(|g| g.done)
+                {
+                    kreate_render::viewport::RenderPasses {
+                        width: grid.full_w,
+                        height: grid.full_h,
+                        combined: grid.combined.clone(),
+                        normal: grid.normal_pass.clone(),
+                        depth: grid.depth.clone(),
+                    }
+                } else {
+                    let forward = (self.camera.pivot - self.camera.eye())
+                        .normalize_or_zero()
+                        .as_vec3();
+                    let gfx = self.gfx.as_ref().ok_or("the window closed")?;
+                    let exposure = gfx.viewport.display().exposure;
+                    let mut passes = gfx.viewport.read_passes(
+                        &gfx.gpu.device,
+                        &gfx.gpu.queue,
+                        exposure,
+                        forward,
+                    )?;
+                    if let Some(mean) = blurred {
+                        passes.combined = mean;
+                    }
+                    passes
+                };
                 let crypto = self
                     .render_job
                     .as_ref()
@@ -658,6 +951,7 @@ impl App {
             ) = saved.look;
             v.path_trace_bounces = 4;
             v.transparent_background = false;
+            v.path_trace_tile = None;
             v.path_trace_noise_threshold = quiet_enough(0);
         }
         self.camera = saved.camera;

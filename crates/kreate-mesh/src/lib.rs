@@ -9,6 +9,7 @@
 pub mod arch;
 pub mod arena;
 pub mod attribute;
+pub mod bake;
 pub mod bmesh;
 pub mod check;
 pub mod dyntopo;
@@ -29,6 +30,7 @@ pub mod remesh;
 pub mod sculpt;
 pub mod section;
 pub mod selection;
+pub mod tangents;
 pub mod tessellate;
 pub mod text;
 

@@ -91,6 +91,8 @@ pub struct DocumentFile {
     autosaved_version: u64,
     /// The worker's replies.
     replies: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    /// Last autosave failure message to surface in the UI banner.
+    last_autosave_error: Option<String>,
     session: Option<Session>,
     /// How long after the last change an autosave is written.
     ///
@@ -116,6 +118,7 @@ impl DocumentFile {
             last_autosave: Instant::now(),
             autosaved_version: 0,
             replies: None,
+            last_autosave_error: None,
             session: Session::acquire(),
             idle_after: AUTOSAVE_IDLE,
             at_least_every: AUTOSAVE_MAX_INTERVAL,
@@ -215,6 +218,7 @@ impl DocumentFile {
                 last_autosave: Instant::now(),
                 autosaved_version: version,
                 replies: None,
+                last_autosave_error: None,
                 session: Session::acquire(),
                 idle_after: AUTOSAVE_IDLE,
                 at_least_every: AUTOSAVE_MAX_INTERVAL,
@@ -229,16 +233,23 @@ impl DocumentFile {
     /// and then fails has told them a lie about their own data. Autosave, which
     /// nobody is waiting on, is the one that goes to a thread.
     pub fn save(&mut self, path: &Path, document: &Document) -> Result<(), String> {
-        let bytes = container::write(document, &self.manifest, &self.unknown)
-            .map_err(|e| format!("cannot serialise: {e}"))?;
-        write_atomic(path, &bytes)?;
+        write_atomic_stream(path, |w| {
+            container::write_to(w, document, &self.manifest, &self.unknown)
+                .map_err(|e| format!("cannot serialise: {e}"))
+        })?;
         self.path = Some(path.to_path_buf());
         self.saved_version = document.version();
         self.changed = None;
+        self.last_autosave_error = None;
         // Cleared, because the reason to keep an autosave is that it holds work
         // the saved file does not.
         self.discard_autosave();
         Ok(())
+    }
+
+    /// Returns and clears the most recent autosave failure message, if any.
+    pub fn take_autosave_error(&mut self) -> Option<String> {
+        self.last_autosave_error.take()
     }
 
     /// Records that the document changed, so autosave knows there is work to do.
@@ -308,9 +319,11 @@ impl DocumentFile {
         std::thread::Builder::new()
             .name("autosave".to_string())
             .spawn(move || {
-                let result = container::write(&snapshot, &manifest, &unknown)
-                    .map_err(|e| format!("cannot serialise: {e}"))
-                    .and_then(|bytes| write_atomic(&destination, &bytes).map(|()| destination));
+                let result = write_atomic_stream(&destination, |w| {
+                    container::write_to(w, &snapshot, &manifest, &unknown)
+                        .map_err(|e| format!("cannot serialise: {e}"))
+                })
+                .map(|()| destination);
                 let _ = tx.send(result);
             })
             .ok();
@@ -331,6 +344,7 @@ impl DocumentFile {
             Ok(Ok(path)) => Some(path),
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "autosave failed");
+                self.last_autosave_error = Some(e);
                 None
             }
             Err(_) => None,
@@ -342,6 +356,7 @@ impl DocumentFile {
         match rx.try_recv() {
             Ok(Ok(path)) => {
                 tracing::info!(path = %path.display(), "autosaved");
+                self.last_autosave_error = None;
                 self.replies = None;
             }
             Ok(Err(e)) => {
@@ -349,6 +364,7 @@ impl DocumentFile {
                 // written is usually a full or unwritable disk, and hammering it
                 // every frame would turn a warning into a hang.
                 tracing::warn!(error = %e, "autosave failed");
+                self.last_autosave_error = Some(e);
                 self.replies = None;
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -896,6 +912,46 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         // that worked.
         file.sync_all()
             .map_err(|e| format!("cannot flush {}: {e}", temporary.display()))?;
+    }
+    std::fs::rename(&temporary, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("cannot replace {}: {e}", path.display())
+    })
+}
+
+/// Streams a file to `path` via a temporary sibling file, `sync_all`, and an
+/// atomic rename, avoiding buffering large archives in RAM.
+pub fn write_atomic_stream<F>(path: &Path, write_fn: F) -> Result<(), String>
+where
+    F: FnOnce(
+        std::io::BufWriter<std::fs::File>,
+    ) -> Result<std::io::BufWriter<std::fs::File>, String>,
+{
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let temporary = path.with_extension(format!(
+        "{}.tmp{}",
+        path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("kreate"),
+        std::process::id()
+    ));
+    let write_res: Result<(), String> = (|| {
+        let file = std::fs::File::create(&temporary)
+            .map_err(|e| format!("cannot create {}: {e}", temporary.display()))?;
+        let mut buf = write_fn(std::io::BufWriter::with_capacity(256 * 1024, file))?;
+        buf.flush()
+            .map_err(|e| format!("cannot flush {}: {e}", temporary.display()))?;
+        let file = buf
+            .into_inner()
+            .map_err(|e| format!("cannot flush {}: {e}", temporary.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync {}: {e}", temporary.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(e);
     }
     std::fs::rename(&temporary, path).map_err(|e| {
         let _ = std::fs::remove_file(&temporary);

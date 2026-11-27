@@ -994,7 +994,7 @@ impl Operator for DissolveLimited {
 }
 
 /// What `mesh.check_select` can find, in its numbering.
-pub const CHECK_ISSUES: [&str; 7] = [
+pub const CHECK_ISSUES: [&str; 8] = [
     "open",
     "non_manifold",
     "flipped",
@@ -1002,6 +1002,7 @@ pub const CHECK_ISSUES: [&str; 7] = [
     "loose",
     "intersecting",
     "thin",
+    "overhang",
 ];
 
 #[derive(Clone, Debug, PartialEq, OpParams)]
@@ -1014,7 +1015,8 @@ pub struct CheckSelectParams {
         "degenerate",
         "loose",
         "intersecting",
-        "thin"
+        "thin",
+        "overhang"
     ))]
     pub issue: u32,
     /// The thinnest wall allowed, in the world, for `thin`.
@@ -1032,8 +1034,9 @@ impl Default for CheckSelectParams {
 }
 
 /// Selects what a mesh check found, in every mesh being edited: the rims of
-/// holes, faces passing through each other, walls too thin to print. The
-/// rest is deselected, so what is left selected is exactly the fault.
+/// holes, faces passing through each other, walls too thin to print, or
+/// steep overhangs. The rest is deselected, so what is left selected is
+/// exactly the fault.
 pub struct CheckSelect;
 
 impl Operator for CheckSelect {
@@ -1076,7 +1079,8 @@ impl Operator for CheckSelect {
                 3 => (Domain::Face, SelectMode::Face, report.degenerate_faces),
                 4 => (Domain::Point, SelectMode::Vert, report.loose_verts),
                 5 => (Domain::Face, SelectMode::Face, report.intersecting_faces),
-                _ => (Domain::Face, SelectMode::Face, report.thin_faces),
+                6 => (Domain::Face, SelectMode::Face, report.thin_faces),
+                _ => (Domain::Face, SelectMode::Face, report.overhang_faces),
             };
             selection::select_none(mesh);
             for i in &list {
@@ -1096,6 +1100,7 @@ impl Operator for CheckSelect {
             "loose vertices",
             "intersecting faces",
             "thin faces",
+            "overhang faces",
         ][issue as usize];
         crate::report::say(if count == 0 {
             format!("found 0 {what}: none")
@@ -1107,6 +1112,153 @@ impl Operator for CheckSelect {
         } else {
             OpResult::Cancelled
         })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct RepairManifoldParams {
+    /// Fill closed boundary edge loops to seal holes.
+    pub fill_holes: bool,
+    /// Remove vertices not referenced by any face.
+    pub remove_loose: bool,
+    /// Recalculate face winding consistently outward.
+    pub fix_normals: bool,
+}
+
+impl Default for RepairManifoldParams {
+    fn default() -> Self {
+        Self {
+            fill_holes: true,
+            remove_loose: true,
+            fix_normals: true,
+        }
+    }
+}
+
+/// One-click 3D-print manifold repair on the active mesh: removes loose
+/// vertices, caps closed open-edge boundary loops, and recalculates consistent
+/// outward normals.
+pub struct RepairManifold;
+
+impl Operator for RepairManifold {
+    type Params = RepairManifoldParams;
+
+    fn id() -> &'static str {
+        "mesh.repair_manifold"
+    }
+    fn label() -> &'static str {
+        "Repair Manifold"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        doc.selection
+            .active
+            .and_then(|id| doc.object(id))
+            .is_some_and(|o| o.mesh().is_some())
+    }
+
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        use std::collections::{HashMap, HashSet};
+        let Some(mesh_id) = doc
+            .document()
+            .selection
+            .active
+            .and_then(|id| doc.document().object(id))
+            .and_then(|o| o.mesh())
+        else {
+            return Ok(OpResult::Cancelled);
+        };
+        let Some(orig) = doc.document().mesh(mesh_id).cloned() else {
+            return Ok(OpResult::Cancelled);
+        };
+
+        let mut bm = orig.to_bmesh();
+        let mut holes_filled = 0usize;
+        let mut loose_removed = 0usize;
+        let mut faces_flipped = 0usize;
+
+        if params.remove_loose {
+            let loose: Vec<kreate_mesh::VertId> = bm
+                .vert_ids()
+                .filter(|&v| bm.vert_faces(v).is_empty())
+                .collect();
+            for v in loose {
+                bm.remove_vert(v);
+                loose_removed += 1;
+            }
+        }
+
+        if params.fill_holes {
+            // Collect boundary edges (incident to exactly one face) as directed
+            // half-edges oriented opposite the existing face so a cap closes cleanly.
+            let mut next_map: HashMap<kreate_mesh::VertId, Vec<kreate_mesh::VertId>> =
+                HashMap::new();
+            for e in bm.edge_ids() {
+                if bm.edge_faces(e).len() != 1 {
+                    continue;
+                }
+                let Some([v0, v1]) = bm.edge_verts(e) else {
+                    continue;
+                };
+                let f = bm.edge_faces(e)[0];
+                let ring = bm.face_verts(f);
+                let mut forward = false;
+                for i in 0..ring.len() {
+                    if ring[i] == v0 && ring[(i + 1) % ring.len()] == v1 {
+                        forward = true;
+                        break;
+                    }
+                }
+                // Cap winds opposite the adjacent face along the shared edge.
+                let (a, b) = if forward { (v1, v0) } else { (v0, v1) };
+                next_map.entry(a).or_default().push(b);
+            }
+            let mut used: HashSet<(kreate_mesh::VertId, kreate_mesh::VertId)> = HashSet::new();
+            let starts: Vec<kreate_mesh::VertId> = next_map.keys().copied().collect();
+            for start in starts {
+                let mut ring = Vec::new();
+                let mut cur = start;
+                while let Some(next) = next_map
+                    .get(&cur)
+                    .and_then(|outs| outs.iter().copied().find(|&n| !used.contains(&(cur, n))))
+                {
+                    used.insert((cur, next));
+                    ring.push(cur);
+                    cur = next;
+                    if cur == start || ring.len() > 2048 {
+                        break;
+                    }
+                }
+                if cur == start
+                    && ring.len() >= 3
+                    && kreate_mesh::edit::fill(&mut bm, &ring).is_ok()
+                {
+                    holes_filled += 1;
+                }
+            }
+        }
+
+        if params.fix_normals {
+            let faces: Vec<kreate_mesh::FaceId> = bm.face_ids().collect();
+            let recalc = kreate_mesh::edit::normals::recalculate(&mut bm, &faces, false);
+            faces_flipped = recalc.flipped;
+        }
+
+        if holes_filled == 0 && loose_removed == 0 && faces_flipped == 0 {
+            crate::report::say("repair manifold: mesh already clean");
+            return Ok(OpResult::Cancelled);
+        }
+        let repaired = bm.to_mesh_data();
+        if let Some(m) = doc.document_mut().mesh_mut(mesh_id) {
+            *m = repaired;
+        }
+        crate::report::say(format!(
+            "repair manifold: filled {holes_filled} hole(s), removed {loose_removed} loose vert(s), flipped {faces_flipped} face(s)"
+        ));
+        Ok(OpResult::Finished)
     }
 }
 
@@ -3889,6 +4041,7 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<ExtrudeRegion>();
     registry.register::<MedianSet>();
     registry.register::<CheckSelect>();
+    registry.register::<RepairManifold>();
     registry.register::<DissolveLimited>();
     registry.register::<FillHole>();
     registry.register::<InsetFaces>();

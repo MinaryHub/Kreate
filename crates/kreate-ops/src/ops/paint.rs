@@ -31,6 +31,8 @@ pub fn register(registry: &mut crate::operator::OperatorRegistry) {
     registry.register::<MirrorWeights>();
     registry.register::<TextureStroke>();
     registry.register::<NewTexture>();
+    registry.register::<VertexColorStroke>();
+    registry.register::<FillVertexColor>();
 }
 
 // --- texture painting ------------------------------------------------------------
@@ -45,6 +47,13 @@ pub struct TextureStrokeParams {
     /// The colour, as the image stores it: an sRGB image's own encoding, so
     /// the swatch picked is the colour that lands.
     pub color: [f64; 3],
+    /// Channel mode: 0 = RGBA colour, 1 = Roughness (green), 2 = Metallic
+    /// (blue), 3 = Erase (alpha to 0).
+    #[param(variants("color", "roughness", "metallic", "erase"))]
+    pub channel: u32,
+    /// Scalar brush value (0..1) used when painting Roughness or Metallic.
+    #[param(min = 0.0, max = 1.0)]
+    pub value: f64,
 }
 
 impl Default for TextureStrokeParams {
@@ -53,6 +62,8 @@ impl Default for TextureStrokeParams {
             image: String::new(),
             dabs: Vec::new(),
             color: [1.0, 1.0, 1.0],
+            channel: 0,
+            value: 0.5,
         }
     }
 }
@@ -124,6 +135,8 @@ impl Operator for TextureStroke {
             return Ok(OpResult::Cancelled);
         }
         let target = params.color.map(|c| (c.clamp(0.0, 1.0) * 255.0) as f32);
+        let scalar = (params.value.clamp(0.0, 1.0) * 255.0) as f32;
+        let channel_mode = params.channel;
         doc.edit_image(id, &tiles, |img| {
             img.source = kreate_scene::image::Source::Painted;
             let tile = kreate_scene::image::TILE;
@@ -154,13 +167,39 @@ impl Operator for TextureStroke {
                         };
                         let at = (((y % tile) * tile + (x % tile)) * 4) as usize;
                         let bytes = &mut px.bytes_mut()[at..at + 4];
-                        for c in 0..3 {
-                            let old = bytes[c] as f32;
-                            bytes[c] =
-                                (old + (target[c] - old) * a).round().clamp(0.0, 255.0) as u8;
+                        match channel_mode {
+                            // Roughness (glTF green channel)
+                            1 => {
+                                let old = bytes[1] as f32;
+                                bytes[1] =
+                                    (old + (scalar - old) * a).round().clamp(0.0, 255.0) as u8;
+                                bytes[3] = 255;
+                            }
+                            // Metallic (glTF blue channel)
+                            2 => {
+                                let old = bytes[2] as f32;
+                                bytes[2] =
+                                    (old + (scalar - old) * a).round().clamp(0.0, 255.0) as u8;
+                                bytes[3] = 255;
+                            }
+                            // Erase (reduce alpha toward 0)
+                            3 => {
+                                let old = bytes[3] as f32;
+                                bytes[3] = (old * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+                            }
+                            // RGBA colour
+                            _ => {
+                                for c in 0..3 {
+                                    let old = bytes[c] as f32;
+                                    bytes[c] =
+                                        (old + (target[c] - old) * a).round().clamp(0.0, 255.0)
+                                            as u8;
+                                }
+                                let old = bytes[3] as f32;
+                                bytes[3] =
+                                    (old + (255.0 - old) * a).round().clamp(0.0, 255.0) as u8;
+                            }
                         }
-                        let old = bytes[3] as f32;
-                        bytes[3] = (old + (255.0 - old) * a).round().clamp(0.0, 255.0) as u8;
                     }
                 }
             }
@@ -183,8 +222,15 @@ pub struct NewTextureParams {
     pub width: u32,
     #[param(min = 16, max = 8192, unit = "count")]
     pub height: u32,
-    /// What it starts as, in its own sRGB encoding.
+    /// What it starts as, in its own sRGB encoding (or ORM default for PBR map).
     pub color: [f64; 3],
+    /// Material slot index on the active mesh (0 = first slot).
+    #[param(min = 0, max = 64, unit = "count")]
+    pub slot: u32,
+    /// Which texture slot to create: 0 = Base Color, 1 = Metallic-Roughness,
+    /// 2 = Emission.
+    #[param(variants("base_color", "metallic_roughness", "emission"))]
+    pub map: u32,
 }
 
 impl Default for NewTextureParams {
@@ -193,13 +239,14 @@ impl Default for NewTextureParams {
             width: 1024,
             height: 1024,
             color: [1.0, 1.0, 1.0],
+            slot: 0,
+            map: 0,
         }
     }
 }
 
-/// A new image to paint on, as the active object's base colour: Blender's
-/// "Add Texture Paint Slot". The object's first material takes it, and gets
-/// made when there is none.
+/// A new image to paint on, assigned to the active object's material slot:
+/// Base Color, Metallic-Roughness, or Emission.
 pub struct NewTexture;
 
 impl Operator for NewTexture {
@@ -228,18 +275,33 @@ impl Operator for NewTexture {
         let Some(mesh) = d.object(object).and_then(|o| o.mesh()) else {
             return Ok(OpResult::Cancelled);
         };
+        let map_kind = match params.map {
+            1 => kreate_scene::MaterialMap::MetallicRoughness,
+            2 => kreate_scene::MaterialMap::Emission,
+            _ => kreate_scene::MaterialMap::BaseColor,
+        };
+        let suffix = match map_kind {
+            kreate_scene::MaterialMap::MetallicRoughness => "ORM",
+            kreate_scene::MaterialMap::Emission => "Emission",
+            _ => "Paint",
+        };
         let name = format!(
-            "{} Paint",
+            "{} {suffix}",
             d.object(object).map(|o| o.name.clone()).unwrap_or_default()
         );
         let (w, h) = (params.width.clamp(16, 8192), params.height.clamp(16, 8192));
         let mut image =
             kreate_scene::Image::new(name.clone(), w, h, kreate_scene::PixelFormat::Rgba8);
-        image.color_space = kreate_scene::ColorSpace::Srgb;
+        image.color_space = map_kind.color_space();
         image.source = kreate_scene::image::Source::Painted;
-        let fill = params
-            .color
-            .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let fill: [u8; 3] = match map_kind {
+            // Default ORM: AO=1.0 (R=255), Roughness=0.5 (G=128), Metallic=0.0 (B=0).
+            kreate_scene::MaterialMap::MetallicRoughness => [255, 128, 0],
+            kreate_scene::MaterialMap::Emission => [0, 0, 0],
+            _ => params
+                .color
+                .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8),
+        };
         let (across, down) = image.tile_counts();
         for ty in 0..down {
             for tx in 0..across {
@@ -251,7 +313,8 @@ impl Operator for NewTexture {
             }
         }
         let image = d.add_image(image);
-        let material = match d.mesh_slots(mesh).first().copied().flatten() {
+        let slot = params.slot as usize;
+        let material = match d.mesh_slots(mesh).get(slot).copied().flatten() {
             Some(m) => m,
             None => {
                 let m = d.add_material(kreate_scene::Material {
@@ -259,20 +322,193 @@ impl Operator for NewTexture {
                     ..Default::default()
                 });
                 let mut slots = d.mesh_slots(mesh).to_vec();
-                if slots.is_empty() {
-                    slots.push(Some(m));
-                } else {
-                    slots[0] = Some(m);
+                if slots.len() <= slot {
+                    slots.resize(slot + 1, None);
                 }
+                slots[slot] = Some(m);
                 d.set_mesh_slots(mesh, slots);
                 m
             }
         };
         if let Some(m) = d.material_mut(material) {
-            m.base_color_image = Some(image);
-            // White, so the texture shows as painted rather than tinted.
-            m.base_color = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
+            *m.map_mut(map_kind) = Some(image);
+            match map_kind {
+                kreate_scene::MaterialMap::BaseColor => {
+                    // White, so the texture shows as painted rather than tinted.
+                    m.base_color = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
+                }
+                kreate_scene::MaterialMap::MetallicRoughness => {
+                    m.roughness = 1.0;
+                    m.metallic = 1.0;
+                }
+                kreate_scene::MaterialMap::Emission => {
+                    if m.emission_strength <= 0.0 {
+                        m.emission_strength = 1.0;
+                    }
+                    m.emission = kreate_math::SceneRgb::new(1.0, 1.0, 1.0);
+                }
+                _ => {}
+            }
         }
+        Ok(OpResult::Finished)
+    }
+}
+
+// --- vertex colour painting ------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct VertexColorStrokeParams {
+    /// Vertex indices touched by the brush stroke.
+    pub vertices: Vec<u32>,
+    /// Per-vertex blend factor (0..1) corresponding to `vertices`.
+    pub amounts: Vec<f64>,
+    /// Linear RGBA target colour to blend toward.
+    pub color: [f64; 3],
+    #[param(min = 0.0, max = 1.0)]
+    pub alpha: f64,
+}
+
+impl Default for VertexColorStrokeParams {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            amounts: Vec::new(),
+            color: [1.0, 1.0, 1.0],
+            alpha: 1.0,
+        }
+    }
+}
+
+/// Paints per-vertex `COLOR` (`COLOR_0`) directly onto the active mesh,
+/// creating the layer initialized to white if absent.
+pub struct VertexColorStroke;
+
+impl Operator for VertexColorStroke {
+    type Params = VertexColorStrokeParams;
+    fn id() -> &'static str {
+        "paint.vertex_color_stroke"
+    }
+    fn label() -> &'static str {
+        "Vertex Color Stroke"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_mesh(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((_, mesh_id)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        if params.vertices.is_empty() || params.vertices.len() != params.amounts.len() {
+            return Ok(OpResult::Cancelled);
+        }
+        let target = glam::Vec4::new(
+            params.color[0].clamp(0.0, 1.0) as f32,
+            params.color[1].clamp(0.0, 1.0) as f32,
+            params.color[2].clamp(0.0, 1.0) as f32,
+            params.alpha.clamp(0.0, 1.0) as f32,
+        );
+        let d = doc.document_mut();
+        let Some(mesh) = d.mesh_mut(mesh_id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let n = mesh.num_verts() as usize;
+        // Ensure a point-domain F32x4 COLOR layer exists.
+        let mut colors: Vec<glam::Vec4> =
+            match mesh.attributes().get(kreate_mesh::attribute::names::COLOR) {
+                Some(l) if l.domain == Domain::Point => match &l.data {
+                    AttrData::F32x4(v) if v.len() == n => v.to_vec(),
+                    AttrData::F32x3(v) if v.len() == n => v.iter().map(|c| c.extend(1.0)).collect(),
+                    _ => vec![glam::Vec4::ONE; n],
+                },
+                _ => vec![glam::Vec4::ONE; n],
+            };
+        let mut changed = false;
+        for (&v, &a) in params.vertices.iter().zip(&params.amounts) {
+            let vi = v as usize;
+            if vi >= n {
+                continue;
+            }
+            let t = (a.clamp(0.0, 1.0)) as f32;
+            if t <= 0.0 {
+                continue;
+            }
+            let next = colors[vi].lerp(target, t);
+            if next != colors[vi] {
+                colors[vi] = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(OpResult::Cancelled);
+        }
+        mesh.attributes_mut().insert(
+            kreate_mesh::attribute::names::COLOR,
+            Domain::Point,
+            AttrData::F32x4(std::sync::Arc::new(colors)),
+        );
+        Ok(OpResult::Finished)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, OpParams)]
+pub struct FillVertexColorParams {
+    #[param(color)]
+    pub color: [f64; 3],
+    #[param(min = 0.0, max = 1.0)]
+    pub alpha: f64,
+}
+
+impl Default for FillVertexColorParams {
+    fn default() -> Self {
+        Self {
+            color: [1.0, 1.0, 1.0],
+            alpha: 1.0,
+        }
+    }
+}
+
+/// Fills every vertex of the active mesh's `COLOR` attribute with a solid color.
+pub struct FillVertexColor;
+
+impl Operator for FillVertexColor {
+    type Params = FillVertexColorParams;
+    fn id() -> &'static str {
+        "paint.fill_vertex_color"
+    }
+    fn label() -> &'static str {
+        "Fill Vertex Color"
+    }
+    fn poll(_ctx: &Context, doc: &Document) -> bool {
+        active_mesh(doc).is_some()
+    }
+    fn execute(
+        params: &Self::Params,
+        doc: &mut DocMut<'_>,
+        _ctx: &Context,
+    ) -> Result<OpResult, OpError> {
+        let Some((_, mesh_id)) = active_mesh(doc.document()) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let fill = glam::Vec4::new(
+            params.color[0].clamp(0.0, 1.0) as f32,
+            params.color[1].clamp(0.0, 1.0) as f32,
+            params.color[2].clamp(0.0, 1.0) as f32,
+            params.alpha.clamp(0.0, 1.0) as f32,
+        );
+        let d = doc.document_mut();
+        let Some(mesh) = d.mesh_mut(mesh_id) else {
+            return Ok(OpResult::Cancelled);
+        };
+        let n = mesh.num_verts() as usize;
+        mesh.attributes_mut().insert(
+            kreate_mesh::attribute::names::COLOR,
+            Domain::Point,
+            AttrData::F32x4(std::sync::Arc::new(vec![fill; n])),
+        );
         Ok(OpResult::Finished)
     }
 }

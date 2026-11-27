@@ -150,6 +150,9 @@ memmap2   = "0.9"
 # asks the operating system's own certificate store on every target (including
 # Android, where no `curl` binary exists), and `_ring` stays inside MIT/Apache/ISC.
 ureq      = { version = "3", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier", "gzip", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-native-certs = "0.8"
 
 # --- dev / test ---
 proptest = "1.5"

@@ -127,10 +127,19 @@ pub fn plan_sync(cached: &[Arc<MeshData>], scene: &[(ObjectId, Arc<MeshData>)]) 
     let mut seen: ahash::AHashSet<usize> = ahash::AHashSet::with_capacity(scene.len());
     let mut cached_by_ptr: ahash::AHashMap<usize, usize> =
         ahash::AHashMap::with_capacity(cached.len());
+    // Selection, position, and UV-only deltas all keep the same `corner_verts`
+    // buffer (`Arc` pointer) and vertex count, so indexing cached slots by
+    // `(corner_verts_ptr, num_verts)` turns fallback scans from O(M²) to O(1).
+    let mut cached_by_topo: ahash::AHashMap<(usize, u32), Vec<usize>> =
+        ahash::AHashMap::with_capacity(cached.len());
     for (slot, held) in cached.iter().enumerate() {
         cached_by_ptr
             .entry(Arc::as_ptr(held) as usize)
             .or_insert(slot);
+        cached_by_topo
+            .entry((held.corner_verts().as_ptr() as usize, held.num_verts()))
+            .or_default()
+            .push(slot);
     }
     let mut claimed = vec![false; cached.len()];
 
@@ -148,36 +157,38 @@ pub fn plan_sync(cached: &[Arc<MeshData>], scene: &[(ObjectId, Arc<MeshData>)]) 
         }
 
         // A handle the cache has not seen, but perhaps not new geometry. Only
-        // slots not already claimed this frame are candidates: an instance whose
-        // stack diverged is a genuinely different mesh that happens to share most
-        // of its arrays, and adopting it into the original's slot would leave
-        // both objects drawing the same thing.
-        let selection_only = cached
+        // slots not already claimed this frame with matching shared topology
+        // are candidates.
+        let candidates = cached_by_topo
+            .get(&(mesh.corner_verts().as_ptr() as usize, mesh.num_verts()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let selection_only = candidates
             .iter()
-            .enumerate()
-            .find(|(slot, held)| !claimed[*slot] && held.only_selection_differs(mesh));
-        if let Some((slot, _)) = selection_only {
+            .copied()
+            .find(|&slot| !claimed[slot] && cached[slot].only_selection_differs(mesh));
+        if let Some(slot) = selection_only {
             claimed[slot] = true;
             plan.keep.push(slot);
             plan.reflags.push((slot, mesh.clone()));
             continue;
         }
-        let moved_only = cached
+        let moved_only = candidates
             .iter()
-            .enumerate()
-            .find(|(slot, held)| !claimed[*slot] && held.only_positions_differ(mesh));
-        if let Some((slot, _)) = moved_only {
+            .copied()
+            .find(|&slot| !claimed[slot] && cached[slot].only_positions_differ(mesh));
+        if let Some(slot) = moved_only {
             claimed[slot] = true;
             plan.keep.push(slot);
             plan.repositions.push((slot, mesh.clone()));
             continue;
         }
-        let uvs_only = cached
+        let uvs_only = candidates
             .iter()
-            .enumerate()
-            .find(|(slot, held)| !claimed[*slot] && held.only_uvs_differ(mesh));
+            .copied()
+            .find(|&slot| !claimed[slot] && cached[slot].only_uvs_differ(mesh));
         match uvs_only {
-            Some((slot, _)) => {
+            Some(slot) => {
                 claimed[slot] = true;
                 plan.keep.push(slot);
                 plan.reuvs.push((slot, mesh.clone()));

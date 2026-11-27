@@ -116,6 +116,10 @@ pub struct NlaStrip {
     pub mute: bool,
     /// How its values meet what is under it.
     pub blend: NlaBlend,
+    /// Frames over which the strip's influence ramps in from 0 at `start`.
+    pub blend_in: f64,
+    /// Frames over which the strip's influence ramps out to 0 before `end`.
+    pub blend_out: f64,
 }
 
 impl NlaStrip {
@@ -132,6 +136,8 @@ impl NlaStrip {
             extend: NlaExtend::HoldForward,
             mute: false,
             blend: NlaBlend::Replace,
+            blend_in: 0.0,
+            blend_out: 0.0,
         }
     }
 
@@ -142,6 +148,24 @@ impl NlaStrip {
 
     fn length(&self) -> f64 {
         (self.action_end - self.action_start).max(0.0)
+    }
+
+    /// Strip influence at `frame` after applying `blend_in` and `blend_out`
+    /// fade ramps.
+    pub fn effective_influence(&self, frame: f64) -> f64 {
+        let base = self.influence.clamp(0.0, 1.0);
+        if base <= 0.0 {
+            return 0.0;
+        }
+        let end = self.end();
+        let mut ramp = 1.0;
+        if self.blend_in > 1e-6 && frame >= self.start && frame < self.start + self.blend_in {
+            ramp *= ((frame - self.start) / self.blend_in).clamp(0.0, 1.0);
+        }
+        if self.blend_out > 1e-6 && frame <= end && frame > end - self.blend_out {
+            ramp *= ((end - frame) / self.blend_out).clamp(0.0, 1.0);
+        }
+        base * ramp
     }
 
     /// The action's own frame at scene frame `frame`, or `None` where the

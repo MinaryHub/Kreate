@@ -1662,6 +1662,9 @@ pub struct Viewport {
     pub path_trace_bounces: u32,
     /// Film Transparent: leave background pixels at alpha = 0 in path-traced output.
     pub transparent_background: bool,
+    /// Optional sub-region tile `[offset_x, offset_y, full_w, full_h]` for
+    /// tiled high-resolution (4K/8K) path-traced renders.
+    pub path_trace_tile: Option<[u32; 4]>,
     /// Adaptive sampling: a pixel stops taking samples once the standard
     /// error of its mean is under this fraction of it. Zero traces every
     /// pixel every sample.
@@ -2904,6 +2907,7 @@ impl Viewport {
             path_trace_denoise: true,
             path_trace_bounces: 4,
             transparent_background: false,
+            path_trace_tile: None,
             path_trace_noise_threshold: 0.01,
             ssr: crate::ssr::Ssr::new(device, 1, 1),
             show_reflections: true,
@@ -3299,11 +3303,16 @@ impl Viewport {
                 // A floor under a backdrop, as the rasterised view has one.
                 self.pathtracer.ground = self.backdrop.is_some() && self.show_ground_shadow;
                 self.pathtracer.transparent_background = self.transparent_background;
+                self.pathtracer.tile = self.path_trace_tile;
                 self.pathtracer.max_bounces = self.path_trace_bounces;
+                let pt_aspect = match self.path_trace_tile {
+                    Some([_, _, fw, fh]) if fw > 0 && fh > 0 => fw as f64 / fh as f64,
+                    _ => aspect,
+                };
                 self.pathtracer.prepare(
                     device,
                     queue,
-                    camera.projection_matrix(aspect),
+                    camera.projection_matrix(pt_aspect),
                     camera.view_rotation(),
                     camera.eye(),
                     self.render_size,

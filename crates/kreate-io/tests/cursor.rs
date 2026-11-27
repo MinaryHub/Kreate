@@ -176,6 +176,7 @@ fn bone_constraints_are_saved_with_the_pose() {
             bone: "Bone".into(),
             kind: ConstraintKind::DampedTrack,
             target: "Goal".into(),
+            target_object: Some(kreate_scene::Uid::from_raw(42)),
             influence: 0.35,
             enabled: false,
         },
@@ -186,6 +187,7 @@ fn bone_constraints_are_saved_with_the_pose() {
                 max: DVec3::new(0.75, 0.375, 1.5),
             },
             target: String::new(),
+            target_object: None,
             influence: 0.8,
             enabled: true,
         },
@@ -232,6 +234,8 @@ fn nla_strips_are_saved_with_their_object() {
         extend: NlaExtend::Nothing,
         mute: true,
         blend: kreate_scene::nla::NlaBlend::Multiply,
+        blend_in: 4.0,
+        blend_out: 6.0,
     };
     doc.object_mut(id).unwrap().nla.push(strip.clone());
     let back = round_trip(&doc);

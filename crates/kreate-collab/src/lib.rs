@@ -12,8 +12,9 @@ pub mod client;
 pub mod relay;
 pub mod replica;
 pub mod session;
+pub(crate) mod tls;
 pub mod wire;
 
 pub use relay::{Relay, RelayConfig};
 pub use session::{Session, SessionEvent};
-pub use wire::{Peer, Presence, DEFAULT_PORT};
+pub use wire::{Peer, Presence, Role, DEFAULT_PORT};

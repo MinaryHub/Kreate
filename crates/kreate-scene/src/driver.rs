@@ -158,11 +158,37 @@ impl Document {
                 .and_then(|c| c.evaluate(self.playback.frame));
             let value = match keyed {
                 Some(value) => value,
-                None => crate::animation::read_object(&source.transform, &v.property)
-                    .and_then(|x| (v.index < 3).then(|| x[v.index as usize]))
-                    .ok_or_else(|| DriverError::BadProperty {
-                        variable: v.name.clone(),
-                    })?,
+                None => {
+                    if let Some(bone_rest) = v.property.strip_prefix("bone:") {
+                        let (bone_name, prop) =
+                            bone_rest
+                                .rsplit_once('.')
+                                .ok_or_else(|| DriverError::BadProperty {
+                                    variable: v.name.clone(),
+                                })?;
+                        let tr = source.pose.transform(bone_name);
+                        crate::animation::read_object(&tr, prop)
+                            .and_then(|x| (v.index < 3).then(|| x[v.index as usize]))
+                            .ok_or_else(|| DriverError::BadProperty {
+                                variable: v.name.clone(),
+                            })?
+                    } else if let Some(key_name) = v.property.strip_prefix("shape:") {
+                        source
+                            .shape_keys
+                            .iter()
+                            .find(|k| k.name == key_name)
+                            .map(|k| k.value as f64)
+                            .ok_or_else(|| DriverError::BadProperty {
+                                variable: v.name.clone(),
+                            })?
+                    } else {
+                        crate::animation::read_object(&source.transform, &v.property)
+                            .and_then(|x| (v.index < 3).then(|| x[v.index as usize]))
+                            .ok_or_else(|| DriverError::BadProperty {
+                                variable: v.name.clone(),
+                            })?
+                    }
+                }
             };
             values.push((v.name.as_str(), value));
         }
@@ -277,6 +303,16 @@ impl Document {
                 };
                 let (property, index) =
                     (o.drivers[i].property.clone(), o.drivers[i].index as usize);
+                if let Some(key_name) = property.strip_prefix("shape:") {
+                    if let Some(k) = o.shape_keys.iter_mut().find(|k| k.name == key_name) {
+                        let next = value.clamp(0.0, 1.0) as f32;
+                        if (k.value - next).abs() > 1e-7 {
+                            k.value = next;
+                            moved += 1;
+                        }
+                    }
+                    continue;
+                }
                 if index > 2 {
                     continue;
                 }

@@ -274,10 +274,31 @@ pub fn compile_with(
     // Clamped away from zero at the bottom, because a roughness of exactly zero
     // is a delta lobe and the microfacet arithmetic divides by its square.
     let _ = writeln!(wgsl, "    s.roughness = clamp({roughness}, 0.02, 1.0);");
-    // The layers, from their slots: see where the constants are pushed.
+    // The layers, from their slots (or wired sockets 7..=10): see where the
+    // constants are pushed.
+    let coat = out.input_expr(
+        output,
+        7,
+        &format!("material.values[{}].y", surface_slot + 3),
+    )?;
+    let anisotropy = out.input_expr(
+        output,
+        8,
+        &format!("material.values[{}].w", surface_slot + 4),
+    )?;
+    let transmission = out.input_expr(
+        output,
+        9,
+        &format!("material.values[{}].x", surface_slot + 2),
+    )?;
+    let subsurface = out.input_expr(
+        output,
+        10,
+        &format!("material.values[{}].y", surface_slot + 5),
+    )?;
     let _ = writeln!(
         wgsl,
-        "    s.ior = max(material.values[{0}].y, 1.0);\n    s.specular = max(material.values[{1}].x, 0.0);\n    s.coat = clamp(material.values[{1}].y, 0.0, 1.0);\n    s.coat_roughness = clamp(material.values[{1}].z, 0.02, 1.0);\n    s.sheen_roughness = clamp(material.values[{1}].w, 0.02, 1.0);\n    s.sheen_color = max(material.values[{2}].rgb, vec3<f32>(0.0));\n    s.anisotropy = clamp(material.values[{2}].w, 0.0, 1.0);\n    s.anisotropy_rotation = material.values[{3}].x;\n    s.subsurface = clamp(material.values[{3}].y, 0.0, 1.0);\n    s.subsurface_radius = max(material.values[{3}].z, 0.0);\n    s.attenuation_distance = max(material.values[{3}].w, 0.0);\n    s.subsurface_color = clamp(material.values[{4}].rgb, vec3<f32>(0.0), vec3<f32>(1.0));\n    s.attenuation_color = clamp(material.values[{5}].rgb, vec3<f32>(0.0), vec3<f32>(1.0));",
+        "    s.ior = max(material.values[{0}].y, 1.0);\n    s.specular = max(material.values[{1}].x, 0.0);\n    s.coat = clamp({coat}, 0.0, 1.0);\n    s.coat_roughness = clamp(material.values[{1}].z, 0.02, 1.0);\n    s.sheen_roughness = clamp(material.values[{1}].w, 0.02, 1.0);\n    s.sheen_color = max(material.values[{2}].rgb, vec3<f32>(0.0));\n    s.anisotropy = clamp({anisotropy}, 0.0, 1.0);\n    s.anisotropy_rotation = material.values[{3}].x;\n    s.subsurface = clamp({subsurface}, 0.0, 1.0);\n    s.subsurface_radius = max(material.values[{3}].z, 0.0);\n    s.attenuation_distance = max(material.values[{3}].w, 0.0);\n    s.subsurface_color = clamp(material.values[{4}].rgb, vec3<f32>(0.0), vec3<f32>(1.0));\n    s.attenuation_color = clamp(material.values[{5}].rgb, vec3<f32>(0.0), vec3<f32>(1.0));",
         surface_slot + 2,
         surface_slot + 3,
         surface_slot + 4,
@@ -317,7 +338,7 @@ pub fn compile_with(
     // The third slot: how much passes through, and how it bends.
     let _ = writeln!(
         wgsl,
-        "    out.transmission = clamp(material.values[{0}].x, 0.0, 1.0);\n    out.ior = max(material.values[{0}].y, 1.0);",
+        "    out.transmission = clamp({transmission}, 0.0, 1.0);\n    out.ior = max(material.values[{0}].y, 1.0);",
         surface_slot + 2
     );
     // Opacity, and below what it is cut away: the constant, times whatever

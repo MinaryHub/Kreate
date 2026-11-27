@@ -56,9 +56,9 @@ use std::sync::Arc;
 use kreate_math::SceneTime;
 use kreate_mesh::modifiers::{
     array, bevel, decimate, displace, mirror, screw, shrinkwrap, simple_deform, solidify,
-    subdivide, triangulate, weld, ArrayParams, BevelParams, BooleanOp, DecimateParams,
-    DisplaceParams, MirrorParams, ScrewParams, ShrinkwrapParams, SimpleDeformParams,
-    SolidifyParams, SubdivideParams, WeldParams,
+    subdivide, triangulate, weighted_normal, weld, ArrayParams, BevelParams, BooleanOp,
+    DecimateParams, DisplaceParams, MirrorParams, ScrewParams, ShrinkwrapParams,
+    SimpleDeformParams, SolidifyParams, SubdivideParams, WeightedNormalParams, WeldParams,
 };
 use kreate_mesh::MeshData;
 use kreate_reflect::Uid;
@@ -131,6 +131,8 @@ pub enum ModifierKind {
     /// Every vertex moved onto another object's surface; read as a boolean
     /// reads its cutter.
     Shrinkwrap(ShrinkwrapModifier),
+    /// Area- and angle-weighted split normals written to `CUSTOM_NORMAL`.
+    WeightedNormal(WeightedNormalParams),
     /// A modifier that moves the mesh according to the clock.
     ///
     /// Exists so that the cache's time-keyed path can be driven, and only in a
@@ -166,6 +168,7 @@ impl ModifierKind {
             ModifierKind::Screw(_) => "screw",
             ModifierKind::Decimate(_) => "decimate",
             ModifierKind::Shrinkwrap(_) => "shrinkwrap",
+            ModifierKind::WeightedNormal(_) => "weighted_normal",
             #[cfg(test)]
             ModifierKind::Drift(_) => "drift",
         }
@@ -191,6 +194,7 @@ impl ModifierKind {
             ModifierKind::Screw(_) => "modifier-screw",
             ModifierKind::Decimate(_) => "modifier-decimate",
             ModifierKind::Shrinkwrap(_) => "modifier-shrinkwrap",
+            ModifierKind::WeightedNormal(_) => "modifier-weighted-normal",
             #[cfg(test)]
             ModifierKind::Drift(_) => "modifier-drift",
         }
@@ -221,7 +225,8 @@ impl ModifierKind {
             | ModifierKind::SimpleDeform(_)
             | ModifierKind::Screw(_)
             | ModifierKind::Decimate(_)
-            | ModifierKind::Shrinkwrap(_) => false,
+            | ModifierKind::Shrinkwrap(_)
+            | ModifierKind::WeightedNormal(_) => false,
             #[cfg(test)]
             ModifierKind::Drift(_) => true,
         }
@@ -245,6 +250,7 @@ impl ModifierKind {
             ModifierKind::SimpleDeform(p) => simple_deform(input, p),
             ModifierKind::Screw(p) => screw(input, p),
             ModifierKind::Decimate(p) => decimate(input, p),
+            ModifierKind::WeightedNormal(p) => weighted_normal(input, p),
             ModifierKind::Shrinkwrap(m) => match operands.iter().find(|o| o.uid == m.target) {
                 Some(operand) => {
                     let mut target = (*operand.mesh).clone();

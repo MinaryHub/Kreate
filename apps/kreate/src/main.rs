@@ -451,13 +451,17 @@ type BakeResult = (
     kreate_scene::physics::bake::BakeSummary,
 );
 
-/// A texture paint stroke in progress: the dabs laid so far in the image's
-/// UV square, and — once anything has changed — its modal session.
+/// A texture or vertex-color paint stroke in progress, and — once anything
+/// has changed — its modal session.
 struct TextureStroke {
     object: kreate_scene::document::ObjectId,
-    /// The image painted, by identity, as the operator names it.
+    /// The image painted, by identity, as the operator names it (empty in vertex color mode).
     image: String,
     dabs: Vec<f64>,
+    /// True when painting per-vertex `COLOR_0` instead of an image texture.
+    vertex_mode: bool,
+    /// Per-vertex accumulated stroke strength for vertex color painting.
+    vertex_amounts: std::collections::BTreeMap<u32, f64>,
     /// Where the last dab went, in the world, to space the next one.
     last: DVec3,
     radius_world: f64,
@@ -1750,7 +1754,7 @@ impl App {
             if let Some(gfx) = self.gfx.as_mut() {
                 gfx.viewport.shading = kreate_render::ShadingMode::Rendered;
             }
-            if self.paint_target().is_none() {
+            if self.ui.texture_paint.channel != 5 && self.paint_target().is_none() {
                 let message = self.ui.catalog.get("texture-paint-no-image");
                 self.status(&message);
             }
@@ -4559,6 +4563,7 @@ impl App {
             r.loose_verts.len(),
             r.intersecting_faces.len(),
             r.thin_faces.len(),
+            r.overhang_faces.len(),
         ];
         self.ui.mesh_check = Some((id, counts));
         let total: usize = counts.iter().sum();
@@ -11900,6 +11905,10 @@ impl App {
         // where it was being looked at.
         self.file.set_view(&self.camera);
         self.file.maybe_autosave(&self.doc);
+        if let Some(err) = self.file.take_autosave_error() {
+            self.ui.autosave_error = Some(err.clone());
+            self.status(&format!("autosave failed: {err}"));
+        }
         let title = self.file.title(&self.doc);
         if title != self.shown_title {
             self.ui.document_title = title.trim_end_matches(" — Kreate").to_string();
@@ -13683,19 +13692,24 @@ impl App {
         }
     }
 
-    /// The image texture paint paints on: the active object's first
-    /// material's base colour, by identity.
+    /// The image texture paint paints on: the active object's active material
+    /// slot's map matching the chosen PBR paint channel, by identity.
     fn paint_target(&self) -> Option<String> {
         let object = self.doc.selection.active?;
-        let mesh = self.doc.object(object)?.mesh()?;
-        let material = self.doc.mesh_slots(mesh).first().copied().flatten()?;
-        let image = self.doc.material(material)?.base_color_image?;
+        let material = self
+            .doc
+            .material_at(object, self.ui.material_slot as usize)?;
+        let image = match self.ui.texture_paint.channel {
+            1 | 2 => material.metallic_roughness_image?,
+            3 => material.emission_image?,
+            _ => material.base_color_image?,
+        };
         Some(self.doc.image_uid(image)?.raw().to_string())
     }
 
-    /// Where the pointer meets the active mesh, as a UV and how many UV units
-    /// a unit of the mesh's own length is there.
-    fn texture_hit(&mut self) -> Option<(DVec3, glam::Vec2, f64)> {
+    /// Where the pointer meets the active mesh: world hit point, local hit
+    /// point, UV on the hit face, and UV-per-mesh-unit scale.
+    fn texture_hit(&mut self) -> Option<(DVec3, glam::Vec3, glam::Vec2, f64)> {
         let object = self.doc.selection.active?;
         let ndc = self.cursor_ndc()?;
         let aspect = self.viewport_aspect();
@@ -13716,22 +13730,28 @@ impl App {
             .inverse()
             .transform_point3(hit.point)
             .as_vec3();
-        let (uv, scale) = uv_on_face(&mesh, hit.face, local)?;
-        Some((hit.point, uv, scale))
+        let (uv, scale) = uv_on_face(&mesh, hit.face, local).unwrap_or((glam::Vec2::ZERO, 0.0));
+        Some((hit.point, local, uv, scale))
     }
 
-    /// A press in texture paint mode: a stroke starts where the pointer
-    /// meets the mesh, on its texture.
+    /// A press in texture paint mode: starts either a PBR texture stroke or a
+    /// per-vertex color stroke where the pointer meets the mesh.
     fn begin_texture_stroke(&mut self) {
         let Some(object) = self.doc.selection.active else {
             return;
         };
-        let Some(image) = self.paint_target() else {
-            let message = self.ui.catalog.get("texture-paint-no-image");
-            self.status(&message);
-            return;
+        let vertex_mode = self.ui.texture_paint.channel == 5;
+        let image = if vertex_mode {
+            String::new()
+        } else {
+            let Some(img) = self.paint_target() else {
+                let message = self.ui.catalog.get("texture-paint-no-image");
+                self.status(&message);
+                return;
+            };
+            img
         };
-        let Some((at, _, _)) = self.texture_hit() else {
+        let Some((at, _, _, _)) = self.texture_hit() else {
             return;
         };
         let height = self
@@ -13752,6 +13772,8 @@ impl App {
             object,
             image,
             dabs: Vec::new(),
+            vertex_mode,
+            vertex_amounts: std::collections::BTreeMap::new(),
             last: at,
             radius_world,
             session: None,
@@ -13761,20 +13783,122 @@ impl App {
     }
 
     fn add_texture_dab(&mut self) {
-        let Some((at, uv, scale)) = self.texture_hit() else {
+        let Some((at, local, hit_uv, hit_scale)) = self.texture_hit() else {
             return;
         };
         let strength = self.ui.texture_paint.strength as f64;
+        let symmetry_x = self.ui.texture_paint.symmetry_x;
+        let (object, radius_world, vertex_mode) = {
+            let Some(stroke) = self.texture_stroke.as_ref() else {
+                return;
+            };
+            (stroke.object, stroke.radius_world, stroke.vertex_mode)
+        };
+        let to_local = self.doc.world_transform(object).inverse();
+        let radius_local = to_local
+            .transform_vector3(DVec3::X * radius_world)
+            .length()
+            .max(1e-6);
+        let mesh = self
+            .evaluated
+            .iter()
+            .find(|(id, _)| *id == object)
+            .map(|(_, m)| m.clone());
+        let centers: Vec<glam::Vec3> = if symmetry_x {
+            vec![local, glam::Vec3::new(-local.x, local.y, local.z)]
+        } else {
+            vec![local]
+        };
+
         let Some(stroke) = self.texture_stroke.as_mut() else {
             return;
         };
-        let to_local = self.doc.world_transform(stroke.object).inverse();
-        let radius_local = to_local
-            .transform_vector3(DVec3::X * stroke.radius_world)
-            .length();
-        stroke
-            .dabs
-            .extend([uv.x as f64, uv.y as f64, radius_local * scale, strength]);
+        if vertex_mode {
+            if let Some(mesh) = mesh {
+                let r = radius_local as f32;
+                let r2 = r * r;
+                for (vi, &pos) in mesh.positions().iter().enumerate() {
+                    for &c in &centers {
+                        let d2 = pos.distance_squared(c);
+                        if d2 <= r2 {
+                            let t = 1.0 - (d2.sqrt() / r).clamp(0.0, 1.0);
+                            let falloff = (t * t * (3.0 - 2.0 * t)) as f64 * strength;
+                            let entry = stroke.vertex_amounts.entry(vi as u32).or_insert(0.0);
+                            *entry = (*entry).max(falloff);
+                        }
+                    }
+                }
+            }
+            stroke.last = at;
+            return;
+        }
+
+        // 3D sphere-projected dabs across all faces intersecting the brush
+        // sphere so strokes seamlessly cross UV island seams (and optional X
+        // symmetry mirrors across X=0).
+        let mut emitted = false;
+        if let Some(mesh) = mesh {
+            let r = radius_local as f32;
+            if mesh
+                .attributes()
+                .get_f32x2(kreate_mesh::attribute::names::UV)
+                .is_some()
+            {
+                let positions = mesh.positions();
+                let mut island_uvs: Vec<glam::Vec2> = Vec::new();
+                for &c in &centers {
+                    let c_min = c - glam::Vec3::splat(r);
+                    let c_max = c + glam::Vec3::splat(r);
+                    island_uvs.clear();
+                    for f in 0..mesh.num_faces() {
+                        let ring = mesh.face_verts(f);
+                        if ring.len() < 3 {
+                            continue;
+                        }
+                        let mut fmin = glam::Vec3::splat(f32::INFINITY);
+                        let mut fmax = glam::Vec3::splat(f32::NEG_INFINITY);
+                        for &vi in ring {
+                            let p = positions[vi as usize];
+                            fmin = fmin.min(p);
+                            fmax = fmax.max(p);
+                        }
+                        if fmax.x < c_min.x
+                            || fmin.x > c_max.x
+                            || fmax.y < c_min.y
+                            || fmin.y > c_max.y
+                            || fmax.z < c_min.z
+                            || fmin.z > c_max.z
+                        {
+                            continue;
+                        }
+                        if let Some((uv, scale)) = uv_on_face(&mesh, f, c) {
+                            let uv_r = radius_local * scale;
+                            if uv_r <= 1e-6 {
+                                continue;
+                            }
+                            // Deduplicate nearby projections on the same UV island.
+                            let dup_eps2 = ((uv_r * 0.25) as f32).powi(2);
+                            if island_uvs.iter().any(|p| p.distance_squared(uv) < dup_eps2) {
+                                continue;
+                            }
+                            island_uvs.push(uv);
+                            stroke
+                                .dabs
+                                .extend([uv.x as f64, uv.y as f64, uv_r, strength]);
+                            emitted = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !emitted && hit_scale > 0.0 {
+            stroke.dabs.extend([
+                hit_uv.x as f64,
+                hit_uv.y as f64,
+                radius_local * hit_scale,
+                strength,
+            ]);
+        }
         stroke.last = at;
     }
 
@@ -13785,19 +13909,40 @@ impl App {
             return;
         };
         let (last, radius) = (stroke.last, stroke.radius_world);
-        if let Some((at, _, _)) = self.texture_hit() {
+        if let Some((at, _, _, _)) = self.texture_hit() {
             if at.distance(last) >= radius * 0.25 {
                 self.add_texture_dab();
             }
         }
         let color = self.ui.texture_paint.color;
+        let ui_channel = self.ui.texture_paint.channel;
+        let scalar_value = self.ui.texture_paint.value as f64;
         let Some(stroke) = self.texture_stroke.as_mut() else {
             return;
         };
-        let mut params = PropertyMap::new();
-        params.set("image", PropertyValue::Text(stroke.image.clone()));
-        params.set("dabs", PropertyValue::Floats(stroke.dabs.clone()));
-        params.set("color", PropertyValue::Vec3(color.map(|c| c as f64)));
+        let (op_id, params) = if stroke.vertex_mode {
+            let mut params = PropertyMap::new();
+            let vertices: Vec<u32> = stroke.vertex_amounts.keys().copied().collect();
+            let amounts: Vec<f64> = stroke.vertex_amounts.values().copied().collect();
+            params.set("vertices", PropertyValue::Ints(vertices));
+            params.set("amounts", PropertyValue::Floats(amounts));
+            params.set("color", PropertyValue::Vec3(color.map(|c| c as f64)));
+            ("paint.vertex_color_stroke", params)
+        } else {
+            let op_channel = match ui_channel {
+                1 => 1u32, // roughness
+                2 => 2u32, // metallic
+                4 => 3u32, // erase
+                _ => 0u32, // color (base_color or emission)
+            };
+            let mut params = PropertyMap::new();
+            params.set("image", PropertyValue::Text(stroke.image.clone()));
+            params.set("dabs", PropertyValue::Floats(stroke.dabs.clone()));
+            params.set("color", PropertyValue::Vec3(color.map(|c| c as f64)));
+            params.set("channel", PropertyValue::Enum(op_channel));
+            params.set("value", PropertyValue::Float(scalar_value));
+            ("paint.texture_stroke", params)
+        };
         match stroke.session.as_mut() {
             Some(session) => {
                 if let Err(e) = self.history.update_modal(
@@ -13817,7 +13962,7 @@ impl App {
                     &mut self.doc,
                     None,
                     &self.op_ctx,
-                    "paint.texture_stroke",
+                    op_id,
                     &params,
                 ) {
                     stroke.session = Some(session);
@@ -19280,7 +19425,7 @@ fn exr_of(
         channel("N.Z", &nz, false),
     ];
     channels.extend(extra);
-    kreate_io::exr::write(p.width, p.height, &channels, &strings)
+    kreate_io::exr::write_zip16(p.width, p.height, &channels, &strings)
 }
 
 /// A render under way: F12's still, or Ctrl+F12's frames.
@@ -19311,12 +19456,84 @@ struct RenderJob {
     /// Motion blur, when the settings ask for it and the camera's shutter is
     /// open: the picture as the mean of pictures across the shutter.
     blur: Option<Blur>,
+    /// High-resolution tiled rendering (`> 1024px`) so 4K/8K frames stay
+    /// within a small GPU accumulation target and stitch seamlessly.
+    tiles: Option<TileGrid>,
     written: Vec<std::path::PathBuf>,
     /// An animation being written as one MP4, opened at its first frame.
     video: Option<kreate::video::Video>,
     /// Whether this picture has been through Open Image Denoise: once its
     /// samples are in, and before it is written. See `advance_render_job`.
     denoised: bool,
+}
+
+/// Tiled 4K/8K path-traced render state: renders 1024x1024 tiles sequentially
+/// and stitches scene-linear color, depth, normal, and OIDN guides.
+struct TileGrid {
+    full_w: u32,
+    full_h: u32,
+    /// `(offset_x, offset_y, tile_w, tile_h)` for each tile.
+    rects: Vec<[u32; 4]>,
+    index: usize,
+    combined: Vec<[f32; 4]>,
+    albedo: Vec<[f32; 3]>,
+    normal_oidn: Vec<[f32; 3]>,
+    normal_pass: Vec<[f32; 3]>,
+    depth: Vec<f32>,
+    exposure: f32,
+    done: bool,
+}
+
+impl TileGrid {
+    const TILE_SIZE: u32 = 1024;
+
+    fn new(full_w: u32, full_h: u32) -> Self {
+        let mut rects = Vec::new();
+        let mut y = 0u32;
+        while y < full_h {
+            let th = Self::TILE_SIZE.min(full_h - y);
+            let mut x = 0u32;
+            while x < full_w {
+                let tw = Self::TILE_SIZE.min(full_w - x);
+                rects.push([x, y, tw, th]);
+                x += tw;
+            }
+            y += th;
+        }
+        let n = (full_w as usize) * (full_h as usize);
+        Self {
+            full_w,
+            full_h,
+            rects,
+            index: 0,
+            combined: vec![[0.0; 4]; n],
+            albedo: vec![[0.0; 3]; n],
+            normal_oidn: vec![[0.0; 3]; n],
+            normal_pass: vec![[0.0; 3]; n],
+            depth: vec![0.0; n],
+            exposure: 0.0,
+            done: false,
+        }
+    }
+
+    fn current_rect(&self) -> Option<[u32; 4]> {
+        self.rects.get(self.index).copied()
+    }
+
+    fn current_uniform(&self) -> Option<[u32; 4]> {
+        self.current_rect()
+            .map(|[x, y, _, _]| [x, y, self.full_w, self.full_h])
+    }
+
+    fn reset(&mut self) {
+        self.index = 0;
+        self.done = false;
+        self.combined.fill([0.0; 4]);
+        self.albedo.fill([0.0; 3]);
+        self.normal_oidn.fill([0.0; 3]);
+        self.normal_pass.fill([0.0; 3]);
+        self.depth.fill(0.0);
+    }
 }
 
 /// Motion blur in progress: which moment of the shutter is being drawn, and
@@ -19330,6 +19547,11 @@ struct Blur {
     /// The frame the shutter is centred on.
     base: f64,
     sum: Vec<[f32; 4]>,
+    /// Averaged OIDN albedo & normal guides across shutter moments.
+    albedo_sum: Vec<[f32; 3]>,
+    normal_sum: Vec<[f32; 3]>,
+    /// Optional OIDN-denoised final linear mean (`[r, g, b, a]`).
+    denoised_mean: Option<Vec<[f32; 4]>>,
 }
 
 impl Blur {
@@ -19843,7 +20065,111 @@ fn main() {
         kreate::crashreport::crash_on_purpose();
     }
 
+    // Headless batch scripting: `kreate --headless --script <file> [scene.kreate] [--save <out.kreate>]`
+    if args.iter().any(|a| a == "--headless") {
+        std::process::exit(run_headless(&args));
+    }
+
     run(EventLoop::new().expect("create event loop"), args);
+}
+
+/// Runs a Kreate operator script headlessly without creating a window or GPU
+/// context, optionally opening a `.kreate` scene and saving the modified result.
+fn run_headless(args: &[String]) -> i32 {
+    let mut script_path: Option<std::path::PathBuf> = None;
+    let mut save_path: Option<std::path::PathBuf> = None;
+    let mut input_path: Option<std::path::PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--headless" => {}
+            "--script" | "-s" => {
+                i += 1;
+                if let Some(p) = args.get(i) {
+                    script_path = Some(std::path::PathBuf::from(p));
+                }
+            }
+            "--save" | "-o" => {
+                i += 1;
+                if let Some(p) = args.get(i) {
+                    save_path = Some(std::path::PathBuf::from(p));
+                }
+            }
+            "--lang" => {
+                i += 1;
+            }
+            other if !other.starts_with('-') => {
+                input_path = Some(std::path::PathBuf::from(other));
+            }
+            other => {
+                eprintln!("unknown headless argument: {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    let Some(script_path) = script_path else {
+        eprintln!(
+            "usage: kreate --headless --script <file> [input.kreate] [--save <output.kreate>]"
+        );
+        return 2;
+    };
+    let source = match std::fs::read_to_string(&script_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("failed to read script {}: {e}", script_path.display());
+            return 1;
+        }
+    };
+    let mut doc = if let Some(ref input) = input_path {
+        match std::fs::File::open(input)
+            .map_err(|e| e.to_string())
+            .and_then(|f| kreate_io::container::read(f).map_err(|e| e.to_string()))
+        {
+            Ok(loaded) => loaded.document,
+            Err(e) => {
+                eprintln!("failed to open {}: {e}", input.display());
+                return 1;
+            }
+        }
+    } else {
+        Document::new()
+    };
+    let mut registry = kreate_ops::OperatorRegistry::new();
+    kreate_ops::register_builtin(&mut registry);
+    let mut history = kreate_ops::History::new();
+    let ctx = kreate_ops::Context::default();
+    let mut failed = 0usize;
+    for outcome in history.run_script(&registry, &mut doc, None, &ctx, &source) {
+        match outcome.result {
+            Ok(res) => {
+                println!("line {}: ok ({res:?})", outcome.line);
+            }
+            Err(err) => {
+                eprintln!("line {}: error: {err} — {}", outcome.line, outcome.text);
+                failed += 1;
+            }
+        }
+    }
+    if let Some(ref out) = save_path {
+        let bytes = match kreate_io::container::write(&doc, &Default::default(), &[]) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("failed to serialize scene: {e}");
+                return 1;
+            }
+        };
+        if let Err(e) = std::fs::write(out, &bytes) {
+            eprintln!("failed to write {}: {e}", out.display());
+            return 1;
+        }
+        println!("saved {}", out.display());
+    }
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// The shell on `event_loop` until it is closed: the desktop's `main`
