@@ -253,6 +253,66 @@ pub fn project_drawing(parts: &[(&MeshData, DAffine3)], view: View, crease: f64)
     prepared.project(view, crease)
 }
 
+/// Exact analytic hidden-line projection of an OCCT B-rep `solid` from `view`,
+/// preserving true circular arcs, lines, and hidden/silhouette tags.
+pub fn project_solid_hlr(
+    solid: &kreate_occt::Shape,
+    view: View,
+) -> Option<Vec<kreate_occt::HlrEdge>> {
+    let toward = view.toward();
+    let right = match view {
+        View::Top | View::Front => DVec3::X,
+        View::Right => DVec3::Y,
+        View::Iso => DVec3::Z.cross(toward).normalize(),
+    };
+    solid.project_hlr(toward.to_array(), right.to_array())
+}
+
+/// Projects an OCCT B-rep `solid` through `HLRBRep_Algo` and tessellates any
+/// analytic arcs into fine `Line2` segments for sheet layout compatibility.
+pub fn project_solid_lines(solid: &kreate_occt::Shape, view: View) -> Option<Vec<Line2>> {
+    let edges = project_solid_hlr(solid, view)?;
+    let mut lines = Vec::new();
+    for e in edges {
+        match e.curve {
+            kreate_occt::HlrCurve::Line { a, b } => {
+                lines.push(Line2 {
+                    a,
+                    b,
+                    hidden: e.hidden,
+                });
+            }
+            kreate_occt::HlrCurve::Arc {
+                centre,
+                radius,
+                start,
+                sweep,
+            } => {
+                let steps = ((sweep.abs() / 0.1).ceil() as usize).clamp(4, 128);
+                for i in 0..steps {
+                    let a0 = start + sweep * (i as f64 / steps as f64);
+                    let a1 = start + sweep * ((i + 1) as f64 / steps as f64);
+                    lines.push(Line2 {
+                        a: [centre[0] + radius * a0.cos(), centre[1] + radius * a0.sin()],
+                        b: [centre[0] + radius * a1.cos(), centre[1] + radius * a1.sin()],
+                        hidden: e.hidden,
+                    });
+                }
+            }
+            kreate_occt::HlrCurve::Polyline(pts) => {
+                for w in pts.windows(2) {
+                    lines.push(Line2 {
+                        a: w[0],
+                        b: w[1],
+                        hidden: e.hidden,
+                    });
+                }
+            }
+        }
+    }
+    Some(lines)
+}
+
 /// Lines that fall on the same place on the page, drawn once: an edge seen
 /// straight behind another — a box's bottom under its top — is the same
 /// line, and where a visible and a hidden line coincide the visible one is

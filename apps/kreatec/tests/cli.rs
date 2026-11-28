@@ -579,3 +579,64 @@ fn step_usda_and_drawing_diffs_work_through_kreatec() {
         df.stdout
     );
 }
+
+#[test]
+fn json_inspect_validate_and_full_scene_convert() {
+    let dir = scratch("json_and_full_convert");
+    let src = dir.join("scene.kreate");
+    let mut doc = Document::new();
+    let parent = doc.add_object(Object::new("rig", ObjectData::Empty));
+    let mesh = doc.add_mesh(cube());
+    let child = doc.add_object(Object::new("body", ObjectData::Mesh(mesh)));
+    doc.set_parent(child, Some(parent)).unwrap();
+    let mat = doc.add_material(kreate_scene::Material {
+        name: "RedPaint".into(),
+        ..Default::default()
+    });
+    doc.set_mesh_slots(mesh, vec![Some(mat)]);
+    write_document(&src, &doc, &[]);
+
+    // --json inspect
+    let insp = run(&["inspect", "--json", src.to_str().unwrap()]);
+    assert!(insp.ok, "{}", insp.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&insp.stdout).expect("inspect --json should emit valid JSON");
+    assert_eq!(parsed["object_count"], 2);
+    assert_eq!(parsed["mesh_count"], 1);
+    assert_eq!(parsed["material_count"], 1);
+
+    // --json validate
+    let val = run(&["validate", "--json", src.to_str().unwrap()]);
+    assert!(val.ok, "{}", val.stdout);
+    let vparsed: serde_json::Value =
+        serde_json::from_str(&val.stdout).expect("validate --json should emit valid JSON");
+    assert_eq!(vparsed["ok"], true);
+    assert_eq!(vparsed["violation_count"], 0);
+
+    // Full-document conversions to .glb, .usda, .usdz, and .urdf
+    let glb = dir.join("scene.glb");
+    let usda = dir.join("scene.usda");
+    let usdz = dir.join("scene.usdz");
+    let urdf = dir.join("scene.urdf");
+
+    assert!(run(&["convert", src.to_str().unwrap(), glb.to_str().unwrap()]).ok);
+    let glb_bytes = std::fs::read(&glb).unwrap();
+    assert!(glb_bytes.starts_with(b"glTF"), "valid GLB header");
+    let glb_text = String::from_utf8_lossy(&glb_bytes);
+    assert!(
+        glb_text.contains("RedPaint"),
+        "material name should survive full-document GLB conversion"
+    );
+
+    assert!(run(&["convert", src.to_str().unwrap(), usda.to_str().unwrap()]).ok);
+    let usda_text = std::fs::read_to_string(&usda).unwrap();
+    assert!(usda_text.contains("#usda 1.0"), "{usda_text}");
+    assert!(usda_text.contains("RedPaint"), "{usda_text}");
+
+    assert!(run(&["convert", src.to_str().unwrap(), usdz.to_str().unwrap()]).ok);
+    assert!(std::fs::read(&usdz).unwrap().starts_with(b"PK"));
+
+    assert!(run(&["convert", src.to_str().unwrap(), urdf.to_str().unwrap()]).ok);
+    let urdf_text = std::fs::read_to_string(&urdf).unwrap();
+    assert!(urdf_text.contains("<robot name=\"scene\">"), "{urdf_text}");
+}

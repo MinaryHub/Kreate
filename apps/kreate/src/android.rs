@@ -18,13 +18,19 @@
 //!   the newest file in `Documents` of a kind asked for.
 //! - A question — save before closing? — is answered yes, so nothing is
 //!   lost to a dialog that cannot be shown.
-//! - The clipboard is empty.
+//! - The clipboard calls into the activity via [`set_clipboard`] (falling back
+//!   to an in-process buffer when running headless or in tests).
+//! - CJK/IME text composition arrives via [`push_ime_commit`] /
+//!   [`set_ime_preedit`] from Android's `InputConnection`.
 //!
 //! The picker itself is the activity's (apps/kreate-android), reached
 //! through [`set_picker`]; the soft keyboard through [`set_keyboard`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// Mobile undo memory budget (64 MiB) to stay well within Android RAM limits.
+pub const MOBILE_UNDO_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// What the shell asks the system's picker for.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,12 +43,21 @@ pub enum Request {
 }
 
 type Hook<T> = Box<dyn Fn(T) + Send + Sync>;
+type ClipboardGet = Box<dyn Fn() -> Option<String> + Send + Sync>;
+type ClipboardSet = Box<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Default)]
 struct Picker {
     open: Option<Hook<Request>>,
     wake: Option<Hook<()>>,
     keyboard: Option<Hook<bool>>,
+    clipboard_get: Option<ClipboardGet>,
+    clipboard_set: Option<ClipboardSet>,
+    clipboard_fallback: Option<String>,
+    /// Committed CJK/IME strings queued from Android's `InputConnection`.
+    ime_commits: Vec<String>,
+    /// Active IME composing preedit string (empty when not composing).
+    ime_preedit: String,
     /// A file the picker brought in, for the next `pick_file`.
     ready: Option<PathBuf>,
     /// A `pick_file` opened the picker since the shell last asked.
@@ -54,6 +69,17 @@ static PICKER: Mutex<Option<Picker>> = Mutex::new(None);
 fn with<R>(f: impl FnOnce(&mut Picker) -> R) -> R {
     let mut guard = PICKER.lock().unwrap_or_else(|e| e.into_inner());
     f(guard.get_or_insert_with(Picker::default))
+}
+
+fn wake_shell() {
+    let has_waker = with(|p| p.wake.is_some());
+    if has_waker {
+        with(|p| {
+            if let Some(w) = &p.wake {
+                w(())
+            }
+        });
+    }
 }
 
 /// How the system's picker is opened: set once at start-up on Android.
@@ -71,6 +97,45 @@ pub fn set_keyboard(show: impl Fn(bool) + Send + Sync + 'static) {
     with(|p| p.keyboard = Some(Box::new(show)));
 }
 
+/// How Android's system clipboard is read and written: set once at start-up.
+pub fn set_clipboard(
+    get: impl Fn() -> Option<String> + Send + Sync + 'static,
+    set: impl Fn(&str) + Send + Sync + 'static,
+) {
+    with(|p| {
+        p.clipboard_get = Some(Box::new(get));
+        p.clipboard_set = Some(Box::new(set));
+    });
+}
+
+/// Enqueues committed text from Android's `InputConnection` (e.g. Korean/CJK IME).
+pub fn push_ime_commit(text: String) {
+    if text.is_empty() {
+        return;
+    }
+    with(|p| {
+        p.ime_preedit.clear();
+        p.ime_commits.push(text);
+    });
+    wake_shell();
+}
+
+/// Updates the active IME composing preedit text from Android's `InputConnection`.
+pub fn set_ime_preedit(text: String) {
+    with(|p| p.ime_preedit = text);
+    wake_shell();
+}
+
+/// Drains all committed IME text chunks since the last frame.
+pub fn take_ime_commits() -> Vec<String> {
+    with(|p| std::mem::take(&mut p.ime_commits))
+}
+
+/// Returns the current IME composing preedit string (empty when idle).
+pub fn ime_preedit() -> String {
+    with(|p| p.ime_preedit.clone())
+}
+
 /// The soft keyboard shown or put away, where there is one.
 pub fn keyboard(show: bool) {
     with(|p| {
@@ -83,17 +148,8 @@ pub fn keyboard(show: bool) {
 /// A file the picker brought in: kept for the next `pick_file`, and the
 /// shell woken to ask for it.
 pub fn file_arrived(path: PathBuf) {
-    let wake = with(|p| {
-        p.ready = Some(path);
-        p.wake.is_some()
-    });
-    if wake {
-        with(|p| {
-            if let Some(w) = &p.wake {
-                w(())
-            }
-        });
-    }
+    with(|p| p.ready = Some(path));
+    wake_shell();
 }
 
 /// Whether a file has come in that no `pick_file` has taken yet.
@@ -296,8 +352,11 @@ pub mod rfd {
     }
 }
 
-/// `arboard`'s clipboard, always empty.
+/// `arboard`-compatible clipboard backed by Android's `ClipboardManager` hooks
+/// (with an in-process fallback for headless/test use).
 pub mod arboard {
+    use super::with;
+
     #[derive(Debug)]
     pub struct Error;
 
@@ -307,7 +366,7 @@ pub mod arboard {
 
     impl Clipboard {
         pub fn new() -> Result<Self, Error> {
-            Err(Error)
+            Ok(Self)
         }
         pub fn get(&mut self) -> Get {
             Get
@@ -316,10 +375,24 @@ pub mod arboard {
             Err(Error)
         }
         pub fn get_text(&mut self) -> Result<String, Error> {
-            Err(Error)
+            with(|p| {
+                if let Some(getter) = &p.clipboard_get {
+                    getter().or_else(|| p.clipboard_fallback.clone())
+                } else {
+                    p.clipboard_fallback.clone()
+                }
+            })
+            .ok_or(Error)
         }
-        pub fn set_text(&mut self, _text: impl Into<String>) -> Result<(), Error> {
-            Err(Error)
+        pub fn set_text(&mut self, text: impl Into<String>) -> Result<(), Error> {
+            let s = text.into();
+            with(|p| {
+                if let Some(setter) = &p.clipboard_set {
+                    setter(&s);
+                }
+                p.clipboard_fallback = Some(s);
+            });
+            Ok(())
         }
     }
 
@@ -408,5 +481,37 @@ mod tests {
         ));
         *PICKER.lock().unwrap() = None;
         let _ = std::fs::remove_dir_all(&docs);
+    }
+
+    #[test]
+    fn clipboard_and_ime_hooks_round_trip() {
+        *PICKER.lock().unwrap() = None;
+        // Fallback buffer works before JNI hooks are registered.
+        let mut cb = arboard::Clipboard::new().expect("clipboard available");
+        cb.set_text("hello kreate").unwrap();
+        assert_eq!(cb.get_text().unwrap(), "hello kreate");
+
+        // JNI-style hook overrides clipboard read/write.
+        let backing = std::sync::Arc::new(Mutex::new(String::from("from-android")));
+        let b_get = backing.clone();
+        let b_set = backing.clone();
+        set_clipboard(
+            move || Some(b_get.lock().unwrap().clone()),
+            move |s| *b_set.lock().unwrap() = s.to_string(),
+        );
+        assert_eq!(cb.get_text().unwrap(), "from-android");
+        cb.set_text("한글 복사").unwrap();
+        assert_eq!(*backing.lock().unwrap(), "한글 복사");
+        assert_eq!(cb.get_text().unwrap(), "한글 복사");
+
+        // CJK IME preedit and commit queue.
+        set_ime_preedit("하".into());
+        assert_eq!(ime_preedit(), "하");
+        push_ime_commit("한글".into());
+        assert_eq!(ime_preedit(), "");
+        assert_eq!(take_ime_commits(), vec!["한글".to_string()]);
+        assert!(take_ime_commits().is_empty());
+
+        *PICKER.lock().unwrap() = None;
     }
 }

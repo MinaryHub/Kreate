@@ -31,6 +31,20 @@ const CHORD: f64 = 1e-5;
 /// The drawing as a one-page PDF, `width` by `height` metres, the
 /// drawing's origin at the page's bottom left.
 pub fn write(drawing: &Drawing, width: f64, height: f64) -> Vec<u8> {
+    write_pages(&[(drawing, width, height)])
+}
+
+/// Multiple drawing sheets combined into a single multi-page PDF 1.4 file.
+/// Each entry is `(drawing, width_m, height_m)`.
+pub fn write_pages(pages: &[(&Drawing, f64, f64)]) -> Vec<u8> {
+    let rendered: Vec<(String, f64, f64)> = pages
+        .iter()
+        .map(|&(d, w, h)| (render_page(d), w * PT, h * PT))
+        .collect();
+    document_pages(&rendered)
+}
+
+fn render_page(drawing: &Drawing) -> String {
     let mut page = String::new();
     // Round caps and joins, as a plotter's pen draws.
     page.push_str("1 J 1 j\n");
@@ -117,7 +131,7 @@ pub fn write(drawing: &Drawing, width: f64, height: f64) -> Vec<u8> {
             }
         }
     }
-    document(&page, width * PT, height * PT)
+    page
 }
 
 fn x(p: &DVec2) -> String {
@@ -226,42 +240,61 @@ fn text(page: &mut String, t: &Text) {
     }
 }
 
-/// The file: catalog, pages, the page, its compressed contents, and the
-/// table that finds them.
-fn document(content: &str, width_pt: f64, height_pt: f64) -> Vec<u8> {
-    let mut deflate = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    let _ = deflate.write_all(content.as_bytes());
-    let stream = deflate.finish().unwrap_or_default();
+/// The file: catalog, pages, each page and its compressed contents, info, and
+/// the cross-reference table that finds them.
+fn document_pages(pages: &[(String, f64, f64)]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
     let mut offsets = Vec::new();
-    let mut object = |out: &mut Vec<u8>, body: &[u8]| {
+    let mut object = |out: &mut Vec<u8>, body: &[u8]| -> usize {
         offsets.push(out.len());
         let n = offsets.len();
         out.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
         out.extend_from_slice(body);
         out.extend_from_slice(b"\nendobj\n");
+        n
     };
+    // Object 1: Catalog
     object(&mut out, b"<< /Type /Catalog /Pages 2 0 R >>");
-    object(&mut out, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    // Object 2: Pages (page objects sit at 3, 5, 7, ...; streams at 4, 6, 8, ...)
+    let kids: Vec<String> = (0..pages.len())
+        .map(|i| format!("{} 0 R", 3 + i * 2))
+        .collect();
     object(
         &mut out,
         format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << >> >>",
-            num(width_pt),
-            num(height_pt)
+            "<< /Type /Pages /Kids [{}] /Count {} >>",
+            kids.join(" "),
+            pages.len()
         )
         .as_bytes(),
     );
-    let mut body = format!(
-        "<< /Length {} /Filter /FlateDecode >>\nstream\n",
-        stream.len()
-    )
-    .into_bytes();
-    body.extend_from_slice(&stream);
-    body.extend_from_slice(b"\nendstream");
-    object(&mut out, &body);
-    object(&mut out, b"<< /Producer (Kreate) >>");
+    for (i, (content, width_pt, height_pt)) in pages.iter().enumerate() {
+        let stream_obj_id = 4 + i * 2;
+        object(
+            &mut out,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents {} 0 R /Resources << >> >>",
+                num(*width_pt),
+                num(*height_pt),
+                stream_obj_id
+            )
+            .as_bytes(),
+        );
+        let mut deflate =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        let _ = deflate.write_all(content.as_bytes());
+        let stream = deflate.finish().unwrap_or_default();
+        let mut body = format!(
+            "<< /Length {} /Filter /FlateDecode >>\nstream\n",
+            stream.len()
+        )
+        .into_bytes();
+        body.extend_from_slice(&stream);
+        body.extend_from_slice(b"\nendstream");
+        object(&mut out, &body);
+    }
+    let info_id = object(&mut out, b"<< /Producer (Kreate) >>");
     let xref = out.len();
     out.extend_from_slice(
         format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
@@ -271,8 +304,9 @@ fn document(content: &str, width_pt: f64, height_pt: f64) -> Vec<u8> {
     }
     out.extend_from_slice(
         format!(
-            "trailer\n<< /Size {} /Root 1 0 R /Info 5 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            offsets.len() + 1
+            "trailer\n<< /Size {} /Root 1 0 R /Info {} 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            offsets.len() + 1,
+            info_id
         )
         .as_bytes(),
     );
@@ -358,6 +392,33 @@ mod tests {
             page.matches(" h\n").count() > 4,
             "each letter's outlines: {page}"
         );
+    }
+
+    #[test]
+    fn multi_page_pdf_contains_all_pages_and_valid_xref() {
+        let mut p1 = Drawing::new();
+        p1.add_curve(Curve2D::Line {
+            a: DVec2::new(0.01, 0.01),
+            b: DVec2::new(0.05, 0.01),
+        });
+        let mut p2 = Drawing::new();
+        p2.add_curve(Curve2D::Circle {
+            c: DVec2::new(0.1, 0.1),
+            r: 0.02,
+        });
+        let pdf = write_pages(&[(&p1, 0.297, 0.21), (&p2, 0.42, 0.297)]);
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Kids [3 0 R 5 0 R] /Count 2"));
+        let xref = text.rfind("xref\n").unwrap();
+        let table = &text[xref..];
+        for (i, line) in table.lines().skip(3).take(7).enumerate() {
+            let at: usize = line[..10].parse().unwrap();
+            assert!(
+                text[at..].starts_with(&format!("{} 0 obj", i + 1)),
+                "object {}",
+                i + 1
+            );
+        }
     }
 
     #[test]

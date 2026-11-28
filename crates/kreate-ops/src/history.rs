@@ -164,10 +164,21 @@ impl History {
     pub const DEFAULT_BUDGET: usize = 2 << 30;
 
     pub fn new() -> Self {
+        let default_budget = if cfg!(target_os = "android") {
+            64 << 20
+        } else {
+            Self::DEFAULT_BUDGET
+        };
+        let budget_bytes = std::env::var("KREATE_UNDO_BUDGET_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&mb| mb > 0)
+            .map(|mb| mb.saturating_mul(1024 * 1024))
+            .unwrap_or(default_budget);
         Self {
             entries: Vec::new(),
             cursor: 0,
-            budget_bytes: Self::DEFAULT_BUDGET,
+            budget_bytes,
             evicted: 0,
         }
     }

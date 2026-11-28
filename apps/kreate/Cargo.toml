@@ -70,4 +70,4 @@ winresource = "0.1"
 
 [features]
 # Feature bodies built exactly by OpenCASCADE: see kreate-occt.
-occt = ["kreate-scene/occt", "kreate-occt/occt"]
+occt = ["kreate-scene/occt", "kreate-io/occt", "kreate-occt/occt"]

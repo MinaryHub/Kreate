@@ -50,13 +50,111 @@ pub fn parse_step(text: &str, name: &str) -> Result<ImportScene, StepError> {
     parse_step_with(text, name, &ReadProgress::default())
 }
 
+/// Imports a STEP file directly through OpenCASCADE (`kreate-occt`) when
+/// compiled with `--features occt`, tessellating every trimmed NURBS / analytic
+/// solid into a watertight `ImportScene`.
+pub fn parse_step_occt(text: &str, name: &str) -> Option<ImportScene> {
+    if !kreate_occt::available() || !text.contains("ISO-10303-21") {
+        return None;
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "kreate-step-in-{}-{}.step",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, text.as_bytes()).ok()?;
+    let shape = kreate_occt::read_step(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let shape = shape?;
+    let solids = shape.explode_solids();
+    if solids.is_empty() {
+        return None;
+    }
+    let mut source = SourceMetadata::new("step");
+    source.unit_scale = 1.0;
+    let mut scene = ImportScene::new(source);
+    let stem = name
+        .strip_suffix(".step")
+        .or_else(|| name.strip_suffix(".stp"))
+        .unwrap_or(name);
+    for (idx, solid) in solids.iter().enumerate() {
+        let Some(tess) = solid.mesh(1e-4, 0.2) else {
+            continue;
+        };
+        if tess.triangles.is_empty() {
+            continue;
+        }
+        let mut pos_map: HashMap<[u32; 3], u32> = HashMap::new();
+        let mut positions: Vec<Vec3> = Vec::new();
+        let remap: Vec<u32> = tess
+            .positions
+            .iter()
+            .map(|p| {
+                let v = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+                let key = [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+                *pos_map.entry(key).or_insert_with(|| {
+                    positions.push(v);
+                    positions.len() as u32 - 1
+                })
+            })
+            .collect();
+        let faces: Vec<Vec<u32>> = tess
+            .triangles
+            .iter()
+            .filter_map(|t| {
+                let a = remap[t[0] as usize];
+                let b = remap[t[1] as usize];
+                let c = remap[t[2] as usize];
+                (a != b && b != c && a != c).then(|| vec![a, b, c])
+            })
+            .collect();
+        if faces.is_empty() {
+            continue;
+        }
+        let part_name = if solids.len() == 1 {
+            stem.to_string()
+        } else {
+            format!("{stem}_{:02}", idx + 1)
+        };
+        let mesh_idx = scene.meshes.len();
+        scene.meshes.push(ImportMesh {
+            name: part_name.clone(),
+            positions,
+            faces,
+            ..ImportMesh::default()
+        });
+        scene.nodes.push(ImportNode {
+            name: part_name,
+            transform: ImportTransform::default(),
+            data: ImportNodeData::Mesh(mesh_idx),
+            parent: None,
+            skin: None,
+            robot: None,
+            hidden: false,
+        });
+    }
+    (!scene.meshes.is_empty()).then_some(scene)
+}
+
 /// [`parse_step`], saying how far it has got and stopping when asked.
 pub fn parse_step_with(
     text: &str,
     name: &str,
     progress: &ReadProgress,
 ) -> Result<ImportScene, StepError> {
-    let model = Model::parse(text, progress)?;
+    let model = match Model::parse(text, progress) {
+        Ok(m) => m,
+        Err(StepError::Cancelled) => return Err(StepError::Cancelled),
+        Err(e) => {
+            if let Some(occt_scene) = parse_step_occt(text, name) {
+                return Ok(occt_scene);
+            }
+            return Err(e);
+        }
+    };
     let mut source = SourceMetadata::new("step");
     let unit = model.unit("LENGTH_UNIT");
     match unit {
@@ -77,9 +175,22 @@ pub fn parse_step_with(
 
     let mut reader = Reader::new(&model, angle, progress);
     let mut scene = ImportScene::new(source);
-    reader.read_into(&mut scene, name)?;
+    if let Err(e) = reader.read_into(&mut scene, name) {
+        if matches!(e, StepError::Cancelled) || progress.cancelled() {
+            return Err(StepError::Cancelled);
+        }
+        if let Some(occt_scene) = parse_step_occt(text, name) {
+            return Ok(occt_scene);
+        }
+        return Err(e);
+    }
     if progress.cancelled() {
         return Err(StepError::Cancelled);
+    }
+    if (reader.rough > 0 || !reader.unknown_surfaces.is_empty()) && kreate_occt::available() {
+        if let Some(occt_scene) = parse_step_occt(text, name) {
+            return Ok(occt_scene);
+        }
     }
     if reader.rough > 0 {
         scene.source.notes.push(LossyNote::Unsupported {

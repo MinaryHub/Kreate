@@ -8,8 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use kreate_io::build::scene_from_document;
 use kreate_io::container::{self, Manifest, UnknownEntry};
-use kreate_io::gltf_export::{write_gltf, GltfExportOptions};
+use kreate_io::gltf_export::{write_gltf, write_gltf_scene, GltfExportOptions};
 use kreate_io::gltf_import::{parse_gltf, GltfOptions};
 use kreate_io::obj::{parse_obj, write_obj, ObjOptions};
 use kreate_io::stl::{parse_stl, write_stl, StlOptions};
@@ -21,16 +22,17 @@ const USAGE: &str = "\
 kreatec — Kreate command-line tools
 
 USAGE:
-    kreatec inspect  <file>                  Summarise a file's contents
-    kreatec validate <file>                  Check structural invariants
+    kreatec inspect  [--json] <file>         Summarise a file's contents
+    kreatec validate [--json] <file>         Check structural invariants
     kreatec convert  <in> <out>              Read and rewrite through the IR
     kreatec gen      <shape> <out>           Write a synthetic test mesh
     kreatec diff     <a> <b>                 Semantic diff of two files
     kreatec textconv <file>                  Stable text rendering, for git
 
 FORMATS:
-    Read & write: .kreate, .obj, .stl, .gltf, .glb, .step, .stp, .3mf
-    Read:         .fbx, .usd, .usda, .usdc, .usdz, .dxf, .ply, .off, .dae, .urdf
+    Read & write: .kreate, .obj, .stl, .gltf, .glb, .usd, .usda, .usdc, .usdz,
+                  .step, .stp, .3mf, .urdf
+    Read:         .fbx, .dxf, .ply, .off, .dae
 
     .kreate is the native format and carries the full scene: objects,
     hierarchy, transforms, CAD features, 2D drawings and shared datablocks.
@@ -56,6 +58,7 @@ SHAPES:
 OPTIONS:
     --z-up            Treat the source as Z-up (default for OBJ is Y-up)
     --scale <metres>  Metres per source unit (default 1.0)
+    --json            Emit machine-readable JSON for `inspect` and `validate`
 ";
 
 fn main() -> ExitCode {
@@ -71,6 +74,7 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Result<(), String> {
     let mut opts = ObjOptions::default();
+    let mut json_out = false;
     let mut positional: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -81,6 +85,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 let v = args.get(i).ok_or("--scale needs a value")?;
                 opts.unit_scale = v.parse().map_err(|_| format!("bad --scale '{v}'"))?;
             }
+            "--json" => json_out = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return Ok(());
@@ -91,8 +96,8 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     match positional.split_first() {
-        Some((&"inspect", [path])) => inspect(Path::new(path), opts),
-        Some((&"validate", [path])) => validate(Path::new(path), opts),
+        Some((&"inspect", [path])) => inspect(Path::new(path), opts, json_out),
+        Some((&"validate", [path])) => validate(Path::new(path), opts, json_out),
         Some((&"convert", [src, dst])) => convert(Path::new(src), &PathBuf::from(dst), opts),
         Some((&"gen", [shape, dst])) => gen(shape, &PathBuf::from(dst), opts),
         Some((&"diff", [a, b])) => diff(Path::new(a), Path::new(b), opts),
@@ -123,7 +128,7 @@ fn save_document(
 
 /// Reads a file through the IR, printing anything that had to be assumed or
 /// dropped along the way.
-fn load(path: &Path, opts: ObjOptions) -> Result<Vec<(String, MeshData)>, String> {
+fn load(path: &Path, opts: ObjOptions, quiet: bool) -> Result<Vec<(String, MeshData)>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let scene = if is_gltf(path) {
         // glTF declares its own units and orientation, so the command line
@@ -149,7 +154,11 @@ fn load(path: &Path, opts: ObjOptions) -> Result<Vec<(String, MeshData)>, String
     };
     let (meshes, source) = scene.into_mesh_data();
     for note in &source.notes {
-        println!("  note: {note:?}");
+        if quiet {
+            eprintln!("  note: {note:?}");
+        } else {
+            println!("  note: {note:?}");
+        }
     }
     Ok(meshes)
 }
@@ -174,7 +183,7 @@ struct Opened {
 /// convenience: it means `inspect`, `validate` and `diff` are written once
 /// against a document instead of three times against whatever each format
 /// happens to produce.
-fn open(path: &Path, opts: ObjOptions) -> Result<Opened, String> {
+fn open(path: &Path, opts: ObjOptions, quiet: bool) -> Result<Opened, String> {
     if is_kreate(path) {
         let file = std::fs::File::open(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -187,13 +196,21 @@ fn open(path: &Path, opts: ObjOptions) -> Result<Opened, String> {
         let mut document = loaded.document;
         let directory = path.parent().unwrap_or(Path::new("."));
         for problem in kreate_io::library::refresh_links(&mut document, directory) {
-            println!("  note: {problem}");
+            if quiet {
+                eprintln!("  note: {problem}");
+            } else {
+                println!("  note: {problem}");
+            }
         }
         for entry in &loaded.unknown {
             // Not a warning. An unknown entry is how a newer build's data
             // survives a round trip through this one, and saying so is how the
             // user learns their file has more in it than this build understands.
-            println!("  note: kept unrecognised entry {}", entry.name);
+            if quiet {
+                eprintln!("  note: kept unrecognised entry {}", entry.name);
+            } else {
+                println!("  note: kept unrecognised entry {}", entry.name);
+            }
         }
         return Ok(Opened {
             document,
@@ -211,7 +228,11 @@ fn open(path: &Path, opts: ObjOptions) -> Result<Opened, String> {
         let (document, notes) = kreate_io::scene_file::read_scene_file(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         for note in &notes {
-            println!("  note: {note:?}");
+            if quiet {
+                eprintln!("  note: {note:?}");
+            } else {
+                println!("  note: {note:?}");
+            }
         }
         return Ok(Opened {
             document,
@@ -219,7 +240,7 @@ fn open(path: &Path, opts: ObjOptions) -> Result<Opened, String> {
             unknown: Vec::new(),
         });
     }
-    let meshes = load(path, opts)?;
+    let meshes = load(path, opts, quiet)?;
     let mut document = Document::new();
     for (name, mesh) in meshes {
         let id = document.add_mesh(mesh);
@@ -270,6 +291,26 @@ fn is_step(path: &Path) -> bool {
 fn is_3mf(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("3mf"))
+}
+
+fn is_usda(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("usd") || e.eq_ignore_ascii_case("usda"))
+}
+
+fn is_usdc(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("usdc"))
+}
+
+fn is_usdz(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("usdz"))
+}
+
+fn is_urdf(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("urdf"))
 }
 
 /// Writes one mesh in whichever format the destination names.
@@ -359,8 +400,92 @@ fn save(path: &Path, meshes: &[(String, &MeshData)], opts: ObjOptions) -> Result
     }
 }
 
-fn inspect(path: &Path, opts: ObjOptions) -> Result<(), String> {
-    let opened = open(path, opts)?;
+fn inspect(path: &Path, opts: ObjOptions, json_out: bool) -> Result<(), String> {
+    let opened = open(path, opts, json_out)?;
+    let meshes = named_meshes(&opened.document);
+    if json_out {
+        let objects: Vec<serde_json::Value> = opened
+            .document
+            .hierarchy()
+            .into_iter()
+            .filter_map(|(id, depth)| {
+                let object = opened.document.object(id)?;
+                let kind = match object.data {
+                    ObjectData::Mesh(_) => "mesh",
+                    ObjectData::Empty => "empty",
+                    ObjectData::Camera(_) => "camera",
+                    ObjectData::Light(_) => "light",
+                    ObjectData::Armature(_) => "armature",
+                };
+                Some(serde_json::json!({
+                    "name": object.name,
+                    "kind": kind,
+                    "depth": depth,
+                    "visible": object.visible,
+                    "translation": object.transform.translation.to_array(),
+                    "rotation": [
+                        object.transform.rotation.x,
+                        object.transform.rotation.y,
+                        object.transform.rotation.z,
+                        object.transform.rotation.w,
+                    ],
+                    "scale": object.transform.scale.to_array(),
+                    "features": object.features.len(),
+                }))
+            })
+            .collect();
+        let mesh_json: Vec<serde_json::Value> = meshes
+            .iter()
+            .map(|(name, m)| {
+                let m = *m;
+                let b = m.bounds();
+                let tri = m.triangulate();
+                let ngons = (0..m.num_faces()).filter(|&f| m.face_len(f) > 4).count();
+                let quads = (0..m.num_faces()).filter(|&f| m.face_len(f) == 4).count();
+                let layers: Vec<String> = m
+                    .attributes()
+                    .iter()
+                    .map(|l| format!("{}:{}", l.name, l.domain.name()))
+                    .collect();
+                serde_json::json!({
+                    "name": name,
+                    "verts": m.num_verts(),
+                    "edges": m.num_edges(),
+                    "faces": m.num_faces(),
+                    "quads": quads,
+                    "ngons": ngons,
+                    "triangles": tri.num_triangles(),
+                    "euler": m.num_verts() as i64 - m.num_edges() as i64 + m.num_faces() as i64,
+                    "bounds": { "min": b.min.to_array(), "max": b.max.to_array() },
+                    "layers": layers,
+                })
+            })
+            .collect();
+        let manifest_json = opened.manifest.as_ref().map(|m| {
+            serde_json::json!({
+                "format": m.format,
+                "version": format!("{}.{}", m.version_major, m.version_minor),
+                "generator": m.generator,
+                "up_axis": m.up_axis,
+                "unit_scale": m.unit_scale,
+                "min_reader_major": m.min_reader_major,
+            })
+        });
+        let report = serde_json::json!({
+            "path": path.display().to_string(),
+            "manifest": manifest_json,
+            "object_count": opened.document.object_count(),
+            "mesh_count": meshes.len(),
+            "material_count": opened.document.materials().count(),
+            "objects": objects,
+            "meshes": mesh_json,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
     if let Some(manifest) = &opened.manifest {
         println!(
             "{}: {} v{}.{} by {} ({} up, {} m per unit)",
@@ -405,7 +530,6 @@ fn inspect(path: &Path, opts: ObjOptions) -> Result<(), String> {
             );
         }
     }
-    let meshes = named_meshes(&opened.document);
     println!("{}: {} mesh(es)", path.display(), meshes.len());
     for (name, m) in &meshes {
         let m = *m;
@@ -438,14 +562,22 @@ fn inspect(path: &Path, opts: ObjOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn validate(path: &Path, opts: ObjOptions) -> Result<(), String> {
-    let opened = open(path, opts)?;
+fn validate(path: &Path, opts: ObjOptions, json_out: bool) -> Result<(), String> {
+    let opened = open(path, opts, json_out)?;
     let meshes = named_meshes(&opened.document);
-    let mut total = 0;
+    let mut total = 0usize;
+    let mut mesh_reports = Vec::new();
     for (name, m) in &meshes {
         let violations = m.validate();
         total += violations.len();
-        if violations.is_empty() {
+        if json_out {
+            let msgs: Vec<String> = violations.iter().map(|v| format!("{v:?}")).collect();
+            mesh_reports.push(serde_json::json!({
+                "name": name,
+                "ok": violations.is_empty(),
+                "violations": msgs,
+            }));
+        } else if violations.is_empty() {
             println!("  {name}: ok");
         } else {
             println!("  {name}: {} violation(s)", violations.len());
@@ -458,28 +590,55 @@ fn validate(path: &Path, opts: ObjOptions) -> Result<(), String> {
     // cycle or an object pointing at a mesh that is not there is a file that
     // opens and then misbehaves, and it is exactly what a user asking "is my
     // file broken" needs told.
+    let mut doc_errors: Vec<String> = Vec::new();
     for (id, object) in opened.document.objects() {
         if let ObjectData::Mesh(mesh) = object.data {
             if opened.document.mesh(mesh).is_none() {
-                println!(
-                    "  {}: refers to a mesh that is not in the file",
-                    object.name
-                );
+                let msg = format!("{}: refers to a mesh that is not in the file", object.name);
+                if json_out {
+                    doc_errors.push(msg);
+                } else {
+                    println!("  {msg}");
+                }
                 total += 1;
             }
         }
         if let Some(parent) = object.parent {
             if opened.document.object(parent).is_none() {
-                println!(
-                    "  {}: parented to an object that is not in the file",
+                let msg = format!(
+                    "{}: parented to an object that is not in the file",
                     object.name
                 );
+                if json_out {
+                    doc_errors.push(msg);
+                } else {
+                    println!("  {msg}");
+                }
                 total += 1;
             } else if opened.document.is_ancestor(id, parent) {
-                println!("  {}: is its own ancestor", object.name);
+                let msg = format!("{}: is its own ancestor", object.name);
+                if json_out {
+                    doc_errors.push(msg);
+                } else {
+                    println!("  {msg}");
+                }
                 total += 1;
             }
         }
+    }
+
+    if json_out {
+        let report = serde_json::json!({
+            "path": path.display().to_string(),
+            "ok": total == 0,
+            "violation_count": total,
+            "meshes": mesh_reports,
+            "document_errors": doc_errors,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
     }
 
     if total == 0 {
@@ -501,7 +660,7 @@ fn validate(path: &Path, opts: ObjOptions) -> Result<(), String> {
 /// rather than shifting the whole file. Hence one object per line in document
 /// order, and no running totals.
 fn textconv(path: &Path, opts: ObjOptions) -> Result<(), String> {
-    let opened = open(path, opts)?;
+    let opened = open(path, opts, false)?;
     let document = &opened.document;
     if let Some(m) = &opened.manifest {
         // The generator is deliberately omitted: it carries a version number, so
@@ -581,8 +740,8 @@ fn textconv(path: &Path, opts: ObjOptions) -> Result<(), String> {
 /// a heuristic that guesses wrong about a rename is worse than one that does not
 /// guess.
 fn diff(a: &Path, b: &Path, opts: ObjOptions) -> Result<(), String> {
-    let left = open(a, opts)?;
-    let right = open(b, opts)?;
+    let left = open(a, opts, false)?;
+    let right = open(b, opts, false)?;
 
     let index = |document: &Document| -> std::collections::BTreeMap<String, ObjectSummary> {
         document
@@ -732,8 +891,21 @@ impl ObjectSummary {
     }
 }
 
+fn write_sidecars(dst: &Path, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let dir = dst.parent().unwrap_or(Path::new("."));
+    for (rel, bytes) in files {
+        let out = dir.join(rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&out, bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    }
+    Ok(())
+}
+
 fn convert(src: &Path, dst: &Path, opts: ObjOptions) -> Result<(), String> {
-    let opened = open(src, opts)?;
+    let opened = open(src, opts, false)?;
 
     // Native to native keeps the whole document — hierarchy, shared datablocks,
     // unrecognised entries and the source manifest. Going out through the mesh
@@ -749,6 +921,139 @@ fn convert(src: &Path, dst: &Path, opts: ObjOptions) -> Result<(), String> {
             named_meshes(&opened.document).len()
         );
         return Ok(());
+    }
+
+    // Full-scene glTF/GLB export preserves materials, textures, hierarchy,
+    // cameras, lights, armatures, and animations.
+    if is_gltf(dst) {
+        let (scene, mut notes) = scene_from_document(&opened.document);
+        let gltf = GltfExportOptions {
+            binary: dst
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("glb")),
+            ..GltfExportOptions::default()
+        };
+        let (bytes, more) = write_gltf_scene(&scene, &gltf);
+        notes.extend(more);
+        for note in &notes {
+            println!("  note: {note:?}");
+        }
+        std::fs::write(dst, bytes).map_err(|e| format!("cannot write {}: {e}", dst.display()))?;
+        println!(
+            "wrote {} ({} object(s), {} mesh(es))",
+            dst.display(),
+            opened.document.object_count(),
+            named_meshes(&opened.document).len()
+        );
+        return Ok(());
+    }
+
+    // Full-scene USD export (.usd, .usda, .usdc, .usdz).
+    if is_usda(dst) || is_usdc(dst) || is_usdz(dst) {
+        let (scene, mut notes) = scene_from_document(&opened.document);
+        if is_usdz(dst) {
+            let (bytes, more) = kreate_io::usd::write_usdz(&scene);
+            notes.extend(more);
+            std::fs::write(dst, bytes)
+                .map_err(|e| format!("cannot write {}: {e}", dst.display()))?;
+        } else if is_usdc(dst) {
+            let pkg = kreate_io::usd::write_usd_binary(&scene);
+            notes.extend(pkg.notes);
+            std::fs::write(dst, &pkg.text)
+                .map_err(|e| format!("cannot write {}: {e}", dst.display()))?;
+            write_sidecars(dst, &pkg.files)?;
+        } else {
+            let pkg = kreate_io::usd::write_usd(&scene);
+            notes.extend(pkg.notes);
+            std::fs::write(dst, &pkg.text)
+                .map_err(|e| format!("cannot write {}: {e}", dst.display()))?;
+            write_sidecars(dst, &pkg.files)?;
+        }
+        for note in &notes {
+            println!("  note: {note:?}");
+        }
+        println!(
+            "wrote {} ({} object(s), {} mesh(es))",
+            dst.display(),
+            opened.document.object_count(),
+            named_meshes(&opened.document).len()
+        );
+        return Ok(());
+    }
+
+    // URDF robot description + sidecar mesh files.
+    if is_urdf(dst) {
+        let stem = dst
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "robot".to_string());
+        let written = kreate_io::urdf::write_urdf(&opened.document, &stem);
+        for note in &written.notes {
+            println!("  note: {note:?}");
+        }
+        std::fs::write(dst, &written.urdf)
+            .map_err(|e| format!("cannot write {}: {e}", dst.display()))?;
+        write_sidecars(dst, &written.files)?;
+        println!(
+            "wrote {} ({} sidecar mesh(es))",
+            dst.display(),
+            written.files.len()
+        );
+        return Ok(());
+    }
+
+    // STEP / 3MF: preserve world transforms and exact OCCT B-rep solids when available.
+    if is_step(dst) || is_3mf(dst) {
+        let mut parts: Vec<(String, &MeshData, kreate_math::DAffine3)> = Vec::new();
+        let mut exact_solids: Vec<(String, kreate_occt::Shape)> = Vec::new();
+        let mut all_exact = kreate_scene::feature::exact::enabled();
+        for (id, object) in opened.document.objects() {
+            let Some(mesh_id) = object.mesh() else {
+                continue;
+            };
+            let Some(mesh) = opened.document.mesh(mesh_id) else {
+                continue;
+            };
+            let world = opened.document.world_transform(id);
+            parts.push((object.name.clone(), mesh, world));
+            if is_step(dst) && all_exact {
+                if let Some(solid) = kreate_scene::feature::exact::world_solid(&opened.document, id)
+                {
+                    exact_solids.push((object.name.clone(), solid));
+                } else {
+                    all_exact = false;
+                }
+            }
+        }
+        if is_step(dst) {
+            if all_exact && !exact_solids.is_empty() {
+                let refs: Vec<(&str, &kreate_occt::Shape)> =
+                    exact_solids.iter().map(|(n, s)| (n.as_str(), s)).collect();
+                if kreate_occt::write_step_named(&refs, dst, true, true) {
+                    println!(
+                        "wrote {} ({} exact B-rep solid(s))",
+                        dst.display(),
+                        exact_solids.len()
+                    );
+                    return Ok(());
+                }
+            }
+            let stem = dst
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "part".to_string());
+            let text = kreate_io::step::write_step(&stem, &parts, f64::from(opts.unit_scale));
+            std::fs::write(dst, text)
+                .map_err(|e| format!("cannot write {}: {e}", dst.display()))?;
+            println!("wrote {} ({} part(s))", dst.display(), parts.len());
+            return Ok(());
+        } else {
+            let bytes = kreate_io::threemf::write_3mf(&parts, f64::from(opts.unit_scale));
+            std::fs::write(dst, bytes)
+                .map_err(|e| format!("cannot write {}: {e}", dst.display()))?;
+            println!("wrote {} ({} part(s))", dst.display(), parts.len());
+            return Ok(());
+        }
     }
 
     let meshes = named_meshes(&opened.document);

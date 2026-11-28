@@ -10914,17 +10914,26 @@ impl App {
                     })
                     .map(|(id, _)| *id)
                     .collect();
-                let exact_solids: Option<Vec<kreate_occt::Shape>> =
+                let exact_solids: Option<Vec<(String, kreate_occt::Shape)>> =
                     if !target_ids.is_empty() && kreate_scene::feature::exact::enabled() {
                         target_ids
                             .iter()
-                            .map(|id| kreate_scene::feature::exact::world_solid(&self.doc, *id))
+                            .map(|id| {
+                                let name = self
+                                    .doc
+                                    .object(*id)
+                                    .map(|o| o.name.clone())
+                                    .unwrap_or_else(|| "Part".into());
+                                kreate_scene::feature::exact::world_solid(&self.doc, *id)
+                                    .map(|s| (name, s))
+                            })
                             .collect()
                     } else {
                         None
                     };
                 if let Some(solids) = exact_solids {
-                    let refs: Vec<&kreate_occt::Shape> = solids.iter().collect();
+                    let refs: Vec<(&str, &kreate_occt::Shape)> =
+                        solids.iter().map(|(n, s)| (n.as_str(), s)).collect();
                     let millimetres = (metres_per_unit - 0.001).abs() < 1e-6;
                     let tmp = std::env::temp_dir().join(format!(
                         "kreate-step-{}-{}.step",
@@ -10934,7 +10943,7 @@ impl App {
                             .map(|d| d.as_nanos())
                             .unwrap_or(0)
                     ));
-                    if kreate_occt::write_step(&refs, &tmp, millimetres) {
+                    if kreate_occt::write_step_named(&refs, &tmp, millimetres, false) {
                         let res = std::fs::read(&tmp).map_err(|e| e.to_string());
                         let _ = std::fs::remove_file(&tmp);
                         res

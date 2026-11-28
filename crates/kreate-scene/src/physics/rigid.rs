@@ -72,6 +72,9 @@ pub struct Body {
     pub gravity: f64,
     /// A ball round the shape, for a quick "can these two touch".
     reach: f64,
+    /// Resting dynamic bodies sleep until disturbed by an awake contact or joint motor.
+    pub sleeping: bool,
+    sleep_timer: f64,
 }
 
 /// The 26 directions of a k-DOP: the axes, and the diagonals of the faces and
@@ -262,6 +265,8 @@ impl Body {
             angular_damping: 0.1,
             gravity: 1.0,
             reach,
+            sleeping: false,
+            sleep_timer: 0.0,
         }
     }
 
@@ -274,6 +279,30 @@ impl Body {
 
     pub fn is_dynamic(&self) -> bool {
         self.inv_mass > 0.0
+    }
+
+    /// Wakes a sleeping dynamic body so it participates in the next step.
+    pub fn wake(&mut self) {
+        self.sleeping = false;
+        self.sleep_timer = 0.0;
+    }
+
+    /// Conservative world-space axis-aligned bounding box for broadphase culling.
+    fn aabb(&self) -> (DVec3, DVec3) {
+        match &self.shape {
+            Shape::Mesh(m) => {
+                let b = m.bounds();
+                (b.min.as_dvec3(), b.max.as_dvec3())
+            }
+            Shape::Sphere { radius } => {
+                let r = DVec3::splat(*radius);
+                (self.pos - r, self.pos + r)
+            }
+            Shape::Hull { .. } => {
+                let r = DVec3::splat(self.reach);
+                (self.pos - r, self.pos + r)
+            }
+        }
     }
 
     fn inv_inertia_world(&self, v: DVec3) -> DVec3 {
@@ -561,10 +590,135 @@ fn closest_on_segments(p: DVec3, q: DVec3, r: DVec3, s: DVec3) -> (DVec3, DVec3)
     (p + d1 * sc, r + d2 * tc)
 }
 
-/// The bodies, and what pulls them.
+/// PD servo motor driving a hinge (radians) or slider (metres) joint toward a target.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointMotor {
+    /// Target angle (radians) for a hinge, or travel offset (metres) for a slider.
+    pub target: f64,
+    /// Proportional gain (N·m/rad or N/m).
+    pub stiffness: f64,
+    /// Derivative damping gain (N·m·s/rad or N·s/m).
+    pub damping: f64,
+    /// Maximum torque (N·m) or force (N) the actuator can exert.
+    pub max_force: f64,
+}
+
+/// Degree-of-freedom kind of an articulated rigid-body joint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RigidJointKind {
+    /// Welds body `b` rigidly to body `a`.
+    Fixed,
+    /// Revolute hinge rotating about `axis` with optional `[lower, upper]` limits (radians).
+    Hinge {
+        lower: Option<f64>,
+        upper: Option<f64>,
+    },
+    /// Prismatic slider translating along `axis` with optional `[lower, upper]` travel limits (metres).
+    Slider {
+        lower: Option<f64>,
+        upper: Option<f64>,
+    },
+}
+
+/// An articulated constraint connecting two bodies in a [`RigidWorld`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigidJoint {
+    pub body_a: usize,
+    pub body_b: usize,
+    /// Joint anchor point in body `a`'s local frame.
+    pub anchor_a: DVec3,
+    /// Joint anchor point in body `b`'s local frame.
+    pub anchor_b: DVec3,
+    /// Joint axis in body `a`'s local frame (unit vector).
+    pub axis_a: DVec3,
+    /// Joint axis in body `b`'s local frame (unit vector).
+    pub axis_b: DVec3,
+    /// Relative orientation of body `b` in body `a`'s frame at zero hinge angle.
+    pub rest_rot: DQuat,
+    pub kind: RigidJointKind,
+    pub motor: Option<JointMotor>,
+}
+
+impl RigidJoint {
+    /// A fixed weld joint between `body_a` and `body_b` at their respective local anchors.
+    pub fn fixed(body_a: usize, body_b: usize, anchor_a: DVec3, anchor_b: DVec3) -> Self {
+        Self {
+            body_a,
+            body_b,
+            anchor_a,
+            anchor_b,
+            axis_a: DVec3::Z,
+            axis_b: DVec3::Z,
+            rest_rot: DQuat::IDENTITY,
+            kind: RigidJointKind::Fixed,
+            motor: None,
+        }
+    }
+
+    /// A revolute hinge joint rotating about `axis` (expressed in both local frames).
+    pub fn hinge(
+        body_a: usize,
+        body_b: usize,
+        anchor_a: DVec3,
+        anchor_b: DVec3,
+        axis: DVec3,
+        lower: Option<f64>,
+        upper: Option<f64>,
+    ) -> Self {
+        let u = axis.normalize_or_zero();
+        let u = if u.length_squared() > 0.5 {
+            u
+        } else {
+            DVec3::Z
+        };
+        Self {
+            body_a,
+            body_b,
+            anchor_a,
+            anchor_b,
+            axis_a: u,
+            axis_b: u,
+            rest_rot: DQuat::IDENTITY,
+            kind: RigidJointKind::Hinge { lower, upper },
+            motor: None,
+        }
+    }
+
+    /// A prismatic slider joint translating along `axis` (expressed in both local frames).
+    pub fn slider(
+        body_a: usize,
+        body_b: usize,
+        anchor_a: DVec3,
+        anchor_b: DVec3,
+        axis: DVec3,
+        lower: Option<f64>,
+        upper: Option<f64>,
+    ) -> Self {
+        let u = axis.normalize_or_zero();
+        let u = if u.length_squared() > 0.5 {
+            u
+        } else {
+            DVec3::Z
+        };
+        Self {
+            body_a,
+            body_b,
+            anchor_a,
+            anchor_b,
+            axis_a: u,
+            axis_b: u,
+            rest_rot: DQuat::IDENTITY,
+            kind: RigidJointKind::Slider { lower, upper },
+            motor: None,
+        }
+    }
+}
+
+/// The bodies, articulated joints, and what pulls them.
 #[derive(Clone, Debug)]
 pub struct RigidWorld {
     pub bodies: Vec<Body>,
+    pub joints: Vec<RigidJoint>,
     pub gravity: DVec3,
     pub iterations: u32,
 }
@@ -580,13 +734,148 @@ struct Prepared {
     pushed: f64,
 }
 
+const SLEEP_LIN_SPEED: f64 = 0.03;
+const SLEEP_ANG_SPEED: f64 = 0.05;
+const SLEEP_TIME: f64 = 0.5;
+const WAKE_LIN_SPEED: f64 = 0.06;
+const WAKE_ANG_SPEED: f64 = 0.1;
+
+fn ortho_basis(n: DVec3) -> (DVec3, DVec3) {
+    let ref_axis = if n.x.abs() < 0.8 { DVec3::X } else { DVec3::Y };
+    let t1 = n.cross(ref_axis).normalize_or_zero();
+    let t2 = n.cross(t1).normalize_or_zero();
+    (t1, t2)
+}
+
+fn effective_inv_mass(b: &Body) -> f64 {
+    if b.is_dynamic() && !b.sleeping {
+        b.inv_mass
+    } else {
+        0.0
+    }
+}
+
+fn effective_inv_inertia_world(b: &Body, v: DVec3) -> DVec3 {
+    if b.is_dynamic() && !b.sleeping {
+        b.inv_inertia_world(v)
+    } else {
+        DVec3::ZERO
+    }
+}
+
+fn apply_awake(b: &mut Body, impulse: DVec3, r: DVec3) {
+    if b.is_dynamic() && !b.sleeping {
+        b.apply(impulse, r);
+    }
+}
+
+fn solve_linear_axis(
+    bodies: &mut [Body],
+    pair: (usize, usize),
+    arms: (DVec3, DVec3),
+    dir: DVec3,
+    target_rel_vel: f64,
+    limits: (f64, f64),
+) {
+    let (ia, ib) = pair;
+    let (ra, rb) = arms;
+    let (min_impulse, max_impulse) = limits;
+    let (ba, bb) = (&bodies[ia], &bodies[ib]);
+    let rel_v = (bb.velocity_at(rb) - ba.velocity_at(ra)).dot(dir);
+    let k = effective_inv_mass(ba)
+        + effective_inv_mass(bb)
+        + effective_inv_inertia_world(ba, ra.cross(dir))
+            .cross(ra)
+            .dot(dir)
+        + effective_inv_inertia_world(bb, rb.cross(dir))
+            .cross(rb)
+            .dot(dir);
+    if k <= 1e-12 {
+        return;
+    }
+    let lambda = ((target_rel_vel - rel_v) / k).clamp(min_impulse, max_impulse);
+    apply_awake(&mut bodies[ia], -dir * lambda, ra);
+    apply_awake(&mut bodies[ib], dir * lambda, rb);
+}
+
+fn solve_angular_axis(
+    bodies: &mut [Body],
+    ia: usize,
+    ib: usize,
+    axis: DVec3,
+    target_rel_omega: f64,
+    min_impulse: f64,
+    max_impulse: f64,
+) {
+    let (ba, bb) = (&bodies[ia], &bodies[ib]);
+    let rel_w = (bb.spin - ba.spin).dot(axis);
+    let k = effective_inv_inertia_world(ba, axis).dot(axis)
+        + effective_inv_inertia_world(bb, axis).dot(axis);
+    if k <= 1e-12 {
+        return;
+    }
+    let lambda = ((target_rel_omega - rel_w) / k).clamp(min_impulse, max_impulse);
+    if bodies[ia].is_dynamic() && !bodies[ia].sleeping {
+        let dw = bodies[ia].inv_inertia_world(axis * lambda);
+        bodies[ia].spin -= dw;
+    }
+    if bodies[ib].is_dynamic() && !bodies[ib].sleeping {
+        let dw = bodies[ib].inv_inertia_world(axis * lambda);
+        bodies[ib].spin += dw;
+    }
+}
+
+fn joint_hinge_angle(ba: &Body, bb: &Body, j: &RigidJoint) -> f64 {
+    let q_rel = (ba.rot * j.rest_rot).inverse() * bb.rot;
+    let proj = q_rel.xyz().dot(j.axis_a);
+    let angle = 2.0 * proj.atan2(q_rel.w);
+    // Normalize to [-PI, PI].
+    if angle > std::f64::consts::PI {
+        angle - std::f64::consts::TAU
+    } else if angle < -std::f64::consts::PI {
+        angle + std::f64::consts::TAU
+    } else {
+        angle
+    }
+}
+
+fn joint_slider_offset(ba: &Body, bb: &Body, j: &RigidJoint) -> f64 {
+    let pa = ba.pos + ba.rot * j.anchor_a;
+    let pb = bb.pos + bb.rot * j.anchor_b;
+    let axis = (ba.rot * j.axis_a).normalize_or_zero();
+    (pb - pa).dot(axis)
+}
+
 impl RigidWorld {
     pub fn new(gravity: DVec3, iterations: u32) -> Self {
         Self {
             bodies: Vec::new(),
+            joints: Vec::new(),
             gravity,
             iterations: iterations.max(1),
         }
+    }
+
+    /// Current hinge angle (radians) of joint `index`, or `0.0` if out of range.
+    pub fn joint_angle(&self, index: usize) -> f64 {
+        let Some(j) = self.joints.get(index) else {
+            return 0.0;
+        };
+        let (Some(ba), Some(bb)) = (self.bodies.get(j.body_a), self.bodies.get(j.body_b)) else {
+            return 0.0;
+        };
+        joint_hinge_angle(ba, bb, j)
+    }
+
+    /// Current slider travel offset (metres) of joint `index`, or `0.0` if out of range.
+    pub fn joint_offset(&self, index: usize) -> f64 {
+        let Some(j) = self.joints.get(index) else {
+            return 0.0;
+        };
+        let (Some(ba), Some(bb)) = (self.bodies.get(j.body_a), self.bodies.get(j.body_b)) else {
+            return 0.0;
+        };
+        joint_slider_offset(ba, bb, j)
     }
 
     /// One frame of `dt` seconds, in `substeps` steps.
@@ -597,21 +886,56 @@ impl RigidWorld {
         }
     }
 
+    /// X-axis Sweep-and-Prune AABB broadphase (`O(N log N)`) followed by narrowphase.
     fn contacts(&self) -> Vec<Contact> {
+        let n = self.bodies.len();
+        if n < 2 {
+            return Vec::new();
+        }
+        let mut entries: Vec<(usize, DVec3, DVec3)> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let (lo, hi) = b.aabb();
+                (i, lo, hi)
+            })
+            .collect();
+        entries.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
+
         let mut out = Vec::new();
-        for a in 0..self.bodies.len() {
-            for b in a + 1..self.bodies.len() {
-                let (ba, bb) = (&self.bodies[a], &self.bodies[b]);
-                if !ba.is_dynamic() && !bb.is_dynamic() {
+        for i in 0..n {
+            let (ia, lo_a, hi_a) = entries[i];
+            let ba = &self.bodies[ia];
+            let a_awake_dyn = ba.is_dynamic() && !ba.sleeping;
+            for &(ib, lo_b, hi_b) in &entries[i + 1..] {
+                if lo_b.x > hi_a.x {
+                    break;
+                }
+                if hi_a.y < lo_b.y || hi_b.y < lo_a.y || hi_a.z < lo_b.z || hi_b.z < lo_a.z {
                     continue;
                 }
-                let near = match (&ba.shape, &bb.shape) {
-                    (Shape::Mesh(m), _) => overlaps_box(m, bb.pos, bb.reach),
-                    (_, Shape::Mesh(m)) => overlaps_box(m, ba.pos, ba.reach),
-                    _ => ba.pos.distance(bb.pos) <= ba.reach + bb.reach,
+                let bb = &self.bodies[ib];
+                let b_awake_dyn = bb.is_dynamic() && !bb.sleeping;
+                // Skip static-static, static-sleeping, and sleeping-sleeping pairs.
+                if !a_awake_dyn && !b_awake_dyn {
+                    continue;
+                }
+                let (first, second) = if ia < ib { (ia, ib) } else { (ib, ia) };
+                if self.joints.iter().any(|j| {
+                    (j.body_a == first && j.body_b == second)
+                        || (j.body_a == second && j.body_b == first)
+                }) {
+                    continue;
+                }
+                let (bf, bs) = (&self.bodies[first], &self.bodies[second]);
+                let near = match (&bf.shape, &bs.shape) {
+                    (Shape::Mesh(m), _) => overlaps_box(m, bs.pos, bs.reach),
+                    (_, Shape::Mesh(m)) => overlaps_box(m, bf.pos, bf.reach),
+                    _ => bf.pos.distance(bs.pos) <= bf.reach + bs.reach,
                 };
                 if near {
-                    contacts_between(&self.bodies, a, b, &mut out);
+                    contacts_between(&self.bodies, first, second, &mut out);
                 }
             }
         }
@@ -620,23 +944,138 @@ impl RigidWorld {
 
     /// One step of `dt` seconds.
     pub fn step(&mut self, dt: f64) {
-        for b in self.bodies.iter_mut().filter(|b| b.is_dynamic()) {
+        if dt <= 0.0 {
+            return;
+        }
+        let n_bodies = self.bodies.len();
+        let mut motor_active = vec![false; n_bodies];
+        // Wake bodies driven by active joint motors or linked to fast-moving bodies.
+        for j in &self.joints {
+            if j.body_a >= n_bodies || j.body_b >= n_bodies || j.body_a == j.body_b {
+                continue;
+            }
+            if j.motor.is_some() {
+                if self.bodies[j.body_a].is_dynamic() {
+                    self.bodies[j.body_a].wake();
+                    motor_active[j.body_a] = true;
+                }
+                if self.bodies[j.body_b].is_dynamic() {
+                    self.bodies[j.body_b].wake();
+                    motor_active[j.body_b] = true;
+                }
+            } else {
+                let a_fast = self.bodies[j.body_a].is_dynamic()
+                    && !self.bodies[j.body_a].sleeping
+                    && (self.bodies[j.body_a].vel.length() > WAKE_LIN_SPEED
+                        || self.bodies[j.body_a].spin.length() > WAKE_ANG_SPEED);
+                let b_fast = self.bodies[j.body_b].is_dynamic()
+                    && !self.bodies[j.body_b].sleeping
+                    && (self.bodies[j.body_b].vel.length() > WAKE_LIN_SPEED
+                        || self.bodies[j.body_b].spin.length() > WAKE_ANG_SPEED);
+                if a_fast && self.bodies[j.body_b].is_dynamic() {
+                    self.bodies[j.body_b].wake();
+                }
+                if b_fast && self.bodies[j.body_a].is_dynamic() {
+                    self.bodies[j.body_a].wake();
+                }
+            }
+        }
+
+        for b in self
+            .bodies
+            .iter_mut()
+            .filter(|b| b.is_dynamic() && !b.sleeping)
+        {
             b.vel += self.gravity * b.gravity * dt;
             b.vel *= (1.0 - b.linear_damping.clamp(0.0, 1.0)).powf(dt);
             b.spin *= (1.0 - b.angular_damping.clamp(0.0, 1.0)).powf(dt);
         }
-        let mut prepared: Vec<Prepared> = self
-            .contacts()
+
+        // Apply PD servo motor forces/torques once per substep (with implicit damping stabilization).
+        for j in &self.joints {
+            let Some(motor) = j.motor else { continue };
+            if j.body_a >= n_bodies || j.body_b >= n_bodies || j.body_a == j.body_b {
+                continue;
+            }
+            match j.kind {
+                RigidJointKind::Hinge { .. } => {
+                    let (ba, bb) = (&self.bodies[j.body_a], &self.bodies[j.body_b]);
+                    let axis = (ba.rot * j.axis_a).normalize_or_zero();
+                    if axis.length_squared() < 0.5 {
+                        continue;
+                    }
+                    let angle = joint_hinge_angle(ba, bb, j);
+                    let rel_w = (bb.spin - ba.spin).dot(axis);
+                    let k = effective_inv_inertia_world(ba, axis).dot(axis)
+                        + effective_inv_inertia_world(bb, axis).dot(axis);
+                    let denom = 1.0 + motor.damping * dt * k;
+                    let tau = ((motor.stiffness * (motor.target - angle) - motor.damping * rel_w)
+                        / denom)
+                        .clamp(-motor.max_force, motor.max_force);
+                    let imp = axis * (tau * dt);
+                    if self.bodies[j.body_a].is_dynamic() && !self.bodies[j.body_a].sleeping {
+                        let dw = self.bodies[j.body_a].inv_inertia_world(imp);
+                        self.bodies[j.body_a].spin -= dw;
+                    }
+                    if self.bodies[j.body_b].is_dynamic() && !self.bodies[j.body_b].sleeping {
+                        let dw = self.bodies[j.body_b].inv_inertia_world(imp);
+                        self.bodies[j.body_b].spin += dw;
+                    }
+                }
+                RigidJointKind::Slider { .. } => {
+                    let (ba, bb) = (&self.bodies[j.body_a], &self.bodies[j.body_b]);
+                    let axis = (ba.rot * j.axis_a).normalize_or_zero();
+                    if axis.length_squared() < 0.5 {
+                        continue;
+                    }
+                    let ra = ba.rot * j.anchor_a;
+                    let rb = bb.rot * j.anchor_b;
+                    let offset = joint_slider_offset(ba, bb, j);
+                    let rel_v = (bb.velocity_at(rb) - ba.velocity_at(ra)).dot(axis);
+                    let k = effective_inv_mass(ba) + effective_inv_mass(bb);
+                    let denom = 1.0 + motor.damping * dt * k;
+                    let force = ((motor.stiffness * (motor.target - offset)
+                        - motor.damping * rel_v)
+                        / denom)
+                        .clamp(-motor.max_force, motor.max_force);
+                    let imp = axis * (force * dt);
+                    apply_awake(&mut self.bodies[j.body_a], -imp, ra);
+                    apply_awake(&mut self.bodies[j.body_b], imp, rb);
+                }
+                RigidJointKind::Fixed => {}
+            }
+        }
+
+        let raw_contacts = self.contacts();
+        // Wake sleeping bodies struck by a moving awake dynamic body.
+        for c in &raw_contacts {
+            let a_awake_fast = self.bodies[c.a].is_dynamic()
+                && !self.bodies[c.a].sleeping
+                && (self.bodies[c.a].vel.length() > WAKE_LIN_SPEED
+                    || self.bodies[c.a].spin.length() > WAKE_ANG_SPEED);
+            let b_awake_fast = self.bodies[c.b].is_dynamic()
+                && !self.bodies[c.b].sleeping
+                && (self.bodies[c.b].vel.length() > WAKE_LIN_SPEED
+                    || self.bodies[c.b].spin.length() > WAKE_ANG_SPEED);
+            if a_awake_fast && self.bodies[c.b].is_dynamic() && self.bodies[c.b].sleeping {
+                self.bodies[c.b].wake();
+            }
+            if b_awake_fast && self.bodies[c.a].is_dynamic() && self.bodies[c.a].sleeping {
+                self.bodies[c.a].wake();
+            }
+        }
+
+        let mut prepared: Vec<Prepared> = raw_contacts
             .into_iter()
             .map(|c| {
                 let (a, b) = (&self.bodies[c.a], &self.bodies[c.b]);
                 let ra = c.point - a.pos;
                 let rb = c.point - b.pos;
                 let n = c.normal;
-                let k = a.inv_mass
-                    + b.inv_mass
-                    + a.inv_inertia_world(ra.cross(n)).cross(ra).dot(n)
-                    + b.inv_inertia_world(rb.cross(n)).cross(rb).dot(n);
+                let k = effective_inv_mass(a)
+                    + effective_inv_mass(b)
+                    + effective_inv_inertia_world(a, ra.cross(n)).cross(ra).dot(n)
+                    + effective_inv_inertia_world(b, rb.cross(n)).cross(rb).dot(n);
                 let vn = (a.velocity_at(ra) - b.velocity_at(rb)).dot(n);
                 let bounce = a.bounciness.max(b.bounciness).clamp(0.0, 1.0);
                 // Coming in fast enough to bounce; slower is resting, and a
@@ -654,6 +1093,9 @@ impl RigidWorld {
                 }
             })
             .collect();
+
+        let joints_snapshot = self.joints.clone();
+        let baumgarte = 0.25 / dt;
         for _ in 0..self.iterations {
             for p in prepared.iter_mut() {
                 let (ia, ib) = (p.c.a, p.c.b);
@@ -663,8 +1105,8 @@ impl RigidWorld {
                 let total = (p.pushed + (p.target - vn) * p.normal_mass).max(0.0);
                 let dl = total - p.pushed;
                 p.pushed = total;
-                self.bodies[ia].apply(n * dl, p.ra);
-                self.bodies[ib].apply(-n * dl, p.rb);
+                apply_awake(&mut self.bodies[ia], n * dl, p.ra);
+                apply_awake(&mut self.bodies[ib], -n * dl, p.rb);
                 // Friction, against the sliding, no more than μ times the push.
                 let rel = self.bodies[ia].velocity_at(p.ra) - self.bodies[ib].velocity_at(p.rb);
                 let tangential = rel - n * rel.dot(n);
@@ -672,19 +1114,192 @@ impl RigidWorld {
                 if speed > 1e-9 {
                     let t = tangential / speed;
                     let (a, b) = (&self.bodies[ia], &self.bodies[ib]);
-                    let k = a.inv_mass
-                        + b.inv_mass
-                        + a.inv_inertia_world(p.ra.cross(t)).cross(p.ra).dot(t)
-                        + b.inv_inertia_world(p.rb.cross(t)).cross(p.rb).dot(t);
+                    let k = effective_inv_mass(a)
+                        + effective_inv_mass(b)
+                        + effective_inv_inertia_world(a, p.ra.cross(t))
+                            .cross(p.ra)
+                            .dot(t)
+                        + effective_inv_inertia_world(b, p.rb.cross(t))
+                            .cross(p.rb)
+                            .dot(t);
                     if k > 1e-12 {
                         let jt = (speed / k).min(p.friction * p.pushed);
-                        self.bodies[ia].apply(-t * jt, p.ra);
-                        self.bodies[ib].apply(t * jt, p.rb);
+                        apply_awake(&mut self.bodies[ia], -t * jt, p.ra);
+                        apply_awake(&mut self.bodies[ib], t * jt, p.rb);
+                    }
+                }
+            }
+
+            // Solve articulated joint constraints (position, orientation alignment, and travel limits).
+            for j in &joints_snapshot {
+                let (ia, ib) = (j.body_a, j.body_b);
+                if ia >= n_bodies || ib >= n_bodies || ia == ib {
+                    continue;
+                }
+                if !self.bodies[ia].is_dynamic() && !self.bodies[ib].is_dynamic() {
+                    continue;
+                }
+                let ra = self.bodies[ia].rot * j.anchor_a;
+                let rb = self.bodies[ib].rot * j.anchor_b;
+                let pa = self.bodies[ia].pos + ra;
+                let pb = self.bodies[ib].pos + rb;
+                let pos_err = pb - pa;
+
+                match j.kind {
+                    RigidJointKind::Fixed => {
+                        for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+                            let target_v = -baumgarte * pos_err.dot(axis);
+                            solve_linear_axis(
+                                &mut self.bodies,
+                                (ia, ib),
+                                (ra, rb),
+                                axis,
+                                target_v,
+                                (f64::NEG_INFINITY, f64::INFINITY),
+                            );
+                        }
+                        let ref_rot = self.bodies[ia].rot * j.rest_rot;
+                        let q_err = ref_rot.inverse() * self.bodies[ib].rot;
+                        let sign = if q_err.w < 0.0 { -1.0 } else { 1.0 };
+                        let ang_err = ref_rot * (q_err.xyz() * (2.0 * sign));
+                        for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+                            let target_w = -baumgarte * ang_err.dot(axis);
+                            solve_angular_axis(
+                                &mut self.bodies,
+                                ia,
+                                ib,
+                                axis,
+                                target_w,
+                                f64::NEG_INFINITY,
+                                f64::INFINITY,
+                            );
+                        }
+                    }
+                    RigidJointKind::Hinge { lower, upper } => {
+                        for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+                            let target_v = -baumgarte * pos_err.dot(axis);
+                            solve_linear_axis(
+                                &mut self.bodies,
+                                (ia, ib),
+                                (ra, rb),
+                                axis,
+                                target_v,
+                                (f64::NEG_INFINITY, f64::INFINITY),
+                            );
+                        }
+                        let axis_a_w = (self.bodies[ia].rot * j.axis_a).normalize_or_zero();
+                        let axis_b_w = (self.bodies[ib].rot * j.axis_b).normalize_or_zero();
+                        if axis_a_w.length_squared() > 0.5 && axis_b_w.length_squared() > 0.5 {
+                            let perp_err = axis_a_w.cross(axis_b_w);
+                            let (u1, u2) = ortho_basis(axis_a_w);
+                            for perp in [u1, u2] {
+                                let target_w = -baumgarte * perp_err.dot(perp);
+                                solve_angular_axis(
+                                    &mut self.bodies,
+                                    ia,
+                                    ib,
+                                    perp,
+                                    target_w,
+                                    f64::NEG_INFINITY,
+                                    f64::INFINITY,
+                                );
+                            }
+                            let angle = joint_hinge_angle(&self.bodies[ia], &self.bodies[ib], j);
+                            if let Some(lo) = lower {
+                                if angle < lo {
+                                    solve_angular_axis(
+                                        &mut self.bodies,
+                                        ia,
+                                        ib,
+                                        axis_a_w,
+                                        baumgarte * (lo - angle),
+                                        0.0,
+                                        f64::INFINITY,
+                                    );
+                                }
+                            }
+                            if let Some(hi) = upper {
+                                if angle > hi {
+                                    solve_angular_axis(
+                                        &mut self.bodies,
+                                        ia,
+                                        ib,
+                                        axis_a_w,
+                                        baumgarte * (hi - angle),
+                                        f64::NEG_INFINITY,
+                                        0.0,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    RigidJointKind::Slider { lower, upper } => {
+                        let axis_w = (self.bodies[ia].rot * j.axis_a).normalize_or_zero();
+                        if axis_w.length_squared() > 0.5 {
+                            let (u1, u2) = ortho_basis(axis_w);
+                            for perp in [u1, u2] {
+                                let target_v = -baumgarte * pos_err.dot(perp);
+                                solve_linear_axis(
+                                    &mut self.bodies,
+                                    (ia, ib),
+                                    (ra, rb),
+                                    perp,
+                                    target_v,
+                                    (f64::NEG_INFINITY, f64::INFINITY),
+                                );
+                            }
+                            let offset = pos_err.dot(axis_w);
+                            if let Some(lo) = lower {
+                                if offset < lo {
+                                    solve_linear_axis(
+                                        &mut self.bodies,
+                                        (ia, ib),
+                                        (ra, rb),
+                                        axis_w,
+                                        baumgarte * (lo - offset),
+                                        (0.0, f64::INFINITY),
+                                    );
+                                }
+                            }
+                            if let Some(hi) = upper {
+                                if offset > hi {
+                                    solve_linear_axis(
+                                        &mut self.bodies,
+                                        (ia, ib),
+                                        (ra, rb),
+                                        axis_w,
+                                        baumgarte * (hi - offset),
+                                        (f64::NEG_INFINITY, 0.0),
+                                    );
+                                }
+                            }
+                        }
+                        // Lock relative rotation on a prismatic slider.
+                        let ref_rot = self.bodies[ia].rot * j.rest_rot;
+                        let q_err = ref_rot.inverse() * self.bodies[ib].rot;
+                        let sign = if q_err.w < 0.0 { -1.0 } else { 1.0 };
+                        let ang_err = ref_rot * (q_err.xyz() * (2.0 * sign));
+                        for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+                            let target_w = -baumgarte * ang_err.dot(axis);
+                            solve_angular_axis(
+                                &mut self.bodies,
+                                ia,
+                                ib,
+                                axis,
+                                target_w,
+                                f64::NEG_INFINITY,
+                                f64::INFINITY,
+                            );
+                        }
                     }
                 }
             }
         }
-        for b in self.bodies.iter_mut().filter(|b| b.is_dynamic()) {
+
+        for (idx, b) in self.bodies.iter_mut().enumerate() {
+            if !b.is_dynamic() || b.sleeping {
+                continue;
+            }
             b.pos += b.vel * dt;
             let w = DQuat::from_xyzw(b.spin.x, b.spin.y, b.spin.z, 0.0);
             let dq = w * b.rot;
@@ -695,6 +1310,20 @@ impl RigidWorld {
                 b.rot.w + 0.5 * dq.w * dt,
             )
             .normalize();
+
+            if !motor_active[idx]
+                && b.vel.length_squared() < SLEEP_LIN_SPEED * SLEEP_LIN_SPEED
+                && b.spin.length_squared() < SLEEP_ANG_SPEED * SLEEP_ANG_SPEED
+            {
+                b.sleep_timer += dt;
+                if b.sleep_timer >= SLEEP_TIME {
+                    b.sleeping = true;
+                    b.vel = DVec3::ZERO;
+                    b.spin = DVec3::ZERO;
+                }
+            } else {
+                b.sleep_timer = 0.0;
+            }
         }
     }
 }
@@ -908,5 +1537,126 @@ mod tests {
         let slid = slide(0.0);
         assert!(held < 0.1, "held: {held}");
         assert!(slid > 1.0, "slid: {slid}");
+    }
+
+    #[test]
+    fn broadphase_and_sleeping_settle_many_bodies() {
+        let mut w = world();
+        // Wide static floor.
+        w.bodies.push(
+            Body::cuboid(
+                DVec3::ZERO,
+                DQuat::IDENTITY,
+                DVec3::new(30.0, 30.0, 0.5),
+                0.0,
+            )
+            .fixed(),
+        );
+        // 16 separated cubes dropped onto the floor.
+        for i in 0..16 {
+            let x = (i % 4) as f64 * 2.5 - 3.75;
+            let y = (i / 4) as f64 * 2.5 - 3.75;
+            w.bodies.push(Body::cuboid(
+                DVec3::new(x, y, 1.4),
+                DQuat::IDENTITY,
+                DVec3::splat(0.4),
+                1.0,
+            ));
+        }
+        run(&mut w, 2.5);
+        for (idx, b) in w.bodies[1..].iter().enumerate() {
+            assert!(
+                (b.pos.z - 0.9).abs() < 0.04,
+                "box {idx} did not rest on floor: z={}",
+                b.pos.z
+            );
+            assert!(b.sleeping, "box {idx} should have fallen asleep");
+        }
+    }
+
+    #[test]
+    fn hinge_joint_motor_drives_link_to_target_angle() {
+        let mut w = RigidWorld::new(DVec3::ZERO, 12);
+        // Static base at origin, arm link hinged about Z at (0, 0, 0) with arm centre at (0.5, 0, 0).
+        w.bodies
+            .push(Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::splat(0.2), 0.0).fixed());
+        w.bodies.push(Body::cuboid(
+            DVec3::new(0.5, 0.0, 0.0),
+            DQuat::IDENTITY,
+            DVec3::new(0.5, 0.1, 0.1),
+            1.0,
+        ));
+        let mut hinge = RigidJoint::hinge(
+            0,
+            1,
+            DVec3::ZERO,
+            DVec3::new(-0.5, 0.0, 0.0),
+            DVec3::Z,
+            Some(-1.5),
+            Some(1.5),
+        );
+        let target = std::f64::consts::FRAC_PI_3;
+        hinge.motor = Some(JointMotor {
+            target,
+            stiffness: 40.0,
+            damping: 8.0,
+            max_force: 50.0,
+        });
+        w.joints.push(hinge);
+
+        run(&mut w, 2.0);
+        let angle = w.joint_angle(0);
+        assert!(
+            (angle - target).abs() < 0.05,
+            "hinge angle {angle:.4} did not reach target {target:.4}"
+        );
+        // Anchor must remain attached to the origin.
+        let anchor_world = w.bodies[1].pos + w.bodies[1].rot * DVec3::new(-0.5, 0.0, 0.0);
+        assert!(
+            anchor_world.length() < 0.03,
+            "hinge anchor drifted: {anchor_world:?}"
+        );
+    }
+
+    #[test]
+    fn slider_joint_constrains_motion_to_axis() {
+        let mut w = RigidWorld::new(DVec3::new(0.0, 0.0, -9.81), 12);
+        // Static rail + dynamic carriage constrained to slide along +X in [-0.2, 0.6].
+        w.bodies
+            .push(Body::cuboid(DVec3::ZERO, DQuat::IDENTITY, DVec3::splat(0.2), 0.0).fixed());
+        w.bodies.push(Body::cuboid(
+            DVec3::ZERO,
+            DQuat::IDENTITY,
+            DVec3::splat(0.2),
+            1.0,
+        ));
+        let mut slider = RigidJoint::slider(
+            0,
+            1,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            DVec3::X,
+            Some(-0.2),
+            Some(0.6),
+        );
+        slider.motor = Some(JointMotor {
+            target: 0.45,
+            stiffness: 60.0,
+            damping: 12.0,
+            max_force: 80.0,
+        });
+        w.joints.push(slider);
+
+        run(&mut w, 2.0);
+        let pos = w.bodies[1].pos;
+        let offset = w.joint_offset(0);
+        assert!(
+            (offset - 0.45).abs() < 0.03,
+            "slider offset {offset:.4} did not reach 0.45"
+        );
+        assert!(
+            pos.y.abs() < 0.03 && pos.z.abs() < 0.05,
+            "slider drifted off X axis under gravity: {pos:?}"
+        );
     }
 }

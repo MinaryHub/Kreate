@@ -13,6 +13,7 @@ kreate-mesh.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 kreate-scene.workspace = true
+kreate-occt.workspace = true
 kreate-geom2d.workspace = true
 kreate-fonts.workspace = true
 gltf.workspace = true
@@ -28,6 +29,9 @@ half = "2"
 # FBX compresses its large arrays with zlib. Already built for `zip`.
 flate2 = "1"
 rayon.workspace = true
+
+[features]
+occt = ["kreate-occt/occt", "kreate-scene/occt"]
 
 [dev-dependencies]
 kreate-testkit.workspace = true

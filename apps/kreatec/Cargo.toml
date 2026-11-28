@@ -7,9 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+occt = ["kreate-occt/occt", "kreate-scene/occt", "kreate-io/occt"]
+
 [dependencies]
 kreate-math.workspace = true
 kreate-mesh.workspace = true
+kreate-occt.workspace = true
 kreate-scene.workspace = true
 kreate-io.workspace = true
 glam.workspace = true
+serde_json.workspace = true

@@ -5,6 +5,7 @@
 
 pub mod animation;
 pub mod armature;
+pub mod assembly;
 pub mod camera;
 pub mod clipboard;
 pub mod curve;
@@ -30,6 +31,7 @@ pub mod shader;
 pub mod shape;
 pub mod sketch;
 pub mod skin;
+pub mod topo;
 pub mod undo;
 
 pub use camera::{Camera, Projection, SensorFit};

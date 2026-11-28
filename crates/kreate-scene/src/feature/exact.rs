@@ -175,8 +175,7 @@ fn solid(doc: &Document, f: &Feature) -> Option<Solid> {
                 symmetric,
                 more,
             } => {
-                // Leaning sides, and through all, are the mesh path's yet.
-                if more.taper != 0.0 || more.through {
+                if more.through {
                     return None;
                 }
                 let (z0, z1) = more.span(distance, symmetric);
@@ -186,7 +185,12 @@ fn solid(doc: &Document, f: &Feature) -> Option<Solid> {
                 } else {
                     face
                 };
-                face.extrude([0.0, 0.0, hi - lo])?
+                let prism = face.extrude([0.0, 0.0, hi - lo])?;
+                if more.taper.abs() > 1e-9 {
+                    prism.draft(more.taper, [0.0, 0.0, 1.0], [0.0, 0.0, lo])?
+                } else {
+                    prism
+                }
             }
             Shape::Revolve { axis, angle } => {
                 let (origin, dir) = super::revolve_axis(doc, sketch, axis)?;
@@ -208,6 +212,49 @@ fn solid(doc: &Document, f: &Feature) -> Option<Solid> {
     made
 }
 
+/// Builds the largest planar face of a sketch in the body's local space, for Loft.
+fn largest_sketch_face(
+    doc: &Document,
+    sketch_uid: kreate_reflect::Uid,
+    to_body: DAffine3,
+) -> Option<Solid> {
+    let sketch_id = doc.object_by_uid(sketch_uid)?;
+    let object = doc.object(sketch_id)?;
+    let sketch_world = doc.world_transform(sketch_id);
+    let face = if let Some(drawing) = object.drawing.as_deref() {
+        let regions = drawing.regions(super::DRAWING_CHORD);
+        let best = regions
+            .iter()
+            .max_by(|a, b| a.area.abs().total_cmp(&b.area.abs()))?;
+        let to_loop = |l: &kreate_geom2d::Loop| -> Option<Loop> {
+            let mut out = Vec::new();
+            for piece in l {
+                pieces(&piece.curve, &mut out)?;
+            }
+            Some(out)
+        };
+        let outer = to_loop(&best.outer)?;
+        let holes: Vec<Loop> = best.holes.iter().map(to_loop).collect::<Option<_>>()?;
+        Solid::face(&outer, &holes)?
+    } else {
+        let (outline, holes) = super::shapes::largest_region(doc, sketch_id)?;
+        let ring = |r: &[kreate_math::Vec2]| -> Loop {
+            (0..r.len())
+                .map(|k| {
+                    let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                    Piece::Line {
+                        a: [f64::from(a.x), f64::from(a.y)],
+                        b: [f64::from(b.x), f64::from(b.y)],
+                    }
+                })
+                .collect()
+        };
+        let holes_loops: Vec<Loop> = holes.iter().map(|h| ring(h)).collect();
+        Solid::face(&ring(&outline), &holes_loops)?
+    };
+    face.transformed(rows(to_body * sketch_world))
+}
+
 /// `piece` joined to or cut from `out`; the first piece starts the body.
 fn combine(out: Option<Solid>, piece: &Solid, op: Operation) -> Option<Option<Solid>> {
     Some(match (out, op) {
@@ -219,8 +266,8 @@ fn combine(out: Option<Solid>, piece: &Solid, op: Operation) -> Option<Option<So
     })
 }
 
-/// A body as an exact solid, in its own space: its extrudes and revolves
-/// joined and cut, its patterns and mirrors repeating the feature before.
+/// A body as an exact solid, in its own space: its extrudes, revolves,
+/// fillets, chamfers, shells, sweeps, lofts, patterns, and mirrors.
 /// `None` for a body with a feature this does not build yet, or one the
 /// kernel gives up on.
 pub fn body_solid(doc: &Document, features: &[Feature], body_world: DAffine3) -> Option<Solid> {
@@ -228,7 +275,7 @@ pub fn body_solid(doc: &Document, features: &[Feature], body_world: DAffine3) ->
     let mut out: Option<Solid> = None;
     let mut last: Option<(Solid, Operation)> = None;
     for f in features {
-        match f.shape {
+        match &f.shape {
             Shape::Extrude { .. } | Shape::Revolve { .. } => {
                 let piece = solid(doc, f)?;
                 let sketch_world = doc
@@ -236,6 +283,71 @@ pub fn body_solid(doc: &Document, features: &[Feature], body_world: DAffine3) ->
                     .map(|id| doc.world_transform(id))
                     .unwrap_or(DAffine3::IDENTITY);
                 let piece = piece.transformed(rows(to_body * sketch_world))?;
+                out = combine(out, &piece, f.operation)?;
+                last = Some((piece, f.operation));
+            }
+            Shape::Round {
+                radius,
+                chamfer,
+                edges,
+            } => {
+                let current = out.as_ref()?;
+                let rounded = if *chamfer {
+                    current.chamfer(*radius, edges)?
+                } else {
+                    current.fillet(*radius, edges)?
+                };
+                out = Some(rounded);
+            }
+            Shape::Shell { thickness, open } => {
+                let current = out.as_ref()?;
+                let dir = super::side_direction(*open).map(|d| [d.x, d.y, d.z]);
+                let hollowed = current.shell(*thickness, &[], dir)?;
+                out = Some(hollowed);
+            }
+            Shape::Sweep {
+                path,
+                scale_end,
+                caps,
+            } => {
+                // Variable-scale or uncapped surface sweeps stay on the mesh path.
+                if (*scale_end - 1.0).abs() > 1e-6 || !*caps {
+                    return None;
+                }
+                let path_id = doc.object_by_uid(*path)?;
+                let (pts_world, closed) = super::shapes::object_path(doc, path_id)?;
+                let spine: Vec<[f64; 3]> = pts_world
+                    .iter()
+                    .map(|p| {
+                        let q = to_body.transform_point3(*p);
+                        [q.x, q.y, q.z]
+                    })
+                    .collect();
+                let sketch_world = doc
+                    .object_by_uid(f.sketch)
+                    .map(|id| doc.world_transform(id))
+                    .unwrap_or(DAffine3::IDENTITY);
+                let mut piece: Option<Solid> = None;
+                for face in faces(doc, f)? {
+                    let placed = face.transformed(rows(to_body * sketch_world))?;
+                    let swept = placed.sweep(&spine, closed)?;
+                    piece = Some(match piece {
+                        None => swept,
+                        Some(acc) => acc.boolean(&swept, Boolean::Join)?,
+                    });
+                }
+                let piece = piece?;
+                out = combine(out, &piece, f.operation)?;
+                last = Some((piece, f.operation));
+            }
+            Shape::Loft { sections } => {
+                let mut profiles = Vec::with_capacity(1 + sections.len());
+                profiles.push(largest_sketch_face(doc, f.sketch, to_body)?);
+                for &uid in sections {
+                    profiles.push(largest_sketch_face(doc, uid, to_body)?);
+                }
+                let refs: Vec<&Solid> = profiles.iter().collect();
+                let piece = Solid::loft(&refs, true, false)?;
                 out = combine(out, &piece, f.operation)?;
                 last = Some((piece, f.operation));
             }
@@ -250,18 +362,13 @@ pub fn body_solid(doc: &Document, features: &[Feature], body_world: DAffine3) ->
             Shape::Mirror { axis } => {
                 if let Some((piece, op)) = &last {
                     let mut scale = DVec3::ONE;
-                    scale[(axis as usize).min(2)] = -1.0;
+                    scale[(*axis as usize).min(2)] = -1.0;
                     let copy = piece.transformed(rows(DAffine3::from_scale(scale)))?;
                     out = combine(out, &copy, *op)?;
                 }
             }
-            // Not yet built exactly: the mesh path builds the whole body.
-            Shape::Round { .. }
-            | Shape::Shell { .. }
-            | Shape::Sweep { .. }
-            | Shape::Loft { .. }
-            | Shape::SheetMetal { .. }
-            | Shape::Hole { .. } => return None,
+            // SheetMetal and multi-step Hole still fall back to the mesh kernel.
+            Shape::SheetMetal { .. } | Shape::Hole { .. } => return None,
         }
     }
     out.filter(|s| s.is_valid())
@@ -479,15 +586,81 @@ mod tests {
         assert_eq!(built.num_faces(), m.num_faces());
     }
 
+    /// Extrude + Fillet + Shell stays 100% exact B-rep without mesh fallback.
+    #[test]
+    fn extrude_fillet_and_shell_stay_exact_breps() {
+        let mut doc = Document::new();
+        let mut d = crate::drawing::Drawing::new();
+        let c = [[0.0, 0.0], [0.06, 0.0], [0.06, 0.06], [0.0, 0.06]];
+        for i in 0..4 {
+            d.add_curve(Curve2D::Line {
+                a: DVec2::from(c[i]),
+                b: DVec2::from(c[(i + 1) % 4]),
+            });
+        }
+        let mesh = doc.add_mesh(MeshData::empty());
+        let mut sketch = Object::new("Sketch", ObjectData::Mesh(mesh));
+        sketch.drawing = Some(Box::new(d));
+        let id = doc.add_object(sketch);
+        let uid = doc.object_uid(id).unwrap();
+        let features = vec![
+            Feature {
+                shape: Shape::Extrude {
+                    distance: 0.04,
+                    symmetric: false,
+                    more: Default::default(),
+                },
+                sketch: uid,
+                seeds: vec![[0.03, 0.03]],
+                operation: Operation::Join,
+                order: 1,
+                suppressed: false,
+                name: String::new(),
+            },
+            Feature {
+                shape: Shape::Round {
+                    radius: 0.006,
+                    chamfer: false,
+                    edges: vec![[0.03, 0.0, 0.0]],
+                },
+                sketch: uid,
+                seeds: Vec::new(),
+                operation: Operation::Join,
+                order: 2,
+                suppressed: false,
+                name: String::new(),
+            },
+            Feature {
+                shape: Shape::Shell {
+                    thickness: 0.003,
+                    open: 5, // +Z top face open
+                },
+                sketch: uid,
+                seeds: Vec::new(),
+                operation: Operation::Join,
+                order: 3,
+                suppressed: false,
+                name: String::new(),
+            },
+        ];
+        let solid = body_solid(&doc, &features, DAffine3::IDENTITY).expect("exact fillet+shell");
+        assert!(solid.is_valid());
+        assert!(solid.volume() > 0.0 && solid.volume() < 0.06 * 0.06 * 0.04);
+    }
+
     /// What the kernel does not build yet makes the body come from meshes.
     #[test]
-    fn a_body_with_a_fillet_falls_back_to_meshes() {
+    fn a_body_with_sheet_metal_falls_back_to_meshes() {
         let doc = Document::new();
         let features = vec![Feature {
-            shape: Shape::Round {
-                radius: 0.001,
-                chamfer: false,
+            shape: Shape::SheetMetal {
+                thickness: 0.002,
+                radius: 0.002,
+                k_factor: 0.44,
+                angle: std::f64::consts::FRAC_PI_2,
+                height: 0.02,
                 edges: Vec::new(),
+                flat: false,
             },
             sketch: kreate_reflect::Uid::from_raw(1),
             seeds: Vec::new(),

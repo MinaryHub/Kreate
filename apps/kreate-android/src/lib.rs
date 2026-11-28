@@ -41,10 +41,18 @@ fn android_main(android: AndroidApp) {
         std::env::set_var("XDG_CACHE_HOME", dir.join("cache"));
         std::env::set_var("XDG_DATA_HOME", dir.join("data"));
     }
+    // Mobile RAM budget: cap snapshot undo history at 64 MiB.
+    std::env::set_var("KREATE_UNDO_BUDGET_MB", "64");
     kreate::logs::init();
     app::install_panic_hook();
     let picker = android.clone();
     kreate::android::set_picker(move |request| picker::open(&picker, request));
+    let clip_get = android.clone();
+    let clip_set = android.clone();
+    kreate::android::set_clipboard(
+        move || picker::get_clipboard(&clip_get),
+        move |text| picker::set_clipboard(&clip_set, text),
+    );
     let keys = android.clone();
     kreate::android::set_keyboard(move |show| {
         // Forced, not implicit: an implicit request is ignored with no
@@ -62,7 +70,7 @@ fn android_main(android: AndroidApp) {
     app::run(event_loop, Vec::new());
 }
 
-/// The activity's file picker, through JNI.
+/// The activity's file picker, clipboard, and IME bridge, through JNI.
 mod picker {
     use std::ffi::{c_void, CStr, CString};
     use std::path::PathBuf;
@@ -87,6 +95,20 @@ mod picker {
     unsafe fn string(env: *mut JNIEnv, s: &str) -> jstring {
         let c = CString::new(s.replace('\0', "")).unwrap_or_default();
         ((**env).NewStringUTF.expect("NewStringUTF"))(env, c.as_ptr())
+    }
+
+    unsafe fn read_jstring(env: *mut JNIEnv, s: jstring) -> Option<String> {
+        if s.is_null() {
+            return None;
+        }
+        let f = &**env;
+        let chars = (f.GetStringUTFChars.expect("GetStringUTFChars"))(env, s, null_mut());
+        if chars.is_null() {
+            return None;
+        }
+        let text = CStr::from_ptr(chars).to_string_lossy().into_owned();
+        (f.ReleaseStringUTFChars.expect("ReleaseStringUTFChars"))(env, s, chars);
+        Some(text)
     }
 
     /// `KreateActivity.<name>(<args>)`, its exception (if any) cleared.
@@ -118,6 +140,57 @@ mod picker {
             (f.ExceptionClear.expect("ExceptionClear"))(env);
         }
         (f.DeleteLocalRef.expect("DeleteLocalRef"))(env, class);
+    }
+
+    /// Calls `String KreateActivity.<name>()` and returns the UTF-8 string if non-null.
+    unsafe fn call_string(app: &AndroidApp, name: &CStr) -> Option<String> {
+        let vm = app.vm_as_ptr() as *mut JavaVM;
+        let env = env(vm)?;
+        let f = &**env;
+        let activity = app.activity_as_ptr() as jobject;
+        let class = (f.GetObjectClass.expect("GetObjectClass"))(env, activity);
+        let method = (f.GetMethodID.expect("GetMethodID"))(
+            env,
+            class,
+            name.as_ptr(),
+            c"()Ljava/lang/String;".as_ptr(),
+        );
+        let mut out = None;
+        if method.is_null() {
+            (f.ExceptionClear.expect("ExceptionClear"))(env);
+        } else {
+            let obj = (f.CallObjectMethodA.expect("CallObjectMethodA"))(
+                env,
+                activity,
+                method,
+                null_mut(),
+            );
+            if !obj.is_null() {
+                out = read_jstring(env, obj as jstring);
+                (f.DeleteLocalRef.expect("DeleteLocalRef"))(env, obj);
+            }
+        }
+        if (f.ExceptionCheck.expect("ExceptionCheck"))(env) != 0 {
+            (f.ExceptionDescribe.expect("ExceptionDescribe"))(env);
+            (f.ExceptionClear.expect("ExceptionClear"))(env);
+            out = None;
+        }
+        (f.DeleteLocalRef.expect("DeleteLocalRef"))(env, class);
+        out
+    }
+
+    pub fn get_clipboard(app: &AndroidApp) -> Option<String> {
+        unsafe { call_string(app, c"getClipboardText") }
+    }
+
+    pub fn set_clipboard(app: &AndroidApp, text: &str) {
+        unsafe {
+            call(app, c"setClipboardText", c"(Ljava/lang/String;)V", |env| {
+                vec![jvalue {
+                    l: string(env, text),
+                }]
+            });
+        }
     }
 
     /// The system's picker opened for `request`. It answers later, on the
@@ -153,13 +226,31 @@ mod picker {
         _class: jclass,
         path: jstring,
     ) {
-        let f = &**env;
-        let chars = (f.GetStringUTFChars.expect("GetStringUTFChars"))(env, path, null_mut());
-        if chars.is_null() {
-            return;
+        if let Some(text) = read_jstring(env, path) {
+            kreate::android::file_arrived(PathBuf::from(text));
         }
-        let text = CStr::from_ptr(chars).to_string_lossy().into_owned();
-        (f.ReleaseStringUTFChars.expect("ReleaseStringUTFChars"))(env, path, chars);
-        kreate::android::file_arrived(PathBuf::from(text));
+    }
+
+    /// `KreateActivity.nativeImeCommit(text)`: committed CJK/IME text from `InputConnection`.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_minaryhub_kreate_KreateActivity_nativeImeCommit(
+        env: *mut JNIEnv,
+        _class: jclass,
+        text: jstring,
+    ) {
+        if let Some(s) = read_jstring(env, text) {
+            kreate::android::push_ime_commit(s);
+        }
+    }
+
+    /// `KreateActivity.nativeImePreedit(text)`: active IME composing preedit string.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_minaryhub_kreate_KreateActivity_nativeImePreedit(
+        env: *mut JNIEnv,
+        _class: jclass,
+        text: jstring,
+    ) {
+        let s = read_jstring(env, text).unwrap_or_default();
+        kreate::android::set_ime_preedit(s);
     }
 }

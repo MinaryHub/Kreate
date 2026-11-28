@@ -1519,4 +1519,186 @@ mod tests {
         let want = 0.1 + 2.0 * (std::f64::consts::FRAC_PI_2 * 0.003 + 0.02);
         assert!(((hi.y - lo.y) - want).abs() < 1e-6, "{}", hi.y - lo.y);
     }
+
+    #[test]
+    fn gdt_feature_control_frame_draws_compartments_and_leader() {
+        let mut d = Drawing::new();
+        let frame = GdtFrame {
+            symbol: GdtSymbol::Position,
+            tolerance: 0.05,
+            diameter: true,
+            datums: vec!["A".into(), "B".into()],
+            at_mm: [40.0, 60.0],
+            leader_to_mm: Some([25.0, 50.0]),
+        };
+        add_gdt_frame(&mut d, &frame);
+        let texts: Vec<String> = d
+            .entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Text(t) => Some(t.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("0.05")));
+        assert!(texts.iter().any(|t| t == "A"));
+        assert!(texts.iter().any(|t| t == "B"));
+        assert!(
+            d.entities.len() >= 10,
+            "expected frame borders, dividers, and leader"
+        );
+    }
+}
+
+/// ISO 1101 / ASME Y14.5 geometric tolerancing characteristic symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GdtSymbol {
+    Flatness,
+    Perpendicularity,
+    Parallelism,
+    Concentricity,
+    Position,
+    Runout,
+    Cylindricity,
+    ProfileSurface,
+}
+
+impl GdtSymbol {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            GdtSymbol::Flatness => "⏥",
+            GdtSymbol::Perpendicularity => "⊥",
+            GdtSymbol::Parallelism => "∥",
+            GdtSymbol::Concentricity => "◎",
+            GdtSymbol::Position => "⌖",
+            GdtSymbol::Runout => "↗",
+            GdtSymbol::Cylindricity => "⌭",
+            GdtSymbol::ProfileSurface => "⌓",
+        }
+    }
+}
+
+/// One ISO 1101 / ASME Y14.5 GD&T feature control frame placed on a drawing
+/// sheet (coordinates in millimetres of paper).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GdtFrame {
+    pub symbol: GdtSymbol,
+    pub tolerance: f64,
+    /// Prefix tolerance with `⌀` (cylindrical tolerance zone).
+    pub diameter: bool,
+    /// Datum references (e.g. `["A", "B", "C"]`).
+    pub datums: Vec<String>,
+    /// Bottom-left corner of the frame in millimetres.
+    pub at_mm: [f64; 2],
+    /// Optional arrowhead target point in millimetres.
+    pub leader_to_mm: Option<[f64; 2]>,
+}
+
+/// Draws a boxed GD&T feature control frame onto `drawing` (in paper metres).
+pub fn add_gdt_frame(drawing: &mut Drawing, frame: &GdtFrame) {
+    let layer = drawing
+        .layers
+        .iter()
+        .find(|l| l.name == "DIM")
+        .map(|l| l.id)
+        .unwrap_or_else(|| drawing.add_layer("DIM"));
+    let prev = drawing.current_layer;
+    drawing.current_layer = layer;
+
+    let h = 7.0 * 1e-3;
+    let x0 = frame.at_mm[0] * 1e-3;
+    let y0 = frame.at_mm[1] * 1e-3;
+    let tol_str = if frame.diameter {
+        format!("Ø{:.3}", frame.tolerance)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    } else {
+        format!("{:.3}", frame.tolerance)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+    let mut cells: Vec<(f64, String)> = vec![
+        (h, frame.symbol.glyph().to_string()),
+        (
+            (tol_str.chars().count().max(4) as f64) * 2.4 * 1e-3 + 3.0 * 1e-3,
+            tol_str,
+        ),
+    ];
+    for datum in &frame.datums {
+        cells.push((h, datum.clone()));
+    }
+    let total_w: f64 = cells.iter().map(|(w, _)| *w).sum();
+
+    // Outer rectangle
+    let rect = [
+        DVec2::new(x0, y0),
+        DVec2::new(x0 + total_w, y0),
+        DVec2::new(x0 + total_w, y0 + h),
+        DVec2::new(x0, y0 + h),
+    ];
+    for i in 0..4 {
+        drawing.add_curve(Curve2D::Line {
+            a: rect[i],
+            b: rect[(i + 1) % 4],
+        });
+    }
+    // Cell dividers + centred labels
+    let mut cx = x0;
+    for (idx, (w, label)) in cells.iter().enumerate() {
+        if idx > 0 {
+            drawing.add_curve(Curve2D::Line {
+                a: DVec2::new(cx, y0),
+                b: DVec2::new(cx, y0 + h),
+            });
+        }
+        drawing.add(EntityKind::Text(Text {
+            at: DVec2::new(cx + w * 0.5, y0 + h * 0.25),
+            height: 3.0 * 1e-3,
+            rotation: 0.0,
+            content: label.clone(),
+            align: TextAlign::Center,
+            font: String::new(),
+        }));
+        cx += w;
+    }
+
+    // Optional leader line + filled-style V-arrow pointing to target feature
+    if let Some([tx_mm, ty_mm]) = frame.leader_to_mm {
+        let target = DVec2::new(tx_mm * 1e-3, ty_mm * 1e-3);
+        let attach = if target.x < x0 + total_w * 0.5 {
+            DVec2::new(x0, y0 + h * 0.5)
+        } else {
+            DVec2::new(x0 + total_w, y0 + h * 0.5)
+        };
+        let shoulder = DVec2::new(
+            attach.x + if target.x < attach.x { -4.0e-3 } else { 4.0e-3 },
+            attach.y,
+        );
+        drawing.add_curve(Curve2D::Line {
+            a: attach,
+            b: shoulder,
+        });
+        drawing.add_curve(Curve2D::Line {
+            a: shoulder,
+            b: target,
+        });
+        let dir = (shoulder - target).normalize_or_zero();
+        if dir != DVec2::ZERO {
+            let perp = DVec2::new(-dir.y, dir.x);
+            let arrow_len = 2.5e-3;
+            let arrow_w = 0.8e-3;
+            drawing.add_curve(Curve2D::Line {
+                a: target,
+                b: target + dir * arrow_len + perp * arrow_w,
+            });
+            drawing.add_curve(Curve2D::Line {
+                a: target,
+                b: target + dir * arrow_len - perp * arrow_w,
+            });
+        }
+    }
+
+    drawing.current_layer = prev;
 }

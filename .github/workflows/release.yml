@@ -146,6 +146,10 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.exe }} dist/
           cp target/${{ matrix.target }}/release/${{ matrix.mcp }} dist/
+          # Third-party licence notices (OIDN Apache-2.0, optional OCCT LGPL-2.1).
+          # To build with the exact B-rep CAD kernel enabled, install OpenCASCADE
+          # dynamic libraries and pass `--features occt` to `cargo build`.
+          [ -f THIRD_PARTY.md ] && cp THIRD_PARTY.md dist/
           # Windows: DirectX's shader compiler beside the program, from the
           # runner's newest Windows SDK. wgpu uses it when it is there; the
           # old compiler it falls back on takes most of a minute over the

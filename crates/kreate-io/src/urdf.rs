@@ -170,12 +170,21 @@ pub fn parse_urdf(text: &str, base: &Path, load: &LoadPart<'_>) -> Result<Import
                     .and_then(|v| v.trim().parse::<f64>().ok())
                     .unwrap_or(0.0)
             };
+            let dynamics = j.child("dynamics");
+            let dyn_attr = |name: &str| {
+                dynamics
+                    .and_then(|d| d.attr(name))
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+                    .unwrap_or(0.0)
+            };
             joint.robot = Some(RobotPart::Joint(Joint {
                 kind: JointKind::from_tag(kind).unwrap_or_default(),
                 lower: attr("lower"),
                 upper: attr("upper"),
                 effort: attr("effort"),
                 velocity: attr("velocity"),
+                damping: dyn_attr("damping"),
+                friction: dyn_attr("friction"),
                 mimic: j.child("mimic").and_then(|m| {
                     Some(Mimic {
                         joint: m.attr("joint")?.to_string(),
@@ -506,14 +515,79 @@ pub struct WrittenRobot {
     pub notes: Vec<LossyNote>,
 }
 
+/// Options controlling URDF export (`package://` URIs, GLB visual meshes, and
+/// verbatim `<gazebo>`/`<transmission>`/`<sensor>` blocks).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UrdfExportOptions {
+    /// When set (e.g. `"my_robot_description"`), mesh filenames are written as
+    /// `package://<prefix>/meshes/...` instead of relative `meshes/...`.
+    pub package_prefix: Option<String>,
+    /// Export visual meshes as `.glb` (preserving materials/UVs) while keeping
+    /// collision meshes as lightweight `.stl`.
+    pub visual_as_glb: bool,
+    /// Raw XML extension blocks (`<gazebo>`, `<transmission>`, `<sensor>`) to
+    /// preserve verbatim inside `<robot>` on round-trip.
+    pub extra_xml: Vec<String>,
+}
+
+/// Extracts top-level `<gazebo>`, `<transmission>`, and `<sensor>` blocks from
+/// a URDF document verbatim so they can be re-emitted on export without loss.
+pub fn extract_urdf_extras(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for tag in ["gazebo", "transmission", "sensor"] {
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        let mut cursor = 0usize;
+        while let Some(rel) = text[cursor..].find(&open) {
+            let start = cursor + rel;
+            let after_open = start + open.len();
+            // Ensure tag name boundary (whitespace, '>', or '/').
+            let boundary = text
+                .as_bytes()
+                .get(after_open)
+                .is_some_and(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/');
+            if !boundary {
+                cursor = after_open;
+                continue;
+            }
+            if let Some(gt) = text[after_open..].find('>') {
+                let open_end = after_open + gt + 1;
+                if text[..open_end].ends_with("/>") {
+                    out.push(text[start..open_end].trim().to_string());
+                    cursor = open_end;
+                    continue;
+                }
+                if let Some(cl) = text[open_end..].find(&close) {
+                    let block_end = open_end + cl + close.len();
+                    out.push(text[start..block_end].trim().to_string());
+                    cursor = block_end;
+                    continue;
+                }
+            }
+            break;
+        }
+    }
+    out
+}
+
 /// The document as a robot description.
 ///
 /// A robot that came in from one goes back out as it was — its links, its
-/// joints with their limits and the joints they mimic, its links' inertia,
+/// joints with their limits, dynamics, and mimic links, its links' inertia,
 /// visual and collision meshes with their colours — at rest, whatever pose
 /// it is in now. A document that is not a robot is written as one: every
 /// object a link, fixed to its parent, under one `base_link`.
 pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobot {
+    write_urdf_with_options(doc, robot_name, &UrdfExportOptions::default())
+}
+
+/// [`write_urdf`] with full ROS/Gazebo export options (`package://` URIs, GLB
+/// visual meshes, and preserved `<gazebo>`/`<transmission>`/`<sensor>` XML).
+pub fn write_urdf_with_options(
+    doc: &kreate_scene::Document,
+    robot_name: &str,
+    opts: &UrdfExportOptions,
+) -> WrittenRobot {
     use kreate_scene::document::{ObjectData, ObjectId};
     use kreate_scene::robot::RobotPart;
     use std::fmt::Write as _;
@@ -772,21 +846,42 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
                 continue;
             }
             let Some(data) = doc.mesh(mesh) else { continue };
+            let use_glb = opts.visual_as_glb && !collision;
             let file = mesh_file
                 .entry(mesh)
                 .or_insert_with(|| {
                     let tag = if collision { "collision" } else { "visual" };
-                    let path = format!("meshes/{}.stl", unique(&format!("{name}_{tag}")));
-                    let (bytes, more) = crate::stl::write_stl(
-                        data,
-                        &crate::stl::StlOptions {
-                            unit_scale: 1.0,
-                            ..Default::default()
-                        },
-                    );
-                    notes.extend(more);
-                    files.push((path.clone(), bytes));
-                    path
+                    let (rel_path, bytes) = if use_glb {
+                        let p = format!("meshes/{}.glb", unique(&format!("{name}_{tag}")));
+                        let (b, more) = crate::gltf_export::write_gltf(
+                            &[(name.clone(), data)],
+                            &[],
+                            &crate::gltf_export::GltfExportOptions {
+                                binary: true,
+                                ..Default::default()
+                            },
+                        );
+                        notes.extend(more);
+                        (p, b)
+                    } else {
+                        let p = format!("meshes/{}.stl", unique(&format!("{name}_{tag}")));
+                        let (b, more) = crate::stl::write_stl(
+                            data,
+                            &crate::stl::StlOptions {
+                                unit_scale: 1.0,
+                                ..Default::default()
+                            },
+                        );
+                        notes.extend(more);
+                        (p, b)
+                    };
+                    files.push((rel_path.clone(), bytes));
+                    match &opts.package_prefix {
+                        Some(pkg) if !pkg.is_empty() => {
+                            format!("package://{}/{rel_path}", pkg.trim_matches('/'))
+                        }
+                        _ => rel_path,
+                    }
                 })
                 .clone();
             let relative = inverse * rest_world(id);
@@ -887,6 +982,14 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
                     tidy(j.velocity)
                 );
             }
+            if j.damping != 0.0 || j.friction != 0.0 {
+                let _ = writeln!(
+                    out,
+                    "    <dynamics damping=\"{}\" friction=\"{}\"/>",
+                    tidy(j.damping),
+                    tidy(j.friction)
+                );
+            }
             if let Some(m) = &j.mimic {
                 let _ = writeln!(
                     out,
@@ -898,6 +1001,12 @@ pub fn write_urdf(doc: &kreate_scene::Document, robot_name: &str) -> WrittenRobo
             }
         }
         let _ = writeln!(out, "  </joint>");
+    }
+    for block in &opts.extra_xml {
+        let trimmed = block.trim();
+        if !trimmed.is_empty() {
+            let _ = writeln!(out, "  {trimmed}");
+        }
     }
     let _ = writeln!(out, "</robot>");
     if !robot_doc {
@@ -1215,5 +1324,112 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn urdf_preserves_dynamics_package_uri_glb_visuals_and_extra_xml() {
+        let xml = r#"<robot name="bot">
+          <link name="base">
+            <visual><geometry><box size="0.4 0.4 0.2"/></geometry></visual>
+            <collision><geometry><box size="0.4 0.4 0.2"/></geometry></collision>
+          </link>
+          <link name="arm">
+            <visual><geometry><cylinder radius="0.05" length="0.6"/></geometry></visual>
+          </link>
+          <joint name="elbow" type="revolute">
+            <parent link="base"/><child link="arm"/>
+            <origin xyz="0 0 0.1" rpy="0 0 0"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="-1.5" upper="1.5" effort="20" velocity="2"/>
+            <dynamics damping="0.7" friction="0.15"/>
+          </joint>
+          <gazebo reference="base"><material>Gazebo/Grey</material></gazebo>
+          <transmission name="elbow_trans"><type>transmission_interface/SimpleTransmission</type></transmission>
+          <sensor name="imu" type="imu"><update_rate>100</update_rate></sensor>
+        </robot>"#;
+
+        let extras = extract_urdf_extras(xml);
+        assert_eq!(
+            extras.len(),
+            3,
+            "expected gazebo, transmission, sensor blocks: {extras:?}"
+        );
+        assert!(extras[0].starts_with("<gazebo"));
+        assert!(extras[1].starts_with("<transmission"));
+        assert!(extras[2].starts_with("<sensor"));
+
+        let none = |_: &Path| -> Result<ImportScene, String> { Err("none".into()) };
+        let scene = parse_urdf(xml, Path::new("."), &none).unwrap();
+        let mut doc = kreate_scene::Document::new();
+        crate::build::build_into(&scene, &mut doc);
+
+        // Verify dynamics survived import into Document.
+        let elbow = doc
+            .objects()
+            .find_map(|(_, o)| match (&o.robot, o.name.as_str()) {
+                (Some(RobotPart::Joint(j)), "elbow") => Some(j.clone()),
+                _ => None,
+            })
+            .expect("elbow joint present");
+        assert!(
+            (elbow.damping - 0.7).abs() < 1e-6,
+            "damping={}",
+            elbow.damping
+        );
+        assert!(
+            (elbow.friction - 0.15).abs() < 1e-6,
+            "friction={}",
+            elbow.friction
+        );
+
+        // Export with package:// URI prefix, GLB visuals, and preserved extra XML.
+        let opts = UrdfExportOptions {
+            package_prefix: Some("my_bot_description".into()),
+            visual_as_glb: true,
+            extra_xml: extras,
+        };
+        let written = write_urdf_with_options(&doc, "bot", &opts);
+        assert!(
+            written
+                .urdf
+                .contains("package://my_bot_description/meshes/"),
+            "{}",
+            written.urdf
+        );
+        assert!(
+            written
+                .urdf
+                .contains("<dynamics damping=\"0.7\" friction=\"0.15\"/>"),
+            "{}",
+            written.urdf
+        );
+        assert!(
+            written.urdf.contains("<gazebo reference=\"base\">"),
+            "{}",
+            written.urdf
+        );
+        assert!(
+            written.urdf.contains("<transmission name=\"elbow_trans\">"),
+            "{}",
+            written.urdf
+        );
+        assert!(
+            written.urdf.contains("<sensor name=\"imu\""),
+            "{}",
+            written.urdf
+        );
+        // Visuals exported as .glb, collisions as .stl.
+        assert!(
+            written
+                .files
+                .iter()
+                .any(|(p, b)| p.ends_with(".glb") && b.starts_with(b"glTF")),
+            "expected valid GLB visual mesh in {:?}",
+            written.files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+        assert!(
+            written.files.iter().any(|(p, _)| p.ends_with(".stl")),
+            "expected STL collision mesh"
+        );
     }
 }
