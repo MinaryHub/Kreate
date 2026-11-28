@@ -10,6 +10,8 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-28
+
 ### Added
 
 - **Exact CAD B-rep kernel & STEP fidelity (optional `--features occt`)**:
@@ -1297,7 +1299,8 @@ use; `scripts/release.sh` turns that section into the next release.
 The first version: the editor, its operators, the renderer, files and the
 Claude connector, before releases were numbered.
 
-[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/MinaryHub/Kreate/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.17.0
 [0.16.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.16.0
 [0.15.1]: https://github.com/MinaryHub/Kreate/releases/tag/v0.15.1
 [0.15.0]: https://github.com/MinaryHub/Kreate/releases/tag/v0.15.0
