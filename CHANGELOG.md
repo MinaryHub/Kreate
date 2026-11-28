@@ -10,6 +10,56 @@ use; `scripts/release.sh` turns that section into the next release.
 
 ## [Unreleased]
 
+### Added
+
+- **Exact CAD B-rep kernel & STEP fidelity (optional `--features occt`)**:
+  exact analytic OpenCASCADE support for Fillet, Chamfer, Shell, Sweep, Loft
+  and tapered Extrude (Draft), automatic OCCT fallback when importing complex
+  curved STEP assemblies, and named STEP AP214/AP242 export (`THIRD_PARTY.md`
+  bundled in releases).
+- **Persistent topological naming & 3D assemblies**: stable `FaceRef` and
+  `EdgeRef` tracking across parametric dimension edits, a multi-constraint 3D
+  assembly solver (Planar, Concentric, Distance, Parallel, Perpendicular and
+  Angle mates), non-destructive exploded views, and indented hierarchical BOM
+  generation with CSV export.
+- **Analytic 2D drafting, GD&T & multi-page PDF**: exact OCCT Hidden-Line
+  Removal (`HLRBRep_Algo`) projection for 2D drawings, ISO 1101 / ASME Y14.5
+  GD&T Feature Control Frames, and multi-page PDF 1.4 export.
+- **Game & texture-authoring pipeline**: high-to-low tangent-space Normal,
+  Ambient Occlusion and Curvature map baker (`mesh.bake_maps`), `Weighted
+  Normal` modifier for clean hard-surface bevel shading, seam-preserving UV
+  repacking and `Decimate`, UV `Mapping` / `TextureCoordinate` and Principled
+  `Emission` shader nodes, vertex colour painting, texture paint `Save As…` /
+  `Reload`, and multi-clip glTF/GLB animation export (`Selected` / `Active
+  Collection` / `Apply Modifiers`).
+- **Production rendering & denoising**: `Film Transparent` alpha background
+  output (PNG / EXR), tiled high-resolution renders with progress & cancel,
+  albedo + normal AOV guide buffers for Open Image Denoise (OIDN), adaptive
+  path-traced sampling, area-light MIS, shadow rays, texture sampling and
+  orthographic camera support in the path tracer, plus multi-pass ZIP16 EXR
+  export.
+- **Collaboration, scripting & MCP**: authenticated TLS/bearer-token relay
+  rooms with room-secret hashing, sparse live sculpt/paint tile delta sync,
+  headless CLI script execution (`kreate --background --script`), richer
+  script control flow (`if`/`elif`/`else`, f-strings, scene queries), and
+  expanded MCP tools (`capture_view`, `get_logs`, `render_still`,
+  `export_file`, `export_drawing`).
+- **Robotics, physics, CLI & Android**: URDF joint `<dynamics>` damping /
+  friction, `package://` mesh URIs, GLB visual export and verbatim `<gazebo>` /
+  `<transmission>` / `<sensor>` block preservation; `O(N log N)` Sweep-and-Prune
+  broadphase, body sleeping/waking and articulated Fixed/Hinge/Slider joints
+  with PD servo motors; `kreatec --json` (`inspect` / `validate`) and
+  full-document `kreatec convert` for glTF/GLB, USD/USDA/USDC/USDZ, URDF, STEP
+  and 3MF; Android system clipboard JNI bridge, CJK IME `InputConnection`
+  preedit/commit queue, and 64 MiB mobile undo RAM budget.
+
+### Fixed
+
+- Fixed real-world production bugs across orthographic camera export/rendering,
+  evaluated modifier export, UV/normal preservation during mesh decimation,
+  Fluent localization bundle parsing, relay shutdown race conditions, STEP
+  import cancellation handling, and OCCT edge-picking distance tolerance.
+
 ## [0.16.0] - 2026-11-25
 
 ### Added

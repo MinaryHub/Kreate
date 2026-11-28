@@ -74,7 +74,7 @@ fn android_main(android: AndroidApp) {
 mod picker {
     use std::ffi::{c_void, CStr, CString};
     use std::path::PathBuf;
-    use std::ptr::null_mut;
+    use std::ptr::{null, null_mut};
 
     use jni_sys::{jclass, jobject, jstring, jvalue, JNIEnv, JavaVM, JNI_OK, JNI_VERSION_1_6};
     use kreate::android::Request;
@@ -159,12 +159,8 @@ mod picker {
         if method.is_null() {
             (f.ExceptionClear.expect("ExceptionClear"))(env);
         } else {
-            let obj = (f.CallObjectMethodA.expect("CallObjectMethodA"))(
-                env,
-                activity,
-                method,
-                null_mut(),
-            );
+            let obj =
+                (f.CallObjectMethodA.expect("CallObjectMethodA"))(env, activity, method, null());
             if !obj.is_null() {
                 out = read_jstring(env, obj as jstring);
                 (f.DeleteLocalRef.expect("DeleteLocalRef"))(env, obj);
